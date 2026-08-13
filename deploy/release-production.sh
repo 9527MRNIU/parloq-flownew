@@ -103,7 +103,7 @@ chmod 600 "${env_file}"
 cd "${remote_dir}"
 docker compose --env-file "${env_file}" -f "${compose_file}" config --quiet
 docker compose --env-file "${env_file}" -f "${compose_file}" up -d postgres redis
-docker compose --env-file "${env_file}" -f "${compose_file}" run --rm migrate
+docker compose --env-file "${env_file}" -f "${compose_file}" run --interactive=false -T --rm migrate
 docker compose --env-file "${env_file}" -f "${compose_file}" up -d --no-deps wa-gateway api api-worker web
 docker compose --env-file "${env_file}" -f "${compose_file}" ps
 

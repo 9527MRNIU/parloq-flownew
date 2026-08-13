@@ -4,8 +4,9 @@ Parloq Flow is a new outbound marketing console. It intentionally keeps the
 visual language and frontend structure of the earlier console without carrying
 over unrelated legacy product features.
 
-The development system runs entirely through local Docker Compose. No cloud
-build or deployment is required.
+The development system runs entirely through local Docker Compose. Production
+uses a separate, isolated Compose project with locally built immutable images;
+see [docs/production-deployment.md](docs/production-deployment.md).
 
 ## Local development
 

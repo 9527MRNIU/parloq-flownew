@@ -82,7 +82,7 @@ install -d -m 700 /data/parloq-flow/postgres /data/parloq-flow/redis
 cd /www/server/panel/data/compose/parloq-flow
 docker compose --env-file .env -f docker-compose.yaml config --quiet
 docker compose --env-file .env -f docker-compose.yaml up -d postgres redis
-docker compose --env-file .env -f docker-compose.yaml run --rm migrate
+docker compose --env-file .env -f docker-compose.yaml run --interactive=false -T --rm migrate
 docker compose --env-file .env -f docker-compose.yaml up -d --no-deps wa-gateway api api-worker web
 docker compose --env-file .env -f docker-compose.yaml ps
 curl -fsS http://127.0.0.1:18100/healthz
