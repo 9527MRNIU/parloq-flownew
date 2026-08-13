@@ -1,129 +1,135 @@
 # Parloq Flow 生产部署记录
 
-本文档记录 Parloq Flow 在现有生产服务器上的独立部署方式，避免每次重新
-确认 SSH、目录、端口和发布流程。真实密码、Token、代理凭据和 WhatsApp
-会话不得写入仓库。
+这份文件是本项目的长期部署交接记录。以后不需要用户再次说明服务器、域名、
+目录和连接方式。真实密码、Token、代理凭据及 WhatsApp 会话不得写入仓库。
 
-## 固定信息
+## 固定资源与当前登记
 
 | 项目 | 值 |
 | --- | --- |
 | 生产服务器 | `216.106.185.81` |
-| SSH | `ssh -o BatchMode=yes root@216.106.185.81` |
+| 宝塔面板 | `https://bt2.felixweb.top:10049` |
+| 宝塔版本 | `11.8.1`（2026-08-14 核验） |
 | 管理域名 | `https://center.parloq.com` |
 | Compose project | `parloq-flow` |
+| 宝塔 Compose ID | `1`（2026-08-14 核验） |
 | Compose 目录 | `/www/server/panel/data/compose/parloq-flow` |
 | Compose 文件 | `/www/server/panel/data/compose/parloq-flow/docker-compose.yaml` |
 | 环境文件 | `/www/server/panel/data/compose/parloq-flow/.env` |
 | 持久化目录 | `/data/parloq-flow` |
 | 宿主机回环端口 | `127.0.0.1:18100` |
-| Nginx vhost | `/www/server/panel/vhost/nginx/center.parloq.com.conf` |
+| 宝塔网站 | `center.parloq.com`，ID `38`（2026-08-14 核验） |
+| 宝塔反代 | `parloq-flow` → `http://127.0.0.1:18100` |
 
 旧 WABA 系统使用 `app.parloq.com`、Compose project `waba`、端口
-`8000/8002` 和 `/data/waba`。这些资源不是本项目的一部分，任何 Parloq
-Flow 部署都不能修改或复用它们。
+`8000/8002` 和 `/data/waba`。这些不是本项目资源，禁止修改、重建、删除或
+复用。宝塔把旧 `waba` 显示为「已停止」是因为它有一个成功退出的一次性
+`migrate` 容器；实际 21 个常驻容器仍在运行。不要为了修正显示状态去改旧栈。
 
-## 架构和隔离
+## 唯一写入控制面
 
-生产 Compose 包含独立 PostgreSQL、Redis、迁移任务、API、任务 Worker、
-Baileys 网关和静态 Web 服务。数据库与 Redis 不发布宿主机端口；只有 Web
-服务发布到 `127.0.0.1:18100`，再由宝塔 Nginx 提供公网 HTTPS。
+生产写操作一律通过宝塔 API：
 
-数据使用以下宿主机目录：
+- Docker 编排登记、启动和日常人工管理：宝塔 Docker/容器编排；
+- 镜像归档上传：宝塔 File API；
+- 版本切换、迁移和健康验收：宝塔临时计划任务 API；
+- 建站与反代：宝塔 Site API；
+- 证书：宝塔 SSL API；
+- 自定义 Nginx 片段：宝塔 File API，使用版本号和 Parloq marker；
+- Nginx 检查及 reload：宝塔 System API。
+
+禁止用 SSH/SCP 直接写远端文件、直接执行 Docker/Compose、直接修改 Nginx
+或直接改宝塔 SQLite。SSH 只用于两件事：只读诊断，以及把本机端口加密转发
+到面板的 `127.0.0.1:10049`。真正的变更请求仍由宝塔 API 完成并留下宝塔日志。
+
+本机连接记录在仓库根目录的未跟踪文件 `.env.baota.local`：
+
+```dotenv
+BAOTA_SSH_HOST=root@216.106.185.81
+BAOTA_PANEL_REMOTE_PORT=10049
+BAOTA_TOKEN_SOURCE=remote-api-json
+```
+
+该文件不保存 API Key。客户端通过一次只读 SSH 调用读取服务器已配置的 Token
+哈希，随后所有写操作走宝塔 API。文件被 `.gitignore` 排除，不要提交任何密钥。
+若本地文件丢失，可从 `deploy/baota.env.example` 复制恢复，不需要用户重新说明
+服务器连接方式。
+
+## 当前架构与隔离
+
+生产栈有独立 PostgreSQL、Redis、API、任务 Worker、Baileys 网关和静态 Web。
+数据库与 Redis 不发布宿主端口，只有 Web 映射到 `127.0.0.1:18100`。持久化目录：
 
 - `/data/parloq-flow/postgres`
 - `/data/parloq-flow/redis`
 
-不要执行 `docker compose down -v`，也不要把 `/data/waba` 当成本项目数据。
+`migrate` 服务属于 Compose profile `migration`。常规 `up` 不会创建它，因此宝塔
+不会因为一个 `Exited (0)` 的迁移容器把整个 `parloq-flow` 误显示为停止。发布
+脚本会显式执行一次 `--profile migration ... run --rm migrate`。
 
-## DNS 和证书
+不得执行 `docker compose down -v`，不得在宝塔点击「删除编排」，不得删除
+`/data/parloq-flow`。宝塔的删除编排流程可能连带 volumes。
 
-`parloq.com` 使用 Cloudflare DNS。`center.parloq.com` 应在 Cloudflare 中指向
-生产源站 `216.106.185.81` 并保持代理开启。仓库里的 Nginx 模板复用现有
-`parloq.com` 通配符证书和 Cloudflare 源站限制。
+## 站点、反代与证书
 
-客户推广域名不使用系统主域名。每个客户域名应：
+`center.parloq.com` 已是独立宝塔网站，并有宝塔反代记录。创建时使用的接口口径：
 
-1. CNAME 到 `center.parloq.com`，或按运营要求使用等价的源站记录；
-2. 在服务器增加只包含该域名的 Nginx vhost；
-3. 申请对应证书；
-4. 将请求代理到 `127.0.0.1:18100` 并保留原始 `Host`；
-5. 再在后台执行域名验证和渠道绑定。
+1. `/site?action=AddSite` 创建 `center.parloq.com`；
+2. `/site?action=CreateProxy` 创建 `parloq-flow`，回源
+   `http://127.0.0.1:18100`，保留 `$http_host`；
+3. `/ssl?action=get_cert_list` 找到覆盖 `*.parloq.com` 与 `parloq.com` 的最新证书；
+4. `/ssl?action=SetBatchCertToSite` 把证书部署给该站点；
+5. `/files?action=GetFileBody|SaveFileBody` 用 `st_mtime` 乐观锁写入 Parloq marker；
+6. `/system?action=ServiceAdmin` 先 `nginx test`，成功后 `reload`。
 
-不要安装捕获所有域名的 `default_server`，共享服务器上还有其他站点。
+2026-08-14 部署的通配符证书到期日为 2026-10-12。它已复制到宝塔标准目录
+`/www/server/panel/vhost/cert/center.parloq.com`，可在面板 SSL 页管理。
 
-## 首次部署
+自定义片段只拥有以下 marker 内容，不整体覆盖宝塔 vhost 或代理文件：
 
-首次部署前，本地代码应已测试、提交并推送。构建并导出三个不可变镜像：
+- vhost：Cloudflare-only 源站限制、12 MB 请求体、安全响应头；
+- proxy：`X-Forwarded-*`、10 秒连接超时、120 秒收发超时、关闭请求缓冲。
 
-```bash
-bash deploy/build-production-images.sh
-```
+参考内容在 `deploy/nginx.center.parloq.com.conf`，该文件不能直接安装成 vhost。
 
-服务器初始化目录：
+客户推广落地页域名由客户单独绑定。每个域名必须创建独立宝塔网站、反代和
+证书，并保留原始 Host；禁止 default_server 捕获共享服务器上的其他站点。
 
-```bash
-install -d -m 700 /www/server/panel/data/compose/parloq-flow
-install -d -m 700 /data/parloq-flow/postgres /data/parloq-flow/redis
-```
+## 常规发布
 
-把 `deploy/docker-compose.production.yml` 安装为服务器的
-`docker-compose.yaml`，把 `deploy/production.env.example` 复制成 `.env`，
-用独立随机值替换所有 `change-me-*`，并设置权限为 `600`。三个镜像变量应
-使用本次提交 SHA。不得从旧项目复制数据库密码或应用密钥。
-
-安装 `deploy/nginx.center.parloq.com.conf` 前先执行 `nginx -t`；安装后再次
-检查并 reload。由于现有 `parloq.com *.parloq.com` vhost 属于旧系统，新的
-精确 `center.parloq.com` server block 必须独立存在。
-
-启动顺序：
-
-```bash
-cd /www/server/panel/data/compose/parloq-flow
-docker compose --env-file .env -f docker-compose.yaml config --quiet
-docker compose --env-file .env -f docker-compose.yaml up -d postgres redis
-docker compose --env-file .env -f docker-compose.yaml run --interactive=false -T --rm migrate
-docker compose --env-file .env -f docker-compose.yaml up -d --no-deps wa-gateway api api-worker web
-docker compose --env-file .env -f docker-compose.yaml ps
-curl -fsS http://127.0.0.1:18100/healthz
-```
-
-## 常规发布：本地构建并直接上传
-
-常规发布使用：
+发布命令：
 
 ```bash
 bash deploy/release-production.sh
 ```
 
-脚本会检查干净工作树与已推送的 `main`，构建 `linux/amd64` 镜像，导出压缩
-包，做本地和远端 SHA-256 校验，加载镜像，备份 `.env`，只更新三个镜像
-变量，执行迁移并重建应用服务。它不会覆盖生产 Compose/Nginx，不会重建
-数据库，也不会删除数据。
+脚本会：
 
-## 验证
+1. 检查工作树干净、当前为 `main`、HEAD 已推送到 `origin/main`；
+2. 用 `deploy/baota_api.py status` 核对网站、反代和 Docker 编排均已登记；
+3. 在本机为 `linux/amd64` 构建带完整 Git revision 的三个不可变镜像；
+4. 导出 tar，计算 SHA-256，通过宝塔 File API 分片上传；
+5. 创建一次性宝塔任务，远端复核 SHA-256 并加载镜像；
+6. 备份 `.env`，只更新 API/Web/Baileys 三个镜像变量；
+7. 校验 Compose，运行一次迁移，再更新四个应用服务；
+8. 验证回环健康和四个应用容器的镜像 revision；
+9. 客户端轮询宝塔状态文件，成功后删除临时任务、归档和状态文件；
+10. 最后验证公网 `https://center.parloq.com/healthz`。
 
-```bash
-ssh -o BatchMode=yes root@216.106.185.81
-cd /www/server/panel/data/compose/parloq-flow
-docker compose --env-file .env -f docker-compose.yaml ps
-docker compose --env-file .env -f docker-compose.yaml logs --tail=200 api web wa-gateway api-worker
-curl -fsS http://127.0.0.1:18100/healthz
-curl -fsS https://center.parloq.com/healthz
-```
+任何步骤失败都会写入明确状态；若已经切换 `.env`，任务会恢复备份并尝试重建
+上一版应用服务。数据库和 Redis 不会重建，也不会删除任何数据。失败的任务保留
+在宝塔计划任务中供排查。
 
-还应检查每个应用容器的 `org.opencontainers.image.revision` 与目标提交一致、
-重启次数没有增加、迁移任务成功，以及最近日志没有数据库/网关错误。
+## 人工验证与回滚
 
-## 回滚
+人工验证应在宝塔里确认：
 
-`.env` 每次发布前会备份为 `.env.backup-<commit>-<UTC时间>`。回滚时恢复
-上一个版本的三个镜像变量，然后只重建应用服务：
+- Docker → 容器编排 → `parloq-flow` 为运行中且常驻容器数为 6；
+- 网站 → `center.parloq.com` 的反代为 `parloq-flow`；
+- SSL 证书已部署且 HTTPS 有效；
+- `https://center.parloq.com/healthz` 返回 `{"status":"ok"}`；
+- 旧 `waba` 的 21 个常驻容器数量没有变化。
 
-```bash
-docker compose --env-file .env -f docker-compose.yaml up -d --no-deps \
-  wa-gateway api api-worker web
-```
-
-不要为了回滚应用镜像而回滚或清空数据库。若迁移不可向后兼容，应先停止
-发布并单独制定数据库回滚方案。
+回滚使用发布前的 `.env.backup-<commit>-<UTC>`，只恢复三个镜像变量并通过
+宝塔临时任务执行应用服务更新。不要回滚/清空数据库；遇到不可向后兼容迁移时，
+必须先单独制定数据库回滚方案。

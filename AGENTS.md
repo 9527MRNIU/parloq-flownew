@@ -22,12 +22,20 @@ together with the current user request.
 ## Production Environment
 
 - Production host: `216.106.185.81`.
-- SSH uses the local machine's existing key authentication:
-  `ssh -o BatchMode=yes root@216.106.185.81`.
+- BaoTa panel: `https://bt2.felixweb.top:10049` (version 11.8.1 at the
+  2026-08-14 handoff).
+- BaoTa HTTP APIs are the only production write control plane. Do not use SSH,
+  SCP, direct Nginx edits, direct Compose commands, or direct SQLite changes to
+  mutate production.
+- The local untracked `.env.baota.local` records the connection. The deployment
+  client opens an SSH port-forward to BaoTa's loopback listener and sends every
+  mutation through the authenticated BaoTa API. SSH is transport/read-only
+  diagnostics only; it does not authorize remote write commands.
 - Public management origin: `https://center.parloq.com`.
 - Promotion landing pages use customer-owned domains. They are not assigned a
   Parloq subdomain by default.
 - BaoTa Compose project: `parloq-flow`.
+- BaoTa Compose record ID: `1` at the 2026-08-14 handoff.
 - Compose directory:
   `/www/server/panel/data/compose/parloq-flow`.
 - Compose file:
@@ -38,6 +46,9 @@ together with the current user request.
 - Host-only application port: `127.0.0.1:18100`.
 - Nginx vhost:
   `/www/server/panel/vhost/nginx/center.parloq.com.conf`.
+- BaoTa website record: `center.parloq.com`, ID `38` at the 2026-08-14
+  handoff. Its BaoTa reverse-proxy record is `parloq-flow` targeting
+  `http://127.0.0.1:18100`.
 - Existing WABA production is a different system. Never alter its `waba`
   Compose project, `/www/server/panel/data/compose/waba`, `/data/waba`, images,
   containers, ports `8000/8002`, or `app.parloq.com` while operating this repo.
@@ -56,19 +67,20 @@ registry build unless the user explicitly changes this policy.
 When the user authorizes a production release:
 
 1. Require a clean working tree, confirm `main` is pushed, and record the exact
-   commit SHA.
+   commit SHA. Run `python3 deploy/baota_api.py status` before building.
 2. Build immutable images locally with `deploy/build-production-images.sh`:
    `parloq-flow-api-local:<sha>`, `parloq-flow-web-local:<sha>`, and
    `parloq-flow-wa-gateway-local:<sha>` for `linux/amd64`.
-3. Export only those images, gzip the archive, calculate SHA-256, upload it to
-   `root@216.106.185.81`, verify the remote checksum, and load it with Docker.
-4. Back up the production `.env` with the commit and UTC timestamp. Change only
-   the three image variables during a normal release; preserve all secrets and
-   operational settings.
-5. Validate with
-   `docker compose --env-file .env -f docker-compose.yaml config --quiet`.
-6. Run the one-shot `migrate` service and require a zero exit code before
-   recreating `api`, `api-worker`, `wa-gateway`, and `web`.
+3. Export only those images as a tar archive and upload it with BaoTa's chunked
+   File API. The local script must not use SCP.
+4. Start a temporary, audited BaoTa task that verifies SHA-256, loads the
+   images, backs up `.env`, and changes only the three image variables. The
+   task must publish a status file that the client polls before cleanup.
+5. Validate Compose inside that BaoTa task.
+6. Run `migrate` with the `migration` profile and require a zero exit code
+   before recreating `api`, `api-worker`, `wa-gateway`, and `web`. The profile
+   prevents the successful one-shot container from making BaoTa show the whole
+   stack as stopped.
 7. Never recreate, delete, or clear PostgreSQL/Redis data as part of a release.
    Never use `docker compose down -v`, and never delete `/data/parloq-flow`.
 8. Verify image revisions, migration status, health, restart counts,
@@ -77,25 +89,27 @@ When the user authorizes a production release:
 9. Keep prior image tags and the `.env` backup until verification passes. On
    failure, restore the previous image variables and recreate only application
    services; report the failure and rollback result.
-10. Remove local and remote transfer archives after checksum verification and
-    a successful release.
+10. Remove local and remote transfer archives only after a successful release;
+    retain the `.env` backup.
 
-The checked-in production Compose and Nginx files are bootstrap/reference
-configuration. After the first deployment, inspect live files and never
-overwrite them automatically merely to make them match the repository.
+The checked-in Compose file is the desired managed Compose configuration. The
+Nginx file contains reference fragments only. Never install it over BaoTa's
+generated vhost. Site, proxy, certificate, and marked custom fragments are
+reconciled through BaoTa APIs.
 
 ## Domains and Nginx
 
-- `center.parloq.com` has its own exact Nginx server block pointing to
-  `127.0.0.1:18100`; it must not be added to the old application's upstream.
+- `center.parloq.com` is a separate BaoTa website with an exact reverse-proxy
+  record pointing to `127.0.0.1:18100`; it must not be added to the old
+  application's upstream.
 - The existing wildcard `parloq.com` vhost belongs to the old system. An exact
   `center.parloq.com` block takes precedence and preserves isolation.
 - The origin follows the existing Cloudflare-only ingress policy. DNS changes
   happen in Cloudflare and must direct `center.parloq.com` to this production
   origin before public verification.
 - Each customer landing-page domain needs DNS pointing at the ingress and an
-  explicit Nginx vhost/certificate. Do not install a global default vhost that
-  could capture unrelated sites on the shared server.
+  explicit BaoTa website/proxy/certificate. Do not install a global default
+  vhost that could capture unrelated sites on the shared server.
 - `PROMOTION_INGRESS_HOST=center.parloq.com` is the canonical DNS verification
   target; it does not mean customer landing pages must use the system domain.
 
