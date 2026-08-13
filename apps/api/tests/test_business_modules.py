@@ -177,6 +177,9 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     )
     assert imported.status_code == 201, imported.text
     template = imported.json()["data"]["template"]
+    assert template["manifest"]["schema"] == "parloq-promotion-template/v1"
+    assert template["manifest"]["runtime"] == "parloq-browser-bridge/v1"
+    assert template["manifest"]["capabilities"] == ["phone-pairing"]
     assert template["defaultLocale"] == "en"
     assert template["supportedLocales"] == ["en"]
 
@@ -207,6 +210,11 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     )
     assert replaced.status_code == 200, replaced.text
     assert replaced.json()["data"]["template"]["version"] == "2"
+    replaced_again = admin_client.post(
+        f"/api/promotion/templates/{template['id']}/versions",
+        files={"file": ("dist.zip", replacement, "application/zip")},
+    )
+    assert replaced_again.status_code == 200, replaced_again.text
     preview = admin_client.get(f"/api/promotion/templates/{template['id']}/preview")
     assert preview.status_code == 200
     signed_base_match = re.search(
@@ -216,12 +224,21 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     assert signed_base_match is not None
     signed_asset_root = signed_base_match.group(1)
     assert 'src="assets/app.js"' in preview.text
+    assert 'type="module"' in preview.text
     assert preview.text.index("<base ") < preview.text.index("<link ")
     assert preview.text.index("<base ") < preview.text.index('src="assets/app.js"')
     assert f"{signed_asset_root}assets/logo.png" in preview.text
     assert "/assets/assets/assets/" not in preview.text
-    assert "sandbox allow-scripts" in preview.headers["content-security-policy"]
+    assert "sandbox allow-scripts allow-forms" in preview.headers[
+        "content-security-policy"
+    ]
+    assert "form-action 'none'" in preview.headers["content-security-policy"]
     assert "allow-same-origin" not in preview.headers["content-security-policy"]
+    assert "connect-src http://testserver" in preview.headers["content-security-policy"]
+    assert '"previewMode": true' in preview.text
+    assert "window.parloqSubmitPhone" in preview.text
+    assert 'addEventListener("contextmenu"' in preview.text
+    assert 'e.key==="F12"' in preview.text
     assert admin_client.get(
         f"/api/promotion/templates/{template['id']}/preview/assets/assets/app.js"
     ).status_code == 200
@@ -236,6 +253,13 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     assert signed_css.headers["access-control-allow-origin"] == "*"
     tampered_root = signed_asset_root.replace("_signed/", "_signed/x", 1)
     assert admin_client.get(f"{tampered_root}assets/app.css").status_code == 404
+    preview_token = signed_asset_root.rstrip("/").rsplit("/", 1)[-1]
+    preview_status = admin_client.get(
+        f"/api/promotion/templates/{template['id']}/preview/pairing-status",
+        params={"token": preview_token},
+    )
+    assert preview_status.status_code == 200
+    assert preview_status.json()["data"] == {"state": "ready", "preview": True}
 
     channel = admin_client.post(
         "/api/promotion/channels",
@@ -300,6 +324,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     assert stats["totals"]["phoneSubmit"] == 1
     render = admin_client.get("/api/public/promotion/channels/de-facebook-demo/render?lang=de")
     assert "parloq-promotion-config" in render.text
+    assert 'src="/api/public/promotion/guard.js"' in render.text
     assert '<base href="/api/public/promotion/channels/de-facebook-demo/assets/">' in render.text
     assert render.text.index("<base ") < render.text.index("<link ")
     assert render.text.index("<base ") < render.text.index('src="assets/app.js"')
@@ -324,6 +349,10 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     assert "pairingStartUrl" in tracker.text
     assert "pairing_start_failed" in tracker.text
     assert "form[data-parloq-manual]" in tracker.text
+    guard = admin_client.get("/api/public/promotion/guard.js")
+    assert guard.status_code == 200
+    assert 'addEventListener("contextmenu"' in guard.text
+    assert 'e.key==="F12"' in guard.text
 
     metric = admin_client.post(
         "/api/promotion/ad-metrics",
@@ -350,6 +379,43 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     assert admin_client.get(
         f"/api/promotion/templates/{template['id']}/preview/assets/assets/app.css"
     ).status_code == 401
+
+
+def test_promotion_template_v1_rejects_unknown_schema_and_source_maps(
+    admin_client: TestClient,
+) -> None:
+    unknown_schema = _zip(
+        {
+            "index.html": '<form><input type="tel"></form>',
+            "manifest.json": json.dumps(
+                {
+                    "schema": "parloq-promotion-template/v2",
+                    "capabilities": ["phone-pairing"],
+                }
+            ),
+        }
+    )
+    unsupported = admin_client.post(
+        "/api/promotion/templates",
+        data={"name": "Unsupported schema"},
+        files={"file": ("unknown.zip", unknown_schema, "application/zip")},
+    )
+    assert unsupported.status_code == 422
+    assert "schema" in unsupported.json()["detail"]
+
+    source_map = _zip(
+        {
+            "index.html": '<form><input type="tel"></form>',
+            "assets/app.js.map": "{}",
+        }
+    )
+    rejected_map = admin_client.post(
+        "/api/promotion/templates",
+        data={"name": "Source map bundle"},
+        files={"file": ("source-map.zip", source_map, "application/zip")},
+    )
+    assert rejected_map.status_code == 422
+    assert "app.js.map" in rejected_map.json()["detail"]
 
 
 def test_personal_account_gateway_and_hyperlink_delivery(admin_client: TestClient) -> None:

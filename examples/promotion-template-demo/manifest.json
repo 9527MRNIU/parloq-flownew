@@ -1,7 +1,11 @@
 {
+  "schema": "parloq-promotion-template/v1",
   "version": "1.0.0",
   "entry": "index.html",
   "format": "static-bundle",
+  "capabilities": ["phone-pairing"],
+  "runtime": "parloq-browser-bridge/v1",
+  "interactionProtection": "platform",
   "defaultLocale": "en",
   "supportedLocales": ["en", "zh-CN", "pt-BR", "es", "de", "fr", "ar", "id", "hi"],
   "i18n": {

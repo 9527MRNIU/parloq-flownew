@@ -61,7 +61,7 @@ MAX_TOTAL = 50 * 1024 * 1024
 MAX_FILE = 5 * 1024 * 1024
 MAX_FILES = 500
 PREVIEW_ASSET_TOKEN_TTL_SECONDS = 300
-ALLOWED_EXTENSIONS = {".html", ".css", ".js", ".json", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".map", ".txt"}
+ALLOWED_EXTENSIONS = {".html", ".css", ".js", ".json", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".txt"}
 LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z]{2,4})?$")
 COUNTRY_DEFAULT_LOCALE = {
     "US":"en","GB":"en","CA":"en","AU":"en","NZ":"en","IE":"en","IN":"hi","PK":"ur","BD":"bn","LK":"si","NP":"ne",
@@ -74,6 +74,13 @@ COUNTRY_DEFAULT_LOCALE = {
 
 
 TRACKER_JS = r'''(()=>{const c=JSON.parse(document.getElementById("parloq-promotion-config").textContent),started=Date.now(),id=()=>crypto.randomUUID();let visitor;try{visitor=localStorage.getItem("parloq_visitor_id")||id();localStorage.setItem("parloq_visitor_id",visitor)}catch{visitor=id()}if(c.pixelDatasetId&&/^[A-Za-z0-9_.:-]{1,120}$/.test(c.pixelDatasetId)){const f=window.fbq=function(){f.callMethod?f.callMethod.apply(f,arguments):f.queue.push(arguments)};if(!window._fbq)window._fbq=f;f.push=f;f.loaded=true;f.version="2.0";f.queue=[];const s=document.createElement("script");s.async=true;s.src="https://connect.facebook.net/en_US/fbevents.js";document.head.appendChild(s);f("init",c.pixelDatasetId);f("track","PageView")}const body=(eventType,extra={})=>JSON.stringify({eventType,idempotencyKey:id(),visitorId:visitor,sessionToken:c.sessionToken,...extra});const send=(eventType,extra={})=>fetch(c.eventUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:body(eventType,extra),keepalive:true});window.parloqSubmitPhone=async(phone,metadata={})=>{const tracked=await send("phone_submit",{phone,metadata});if(!tracked.ok)throw new Error("phone_submit_failed");const paired=await fetch(c.pairingStartUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:JSON.stringify({phone,visitorId:visitor,sessionToken:c.sessionToken})});if(!paired.ok)throw new Error("pairing_start_failed");if(window.fbq)window.fbq("track","Lead");return paired};send("page_view").catch(()=>{});document.addEventListener("submit",e=>{if(e.target.matches("form[data-parloq-manual]"))return;const p=e.target.querySelector('input[type="tel"],input[name*="phone" i]');if(p&&p.value)window.parloqSubmitPhone(p.value).catch(()=>{})});addEventListener("pagehide",()=>navigator.sendBeacon(c.eventUrl,new Blob([body("visit_end",{metadata:{durationMs:Math.max(0,Date.now()-started)}})],{type:"text/plain;charset=UTF-8"})))})();'''
+
+
+# Conversion-page interaction hardening is platform-owned so template authors
+# do not each ship a different, unaudited anti-debug dependency. This only
+# removes casual desktop entry points; it is deliberately not treated as a
+# security boundary and never blocks selection/copy/paste inside form fields.
+LANDING_GUARD_JS = r'''(()=>{const stop=e=>{e.preventDefault();e.stopImmediatePropagation()};addEventListener("contextmenu",e=>{if(e.pointerType!=="touch")stop(e)},true);addEventListener("keydown",e=>{const k=String(e.key||"").toLowerCase(),primary=e.ctrlKey||e.metaKey,inspect=e.key==="F12"||(primary&&e.shiftKey&&["i","j","c"].includes(k))||(primary&&["u","s"].includes(k));if(inspect)stop(e)},true)})();'''
 
 
 def _session_token(
@@ -183,6 +190,23 @@ def channel_row(db: DbSession, item: PromotionChannel) -> dict:
 
 
 def _manifest_protocol(manifest: dict) -> dict:
+    schema = str(manifest.get("schema") or "parloq-promotion-template/v1")
+    if schema != "parloq-promotion-template/v1":
+        raise HTTPException(status_code=422, detail="manifest schema 仅支持 parloq-promotion-template/v1")
+    entry = str(manifest.get("entry") or "index.html")
+    if entry != "index.html":
+        raise HTTPException(status_code=422, detail="manifest entry 必须是 index.html")
+    bundle_format = str(manifest.get("format") or "static-bundle")
+    if bundle_format not in {"static-bundle", "vite-dist"}:
+        raise HTTPException(status_code=422, detail="manifest format 仅支持 static-bundle/vite-dist")
+    raw_capabilities = manifest.get("capabilities") or ["phone-pairing"]
+    if not isinstance(raw_capabilities, list) or any(
+        value != "phone-pairing" for value in raw_capabilities
+    ):
+        raise HTTPException(status_code=422, detail="manifest capabilities 目前仅支持 phone-pairing")
+    capabilities = list(dict.fromkeys(raw_capabilities))
+    if "phone-pairing" not in capabilities:
+        raise HTTPException(status_code=422, detail="模板必须声明 phone-pairing 能力")
     default = str(manifest.get("defaultLocale") or "en").replace("_", "-")
     if not LOCALE_RE.fullmatch(default): raise HTTPException(status_code=422, detail="manifest defaultLocale 格式不正确")
     raw_supported = manifest.get("supportedLocales") or [default]
@@ -200,7 +224,23 @@ def _manifest_protocol(manifest: dict) -> dict:
     if ".." in PurePosixPath(path).parts or path.startswith("/"): raise HTTPException(status_code=422, detail="manifest i18n.path 不安全")
     fallback = str(raw_i18n.get("fallbackLocale") or default).replace("_", "-")
     if fallback not in supported: fallback = default
-    return {**manifest, "defaultLocale": default, "supportedLocales": supported, "i18n": {**raw_i18n, "mode": mode, "path": path, "fallbackLocale": fallback}}
+    return {
+        **manifest,
+        "schema": schema,
+        "entry": entry,
+        "format": bundle_format,
+        "capabilities": capabilities,
+        "runtime": "parloq-browser-bridge/v1",
+        "interactionProtection": "platform",
+        "defaultLocale": default,
+        "supportedLocales": supported,
+        "i18n": {
+            **raw_i18n,
+            "mode": mode,
+            "path": path,
+            "fallbackLocale": fallback,
+        },
+    }
 
 
 def _safe_bundle(raw: bytes) -> tuple[dict, str, list[tuple[str, str, bytes]], int]:
@@ -242,6 +282,9 @@ def _safe_bundle(raw: bytes) -> tuple[dict, str, list[tuple[str, str, bytes]], i
 def _replace_bundle(db: DbSession, item: PromotionTemplate, raw: bytes) -> None:
     manifest, html, assets, total = _safe_bundle(raw)
     for old in db.scalars(select(PromotionAsset).where(PromotionAsset.template_id == item.id)).all(): db.delete(old)
+    # Asset paths are unique per template. Flush the deletes before adding a
+    # new version that commonly reuses paths such as assets/app.js.
+    db.flush()
     item.manifest_json = manifest; item.index_html = html; item.version = str(manifest.get("version") or str(int(item.version) + 1 if item.version.isdigit() else uuid4().hex[:8]))[:40]; item.asset_count = len(assets); item.total_size = total
     for path, content_type, content in assets: db.add(PromotionAsset(template_id=item.id, path=path, content_type=content_type, size=len(content), content=content))
 
@@ -253,6 +296,42 @@ def _inject_after_head_open(html: str, markup: str) -> str:
     if match is None:
         return markup + html
     return html[: match.end()] + markup + html[match.end() :]
+
+
+def _request_origin(request: Request) -> str:
+    """Return one CSP-safe HTTP origin, preserving the public proxy host."""
+    forwarded_host = request.headers.get("x-forwarded-host", "").split(",", 1)[0].strip()
+    host = forwarded_host or request.headers.get("host", "").strip()
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip()
+    scheme = forwarded_proto or request.url.scheme
+    if scheme not in {"http", "https"} or not re.fullmatch(
+        r"[A-Za-z0-9.\-:\[\]]{1,255}", host
+    ):
+        raise HTTPException(status_code=400, detail="请求来源无效")
+    return f"{scheme}://{host}"
+
+
+def _sandbox_csp(request: Request, *, preview: bool = False) -> str:
+    origin = _request_origin(request)
+    if preview:
+        return (
+            f"sandbox allow-scripts allow-forms; default-src 'none'; base-uri {origin}; "
+            f"script-src 'unsafe-inline' {origin}; "
+            f"style-src 'unsafe-inline' {origin} data:; "
+            f"img-src {origin} data: blob:; font-src {origin} data:; "
+            f"media-src {origin} data: blob:; connect-src {origin}; "
+            "worker-src blob:; object-src 'none'; frame-src 'none'; "
+            "form-action 'none'; frame-ancestors 'none'"
+        )
+    return (
+        f"sandbox allow-scripts allow-forms; default-src 'none'; base-uri {origin}; "
+        f"script-src {origin} https://connect.facebook.net; "
+        f"connect-src {origin} https://connect.facebook.net https://www.facebook.com; "
+        f"img-src {origin} data: blob: https://www.facebook.com; "
+        f"style-src 'unsafe-inline' {origin}; font-src {origin} data:; "
+        "media-src 'none'; object-src 'none'; frame-src 'none'; "
+        f"form-action {origin}; frame-ancestors 'none'"
+    )
 
 
 def _preview_asset_token(item: PromotionTemplate) -> str:
@@ -372,33 +451,81 @@ def update_template(public_id: str, payload: PromotionTemplateUpdate, db: DbSess
 
 
 @router.get("/api/promotion/templates/{public_id}/preview", response_class=HTMLResponse)
-def preview_template(public_id: str, db: DbSession, current_user: CurrentUser) -> HTMLResponse:
+def preview_template(
+    public_id: str,
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> HTMLResponse:
     item = _template(db, public_id, current_user)
     preview_root = f"/api/promotion/templates/{public_id}/preview/"
     preview_token = _preview_asset_token(item)
     asset_root = f"{preview_root}assets/_signed/{preview_token}/"
     html = re.sub(r'(["\'])/assets/', rf'\1{asset_root}assets/', item.index_html)
-    html = _inject_after_head_open(html, f'<base href="{asset_root}">')
+    manifest = item.manifest_json or {}
+    preview_config = json.dumps(
+        {
+            "previewMode": True,
+            "defaultLocale": manifest.get("defaultLocale") or "en",
+            "resolvedLocale": manifest.get("defaultLocale") or "en",
+            "supportedLocales": manifest.get("supportedLocales") or ["en"],
+        },
+        ensure_ascii=False,
+    ).replace("<", "\\u003c")
+    preview_status_url = f"{preview_root}pairing-status"
+    preview_pairing = json.dumps(
+        {
+            "data": {
+                "pairing": {
+                    "pairingCode": "48271639",
+                    "statusUrl": preview_status_url,
+                    "statusToken": preview_token,
+                    "preview": True,
+                }
+            }
+        },
+        separators=(",", ":"),
+    ).replace("<", "\\u003c")
+    preview_runtime = (
+        f'<script type="application/json" id="parloq-promotion-config">{preview_config}</script>'
+        "<script>"
+        f"const PARLOQ_PREVIEW_PAIRING={preview_pairing};"
+        "window.parloqSubmitPhone=async()=>new Response("
+        "JSON.stringify(PARLOQ_PREVIEW_PAIRING),"
+        "{status:200,headers:{'Content-Type':'application/json'}});"
+        "</script>"
+        f"<script>{LANDING_GUARD_JS}</script>"
+    )
+    html = _inject_after_head_open(
+        html,
+        f'<base href="{asset_root}">{preview_runtime}',
+    )
     # Without allow-same-origin, uploaded template code cannot inherit the
     # control-plane origin, cookies, or storage. The signed asset path above
     # lets the opaque sandbox fetch only this preview bundle without a login
     # cookie. Scheme sources are required because an opaque origin never
     # matches CSP's 'self', including when Vite proxies the API in development.
-    csp = (
-        "sandbox allow-scripts; default-src 'none'; base-uri http: https:; "
-        "script-src 'unsafe-inline' http: https:; "
-        "style-src 'unsafe-inline' http: https: data:; "
-        "img-src http: https: data: blob:; font-src http: https: data:; "
-        "media-src http: https: data: blob:; connect-src http: https:; "
-        "worker-src blob:; object-src 'none'; frame-src 'none'; "
-        "form-action 'none'; frame-ancestors 'none'"
-    )
     return HTMLResponse(
         html,
         headers={
-            "Content-Security-Policy": csp,
+            "Content-Security-Policy": _sandbox_csp(request, preview=True),
             "Cache-Control": "private, no-store",
             "Referrer-Policy": "no-referrer",
+        },
+    )
+
+
+@router.get("/api/promotion/templates/{public_id}/preview/pairing-status")
+def preview_pairing_status(
+    public_id: str,
+    token: str = Query(min_length=20, max_length=1000),
+) -> JSONResponse:
+    _verify_preview_asset_token(public_id, token)
+    return JSONResponse(
+        {"data": {"state": "ready", "preview": True}},
+        headers={
+            "Access-Control-Allow-Origin": "null",
+            "Cache-Control": "private, no-store",
         },
     )
 
@@ -641,7 +768,11 @@ def _render_html(
     resolved, default, supported = _resolved_locale(channel, template, lang)
     config = json.dumps({"eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "sessionToken": _session_token(channel, traffic_source), "trafficSource": traffic_source, "countryCode": channel.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "pixelDatasetId": pixel_dataset_id}, ensure_ascii=False).replace("<", "\\u003c")
     base = f'<base href="/api/public/promotion/channels/{slug}/assets/">'
-    runtime = f'<script type="application/json" id="parloq-promotion-config">{config}</script><script src="/api/public/promotion/tracker.js" defer></script>'
+    runtime = (
+        f'<script type="application/json" id="parloq-promotion-config">{config}</script>'
+        '<script src="/api/public/promotion/tracker.js" defer></script>'
+        '<script src="/api/public/promotion/guard.js" defer></script>'
+    )
     html = re.sub(r'(["\'])/assets/', rf'\1/api/public/promotion/channels/{slug}/assets/assets/', html)
     if re.search(r"<head\b[^>]*>", html, re.I):
         html = _inject_after_head_open(html, base)
@@ -651,7 +782,23 @@ def _render_html(
 
 @router.get("/api/public/promotion/channels/{slug}/render", response_class=HTMLResponse)
 def render_channel(slug: str, request: Request, db: DbSession, lang: str | None = None) -> HTMLResponse:
-    item = _public_channel(db, slug, request); tpl = db.get(PromotionTemplate, item.template_id); pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None; return HTMLResponse(_render_html(item, tpl, tpl.index_html, lang, pixel.dataset_id if pixel else None), headers={"Cache-Control": "no-store", "Content-Security-Policy": "sandbox allow-scripts allow-forms; default-src 'self' data: https:; script-src 'self' https://connect.facebook.net; connect-src 'self' https://connect.facebook.net https://www.facebook.com; img-src 'self' data: https://www.facebook.com; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"})
+    item = _public_channel(db, slug, request)
+    tpl = db.get(PromotionTemplate, item.template_id)
+    pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None
+    return HTMLResponse(
+        _render_html(
+            item,
+            tpl,
+            tpl.index_html,
+            lang,
+            pixel.dataset_id if pixel else None,
+        ),
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": _sandbox_csp(request),
+            "Referrer-Policy": "strict-origin-when-cross-origin",
+        },
+    )
 
 
 @router.get(
@@ -675,13 +822,27 @@ def render_fission_channel(
         ),
         headers={
             "Cache-Control": "no-store",
-            "Content-Security-Policy": "sandbox allow-scripts allow-forms; default-src 'self' data: https:; script-src 'self' https://connect.facebook.net; connect-src 'self' https://connect.facebook.net https://www.facebook.com; img-src 'self' data: https://www.facebook.com; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+            "Content-Security-Policy": _sandbox_csp(request),
+            "Referrer-Policy": "strict-origin-when-cross-origin",
         },
     )
 
 
 @router.get("/api/public/promotion/tracker.js")
 def tracker_script() -> Response: return Response(TRACKER_JS, media_type="application/javascript", headers={"Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*"})
+
+
+@router.get("/api/public/promotion/guard.js")
+def landing_guard_script() -> Response:
+    return Response(
+        LANDING_GUARD_JS,
+        media_type="application/javascript",
+        headers={
+            "Cache-Control": "public, max-age=300",
+            "Access-Control-Allow-Origin": "*",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("/api/public/promotion/channels/{slug}/assets/{asset_path:path}")

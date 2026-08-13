@@ -83,3 +83,8 @@ pairing-code and verified-account attribution flow.
 
 See [docs/architecture.md](docs/architecture.md) for system boundaries and
 capacity assumptions.
+
+Template authors should follow the versioned
+[promotion template specification](docs/promotion-template-spec-v1.md). The
+[peer landing-page review](docs/peer-landing-page-review-2026-08.md) records
+which public-page patterns we adopted and which ones we deliberately avoided.
