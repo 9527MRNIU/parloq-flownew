@@ -38,6 +38,8 @@ class BaoTaDeploymentTests(unittest.TestCase):
         self.assertIn("--profile migration", script)
         self.assertIn("run --interactive=false -T --rm migrate", script)
         self.assertIn("wa-gateway api api-worker web", script)
+        self.assertIn("write_status '{\"status\":\"success\"", script)
+        self.assertNotIn('write_status "{\\"status\\"', script)
         self.assertNotIn(" down ", script)
         self.assertNotIn("down -v", script)
         self.assertNotIn("/data/waba", script)

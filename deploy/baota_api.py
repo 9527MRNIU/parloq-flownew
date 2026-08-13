@@ -319,7 +319,7 @@ rollback() {{
       fi
     fi
   fi
-  write_status "{{\"status\":\"failed\",\"commit\":\"${{commit}}\",\"exitCode\":${{code}},\"rollbackAttempted\":${{switched}},\"rollbackSucceeded\":${{rollback_succeeded}}}}"
+  write_status '{{"status":"failed","commit":"'"${{commit}}"'","exitCode":'"${{code}}"',"rollbackAttempted":'"${{switched}}"',"rollbackSucceeded":'"${{rollback_succeeded}}"'}}'
   exit "${{code}}"
 }}
 trap rollback ERR
@@ -357,7 +357,7 @@ for service in api api-worker web wa-gateway; do
   [ "${{revision}}" = "${{commit}}" ]
 done
 trap - ERR
-write_status "{{\"status\":\"success\",\"commit\":\"${{commit}}\",\"backup\":\"${{backup}}\"}}"
+write_status '{{"status":"success","commit":"'"${{commit}}"'","backup":"'"${{backup}}"'"}}'
 """
 
 
