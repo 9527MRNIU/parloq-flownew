@@ -104,6 +104,45 @@ type AdMetric = {
   clicks: number;
   updatedAt: string;
 };
+type TemplateProtectionMode = "basic" | "enhanced" | "strict";
+type TemplateDevtoolsAction = "log" | "block" | "blank";
+type TemplateDeviceSignals = "off" | "standard" | "enhanced";
+type TemplatePolicy = {
+  protectionMode: TemplateProtectionMode;
+  devtoolsAction: TemplateDevtoolsAction;
+  lockViewportZoom: boolean;
+  deviceSignals: TemplateDeviceSignals;
+};
+
+const defaultTemplatePolicy: TemplatePolicy = {
+  protectionMode: "basic",
+  devtoolsAction: "log",
+  lockViewportZoom: false,
+  deviceSignals: "standard",
+};
+
+function templatePolicyRow(input: unknown): TemplatePolicy {
+  const row = object(input);
+  const protectionMode = field(row, "protectionMode", "protection_mode");
+  const devtoolsAction = field(row, "devtoolsAction", "devtools_action");
+  const deviceSignals = field(row, "deviceSignals", "device_signals");
+  return {
+    protectionMode: ["basic", "enhanced", "strict"].includes(protectionMode)
+      ? (protectionMode as TemplateProtectionMode)
+      : defaultTemplatePolicy.protectionMode,
+    devtoolsAction: ["log", "block", "blank"].includes(devtoolsAction)
+      ? (devtoolsAction as TemplateDevtoolsAction)
+      : defaultTemplatePolicy.devtoolsAction,
+    lockViewportZoom: Boolean(
+      row.lockViewportZoom ??
+        row.lock_viewport_zoom ??
+        defaultTemplatePolicy.lockViewportZoom,
+    ),
+    deviceSignals: ["off", "standard", "enhanced"].includes(deviceSignals)
+      ? (deviceSignals as TemplateDeviceSignals)
+      : defaultTemplatePolicy.deviceSignals,
+  };
+}
 function templateRow(input: unknown): PromotionTemplate {
   const row = object(input);
   const id = field(row, "publicId", "public_id", "id");
@@ -226,6 +265,12 @@ export function PromotionTemplatesPage() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [pending, setPending] = useState(false);
+  const [policyDrawer, setPolicyDrawer] = useState(false);
+  const [policy, setPolicy] = useState<TemplatePolicy>(defaultTemplatePolicy);
+  const [policyLoading, setPolicyLoading] = useState(false);
+  const [policySaving, setPolicySaving] = useState(false);
+  const [policyError, setPolicyError] = useState("");
+  const [policyLoaded, setPolicyLoaded] = useState(false);
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -311,6 +356,47 @@ export function PromotionTemplatesPage() {
       toast.error(caught instanceof Error ? caught.message : "操作失败");
     }
   }
+  const loadPolicy = useCallback(async () => {
+    setPolicyLoading(true);
+    setPolicyError("");
+    setPolicyLoaded(false);
+    try {
+      const payload = await apiRequest("/api/promotion/template-policy");
+      const data = object(object(payload).data ?? payload);
+      setPolicy(templatePolicyRow(data.policy || data));
+      setPolicyLoaded(true);
+    } catch (caught) {
+      setPolicyError(
+        caught instanceof Error ? caught.message : "模板策略读取失败",
+      );
+    } finally {
+      setPolicyLoading(false);
+    }
+  }, []);
+  function openPolicy() {
+    setPolicyDrawer(true);
+    void loadPolicy();
+  }
+  async function savePolicy() {
+    if (!canManage || !policyLoaded || policyError) return;
+    setPolicySaving(true);
+    try {
+      const payload = await apiRequest("/api/promotion/template-policy", {
+        method: "PATCH",
+        body: JSON.stringify(policy),
+      });
+      const data = object(object(payload).data ?? payload);
+      setPolicy(templatePolicyRow(data.policy || data));
+      setPolicyDrawer(false);
+      toast.success("模板策略已保存");
+    } catch (caught) {
+      toast.error(
+        caught instanceof Error ? caught.message : "模板策略保存失败",
+      );
+    } finally {
+      setPolicySaving(false);
+    }
+  }
   return (
     <StandardListPage>
       <ListToolbar
@@ -322,6 +408,10 @@ export function PromotionTemplatesPage() {
         meta={`${visible.length} 个模板`}
         actions={
           <>
+            <Button variant="outline" onClick={openPolicy}>
+              <Settings2Icon size={16} />
+              模板策略
+            </Button>
             <Button variant="outline" onClick={() => void load()}>
               <RefreshCwIcon size={16} />
               刷新
@@ -397,7 +487,7 @@ export function PromotionTemplatesPage() {
                   <TableCell>
                     <div className="flex items-center justify-end gap-1">
                       <IconButton
-                        label="预览"
+                        label="模拟预览：不创建账号、不占用 IP"
                         onClick={() => window.open(row.previewUrl, "_blank")}
                       >
                         <EyeIcon size={16} />
@@ -431,6 +521,153 @@ export function PromotionTemplatesPage() {
           />
         )}
       </ListTableCard>
+      <Drawer
+        open={policyDrawer}
+        onClose={() => !policySaving && setPolicyDrawer(false)}
+        title="模板策略"
+        description="统一设置推广模板的前端防护、视口行为与匿名设备环境信号。"
+        footer={
+          <>
+            <Button
+              variant="outline"
+              disabled={policySaving}
+              onClick={() => setPolicyDrawer(false)}
+            >
+              {canManage ? "取消" : "关闭"}
+            </Button>
+            {canManage ? (
+              <Button
+                disabled={
+                  policyLoading ||
+                  policySaving ||
+                  !policyLoaded ||
+                  Boolean(policyError)
+                }
+                onClick={() => void savePolicy()}
+              >
+                {policySaving ? <Spinner /> : <Settings2Icon size={16} />}
+                保存策略
+              </Button>
+            ) : null}
+          </>
+        }
+      >
+        {policyLoading ? (
+          <div className="loading-state min-h-64">
+            <Spinner />
+            正在读取模板策略…
+          </div>
+        ) : policyError ? (
+          <div className="error-state min-h-64">
+            <strong>模板策略读取失败</strong>
+            <span>{policyError}</span>
+            <Button variant="outline" onClick={() => void loadPolicy()}>
+              <RefreshCwIcon size={16} />
+              重新读取
+            </Button>
+          </div>
+        ) : policyLoaded ? (
+          <div className="drawer-form">
+            {!canManage ? (
+              <div className="rounded-lg border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+                当前账号只有查看权限，不能修改模板策略。
+              </div>
+            ) : null}
+            <label className="field">
+              <span>防护级别</span>
+              <SelectField
+                value={policy.protectionMode}
+                disabled={!canManage || policySaving}
+                onValueChange={(value) =>
+                  setPolicy((current) => ({
+                    ...current,
+                    protectionMode: value as TemplateProtectionMode,
+                  }))
+                }
+                options={[
+                  { value: "basic", label: "基础防护" },
+                  { value: "enhanced", label: "增强防护" },
+                  { value: "strict", label: "严格防护" },
+                ]}
+              />
+              <small>
+                {policy.protectionMode === "basic"
+                  ? "基础：限制右键菜单和常用开发者工具快捷键。"
+                  : policy.protectionMode === "enhanced"
+                    ? "增强：在基础防护上增加窗口尺寸检测、Eruda / vConsole 检测及 console 副作用检测。"
+                    : "严格：在增强防护上增加执行耗时与 debugger 停顿检测。"}
+              </small>
+            </label>
+            <label className="field">
+              <span>检测到开发者工具时</span>
+              <SelectField
+                value={policy.devtoolsAction}
+                disabled={
+                  !canManage ||
+                  policySaving ||
+                  policy.protectionMode === "basic"
+                }
+                onValueChange={(value) =>
+                  setPolicy((current) => ({
+                    ...current,
+                    devtoolsAction: value as TemplateDevtoolsAction,
+                  }))
+                }
+                options={[
+                  { value: "log", label: "仅记录" },
+                  { value: "block", label: "阻止交互" },
+                  { value: "blank", label: "显示空白页" },
+                ]}
+              />
+              <small>
+                此动作仅用于增强或严格防护；基础模式不会执行开发者工具处置动作。
+              </small>
+            </label>
+            <label className="switch-row">
+              <span>
+                <strong>锁定视口缩放</strong>
+                <small>限制页面手势缩放，减少布局被意外放大或缩小。</small>
+              </span>
+              <Switch
+                checked={policy.lockViewportZoom}
+                disabled={!canManage || policySaving}
+                onCheckedChange={(checked) =>
+                  setPolicy((current) => ({
+                    ...current,
+                    lockViewportZoom: checked,
+                  }))
+                }
+                aria-label="锁定视口缩放"
+              />
+            </label>
+            <label className="field">
+              <span>设备环境信号</span>
+              <SelectField
+                value={policy.deviceSignals}
+                disabled={!canManage || policySaving}
+                onValueChange={(value) =>
+                  setPolicy((current) => ({
+                    ...current,
+                    deviceSignals: value as TemplateDeviceSignals,
+                  }))
+                }
+                options={[
+                  { value: "off", label: "关闭" },
+                  { value: "standard", label: "标准" },
+                  { value: "enhanced", label: "增强" },
+                ]}
+              />
+              <small>
+                仅收集浏览器与设备环境、匿名关联信号，不采集 WhatsApp
+                号码或账号凭据。
+              </small>
+            </label>
+            <div className="rounded-lg border border-amber-600/20 bg-amber-600/5 p-3 text-sm text-muted-foreground">
+              跨域访客关联和流量筛选属于推广渠道及平台侧能力，不属于模板策略，本页不提供虚构开关。
+            </div>
+          </div>
+        ) : null}
+      </Drawer>
       <Drawer
         open={drawer}
         onClose={() => !pending && setDrawer(false)}
@@ -926,7 +1163,7 @@ export function PromotionChannelsPage() {
                   <TableCell>
                     <div className="flex items-center justify-end gap-1">
                       <IconButton
-                        label="打开渠道页"
+                        label="打开真实渠道页：提交号码会创建账号并占用 IP"
                         onClick={() =>
                           window.open(
                             `/api/public/promotion/channels/${encodeURIComponent(row.slug)}/render`,

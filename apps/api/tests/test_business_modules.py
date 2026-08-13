@@ -236,6 +236,8 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     assert "allow-same-origin" not in preview.headers["content-security-policy"]
     assert "connect-src http://testserver" in preview.headers["content-security-policy"]
     assert '"previewMode": true' in preview.text
+    assert '"templatePolicy": {' in preview.text
+    assert '"deviceSignals": "standard"' in preview.text
     assert "window.parloqSubmitPhone" in preview.text
     assert 'addEventListener("contextmenu"' in preview.text
     assert 'e.key==="F12"' in preview.text
@@ -322,6 +324,16 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     stats = admin_client.get(f"/api/promotion/channels/{channel_id}/stats").json()["data"]
     assert stats["totals"]["pageView"] == 1
     assert stats["totals"]["phoneSubmit"] == 1
+    policy = admin_client.patch(
+        "/api/promotion/template-policy",
+        json={
+            "protectionMode": "strict",
+            "devtoolsAction": "blank",
+            "lockViewportZoom": True,
+            "deviceSignals": "enhanced",
+        },
+    )
+    assert policy.status_code == 200, policy.text
     render = admin_client.get("/api/public/promotion/channels/de-facebook-demo/render?lang=de")
     assert "parloq-promotion-config" in render.text
     assert 'src="/api/public/promotion/guard.js"' in render.text
@@ -329,6 +341,11 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     assert render.text.index("<base ") < render.text.index("<link ")
     assert render.text.index("<base ") < render.text.index('src="assets/app.js"')
     assert '"pixelDatasetId": "promo-dataset-001"' in render.text
+    assert '"templatePolicy": {' in render.text
+    assert '"protectionMode": "strict"' in render.text
+    assert '"devtoolsAction": "blank"' in render.text
+    assert '"deviceSignals": "enhanced"' in render.text
+    assert "maximum-scale=1,user-scalable=no" in render.text
     assert 'src="assets/app.js"' in render.text
     assert "/api/public/promotion/channels/de-facebook-demo/assets/assets/logo.png" in render.text
     assert "/assets/assets/assets/" not in render.text
@@ -349,10 +366,38 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     assert "pairingStartUrl" in tracker.text
     assert "pairing_start_failed" in tracker.text
     assert "form[data-parloq-manual]" in tracker.text
+    assert 'send("page_view",{metadata:{deviceSignals:signals()}})' in tracker.text
+    assert '"inspection_detected"' in tracker.text
     guard = admin_client.get("/api/public/promotion/guard.js")
     assert guard.status_code == 200
     assert 'addEventListener("contextmenu"' in guard.text
     assert 'e.key==="F12"' in guard.text
+    assert 'window-gap' in guard.text
+    assert 'debugger-delay' in guard.text
+
+    inspection = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/events",
+        content=json.dumps(
+            {
+                "eventType": "inspection_detected",
+                "idempotencyKey": "inspection-event-0001",
+                "visitorId": "visitor-inspection-0001",
+                "sessionToken": config["sessionToken"],
+                "metadata": {"reason": "window-gap", "mode": "enhanced"},
+            }
+        ),
+    )
+    assert inspection.status_code == 200, inspection.text
+    reset_policy = admin_client.patch(
+        "/api/promotion/template-policy",
+        json={
+            "protectionMode": "basic",
+            "devtoolsAction": "log",
+            "lockViewportZoom": False,
+            "deviceSignals": "standard",
+        },
+    )
+    assert reset_policy.status_code == 200, reset_policy.text
 
     metric = admin_client.post(
         "/api/promotion/ad-metrics",

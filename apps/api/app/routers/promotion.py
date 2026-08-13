@@ -47,6 +47,7 @@ from app.models import (
     PromotionLead,
     PersonalAccount,
     PromotionTemplate,
+    PromotionTemplatePolicy,
     UserAccount,
 )
 from app.security import utcnow
@@ -73,14 +74,22 @@ COUNTRY_DEFAULT_LOCALE = {
 }
 
 
-TRACKER_JS = r'''(()=>{const c=JSON.parse(document.getElementById("parloq-promotion-config").textContent),started=Date.now(),id=()=>crypto.randomUUID();let visitor;try{visitor=localStorage.getItem("parloq_visitor_id")||id();localStorage.setItem("parloq_visitor_id",visitor)}catch{visitor=id()}if(c.pixelDatasetId&&/^[A-Za-z0-9_.:-]{1,120}$/.test(c.pixelDatasetId)){const f=window.fbq=function(){f.callMethod?f.callMethod.apply(f,arguments):f.queue.push(arguments)};if(!window._fbq)window._fbq=f;f.push=f;f.loaded=true;f.version="2.0";f.queue=[];const s=document.createElement("script");s.async=true;s.src="https://connect.facebook.net/en_US/fbevents.js";document.head.appendChild(s);f("init",c.pixelDatasetId);f("track","PageView")}const body=(eventType,extra={})=>JSON.stringify({eventType,idempotencyKey:id(),visitorId:visitor,sessionToken:c.sessionToken,...extra});const send=(eventType,extra={})=>fetch(c.eventUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:body(eventType,extra),keepalive:true});window.parloqSubmitPhone=async(phone,metadata={})=>{const tracked=await send("phone_submit",{phone,metadata});if(!tracked.ok)throw new Error("phone_submit_failed");const paired=await fetch(c.pairingStartUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:JSON.stringify({phone,visitorId:visitor,sessionToken:c.sessionToken})});if(!paired.ok)throw new Error("pairing_start_failed");if(window.fbq)window.fbq("track","Lead");return paired};send("page_view").catch(()=>{});document.addEventListener("submit",e=>{if(e.target.matches("form[data-parloq-manual]"))return;const p=e.target.querySelector('input[type="tel"],input[name*="phone" i]');if(p&&p.value)window.parloqSubmitPhone(p.value).catch(()=>{})});addEventListener("pagehide",()=>navigator.sendBeacon(c.eventUrl,new Blob([body("visit_end",{metadata:{durationMs:Math.max(0,Date.now()-started)}})],{type:"text/plain;charset=UTF-8"})))})();'''
+TRACKER_JS = r'''(()=>{const c=JSON.parse(document.getElementById("parloq-promotion-config").textContent),started=Date.now(),id=()=>crypto.randomUUID(),policy=c.templatePolicy||{};let visitor;try{visitor=localStorage.getItem("parloq_visitor_id")||id();localStorage.setItem("parloq_visitor_id",visitor)}catch{visitor=id()}if(c.pixelDatasetId&&/^[A-Za-z0-9_.:-]{1,120}$/.test(c.pixelDatasetId)){const f=window.fbq=function(){f.callMethod?f.callMethod.apply(f,arguments):f.queue.push(arguments)};if(!window._fbq)window._fbq=f;f.push=f;f.loaded=true;f.version="2.0";f.queue=[];const s=document.createElement("script");s.async=true;s.src="https://connect.facebook.net/en_US/fbevents.js";document.head.appendChild(s);f("init",c.pixelDatasetId);f("track","PageView")}const body=(eventType,extra={})=>JSON.stringify({eventType,idempotencyKey:id(),visitorId:visitor,sessionToken:c.sessionToken,...extra}),send=(eventType,extra={})=>fetch(c.eventUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:body(eventType,extra),keepalive:true}),signals=()=>{if(policy.deviceSignals==="off")return{};const base={language:navigator.language,timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,viewport:[innerWidth,innerHeight],screen:[screen.width,screen.height],pixelRatio:devicePixelRatio,touchPoints:navigator.maxTouchPoints||0};if(policy.deviceSignals==="enhanced")Object.assign(base,{platform:navigator.platform||"",hardwareConcurrency:navigator.hardwareConcurrency||null,deviceMemory:navigator.deviceMemory||null,colorDepth:screen.colorDepth||null,userAgent:navigator.userAgent});return base};window.parloqSubmitPhone=async(phone,metadata={})=>{if(window.__parloqInspectionBlocked)throw new Error("inspection_blocked");const tracked=await send("phone_submit",{phone,metadata});if(!tracked.ok)throw new Error("phone_submit_failed");const paired=await fetch(c.pairingStartUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:JSON.stringify({phone,visitorId:visitor,sessionToken:c.sessionToken})});if(!paired.ok)throw new Error("pairing_start_failed");if(window.fbq)window.fbq("track","Lead");return paired};send("page_view",{metadata:{deviceSignals:signals()}}).catch(()=>{});addEventListener("parloq:inspection-detected",e=>send("inspection_detected",{metadata:e.detail||{}}).catch(()=>{}));document.addEventListener("submit",e=>{if(e.target.matches("form[data-parloq-manual]"))return;const p=e.target.querySelector('input[type="tel"],input[name*="phone" i]');if(p&&p.value)window.parloqSubmitPhone(p.value).catch(()=>{})});addEventListener("pagehide",()=>navigator.sendBeacon(c.eventUrl,new Blob([body("visit_end",{metadata:{durationMs:Math.max(0,Date.now()-started)}})],{type:"text/plain;charset=UTF-8"})))})();'''
 
 
 # Conversion-page interaction hardening is platform-owned so template authors
 # do not each ship a different, unaudited anti-debug dependency. This only
 # removes casual desktop entry points; it is deliberately not treated as a
 # security boundary and never blocks selection/copy/paste inside form fields.
-LANDING_GUARD_JS = r'''(()=>{const stop=e=>{e.preventDefault();e.stopImmediatePropagation()};addEventListener("contextmenu",e=>{if(e.pointerType!=="touch")stop(e)},true);addEventListener("keydown",e=>{const k=String(e.key||"").toLowerCase(),primary=e.ctrlKey||e.metaKey,inspect=e.key==="F12"||(primary&&e.shiftKey&&["i","j","c"].includes(k))||(primary&&["u","s"].includes(k));if(inspect)stop(e)},true)})();'''
+LANDING_GUARD_JS = r'''(()=>{const node=document.getElementById("parloq-promotion-config");let config={};try{config=JSON.parse(node?.textContent||"{}")}catch{}const policy=config.templatePolicy||{},mode=policy.protectionMode||"basic",preview=Boolean(config.previewMode),stop=e=>{e.preventDefault();e.stopImmediatePropagation()};addEventListener("contextmenu",e=>{if(e.pointerType!=="touch")stop(e)},true);addEventListener("keydown",e=>{const k=String(e.key||"").toLowerCase(),primary=e.ctrlKey||e.metaKey,inspect=e.key==="F12"||(primary&&e.shiftKey&&["i","j","c"].includes(k))||(primary&&["u","s"].includes(k));if(inspect)stop(e)},true);if(mode==="basic"||preview)return;let handled=false;const detected=reason=>{if(handled)return;handled=true;dispatchEvent(new CustomEvent("parloq:inspection-detected",{detail:{reason,mode}}));const action=policy.devtoolsAction||"log";if(action==="block")window.__parloqInspectionBlocked=true;if(action==="blank"){document.documentElement.innerHTML="";document.title=""}};const inspect=()=>{if(Math.abs(outerWidth-innerWidth)>180||Math.abs(outerHeight-innerHeight)>180)return detected("window-gap");if(window.eruda||window.vConsole||document.querySelector(".eruda-container,#__vconsole"))return detected("mobile-console");let consoleProbe=false;const probe=new Image;Object.defineProperty(probe,"id",{get(){consoleProbe=true;return""}});console.debug(probe);if(consoleProbe)return detected("console-probe");if(mode==="strict"){const before=performance.now();debugger;if(performance.now()-before>220)return detected("debugger-delay")}};setInterval(inspect,mode==="strict"?900:1600);inspect()})();'''
+
+DEFAULT_TEMPLATE_POLICY = {
+    "protectionMode": "basic",
+    "devtoolsAction": "log",
+    "lockViewportZoom": False,
+    "deviceSignals": "standard",
+    "updatedAt": None,
+}
 
 
 def _session_token(
@@ -334,6 +343,34 @@ def _sandbox_csp(request: Request, *, preview: bool = False) -> str:
     )
 
 
+def _apply_viewport_policy(html: str, template_policy: dict) -> str:
+    """Lock zoom only when the tenant explicitly opts into conversion mode."""
+    if not template_policy.get("lockViewportZoom"):
+        return html
+    viewport = (
+        '<meta name="viewport" '
+        'content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">'
+    )
+    pattern = re.compile(r'<meta\b[^>]*\bname\s*=\s*(["\'])viewport\1[^>]*>', re.I)
+    if pattern.search(html):
+        return pattern.sub(viewport, html, count=1)
+    return _inject_after_head_open(html, viewport)
+
+
+def _runtime_template_policy(db: DbSession, owner_id: int) -> dict:
+    """Read a policy without mutating a public GET when defaults are enough."""
+    item = db.scalar(
+        select(PromotionTemplatePolicy).where(
+            PromotionTemplatePolicy.created_by == owner_id
+        )
+    )
+    if item is None:
+        return dict(DEFAULT_TEMPLATE_POLICY)
+    from app.routers.promotion_policy import template_policy_row
+
+    return template_policy_row(item)
+
+
 def _preview_asset_token(item: PromotionTemplate) -> str:
     """Create a short-lived capability for sandboxed preview resources."""
     payload = {
@@ -458,10 +495,12 @@ def preview_template(
     current_user: CurrentUser,
 ) -> HTMLResponse:
     item = _template(db, public_id, current_user)
+    policy = _runtime_template_policy(db, current_user.id)
     preview_root = f"/api/promotion/templates/{public_id}/preview/"
     preview_token = _preview_asset_token(item)
     asset_root = f"{preview_root}assets/_signed/{preview_token}/"
     html = re.sub(r'(["\'])/assets/', rf'\1{asset_root}assets/', item.index_html)
+    html = _apply_viewport_policy(html, policy)
     manifest = item.manifest_json or {}
     preview_config = json.dumps(
         {
@@ -469,6 +508,7 @@ def preview_template(
             "defaultLocale": manifest.get("defaultLocale") or "en",
             "resolvedLocale": manifest.get("defaultLocale") or "en",
             "supportedLocales": manifest.get("supportedLocales") or ["en"],
+            "templatePolicy": policy,
         },
         ensure_ascii=False,
     ).replace("<", "\\u003c")
@@ -752,8 +792,9 @@ def _resolved_locale(channel: PromotionChannel, template: PromotionTemplate, req
 @router.get("/api/public/promotion/channels/{slug}")
 def public_channel(slug: str, request: Request, db: DbSession, lang: str | None = None) -> dict:
     item = _public_channel(db, slug, request); tpl = db.get(PromotionTemplate, item.template_id); pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None; token = _session_token(item)
+    policy = _runtime_template_policy(db, item.created_by)
     resolved, default, supported = _resolved_locale(item, tpl, lang)
-    return {"data": {"channel": {"id": item.public_id, "type": item.channel_type, "name": item.name, "countryCode": item.country_code, "slug": item.slug, "localeMode": item.locale_mode}, "template": {"id": tpl.public_id, "version": tpl.version, "manifest": tpl.manifest_json}, "pixel": {"datasetId": pixel.dataset_id} if pixel else None, "countryCode": item.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "renderUrl": f"/api/public/promotion/channels/{slug}/render", "fissionRenderUrl": f"/api/public/promotion/channels/{slug}/fission/render", "assetBaseUrl": f"/api/public/promotion/channels/{slug}/assets/", "eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "sessionToken": token, "sessionExpiresIn": 1800, "rateLimitPolicy": "reserved", "serverTimestamp": utcnow().isoformat()}}
+    return {"data": {"channel": {"id": item.public_id, "type": item.channel_type, "name": item.name, "countryCode": item.country_code, "slug": item.slug, "localeMode": item.locale_mode}, "template": {"id": tpl.public_id, "version": tpl.version, "manifest": tpl.manifest_json}, "templatePolicy": policy, "pixel": {"datasetId": pixel.dataset_id} if pixel else None, "countryCode": item.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "renderUrl": f"/api/public/promotion/channels/{slug}/render", "fissionRenderUrl": f"/api/public/promotion/channels/{slug}/fission/render", "assetBaseUrl": f"/api/public/promotion/channels/{slug}/assets/", "eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "sessionToken": token, "sessionExpiresIn": 1800, "rateLimitPolicy": "reserved", "serverTimestamp": utcnow().isoformat()}}
 
 
 def _render_html(
@@ -763,10 +804,12 @@ def _render_html(
     lang: str | None,
     pixel_dataset_id: str | None = None,
     traffic_source: str = "direct",
+    template_policy: dict | None = None,
 ) -> str:
     slug = channel.slug
     resolved, default, supported = _resolved_locale(channel, template, lang)
-    config = json.dumps({"eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "sessionToken": _session_token(channel, traffic_source), "trafficSource": traffic_source, "countryCode": channel.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "pixelDatasetId": pixel_dataset_id}, ensure_ascii=False).replace("<", "\\u003c")
+    config = json.dumps({"eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "sessionToken": _session_token(channel, traffic_source), "trafficSource": traffic_source, "countryCode": channel.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "pixelDatasetId": pixel_dataset_id, "templatePolicy": template_policy or {}}, ensure_ascii=False).replace("<", "\\u003c")
+    html = _apply_viewport_policy(html, template_policy or {})
     base = f'<base href="/api/public/promotion/channels/{slug}/assets/">'
     runtime = (
         f'<script type="application/json" id="parloq-promotion-config">{config}</script>'
@@ -785,6 +828,7 @@ def render_channel(slug: str, request: Request, db: DbSession, lang: str | None 
     item = _public_channel(db, slug, request)
     tpl = db.get(PromotionTemplate, item.template_id)
     pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None
+    policy = _runtime_template_policy(db, item.created_by)
     return HTMLResponse(
         _render_html(
             item,
@@ -792,6 +836,7 @@ def render_channel(slug: str, request: Request, db: DbSession, lang: str | None 
             tpl.index_html,
             lang,
             pixel.dataset_id if pixel else None,
+            template_policy=policy,
         ),
         headers={
             "Cache-Control": "no-store",
@@ -811,6 +856,7 @@ def render_fission_channel(
     item = _public_channel(db, slug, request)
     tpl = db.get(PromotionTemplate, item.template_id)
     pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None
+    policy = _runtime_template_policy(db, item.created_by)
     return HTMLResponse(
         _render_html(
             item,
@@ -819,6 +865,7 @@ def render_fission_channel(
             lang,
             pixel.dataset_id if pixel else None,
             "fission",
+            policy,
         ),
         headers={
             "Cache-Control": "no-store",

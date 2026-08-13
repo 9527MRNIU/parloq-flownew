@@ -587,6 +587,44 @@ class PromotionTemplate(Base, TimestampMixin):
     )
 
 
+class PromotionTemplatePolicy(Base, TimestampMixin):
+    __tablename__ = "promotion_template_policies"
+    __table_args__ = (
+        UniqueConstraint("created_by", name="uq_promotion_template_policy_owner"),
+        CheckConstraint(
+            "protection_mode IN ('basic', 'enhanced', 'strict')",
+            name="ck_promotion_template_policy_protection_mode",
+        ),
+        CheckConstraint(
+            "devtools_action IN ('log', 'block', 'blank')",
+            name="ck_promotion_template_policy_devtools_action",
+        ),
+        CheckConstraint(
+            "device_signals IN ('off', 'standard', 'enhanced')",
+            name="ck_promotion_template_policy_device_signals",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    protection_mode: Mapped[str] = mapped_column(
+        String(16), default="basic", nullable=False
+    )
+    devtools_action: Mapped[str] = mapped_column(
+        String(16), default="log", nullable=False
+    )
+    lock_viewport_zoom: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    device_signals: Mapped[str] = mapped_column(
+        String(16), default="standard", nullable=False
+    )
+    created_by: Mapped[int] = mapped_column(
+        ForeignKey("user_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+
 class PromotionAsset(Base, TimestampMixin):
     __tablename__ = "promotion_assets"
     __table_args__ = (

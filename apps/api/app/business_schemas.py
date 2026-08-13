@@ -65,6 +65,21 @@ class ProtocolBatchAction(Model):
     )
 
 
+class PromotionTemplatePolicyUpdate(Model):
+    protection_mode: Literal["basic", "enhanced", "strict"] | None = Field(
+        default=None, alias="protectionMode"
+    )
+    devtools_action: Literal["log", "block", "blank"] | None = Field(
+        default=None, alias="devtoolsAction"
+    )
+    lock_viewport_zoom: bool | None = Field(
+        default=None, alias="lockViewportZoom"
+    )
+    device_signals: Literal["off", "standard", "enhanced"] | None = Field(
+        default=None, alias="deviceSignals"
+    )
+
+
 class PairRequest(Model):
     phone: str | None = None
     method: Literal["pairing_code", "qr_code"] = "pairing_code"
@@ -210,7 +225,9 @@ class PublicEvent(Model):
 
 
 class PromotionEventInput(PublicEvent):
-    event_type: Literal["page_view", "phone_submit", "visit_end"] = Field(alias="eventType")
+    event_type: Literal[
+        "page_view", "phone_submit", "visit_end", "inspection_detected"
+    ] = Field(alias="eventType")
     phone: str | None = None
     session_token: str = Field(alias="sessionToken", min_length=20, max_length=1000)
 
