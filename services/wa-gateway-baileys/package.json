@@ -1,0 +1,32 @@
+{
+  "name": "@parloq/wa-gateway-baileys",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Baileys-based WhatsApp Web gateway for Parloq",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "7.0.0-rc14",
+    "fastify": "^5.5.0",
+    "pg": "^8.16.3",
+    "pino": "^9.9.0",
+    "proxy-agent": "^6.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/pg": "^8.15.5",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

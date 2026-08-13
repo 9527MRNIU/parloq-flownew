@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+import hashlib
+from datetime import timedelta
+from typing import Any
+
+import httpx
+
+from app.config import get_settings
+from app.security import utcnow
+
+
+_UNSET = object()
+_HTTP_CLIENT = httpx.Client(
+    limits=httpx.Limits(max_connections=500, max_keepalive_connections=200),
+    timeout=httpx.Timeout(15.0, connect=5.0),
+)
+
+
+class GatewayError(Exception):
+    pass
+
+
+class WaGatewayClient:
+    def __init__(self, http_client: httpx.Client | None = None) -> None:
+        self.settings = get_settings()
+        self.http_client = http_client or _HTTP_CLIENT
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+    ) -> Any:
+        if self.settings.wa_gateway_mock:
+            return {}
+        headers = {}
+        if self.settings.wa_gateway_api_token:
+            headers["Authorization"] = f"Bearer {self.settings.wa_gateway_api_token}"
+        try:
+            # httpx.Client is thread-safe.  Reusing it is critical for the task
+            # worker: bursts do not create one TCP/TLS connection per message.
+            response = self.http_client.request(
+                method,
+                f"{self.settings.wa_gateway_url}{path}",
+                json=payload if payload is not None else None,
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            raise GatewayError("WhatsApp 网关不可用") from exc
+        if not response.is_success:
+            raise GatewayError(f"WhatsApp 网关请求失败（{response.status_code}）")
+        try:
+            value = response.json()
+        except ValueError as exc:
+            raise GatewayError("WhatsApp 网关返回无法识别的数据") from exc
+        if not isinstance(value, dict):
+            raise GatewayError("WhatsApp 网关返回无法识别的数据")
+        return value.get("data", value)
+
+    def _post(self, path: str, payload: dict[str, Any] | None = None) -> Any:
+        return self._request("POST", path, payload)
+
+    def create(
+        self, account_id: str, phone_e164: str, proxy_url: str | None
+    ) -> dict[str, Any]:
+        if self.settings.wa_gateway_mock:
+            return {"id": account_id, "phoneE164": phone_e164, "state": "unpaired"}
+        value = self._post(
+            "/v1/accounts",
+            {"id": account_id, "phoneE164": phone_e164, "proxyUrl": proxy_url or ""},
+        )
+        return value if isinstance(value, dict) else {}
+
+    def get(self, account_id: str) -> dict[str, Any]:
+        if self.settings.wa_gateway_mock:
+            return {"id": account_id, "state": "linked_offline"}
+        value = self._request("GET", f"/v1/accounts/{account_id}")
+        return value if isinstance(value, dict) else {}
+
+    def list(self) -> list[dict[str, Any]]:
+        if self.settings.wa_gateway_mock:
+            return []
+        value = self._request("GET", "/v1/accounts")
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+    def update_proxy(self, account_id: str, proxy_url: str | None) -> dict[str, Any]:
+        return self.update(account_id, proxy_url=proxy_url)
+
+    def update(
+        self,
+        account_id: str,
+        *,
+        proxy_url: str | None | object = _UNSET,
+        phone_e164: str | object = _UNSET,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if proxy_url is not _UNSET:
+            payload["proxyUrl"] = proxy_url or ""
+        if phone_e164 is not _UNSET:
+            payload["phoneE164"] = phone_e164
+        if self.settings.wa_gateway_mock:
+            return {"id": account_id, "state": "linked_offline"}
+        value = self._request(
+            "PATCH", f"/v1/accounts/{account_id}", payload
+        )
+        return value if isinstance(value, dict) else {}
+
+    def pair(
+        self, account_id: str, phone: str | None, method: str, proxy_url: str | None
+    ) -> dict[str, Any]:
+        if self.settings.wa_gateway_mock:
+            return {
+                "code": "0000-0000",
+                "qrPayload": f"mock://pair/{account_id}",
+                "expiresAt": (utcnow() + timedelta(minutes=3)).isoformat(),
+            }
+        return self._post(
+            f"/v1/accounts/{account_id}/pairing-code",
+            {"phoneE164": phone or ""},
+        )
+
+    def connect(self, account_id: str, proxy_url: str | None = None) -> dict[str, Any]:
+        value = self._post(f"/v1/accounts/{account_id}/connect")
+        return value if isinstance(value, dict) else {}
+
+    def disconnect(self, account_id: str) -> dict[str, Any]:
+        value = self._post(f"/v1/accounts/{account_id}/disconnect")
+        return value if isinstance(value, dict) else {}
+
+    def logout(self, account_id: str) -> dict[str, Any]:
+        value = self._post(f"/v1/accounts/{account_id}/logout")
+        return value if isinstance(value, dict) else {}
+
+    def import_session(
+        self,
+        account_id: str,
+        credentials: dict[str, Any],
+        proxy_url: str | None,
+    ) -> dict[str, Any]:
+        if self.settings.wa_gateway_mock:
+            return {"id": account_id, "state": "validating"}
+        value = self._post(
+            f"/v1/accounts/{account_id}/import-session",
+            {"session": credentials, "proxyUrl": proxy_url or ""},
+        )
+        return value if isinstance(value, dict) else {}
+
+    def export_session(self, account_id: str) -> dict[str, Any]:
+        if self.settings.wa_gateway_mock:
+            raise GatewayError("模拟网关没有可导出的账号凭据")
+        value = self._request("GET", f"/v1/accounts/{account_id}/export-session")
+        if isinstance(value, dict) and isinstance(value.get("session"), dict):
+            return value["session"]
+        if isinstance(value, dict) and isinstance(value.get("credentials"), dict):
+            return value["credentials"]
+        return value if isinstance(value, dict) else {}
+
+    def send(
+        self, account_id: str, request_id: str, to: str, message: str
+    ) -> dict[str, Any]:
+        if self.settings.wa_gateway_mock:
+            digest = hashlib.sha256(f"{account_id}\0{request_id}".encode()).hexdigest()[:16]
+            return {
+                "messageId": request_id,
+                "providerMessageId": f"mock-{digest}",
+                "status": "queued",
+                "queuedAt": utcnow().isoformat(),
+            }
+        return self._post(
+            f"/v1/accounts/{account_id}/messages",
+            {"messageId": request_id, "toE164": to, "text": message},
+        )

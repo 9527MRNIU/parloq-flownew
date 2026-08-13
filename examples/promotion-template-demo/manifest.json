@@ -1,0 +1,12 @@
+{
+  "version": "1.0.0",
+  "entry": "index.html",
+  "format": "static-bundle",
+  "defaultLocale": "en",
+  "supportedLocales": ["en", "zh-CN", "pt-BR", "es", "de", "fr", "ar", "id", "hi"],
+  "i18n": {
+    "mode": "bundled",
+    "path": "locales/{locale}.json",
+    "fallbackLocale": "en"
+  }
+}

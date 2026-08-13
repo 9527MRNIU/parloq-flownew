@@ -1,0 +1,151 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException, Query, status
+from sqlalchemy import func, or_, select, update
+from sqlalchemy.exc import IntegrityError
+
+from app.deps import AdminUser, DbSession
+from app.models import AuthSession, UserAccount, UserGroup
+from app.schemas import UserCreate, UserUpdate
+from app.security import hash_password, utcnow
+from app.serializers import user_row
+
+
+router = APIRouter(prefix="/api/users", tags=["users"])
+
+
+def _group_or_404(db: DbSession, group_id: int) -> UserGroup:
+    group = db.get(UserGroup, group_id)
+    if group is None or not group.enabled:
+        raise HTTPException(status_code=404, detail="用户组不存在")
+    return group
+
+
+@router.get("")
+def list_users(
+    db: DbSession,
+    _admin: AdminUser,
+    keyword: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+) -> dict:
+    statement = select(UserAccount).join(UserGroup)
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        statement = statement.where(
+            or_(
+                UserAccount.username.ilike(pattern),
+                UserAccount.display_name.ilike(pattern),
+                UserGroup.name.ilike(pattern),
+            )
+        )
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    users = db.scalars(
+        statement.order_by(UserAccount.updated_at.desc(), UserAccount.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "data": {
+            "rows": [user_row(user) for user in users],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+    }
+
+
+@router.post("", status_code=status.HTTP_201_CREATED)
+def create_user(payload: UserCreate, db: DbSession, _admin: AdminUser) -> dict:
+    group = _group_or_404(db, payload.group_id)
+    user = UserAccount(
+        username=payload.username,
+        display_name=payload.display_name,
+        password_hash=hash_password(payload.password),
+        group_id=group.id,
+        role="admin" if group.system_key == "admin" else "operator",
+        is_active=payload.is_active,
+    )
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="用户名已存在") from None
+    db.refresh(user)
+    return {"data": {"user": user_row(user, group)}}
+
+
+@router.patch("/{user_id}")
+def update_user(
+    user_id: int,
+    payload: UserUpdate,
+    db: DbSession,
+    current_admin: AdminUser,
+) -> dict:
+    user = db.get(UserAccount, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    group = user.group
+    if payload.group_id is not None:
+        group = _group_or_404(db, payload.group_id)
+    next_role = "admin" if group.system_key == "admin" else "operator"
+    next_active = payload.is_active if payload.is_active is not None else user.is_active
+    if user.id == current_admin.id and (next_role != "admin" or not next_active):
+        raise HTTPException(status_code=400, detail="不能停用自己或移除自己的管理员权限")
+    if user.role == "admin" and (next_role != "admin" or not next_active):
+        other_admins = db.scalar(
+            select(func.count()).select_from(UserAccount).where(
+                UserAccount.role == "admin",
+                UserAccount.is_active.is_(True),
+                UserAccount.id != user.id,
+            )
+        )
+        if not other_admins:
+            raise HTTPException(status_code=400, detail="不能停用最后一个管理员")
+    if payload.username is not None:
+        user.username = payload.username
+    if "display_name" in payload.model_fields_set:
+        user.display_name = payload.display_name
+    if payload.password:
+        user.password_hash = hash_password(payload.password)
+    user.group_id = group.id
+    user.role = next_role
+    user.is_active = next_active
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="用户名已存在") from None
+    db.refresh(user)
+    return {"data": {"user": user_row(user, group)}}
+
+
+@router.delete("/{user_id}")
+def delete_user(user_id: int, db: DbSession, current_admin: AdminUser) -> dict:
+    user = db.get(UserAccount, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if user.id == current_admin.id:
+        raise HTTPException(status_code=400, detail="不能删除当前登录用户")
+    if user.role == "admin":
+        other_admins = db.scalar(
+            select(func.count()).select_from(UserAccount).where(
+                UserAccount.role == "admin",
+                UserAccount.is_active.is_(True),
+                UserAccount.id != user.id,
+            )
+        )
+        if not other_admins:
+            raise HTTPException(status_code=400, detail="不能删除最后一个管理员")
+    user.is_active = False
+    db.execute(
+        update(AuthSession)
+        .where(
+            AuthSession.user_id == user.id,
+            AuthSession.revoked_at.is_(None),
+        )
+        .values(revoked_at=utcnow())
+    )
+    db.commit()
+    return {"data": {"ok": True}}

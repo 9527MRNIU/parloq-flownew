@@ -1,0 +1,173 @@
+name: ${COMPOSE_PROJECT_NAME:-parloq-flow}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-parloq_flow}
+      POSTGRES_USER: ${POSTGRES_USER:-parloq}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-parloq-local}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-parloq} -d ${POSTGRES_DB:-parloq_flow}
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    tmpfs:
+      - /data:size=256m,mode=1777
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  api:
+    build:
+      context: ./apps/api
+    restart: unless-stopped
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://parloq:parloq-local@postgres:5432/parloq_flow}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      SEED_ADMIN_USERNAME: ${SEED_ADMIN_USERNAME:-admin}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-admin}
+      APP_SECRET_KEY: ${APP_SECRET_KEY:-local-only-change-before-shared-environment}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      AUTO_CREATE_TABLES: ${AUTO_CREATE_TABLES:-true}
+      BITLY_MOCK: ${BITLY_MOCK:-true}
+      WA_GATEWAY_BASE_URL: http://wa-gateway:8010
+      WA_GATEWAY_API_TOKEN: ${WA_GATEWAY_API_TOKEN:-local-wa-gateway-token-change-before-shared-environment}
+      WA_GATEWAY_MOCK: ${WA_GATEWAY_MOCK:-false}
+      WA_GATEWAY_WEBHOOK_SECRET: ${WA_GATEWAY_WEBHOOK_SECRET:-local-wa-gateway-webhook-secret-change-before-shared-environment}
+      TASK_QUEUE_MOCK: ${TASK_QUEUE_MOCK:-false}
+      TASK_WORKER_MAX_CONCURRENCY: ${TASK_WORKER_MAX_CONCURRENCY:-200}
+      DOMAIN_VERIFY_MOCK: ${DOMAIN_VERIFY_MOCK:-true}
+      DOMAIN_REGISTRAR_MOCK: ${DOMAIN_REGISTRAR_MOCK:-true}
+      PROMOTION_INGRESS_HOST: ${PROMOTION_INGRESS_HOST:-promotion.localhost}
+      PROMOTION_SUCCESS_WEBHOOK_SECRET: ${PROMOTION_SUCCESS_WEBHOOK_SECRET:-local-promotion-success-secret-change-before-shared-environment}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./apps/api:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      wa-gateway:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  web:
+    build:
+      context: ./apps/web
+    restart: unless-stopped
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+    environment:
+      VITE_API_PROXY_TARGET: ${VITE_API_PROXY_TARGET:-http://api:8000}
+    ports:
+      - "${WEB_PORT:-5173}:5173"
+    volumes:
+      - ./apps/web:/app
+      - web_node_modules:/app/node_modules
+    depends_on:
+      api:
+        condition: service_healthy
+
+  api-worker:
+    build:
+      context: ./apps/api
+    restart: unless-stopped
+    command: ["python", "-m", "app.task_worker"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://parloq:parloq-local@postgres:5432/parloq_flow}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      APP_SECRET_KEY: ${APP_SECRET_KEY:-local-only-change-before-shared-environment}
+      WA_GATEWAY_BASE_URL: http://wa-gateway:8010
+      WA_GATEWAY_API_TOKEN: ${WA_GATEWAY_API_TOKEN:-local-wa-gateway-token-change-before-shared-environment}
+      WA_GATEWAY_MOCK: ${WA_GATEWAY_MOCK:-false}
+      WA_GATEWAY_WEBHOOK_SECRET: ${WA_GATEWAY_WEBHOOK_SECRET:-local-wa-gateway-webhook-secret-change-before-shared-environment}
+      TASK_QUEUE_MOCK: ${TASK_QUEUE_MOCK:-false}
+      TASK_WORKER_MAX_CONCURRENCY: ${TASK_WORKER_MAX_CONCURRENCY:-200}
+    volumes:
+      - ./apps/api:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      wa-gateway:
+        condition: service_healthy
+
+  wa-gateway:
+    build:
+      context: ./services/wa-gateway-baileys
+    restart: unless-stopped
+    environment:
+      WA_ENGINE: ${WA_ENGINE:-mock}
+      WA_GATEWAY_ADDR: ${WA_GATEWAY_ADDR:-:8010}
+      WA_GATEWAY_INSTANCE_ID: ${WA_GATEWAY_INSTANCE_ID:-local-wa-gateway-1}
+      WA_GATEWAY_API_TOKEN: ${WA_GATEWAY_API_TOKEN:-local-wa-gateway-token-change-before-shared-environment}
+      WA_GATEWAY_DATABASE_URL: ${WA_GATEWAY_DATABASE_URL:-postgresql://parloq:parloq-local@postgres:5432/parloq_flow}
+      WA_GATEWAY_SEND_QPS: ${WA_GATEWAY_SEND_QPS:-10}
+      WA_GATEWAY_ACCOUNT_QUEUE_SIZE: ${WA_GATEWAY_ACCOUNT_QUEUE_SIZE:-1000}
+      WA_GATEWAY_DATABASE_MAX_CONNECTIONS: ${WA_GATEWAY_DATABASE_MAX_CONNECTIONS:-50}
+      WA_GATEWAY_WEBHOOK_URL: ${WA_GATEWAY_WEBHOOK_URL:-http://api:8000/api/internal/wa-gateway/events}
+      WA_GATEWAY_WEBHOOK_SECRET: ${WA_GATEWAY_WEBHOOK_SECRET:-local-wa-gateway-webhook-secret-change-before-shared-environment}
+      WA_GATEWAY_WEBHOOK_RETRIES: ${WA_GATEWAY_WEBHOOK_RETRIES:-3}
+    ports:
+      - "${WA_GATEWAY_PORT:-8010}:8010"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:8010/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+volumes:
+  postgres_data:
+  web_node_modules:
