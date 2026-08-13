@@ -7,6 +7,9 @@ COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-bookworm-slim
+ARG BUILD_VERSION=dev
+LABEL org.opencontainers.image.title="Parloq Flow Baileys Gateway" \
+      org.opencontainers.image.revision="${BUILD_VERSION}"
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=build /app/package.json /app/package-lock.json ./

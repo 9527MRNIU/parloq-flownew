@@ -1,5 +1,9 @@
 FROM python:3.12-slim
 
+ARG BUILD_VERSION=dev
+LABEL org.opencontainers.image.title="Parloq Flow API" \
+      org.opencontainers.image.revision="${BUILD_VERSION}"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 

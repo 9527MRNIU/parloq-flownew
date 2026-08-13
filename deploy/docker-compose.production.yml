@@ -1,0 +1,146 @@
+name: ${COMPOSE_PROJECT_NAME:-parloq-flow}
+
+x-api-environment: &api-environment
+  APP_ENV: production
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+  REDIS_URL: redis://redis:6379/0
+  SEED_ADMIN_USERNAME: ${SEED_ADMIN_USERNAME:-admin}
+  SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?SEED_ADMIN_PASSWORD is required}
+  APP_SECRET_KEY: ${APP_SECRET_KEY:?APP_SECRET_KEY is required}
+  AUTH_COOKIE_NAME: ${AUTH_COOKIE_NAME:-parloq_flow_session}
+  AUTH_SESSION_HOURS: ${AUTH_SESSION_HOURS:-336}
+  COOKIE_SECURE: "true"
+  CORS_ORIGINS: ${CORS_ORIGINS:-https://center.parloq.com}
+  AUTO_CREATE_TABLES: "false"
+  BITLY_MOCK: ${BITLY_MOCK:-false}
+  IP_PROXY_MOCK: ${IP_PROXY_MOCK:-false}
+  WA_GATEWAY_BASE_URL: http://wa-gateway:8010
+  WA_GATEWAY_API_TOKEN: ${WA_GATEWAY_API_TOKEN:?WA_GATEWAY_API_TOKEN is required}
+  WA_GATEWAY_MOCK: "false"
+  WA_GATEWAY_WEBHOOK_SECRET: ${WA_GATEWAY_WEBHOOK_SECRET:?WA_GATEWAY_WEBHOOK_SECRET is required}
+  TASK_QUEUE_MOCK: "false"
+  TASK_WORKER_MAX_CONCURRENCY: ${TASK_WORKER_MAX_CONCURRENCY:-200}
+  DOMAIN_VERIFY_MOCK: ${DOMAIN_VERIFY_MOCK:-false}
+  DOMAIN_REGISTRAR_MOCK: ${DOMAIN_REGISTRAR_MOCK:-false}
+  PROMOTION_INGRESS_HOST: ${PROMOTION_INGRESS_HOST:-center.parloq.com}
+  PROMOTION_SUCCESS_WEBHOOK_SECRET: ${PROMOTION_SUCCESS_WEBHOOK_SECRET:?PROMOTION_SUCCESS_WEBHOOK_SECRET is required}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    shm_size: 1gb
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - ${PARLOQ_PERSIST_ROOT:-/data/parloq-flow}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?POSTGRES_USER is required} -d ${POSTGRES_DB:?POSTGRES_DB is required}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--save", ""]
+    volumes:
+      - ${PARLOQ_PERSIST_ROOT:-/data/parloq-flow}/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  migrate:
+    image: ${PARLOQ_API_IMAGE:?PARLOQ_API_IMAGE is required}
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *api-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  wa-gateway:
+    image: ${PARLOQ_WA_GATEWAY_IMAGE:?PARLOQ_WA_GATEWAY_IMAGE is required}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${WA_GATEWAY_LOG_LEVEL:-info}
+      WA_ENGINE: baileys
+      WA_GATEWAY_ADDR: :8010
+      WA_GATEWAY_INSTANCE_ID: ${WA_GATEWAY_INSTANCE_ID:-parloq-flow-prod-1}
+      WA_GATEWAY_API_TOKEN: ${WA_GATEWAY_API_TOKEN:?WA_GATEWAY_API_TOKEN is required}
+      WA_GATEWAY_DATABASE_URL: postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      WA_GATEWAY_SEND_QPS: ${WA_GATEWAY_SEND_QPS:-10}
+      WA_GATEWAY_ACCOUNT_QUEUE_SIZE: ${WA_GATEWAY_ACCOUNT_QUEUE_SIZE:-1000}
+      WA_GATEWAY_DATABASE_MAX_CONNECTIONS: ${WA_GATEWAY_DATABASE_MAX_CONNECTIONS:-50}
+      WA_GATEWAY_WEBHOOK_URL: http://api:8000/api/internal/wa-gateway/events
+      WA_GATEWAY_WEBHOOK_SECRET: ${WA_GATEWAY_WEBHOOK_SECRET:?WA_GATEWAY_WEBHOOK_SECRET is required}
+      WA_GATEWAY_WEBHOOK_RETRIES: ${WA_GATEWAY_WEBHOOK_RETRIES:-3}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8010/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  api:
+    image: ${PARLOQ_API_IMAGE:?PARLOQ_API_IMAGE is required}
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+    environment:
+      <<: *api-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      wa-gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  api-worker:
+    image: ${PARLOQ_API_IMAGE:?PARLOQ_API_IMAGE is required}
+    restart: unless-stopped
+    command: ["python", "-m", "app.task_worker"]
+    environment:
+      <<: *api-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      wa-gateway:
+        condition: service_healthy
+
+  web:
+    image: ${PARLOQ_WEB_IMAGE:?PARLOQ_WEB_IMAGE is required}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PARLOQ_HTTP_PORT:-18100}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s

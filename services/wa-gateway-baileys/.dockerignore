@@ -1,4 +1,7 @@
 node_modules
 dist
-.env
+coverage
 *.log
+.env
+.env.*
+.DS_Store
