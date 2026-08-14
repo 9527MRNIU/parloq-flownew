@@ -53,49 +53,48 @@ interface PairingEventEmitter {
   off(event: 'connection.update', listener: (update: Partial<ConnectionState>) => void): unknown
 }
 
-type PairingSocket = Pick<WASocket, 'waitForSocketOpen' | 'requestPairingCode'> & {
+type PairingSocket = Pick<WASocket, 'requestPairingCode'> & {
   ev: PairingEventEmitter
-}
-
-export async function requestPairingCodeAfterSocketOpen(
-  socket: PairingSocket,
-  phone: string,
-  timeoutMs = 20_000,
-): Promise<string> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    await Promise.race([
-      socket.waitForSocketOpen(),
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(
-          () => reject(new Error('timed out waiting for Baileys pairing socket')),
-          timeoutMs,
-        )
-        timer.unref()
-      }),
-    ])
-    return await socket.requestPairingCode(phone)
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
 }
 
 export async function requestStablePairingCode(
   socket: PairingSocket,
   phone: string,
+  readyTimeoutMs = 20_000,
   stabilityMs = 6_000,
 ): Promise<string> {
+  let resolveReady: (() => void) | undefined
   let rejectClosed: ((reason?: unknown) => void) | undefined
+  let readyTimer: ReturnType<typeof setTimeout> | undefined
+  const ready = new Promise<void>((resolve) => { resolveReady = resolve })
   const closed = new Promise<never>((_resolve, reject) => { rejectClosed = reject })
   const listener = (update: Partial<ConnectionState>) => {
+    // Baileys emits the first QR only after the unregistered registration
+    // handshake has completed and WhatsApp has returned pair-device refs.
+    // A raw websocket-open event is too early: requestPairingCode() writes
+    // creds.me, which can race validateConnection() and make a new account
+    // send a login node instead of a registration node.
+    if (typeof update.qr === 'string' && update.qr.length > 0) resolveReady?.()
     if (update.connection === 'close') {
       rejectClosed?.(update.lastDisconnect?.error ?? new Error('pairing socket closed'))
     }
   }
   socket.ev.on('connection.update', listener)
   try {
+    await Promise.race([
+      ready,
+      closed,
+      new Promise<never>((_resolve, reject) => {
+        readyTimer = setTimeout(
+          () => reject(new Error('timed out waiting for WhatsApp pairing registration')),
+          readyTimeoutMs,
+        )
+        readyTimer.unref()
+      }),
+    ])
+    if (readyTimer) clearTimeout(readyTimer)
     const code = await Promise.race([
-      requestPairingCodeAfterSocketOpen(socket, phone),
+      socket.requestPairingCode(phone),
       closed,
     ])
     await Promise.race([
@@ -104,6 +103,7 @@ export async function requestStablePairingCode(
     ])
     return code
   } finally {
+    if (readyTimer) clearTimeout(readyTimer)
     socket.ev.off('connection.update', listener)
   }
 }

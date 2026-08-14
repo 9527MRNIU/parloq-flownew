@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import type { ConnectionState } from '@whiskeysockets/baileys'
 import { describe, expect, it, vi } from 'vitest'
-import { requestPairingCodeAfterSocketOpen, requestStablePairingCode } from './engine.js'
+import { requestStablePairingCode } from './engine.js'
 
 describe('Baileys pairing socket readiness', () => {
   const eventBus = () => {
@@ -13,46 +13,54 @@ describe('Baileys pairing socket readiness', () => {
     }
   }
 
-  it('waits for the websocket before requesting a pairing code', async () => {
-    let openSocket!: () => void
+  it('waits for WhatsApp pair-device readiness before requesting a pairing code', async () => {
+    const ev = eventBus()
     const socket = {
-      waitForSocketOpen: vi.fn(() => new Promise<void>((resolve) => { openSocket = resolve })),
+      waitForSocketOpen: vi.fn(async () => undefined),
       requestPairingCode: vi.fn(async () => '1234-5678'),
-      ev: eventBus(),
+      ev,
     }
 
-    const pending = requestPairingCodeAfterSocketOpen(socket, '14155550123', 1_000)
+    const pending = requestStablePairingCode(socket, '14155550123', 1_000, 1)
     await Promise.resolve()
     expect(socket.requestPairingCode).not.toHaveBeenCalled()
 
-    openSocket()
+    ev.emit('connection.update', { connection: 'connecting' })
+    await Promise.resolve()
+    expect(socket.requestPairingCode).not.toHaveBeenCalled()
+
+    ev.emit('connection.update', { qr: 'pair-device-ref' })
     await expect(pending).resolves.toBe('1234-5678')
     expect(socket.requestPairingCode).toHaveBeenCalledWith('14155550123')
   })
 
-  it('does not request a code when the websocket closes before opening', async () => {
+  it('does not request a code when the socket closes before pair-device readiness', async () => {
+    const ev = eventBus()
     const socket = {
-      waitForSocketOpen: vi.fn(async () => { throw new Error('Connection Closed') }),
+      waitForSocketOpen: vi.fn(async () => undefined),
       requestPairingCode: vi.fn(async () => 'should-not-run'),
-      ev: eventBus(),
+      ev,
     }
 
-    await expect(
-      requestPairingCodeAfterSocketOpen(socket, '14155550123', 1_000),
-    ).rejects.toThrow('Connection Closed')
+    const pending = requestStablePairingCode(socket, '14155550123', 1_000, 1)
+    ev.emit('connection.update', {
+      connection: 'close',
+      lastDisconnect: { error: new Error('Connection Closed') },
+    })
+    await expect(pending).rejects.toThrow('Connection Closed')
     expect(socket.requestPairingCode).not.toHaveBeenCalled()
   })
 
-  it('bounds the websocket wait with an explicit timeout', async () => {
+  it('bounds the pair-device readiness wait with an explicit timeout', async () => {
     const socket = {
-      waitForSocketOpen: vi.fn(() => new Promise<void>(() => undefined)),
+      waitForSocketOpen: vi.fn(async () => undefined),
       requestPairingCode: vi.fn(async () => 'should-not-run'),
       ev: eventBus(),
     }
 
     await expect(
-      requestPairingCodeAfterSocketOpen(socket, '14155550123', 5),
-    ).rejects.toThrow('timed out waiting for Baileys pairing socket')
+      requestStablePairingCode(socket, '14155550123', 5, 1),
+    ).rejects.toThrow('timed out waiting for WhatsApp pairing registration')
     expect(socket.requestPairingCode).not.toHaveBeenCalled()
   })
 
@@ -63,7 +71,9 @@ describe('Baileys pairing socket readiness', () => {
       requestPairingCode: vi.fn(async () => '1234-5678'),
       ev,
     }
-    const pending = requestStablePairingCode(socket as never, '14155550123', 100)
+    const pending = requestStablePairingCode(socket as never, '14155550123', 1_000, 100)
+    ev.emit('connection.update', { qr: 'pair-device-ref' })
+    await Promise.resolve()
     ev.emit('connection.update', {
       connection: 'close',
       lastDisconnect: { error: new Error('Connection Terminated') },
@@ -73,13 +83,16 @@ describe('Baileys pairing socket readiness', () => {
   })
 
   it('returns the code only after the pairing socket survives the grace period', async () => {
+    const ev = eventBus()
     const socket = {
       waitForSocketOpen: vi.fn(async () => undefined),
       requestPairingCode: vi.fn(async () => '1234-5678'),
-      ev: eventBus(),
+      ev,
     }
 
-    await expect(requestStablePairingCode(socket as never, '14155550123', 5))
+    const pending = requestStablePairingCode(socket as never, '14155550123', 1_000, 5)
+    ev.emit('connection.update', { qr: 'pair-device-ref' })
+    await expect(pending)
       .resolves.toBe('1234-5678')
   })
 })
