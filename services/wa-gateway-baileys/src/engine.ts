@@ -11,6 +11,7 @@ import pino, { type Logger } from 'pino'
 import { ProxyAgent } from 'proxy-agent'
 import { loadAuthState, mergeCreds } from './auth-store.js'
 import type { Store } from './store.js'
+import { WaWebVersionResolver } from './wa-version.js'
 
 export type EngineEvent =
   | { kind: 'connected'; accountId: string; deviceJid: string }
@@ -47,7 +48,14 @@ interface ActiveSocket {
   proxyAgent?: ProxyAgent
 }
 
-type PairingSocket = Pick<WASocket, 'waitForSocketOpen' | 'requestPairingCode'>
+interface PairingEventEmitter {
+  on(event: 'connection.update', listener: (update: Partial<ConnectionState>) => void): unknown
+  off(event: 'connection.update', listener: (update: Partial<ConnectionState>) => void): unknown
+}
+
+type PairingSocket = Pick<WASocket, 'waitForSocketOpen' | 'requestPairingCode'> & {
+  ev: PairingEventEmitter
+}
 
 export async function requestPairingCodeAfterSocketOpen(
   socket: PairingSocket,
@@ -72,6 +80,34 @@ export async function requestPairingCodeAfterSocketOpen(
   }
 }
 
+export async function requestStablePairingCode(
+  socket: PairingSocket,
+  phone: string,
+  stabilityMs = 6_000,
+): Promise<string> {
+  let rejectClosed: ((reason?: unknown) => void) | undefined
+  const closed = new Promise<never>((_resolve, reject) => { rejectClosed = reject })
+  const listener = (update: Partial<ConnectionState>) => {
+    if (update.connection === 'close') {
+      rejectClosed?.(update.lastDisconnect?.error ?? new Error('pairing socket closed'))
+    }
+  }
+  socket.ev.on('connection.update', listener)
+  try {
+    const code = await Promise.race([
+      requestPairingCodeAfterSocketOpen(socket, phone),
+      closed,
+    ])
+    await Promise.race([
+      new Promise<void>((resolve) => setTimeout(resolve, stabilityMs)),
+      closed,
+    ])
+    return code
+  } finally {
+    socket.ev.off('connection.update', listener)
+  }
+}
+
 export class BaileysEngine implements ProtocolEngine {
   readonly name = 'baileys'
   private readonly sockets = new Map<string, ActiveSocket>()
@@ -80,9 +116,11 @@ export class BaileysEngine implements ProtocolEngine {
   private handler: (event: EngineEvent) => void = () => undefined
   private started = false
   private readonly protocolLogger: Logger
+  private readonly versionResolver: WaWebVersionResolver
 
   constructor(private readonly store: Store, logger?: Logger) {
     this.protocolLogger = (logger ?? pino({ level: 'warn' })).child({ component: 'baileys' })
+    this.versionResolver = new WaWebVersionResolver(this.protocolLogger)
   }
 
   setEventHandler(handler: (event: EngineEvent) => void): void { this.handler = handler }
@@ -98,8 +136,9 @@ export class BaileysEngine implements ProtocolEngine {
   async pair(account: EngineAccount): Promise<PairResult> {
     const active = await this.openSocket(account, true)
     const phone = account.phoneE164.slice(1)
-    const code = await requestPairingCodeAfterSocketOpen(active.socket, phone)
-    return { accountId: account.accountId, code, expiresAt: new Date(Date.now() + 3 * 60_000) }
+    const issuedAt = Date.now()
+    const code = await requestStablePairingCode(active.socket, phone)
+    return { accountId: account.accountId, code, expiresAt: new Date(issuedAt + 3 * 60_000) }
   }
 
   async connect(account: EngineAccount): Promise<void> {
@@ -193,9 +232,17 @@ export class BaileysEngine implements ProtocolEngine {
     const proxyAgent = account.proxyUrl
       ? new ProxyAgent({ getProxyForUrl: () => account.proxyUrl })
       : undefined
+    let version
+    try {
+      version = await this.versionResolver.current(proxyAgent as Agent | undefined, createAuth)
+    } catch (error) {
+      proxyAgent?.destroy()
+      throw error
+    }
     const socket = makeWASocket({
       auth: state,
       browser: Browsers.macOS('Chrome'),
+      version,
       logger: this.protocolLogger,
       markOnlineOnConnect: true,
       syncFullHistory: false,
