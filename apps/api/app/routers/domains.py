@@ -4,7 +4,7 @@ import secrets
 from datetime import UTC, timedelta
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from sqlalchemy import and_, func, or_, select, update
@@ -276,6 +276,31 @@ def available_for_channels(db: DbSession, current_user: CurrentUser) -> dict:
     return {"data": {"rows": [domain_row(db, item) for item in items], "total": len(items)}}
 
 
+@router.get("/public-verification/{verification_token}")
+def public_domain_routing_proof(
+    verification_token: str,
+    request: Request,
+    db: DbSession,
+) -> dict:
+    request_host = (request.url.hostname or "").lower().rstrip(".")
+    item = db.scalar(
+        select(DomainRecord).where(
+            DomainRecord.hostname == request_host,
+            DomainRecord.verification_token == verification_token,
+            DomainRecord.enabled.is_(True),
+            DomainRecord.archived_at.is_(None),
+        )
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="域名接入校验不存在")
+    return {
+        "data": {
+            "hostname": item.hostname,
+            "proof": "parloq-domain-routing-v1",
+        }
+    }
+
+
 @order_router.get("")
 def list_domain_orders(db: DbSession, current_user: CurrentUser) -> dict:
     statement = select(DomainOrder)
@@ -541,6 +566,9 @@ def verify_domain(public_id: str, db: DbSession, current_user: CurrentUser) -> d
                 verification_name=f"_parloq-verify.{item.hostname}",
                 verification_value=f"parloq-verification={item.verification_token}",
                 cname_target=settings.promotion_ingress_host,
+                routing_probe_path=(
+                    f"/api/domains/public-verification/{item.verification_token}"
+                ),
             )
         item.registration_status = "active"; item.dns_status = "verified"; item.ssl_status = "verified"; item.hosting_status = "active"; item.last_error = None
     except DomainVerifyError as exc:

@@ -274,7 +274,30 @@ def test_connected_domain_verification_requires_issued_txt_and_cname(
     assert captured["verification_name"] == "_parloq-verify.ownership-check.example"
     assert captured["verification_value"].startswith("parloq-verification=")
     assert captured["cname_target"] == settings.promotion_ingress_host
+    assert captured["routing_probe_path"].startswith(
+        "/api/domains/public-verification/"
+    )
     assert verified.json()["data"]["domain"]["channelSelectable"] is True
+
+
+def test_connected_domain_exposes_host_scoped_routing_proof(
+    admin_client: TestClient,
+) -> None:
+    created = admin_client.post(
+        "/api/domains", json={"hostname": "proof.example"}
+    ).json()["data"]["domain"]
+    token = created["connection"]["txt"]["value"].split("=", 1)[1]
+
+    path = f"/api/domains/public-verification/{token}"
+    proof = admin_client.get(path, headers={"Host": "proof.example"})
+    assert proof.status_code == 200
+    assert proof.json()["data"] == {
+        "hostname": "proof.example",
+        "proof": "parloq-domain-routing-v1",
+    }
+    assert admin_client.get(
+        path, headers={"Host": "wrong.example"}
+    ).status_code == 404
 
 
 def test_promotion_data_center_aggregates_uv_costs_and_successes(

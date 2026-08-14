@@ -4,6 +4,7 @@ import ipaddress
 import re
 import socket
 import ssl
+from urllib.parse import urljoin
 
 import httpx
 
@@ -45,6 +46,7 @@ def verify_public_domain(
     verification_name: str,
     verification_value: str,
     cname_target: str,
+    routing_probe_path: str | None = None,
     timeout: float = 5.0,
 ) -> None:
     txt_answers = _dns_answers(verification_name, "TXT", timeout)
@@ -52,8 +54,31 @@ def verify_public_domain(
         raise DomainVerifyError("未找到系统签发的 TXT 所有权验证记录")
     cname_answers = _dns_answers(hostname, "CNAME", timeout)
     expected_cname = cname_target.lower().rstrip(".")
-    if expected_cname not in {answer.lower().rstrip(".") for answer in cname_answers}:
-        raise DomainVerifyError("域名 CNAME 尚未指向系统推广入口")
+    cname_matches = expected_cname in {
+        answer.lower().rstrip(".") for answer in cname_answers
+    }
+    # A proxied Cloudflare CNAME intentionally answers with edge A/AAAA records,
+    # so public DNS cannot reveal the configured CNAME. In that case, prove the
+    # hostname is already reaching this application over trusted HTTPS instead.
+    # TXT ownership remains mandatory in both modes.
+    if not cname_matches:
+        if not routing_probe_path or not routing_probe_path.startswith("/"):
+            raise DomainVerifyError("域名尚未指向系统推广入口")
+        try:
+            response = httpx.get(
+                urljoin(f"https://{hostname}", routing_probe_path),
+                timeout=timeout,
+                follow_redirects=False,
+            )
+            response.raise_for_status()
+            data = response.json().get("data", {})
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            raise DomainVerifyError("域名尚未通过 HTTPS 接入系统推广入口") from exc
+        if (
+            data.get("hostname") != hostname
+            or data.get("proof") != "parloq-domain-routing-v1"
+        ):
+            raise DomainVerifyError("域名 HTTPS 接入校验响应不匹配")
     try:
         addresses = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
