@@ -103,6 +103,7 @@ export * from "./ui/icon-button";
 export * from "./ui/multi-select";
 export * from "./ui/popover";
 export * from "./ui/select";
+export * from "./ui/searchable-select";
 export * from "./ui/sonner";
 export * from "./ui/switch";
 export * from "./ui/table";

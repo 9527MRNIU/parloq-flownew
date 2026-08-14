@@ -3,6 +3,30 @@ export type ListEnvelope<T> = { data: { rows: T[]; total: number } }
 
 let bearerToken = window.sessionStorage.getItem('parloq-token') || ''
 
+function apiErrorMessage(payload: unknown, status: number): string {
+  if (!payload || typeof payload !== 'object') return `请求失败（${status}）`
+  const body = payload as Record<string, unknown>
+  for (const key of ['detail', 'message', 'error']) {
+    const value = body[key]
+    if (typeof value === 'string' && value.trim()) return value
+  }
+  if (Array.isArray(body.detail)) {
+    const messages = body.detail
+      .map((item) => {
+        if (!item || typeof item !== 'object') return ''
+        const error = item as Record<string, unknown>
+        const location = Array.isArray(error.loc)
+          ? error.loc.filter((part) => part !== 'body').join('.')
+          : ''
+        const message = typeof error.msg === 'string' ? error.msg : ''
+        return [location, message].filter(Boolean).join('：')
+      })
+      .filter(Boolean)
+    if (messages.length) return messages.join('；')
+  }
+  return `请求失败（${status}）`
+}
+
 export function setBearerToken(token: string | null) {
   bearerToken = token || ''
   if (bearerToken) window.sessionStorage.setItem('parloq-token', bearerToken)
@@ -11,7 +35,12 @@ export function setBearerToken(token: string | null) {
 
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
-  if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  // Let the browser attach the multipart boundary for FormData and preserve
+  // native content types for Blob/URLSearchParams. JSON bodies in this client
+  // are serialized strings, so only those receive the JSON content type.
+  if (typeof init.body === 'string' && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
   if (bearerToken && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${bearerToken}`)
 
   const response = await fetch(path, {
@@ -28,8 +57,7 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   const contentType = response.headers.get('content-type') || ''
   const payload = contentType.includes('application/json') ? await response.json() : null
   if (!response.ok) {
-    const message = payload?.detail || payload?.message || payload?.error || `请求失败（${response.status}）`
-    throw new Error(typeof message === 'string' ? message : '请求失败')
+    throw new Error(apiErrorMessage(payload, response.status))
   }
   return payload as T
 }
@@ -50,8 +78,7 @@ export async function apiDownload(path: string, init: RequestInit = {}) {
   if (!response.ok) {
     const contentType = response.headers.get('content-type') || ''
     const payload = contentType.includes('application/json') ? await response.json() : null
-    const message = payload?.detail || payload?.message || payload?.error || `请求失败（${response.status}）`
-    throw new Error(typeof message === 'string' ? message : '请求失败')
+    throw new Error(apiErrorMessage(payload, response.status))
   }
   return {
     blob: await response.blob(),

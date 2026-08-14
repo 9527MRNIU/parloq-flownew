@@ -31,6 +31,7 @@ import {
   EmptyState,
   IconButton,
   Input,
+  SearchableSelect,
   SelectField,
   Spinner,
   Switch,
@@ -49,6 +50,23 @@ import {
   StandardListPage,
 } from "../components/list-page";
 import { useAuth } from "../auth/AuthContext";
+import { countryOptions } from "../lib/countries";
+
+const CHANNEL_SLUG_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
+
+function randomChannelSlug(existing: Iterable<string>, length = 8): string {
+  const reserved = new Set(Array.from(existing, (value) => value.toLowerCase()));
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const random = new Uint8Array(length);
+    globalThis.crypto.getRandomValues(random);
+    const slug = Array.from(
+      random,
+      (value) => CHANNEL_SLUG_ALPHABET[value % CHANNEL_SLUG_ALPHABET.length],
+    ).join("");
+    if (!reserved.has(slug)) return slug;
+  }
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
 
 const field = (row: Record<string, unknown>, ...keys: string[]) => {
   for (const key of keys) if (row[key] != null) return String(row[key]);
@@ -855,7 +873,7 @@ export function PromotionChannelsPage() {
             countryCode: "US",
             templateId: templates[0]?.id || "",
             domainId: "",
-            slug: "",
+            slug: randomChannelSlug(rows.map((item) => item.slug)),
             pixelId: "",
             localeMode: "auto",
             locale: "",
@@ -1234,6 +1252,7 @@ export function PromotionChannelsPage() {
               disabled={
                 pending ||
                 !form.name.trim() ||
+                !form.countryCode ||
                 !form.templateId ||
                 !form.domainId ||
                 !form.slug.trim()
@@ -1259,17 +1278,20 @@ export function PromotionChannelsPage() {
               <span>平台</span>
               <Input value="Facebook" disabled />
             </label>
-            <label className="field">
+            <div className="field">
               <span>投放国家</span>
-              <Input
+              <SearchableSelect
                 value={form.countryCode}
-                maxLength={2}
-                onChange={(e) =>
-                  setForm({ ...form, countryCode: e.target.value })
+                onValueChange={(value) =>
+                  setForm({ ...form, countryCode: value })
                 }
-                placeholder="US"
+                options={countryOptions}
+                placeholder="选择投放国家"
+                searchPlaceholder="搜索国家、地区或代码"
+                emptyText="没有匹配的国家或地区"
+                ariaLabel="投放国家"
               />
-            </label>
+            </div>
           </div>
           <label className="field">
             <span>推广模板</span>
@@ -1337,15 +1359,38 @@ export function PromotionChannelsPage() {
             </label>
             <label className="field">
               <span>访问短码（Slug）</span>
-              <Input
-                value={form.slug}
-                onChange={(e) =>
-                  setForm({
-                    ...form,
-                    slug: e.target.value.replace(/[^a-zA-Z0-9-_]/g, ""),
-                  })
-                }
-              />
+              <div className="flex gap-2">
+                <Input
+                  value={form.slug}
+                  maxLength={120}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      slug: e.target.value
+                        .toLowerCase()
+                        .replace(/[^a-z0-9-]/g, ""),
+                    })
+                  }
+                />
+                <IconButton
+                  label="重新生成随机短码"
+                  onClick={() =>
+                    setForm({
+                      ...form,
+                      slug: randomChannelSlug(
+                        rows
+                          .filter((item) => item.id !== editing?.id)
+                          .map((item) => item.slug),
+                      ),
+                    })
+                  }
+                >
+                  <RefreshCwIcon size={16} />
+                </IconButton>
+              </div>
+              <small className="text-muted-foreground">
+                新建时自动生成 8 位随机短码，也可以手动修改。
+              </small>
             </label>
           </div>
           <label className="field">
