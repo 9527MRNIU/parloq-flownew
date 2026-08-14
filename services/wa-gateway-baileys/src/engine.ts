@@ -47,6 +47,31 @@ interface ActiveSocket {
   proxyAgent?: ProxyAgent
 }
 
+type PairingSocket = Pick<WASocket, 'waitForSocketOpen' | 'requestPairingCode'>
+
+export async function requestPairingCodeAfterSocketOpen(
+  socket: PairingSocket,
+  phone: string,
+  timeoutMs = 20_000,
+): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      socket.waitForSocketOpen(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('timed out waiting for Baileys pairing socket')),
+          timeoutMs,
+        )
+        timer.unref()
+      }),
+    ])
+    return await socket.requestPairingCode(phone)
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 export class BaileysEngine implements ProtocolEngine {
   readonly name = 'baileys'
   private readonly sockets = new Map<string, ActiveSocket>()
@@ -73,7 +98,7 @@ export class BaileysEngine implements ProtocolEngine {
   async pair(account: EngineAccount): Promise<PairResult> {
     const active = await this.openSocket(account, true)
     const phone = account.phoneE164.slice(1)
-    const code = await active.socket.requestPairingCode(phone)
+    const code = await requestPairingCodeAfterSocketOpen(active.socket, phone)
     return { accountId: account.accountId, code, expiresAt: new Date(Date.now() + 3 * 60_000) }
   }
 

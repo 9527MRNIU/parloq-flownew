@@ -10,6 +10,7 @@ export interface Store {
   ready(): Promise<void>
   close(): Promise<void>
   createAccount(account: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state'>): Promise<Account>
+  claimUnpairedAccount(account: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl'>): Promise<Account | null>
   createImportedAccount(account: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness'>, auth: StoredAuth): Promise<Account>
   listAccounts(): Promise<Account[]>
   getAccount(id: string): Promise<Account>
@@ -327,6 +328,23 @@ export class PostgresStore implements Store {
       if ((error as { code?: string }).code === '23505') throw new GatewayError('conflict', 'account id or phone already exists')
       throw error
     }
+  }
+
+  async claimUnpairedAccount(input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl'>): Promise<Account | null> {
+    const result = await this.pool.query<AccountRow>(`
+      UPDATE wa_gateway_baileys.accounts AS account
+      SET id=$1, proxy_url=$3, updated_at=NOW(), reason_category='orphan_reclaimed', provider_code=NULL
+      WHERE account.phone_e164=$2
+        AND account.id<>$1
+        AND account.state='unpaired'
+        AND account.device_jid=''
+        AND account.session_status='none'
+        AND NOT EXISTS (SELECT 1 FROM wa_gateway_baileys.accounts existing WHERE existing.id=$1)
+        AND NOT EXISTS (SELECT 1 FROM wa_gateway_baileys.auth_creds creds WHERE creds.account_id=account.id)
+        AND NOT EXISTS (SELECT 1 FROM wa_gateway_baileys.auth_keys keys WHERE keys.account_id=account.id)
+        AND NOT EXISTS (SELECT 1 FROM wa_gateway_baileys.messages messages WHERE messages.account_id=account.id)
+      RETURNING account.*`, [input.id, input.phoneE164, input.proxyUrl])
+    return result.rows[0] ? accountFromRow(result.rows[0]) : null
   }
 
   async createImportedAccount(

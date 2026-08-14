@@ -506,7 +506,9 @@ def test_promotion_template_v1_rejects_unknown_schema_and_source_maps(
     assert "app.js.map" in rejected_map.json()["detail"]
 
 
-def test_personal_account_gateway_and_hyperlink_delivery(admin_client: TestClient) -> None:
+def test_personal_account_gateway_and_hyperlink_delivery(
+    admin_client: TestClient, monkeypatch
+) -> None:
     proxy = admin_client.post(
         "/api/ip-proxies",
         json={
@@ -521,6 +523,22 @@ def test_personal_account_gateway_and_hyperlink_delivery(admin_client: TestClien
     )
     assert proxy.status_code == 201
     proxy_id = proxy.json()["data"]["proxy"]["id"]
+    original_create = WaGatewayClient.create
+    observed_persisted_account: dict[str, bool] = {}
+
+    def create_after_account_commit(self, account_id, phone, proxy_url):
+        with SessionLocal() as independent_db:
+            observed_persisted_account[account_id] = (
+                independent_db.scalar(
+                    select(PersonalAccount).where(
+                        PersonalAccount.public_id == account_id
+                    )
+                )
+                is not None
+            )
+        return original_create(self, account_id, phone, proxy_url)
+
+    monkeypatch.setattr(WaGatewayClient, "create", create_after_account_commit)
     public_config = admin_client.get(
         "/api/public/promotion/channels/de-facebook-demo"
     ).json()["data"]
@@ -534,6 +552,7 @@ def test_personal_account_gateway_and_hyperlink_delivery(admin_client: TestClien
     )
     assert landing_pair.status_code == 200, landing_pair.text
     pairing = landing_pair.json()["data"]["pairing"]
+    assert observed_persisted_account[pairing["statusUrl"].split("/")[-2]] is True
     assert pairing["pairingCode"] == "0000-0000"
     landing_status = admin_client.get(
         pairing["statusUrl"], params={"token": pairing["statusToken"]}
@@ -678,6 +697,37 @@ def test_personal_account_gateway_and_hyperlink_delivery(admin_client: TestClien
     us_row = next(row for row in insight["rows"] if row["sourceCountry"] == "US")
     assert us_row["bannedAccounts"] == 1
     assert us_row["banRate"] == 1.0
+
+
+def test_landing_pairing_failure_keeps_retryable_account(
+    admin_client: TestClient, monkeypatch
+) -> None:
+    public_config = admin_client.get(
+        "/api/public/promotion/channels/de-facebook-demo"
+    ).json()["data"]
+
+    def fail_pair(*_args, **_kwargs):
+        raise GatewayError("WhatsApp 网关请求失败（502）")
+
+    monkeypatch.setattr(WaGatewayClient, "pair", fail_pair)
+    failed = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/pairing/start",
+        json={
+            "phone": "+4915123456793",
+            "visitorId": "landing-failure-visitor",
+            "sessionToken": public_config["sessionToken"],
+        },
+    )
+    assert failed.status_code == 502
+
+    rows = admin_client.get(
+        "/api/personal-accounts?keyword=4915123456793"
+    ).json()["data"]
+    assert rows["total"] == 1
+    account = rows["rows"][0]
+    assert account["status"] == "unpaired"
+    assert account["validationStatus"] == "failed"
+    assert account["lastError"] == "WhatsApp 网关请求失败（502）"
 
 
 def test_personal_account_create_rollback_and_bulk_state_sync(

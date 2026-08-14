@@ -1197,6 +1197,22 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
     try:
         _set_binding(db, item.public_id, proxy.public_id)
         db.flush()
+        if account_created:
+            from app.services.account_lifecycle import record_initial_account_state
+
+            record_initial_account_state(
+                db, item, reason_category="landing_page_pairing"
+            )
+        # The gateway emits account-state webhooks while pairing starts. Make
+        # the account and its fixed proxy visible to that independent request
+        # before calling the gateway, otherwise the webhook races an
+        # uncommitted row and receives a false 404.
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="该号码已在账号池中") from None
+
+    try:
         try:
             client.create(item.public_id, payload.phone, _proxy_url(db, item.public_id))
         except GatewayError as exc:
@@ -1212,15 +1228,17 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
         )
         item.status = "linked_offline" if client.settings.wa_gateway_mock else "pairing"
         item.last_error = None
-        if account_created:
-            from app.services.account_lifecycle import record_initial_account_state
-
-            record_initial_account_state(
-                db, item, reason_category="landing_page_pairing"
-            )
         db.commit()
     except GatewayError as exc:
         db.rollback()
+        failed = db.scalar(
+            select(PersonalAccount).where(PersonalAccount.public_id == item.public_id)
+        )
+        if failed is not None:
+            failed.status = "unpaired"
+            failed.validation_status = "failed"
+            failed.last_error = str(exc)[:2000]
+            db.commit()
         raise HTTPException(status_code=502, detail=str(exc)) from None
 
     status_token = _pairing_status_token(channel, item, payload.visitor_id)

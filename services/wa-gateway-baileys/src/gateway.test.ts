@@ -18,11 +18,22 @@ class MemoryStore implements Store {
   async ready() {}
   async close() {}
   async createAccount(input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state'>): Promise<Account> {
-    if (this.accounts.has(input.id)) throw new Error('duplicate')
+    if (this.accounts.has(input.id) || [...this.accounts.values()].some((account) => account.phoneE164 === input.phoneE164)) {
+      throw new GatewayError('conflict', 'duplicate')
+    }
     const now = new Date()
     const account: Account = { ...input, deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none', metadataSyncStatus: 'pending', hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, stateChangedAt: now, invalidatedAt: null, reasonCategory: 'created', providerCode: null, createdAt: now, updatedAt: now }
     this.accounts.set(account.id, account)
     return account
+  }
+  async claimUnpairedAccount(input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl'>): Promise<Account | null> {
+    const current = [...this.accounts.values()].find((account) => account.phoneE164 === input.phoneE164)
+    if (!current || current.id === input.id || current.state !== 'unpaired' || current.deviceJid || current.sessionStatus !== 'none' || this.creds.has(current.id)) return null
+    if ([...this.keys.keys()].some((id) => id.startsWith(`${current.id}:`)) || [...this.messages.values()].some((message) => message.accountId === current.id)) return null
+    this.accounts.delete(current.id)
+    const claimed = { ...current, id: input.id, proxyUrl: input.proxyUrl, reasonCategory: 'orphan_reclaimed', providerCode: null, updatedAt: new Date() }
+    this.accounts.set(claimed.id, claimed)
+    return claimed
   }
   async createImportedAccount(input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness'>, auth: StoredAuth) {
     if (this.accounts.has(input.id) || [...this.accounts.values()].some((account) => account.phoneE164 === input.phoneE164)) throw new GatewayError('conflict', 'duplicate')
@@ -138,6 +149,23 @@ describe('Baileys gateway HTTP contract', () => {
     const paired = await app.inject({ method: 'POST', url: '/v1/accounts/wa_test/pairing-code', headers, payload: {} })
     expect(paired.statusCode).toBe(200)
     expect(paired.json().data.code).toBe('0000-0000')
+  })
+
+  it('reclaims a credential-free orphan left by an interrupted control-plane transaction', async () => {
+    const headers = { authorization: `Bearer ${token}` }
+    await store.createAccount({ id: 'wa_orphan_old', phoneE164: '+14155550131', proxyUrl: 'socks5://old.example:1080', state: 'unpaired' })
+
+    const claimed = await app.inject({
+      method: 'POST',
+      url: '/v1/accounts',
+      headers,
+      payload: { id: 'wa_orphan_new', phoneE164: '+14155550131', proxyUrl: 'socks5://new.example:1080' },
+    })
+
+    expect(claimed.statusCode).toBe(201)
+    expect(claimed.json().data).toMatchObject({ id: 'wa_orphan_new', state: 'unpaired', reasonCategory: 'orphan_reclaimed' })
+    expect(store.accounts.has('wa_orphan_old')).toBe(false)
+    expect(store.accounts.has('wa_orphan_new')).toBe(true)
   })
 
   it('imports legacy Baileys creds as pending and exports a complete versioned bundle', async () => {

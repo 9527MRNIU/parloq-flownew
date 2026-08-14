@@ -56,7 +56,17 @@ export class GatewayService {
     const proxyUrl = validateProxy(request.proxyUrl ?? '')
     const id = request.id?.trim() || newPublicId('wa')
     if (!/^[A-Za-z0-9_.-]{1,80}$/.test(id)) throw new GatewayError('invalid_argument', 'account id contains unsupported characters')
-    return publicAccount(await this.store.createAccount({ id, phoneE164, proxyUrl, state: 'unpaired' }))
+    try {
+      return publicAccount(await this.store.createAccount({ id, phoneE164, proxyUrl, state: 'unpaired' }))
+    } catch (error) {
+      if (!(error instanceof GatewayError) || error.code !== 'conflict') throw error
+      // A control-plane transaction may fail after the gateway account was
+      // created. Reclaim only a credential-free, unused row for the exact
+      // phone so a later landing-page retry is not permanently blocked.
+      const reclaimed = await this.store.claimUnpairedAccount({ id, phoneE164, proxyUrl })
+      if (!reclaimed) throw error
+      return publicAccount(reclaimed)
+    }
   }
 
   async listAccounts(): Promise<PublicAccount[]> { return (await this.store.listAccounts()).map(publicAccount) }
