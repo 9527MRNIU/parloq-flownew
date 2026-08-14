@@ -12,3 +12,7 @@ zip -qrFS ../promotion-template-demo.zip . -x README.md
 The template must call `window.parloqSubmitPhone` and must not call account or
 gateway APIs directly. Template preview uses the same bridge with simulated
 pairing data; a channel render uses the real promotion and Baileys flow.
+
+Visible copy uses `data-copy` (and the supported `data-copy-*` attribute markers).
+The platform localizes the initial HTML response before first paint and includes
+the same map as `localizedCopy` for later form and pairing interactions.

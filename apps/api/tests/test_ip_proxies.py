@@ -105,6 +105,72 @@ def test_password_can_be_cleared_without_ever_being_returned(admin_client: TestC
     assert "temporary-password" not in updated.text
 
 
+def test_bulk_proxy_import_parses_lines_and_reports_partial_results(
+    admin_client: TestClient,
+) -> None:
+    response = admin_client.post(
+        "/api/ip-proxies/bulk",
+        json={
+            "lines": [
+                "# one proxy per line",
+                "203.0.113.21:8080",
+                "203.0.113.22:8081:batch-user:batch-password",
+                "encoded-user:encoded%40password@203.0.113.23:1080",
+                "socks5://url-user:url-password@203.0.113.24:1081",
+                "203.0.113.25:8082:colon-user:p@ss:word",
+                "203.0.113.21:8080",
+                "invalid-line",
+                "",
+            ],
+            "defaultProtocol": "https",
+            "countryCode": "us",
+            "provider": "Bulk Provider",
+        },
+    )
+    assert response.status_code == 201
+    data = response.json()["data"]
+    assert data["summary"] == {
+        "total": 7,
+        "created": 5,
+        "duplicate": 1,
+        "failed": 1,
+    }
+    assert [item["status"] for item in data["results"]] == [
+        "created",
+        "created",
+        "created",
+        "created",
+        "created",
+        "duplicate",
+        "failed",
+    ]
+    assert data["results"][-1]["line"] == 8
+    assert "batch-password" not in response.text
+    assert "url-password" not in response.text
+    assert "encoded%40password" not in response.text
+    assert "p@ss:word" not in response.text
+
+    rows = data["rows"]
+    assert {row["host"] for row in rows} == {
+        "203.0.113.21",
+        "203.0.113.22",
+        "203.0.113.23",
+        "203.0.113.24",
+        "203.0.113.25",
+    }
+    assert {row["countryCode"] for row in rows} == {"US"}
+    assert {row["provider"] for row in rows} == {"Bulk Provider"}
+    assert {row["protocol"] for row in rows} == {"https", "socks5"}
+
+    duplicate = admin_client.post(
+        "/api/ip-proxies/bulk",
+        json={"lines": ["https://203.0.113.21:8080"]},
+    )
+    assert duplicate.status_code == 201
+    assert duplicate.json()["data"]["summary"]["duplicate"] == 1
+    assert duplicate.json()["data"]["rows"] == []
+
+
 def test_non_admin_has_read_only_ip_management_access(admin_client: TestClient) -> None:
     group = admin_client.post("/api/user-groups", json={"name": "IP 只读组"})
     assert group.status_code == 201
@@ -131,6 +197,12 @@ def test_non_admin_has_read_only_ip_management_access(admin_client: TestClient) 
         headers=headers,
     )
     assert denied.status_code == 403
+    denied_bulk = admin_client.post(
+        "/api/ip-proxies/bulk",
+        json={"lines": ["203.0.113.50:8080"]},
+        headers=headers,
+    )
+    assert denied_bulk.status_code == 403
 
     assert admin_client.post(
         "/api/auth/login", json={"username": "admin", "password": "admin"}

@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.models import AccountLifecycleEvent, PersonalAccount
+from app.routers.promotion import _localize_template_html
 from app.security import utcnow
 from app.services.wa_gateway import GatewayError, WaGatewayClient
 from app.task_worker import process_task
@@ -24,6 +25,28 @@ def _zip(files: dict[str, str]) -> bytes:
         for path, content in files.items():
             archive.writestr(path, content)
     return output.getvalue()
+
+
+def test_server_side_template_localization_escapes_copy_and_attributes() -> None:
+    source = (
+        '<html lang="en"><head><title>Default</title></head><body>'
+        '<h1 data-copy="title">Default</h1>'
+        '<input data-copy-placeholder="phonePlaceholder" placeholder="default">'
+        "</body></html>"
+    )
+    rendered = _localize_template_html(
+        source,
+        "ar-SA",
+        {
+            "title": "تابع <بأمان> & الآن",
+            "phonePlaceholder": '\\1" <unsafe>',
+        },
+    )
+    assert '<html lang="ar-SA" dir="rtl">' in rendered
+    assert "<title>تابع &lt;بأمان&gt; &amp; الآن</title>" in rendered
+    assert '<h1 data-copy="title">تابع &lt;بأمان&gt; &amp; الآن</h1>' in rendered
+    assert 'placeholder="\\1&amp;quot; &amp;lt;unsafe&amp;gt;"' not in rendered
+    assert 'placeholder="\\1&quot; &lt;unsafe&gt;"' in rendered
 
 
 def _gateway_event(client: TestClient, message_id: str, account_id: str, event_status: str):
@@ -186,7 +209,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     manifest = {
         "version": "2",
         "defaultLocale": "en",
-        "supportedLocales": ["en", "de"],
+        "supportedLocales": ["en", "de", "ar", "fr"],
         "i18n": {
             "mode": "bundled",
             "path": "locales/{locale}.json",
@@ -195,13 +218,14 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     }
     replacement = _zip(
         {
-            "dist/index.html": '<html><head><link rel="stylesheet" href="assets/app.css"><script type="module" src="assets/app.js"></script></head><body><img src="/assets/logo.png"></body></html>',
+            "dist/index.html": '<html lang="en"><head><title>Hello</title><link rel="stylesheet" href="assets/app.css"><script type="module" src="assets/app.js"></script></head><body><h1 data-copy="title">Hello</h1><input data-copy-placeholder="phonePlaceholder" placeholder="12025550123"><img src="/assets/logo.png"></body></html>',
             "dist/manifest.json": json.dumps(manifest),
             "dist/assets/app.js": "window.templateLoaded=true",
             "dist/assets/app.css": "body{color:#123456}",
             "dist/assets/logo.png": "demo",
-            "dist/locales/en.json": '{"title":"Hello"}',
-            "dist/locales/de.json": '{"title":"Hallo"}',
+            "dist/locales/en.json": '{"title":"Hello","phonePlaceholder":"12025550123"}',
+            "dist/locales/de.json": '{"title":"Hallo","phonePlaceholder":"4915123456789"}',
+            "dist/locales/ar.json": '{"title":"تابع برقم هاتفك","phonePlaceholder":"966501234567"}',
         }
     )
     replaced = admin_client.post(
@@ -345,10 +369,29 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     assert '"protectionMode": "strict"' in render.text
     assert '"devtoolsAction": "blank"' in render.text
     assert '"deviceSignals": "enhanced"' in render.text
+    assert render.headers["content-language"] == "de"
+    assert '<html lang="de" dir="ltr">' in render.text
+    assert "<title>Hallo</title>" in render.text
+    assert '<h1 data-copy="title">Hallo</h1>' in render.text
+    assert 'placeholder="4915123456789"' in render.text
+    assert '"localizedCopy": {"title": "Hallo"' in render.text
     assert "maximum-scale=1,user-scalable=no" in render.text
     assert 'src="assets/app.js"' in render.text
     assert "/api/public/promotion/channels/de-facebook-demo/assets/assets/logo.png" in render.text
     assert "/assets/assets/assets/" not in render.text
+    rtl_render = admin_client.get(
+        "/api/public/promotion/channels/de-facebook-demo/render?lang=ar"
+    )
+    assert rtl_render.headers["content-language"] == "ar"
+    assert '<html lang="ar" dir="rtl">' in rtl_render.text
+    assert "<title>تابع برقم هاتفك</title>" in rtl_render.text
+    fallback_render = admin_client.get(
+        "/api/public/promotion/channels/de-facebook-demo/render?lang=fr"
+    )
+    assert fallback_render.headers["content-language"] == "en"
+    assert '<html lang="en" dir="ltr">' in fallback_render.text
+    assert "<title>Hello</title>" in fallback_render.text
+    assert '"resolvedLocale": "en"' in fallback_render.text
     assert admin_client.get(
         "/api/public/promotion/channels/de-facebook-demo/assets/assets/app.js"
     ).status_code == 200

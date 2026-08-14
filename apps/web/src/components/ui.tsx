@@ -83,7 +83,9 @@ export function Drawer({
       }}
     >
       <SheetContent
-        className={wide ? "gap-0 sm:max-w-[720px]" : "gap-0 sm:max-w-[580px]"}
+        className={
+          wide ? "gap-0 sm:max-w-[1080px]" : "gap-0 sm:max-w-[870px]"
+        }
       >
         <SheetHeader>
           <SheetTitle>{title}</SheetTitle>

@@ -10,6 +10,7 @@ import {
   RefreshCwIcon,
   SaveIcon,
   ShieldCheckIcon,
+  SlidersHorizontalIcon,
   Trash2Icon,
   UnlinkIcon,
 } from "lucide-react";
@@ -33,6 +34,7 @@ import {
   TableHead,
   TableHeader,
   TableRow,
+  Textarea,
   confirmAction,
   toast,
 } from "../components/ui";
@@ -80,6 +82,18 @@ type AllocationPolicy = {
   maxAccountsPerIp: number;
   avoidUnhealthy: boolean;
   stickyBinding: boolean;
+};
+type BulkImportResult = {
+  line: number;
+  status: "created" | "duplicate" | "failed";
+  reason?: string;
+  proxyId?: string;
+};
+type BulkImportSummary = {
+  total: number;
+  created: number;
+  duplicate: number;
+  failed: number;
 };
 
 const defaultPolicy: AllocationPolicy = {
@@ -280,10 +294,24 @@ export function IpManagementPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<IpProxy | null>(null);
   const [pending, setPending] = useState(false);
+  const [bulkDrawerOpen, setBulkDrawerOpen] = useState(false);
+  const [bulkPending, setBulkPending] = useState(false);
+  const [bulkText, setBulkText] = useState("");
+  const [bulkResult, setBulkResult] = useState<{
+    summary: BulkImportSummary;
+    results: BulkImportResult[];
+  } | null>(null);
+  const [bulkDefaults, setBulkDefaults] = useState({
+    protocol: "http",
+    countryCode: "",
+    provider: "",
+    enabled: true,
+  });
   const [testingIds, setTestingIds] = useState<string[]>([]);
   const [accountPublicId, setAccountPublicId] = useState("");
   const [bindingPending, setBindingPending] = useState(false);
   const [policy, setPolicy] = useState<AllocationPolicy>(defaultPolicy);
+  const [policyDrawerOpen, setPolicyDrawerOpen] = useState(false);
   const [policyLoading, setPolicyLoading] = useState(true);
   const [policySaving, setPolicySaving] = useState(false);
   const [policyError, setPolicyError] = useState("");
@@ -414,20 +442,17 @@ export function IpManagementPage() {
     });
   }, [country, keyword, protocol, rows, status]);
   const selected = rows.find((row) => row.publicId === selectedId) || null;
-  function openCreate() {
-    setEditing(null);
-    setForm({
-      name: "",
-      protocol: "http",
-      host: "",
-      port: "",
-      username: "",
-      password: "",
-      countryCode: "",
-      provider: "",
-      enabled: true,
-    });
-    setDialogOpen(true);
+  const bulkLineCount = useMemo(
+    () =>
+      bulkText
+        .split(/\r?\n/)
+        .filter((line) => line.trim() && !line.trim().startsWith("#")).length,
+    [bulkText],
+  );
+  function openBulkCreate() {
+    setBulkResult(null);
+    setBulkText("");
+    setBulkDrawerOpen(true);
   }
   function openEdit(row: IpProxy) {
     setEditing(row);
@@ -449,7 +474,8 @@ export function IpManagementPage() {
   }
 
   async function save() {
-    if (!form.name.trim() || !form.host.trim() || !form.port) return;
+    if (!editing || !form.name.trim() || !form.host.trim() || !form.port)
+      return;
     setPending(true);
     try {
       const body = {
@@ -463,16 +489,63 @@ export function IpManagementPage() {
         provider: form.provider.trim() || undefined,
         enabled: form.enabled,
       };
-      await apiRequest(
-        editing ? `/api/ip-proxies/${editing.publicId}` : "/api/ip-proxies",
-        { method: editing ? "PATCH" : "POST", body: JSON.stringify(body) },
-      );
+      await apiRequest(`/api/ip-proxies/${editing.publicId}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
       setDialogOpen(false);
       await load();
+      toast.success("代理已更新");
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "保存代理失败");
     } finally {
       setPending(false);
+    }
+  }
+
+  async function bulkCreate() {
+    if (!bulkLineCount || bulkLineCount > 1000) return;
+    setBulkPending(true);
+    setBulkResult(null);
+    try {
+      const payload = await apiRequest("/api/ip-proxies/bulk", {
+        method: "POST",
+        body: JSON.stringify({
+          lines: bulkText.split(/\r?\n/),
+          defaultProtocol: bulkDefaults.protocol,
+          countryCode:
+            bulkDefaults.countryCode.trim().toUpperCase() || undefined,
+          provider: bulkDefaults.provider.trim() || undefined,
+          enabled: bulkDefaults.enabled,
+        }),
+      });
+      const data = ((payload as { data?: Record<string, unknown> }).data ||
+        payload) as Record<string, unknown>;
+      const rawSummary = (data.summary || {}) as Record<string, unknown>;
+      const summary: BulkImportSummary = {
+        total: Number(rawSummary.total || 0),
+        created: Number(rawSummary.created || 0),
+        duplicate: Number(rawSummary.duplicate || 0),
+        failed: Number(rawSummary.failed || 0),
+      };
+      const results = Array.isArray(data.results)
+        ? (data.results as BulkImportResult[])
+        : [];
+      setBulkResult({ summary, results });
+      await load();
+      if (!summary.failed && !summary.duplicate) {
+        toast.success(`已批量添加 ${summary.created} 条代理`);
+        setBulkDrawerOpen(false);
+        setBulkText("");
+      } else {
+        toast.warning(
+          `导入完成：新增 ${summary.created}，重复 ${summary.duplicate}，失败 ${summary.failed}`,
+        );
+      }
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "批量添加代理失败");
+    } finally {
+      setBulkPending(false);
     }
   }
 
@@ -572,6 +645,7 @@ export function IpManagementPage() {
         payload) as Record<string, unknown>;
       setPolicy(normalizePolicy(data.policy || data));
       toast.success("IP 分配策略已保存");
+      setPolicyDrawerOpen(false);
     } catch (caught) {
       const message =
         caught instanceof Error ? caught.message : "IP 分配策略保存失败";
@@ -584,162 +658,6 @@ export function IpManagementPage() {
 
   return (
     <StandardListPage>
-      <section className="card">
-        <div className="flex flex-col gap-3 border-b pb-4 md:flex-row md:items-start md:justify-between">
-          <div className="flex items-start gap-3">
-            <span className="summary-icon">
-              <ShieldCheckIcon size={19} />
-            </span>
-            <div className="cell-main">
-              <strong>账号 IP 分配策略</strong>
-              <span>设置账号首次分配代理时的隔离程度、国家匹配和健康保护。</span>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            {policyError ? <Badge tone="danger">读取异常</Badge> : null}
-            <Button
-              disabled={
-                !canManage || policyLoading || policySaving || Boolean(policyError)
-              }
-              onClick={() => void savePolicy()}
-            >
-              {policySaving ? <Spinner /> : <SaveIcon size={16} />}
-              保存策略
-            </Button>
-          </div>
-        </div>
-        {policyLoading ? (
-          <div className="loading-state min-h-44">
-            <Spinner />
-            正在加载分配策略…
-          </div>
-        ) : (
-          <div className="mt-4 grid gap-4">
-            {policyError ? (
-              <div className="flex flex-col items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive md:flex-row md:items-center md:justify-between">
-                <span>{policyError}</span>
-                <Button variant="outline" size="sm" onClick={() => void loadPolicy()}>
-                  重新读取
-                </Button>
-              </div>
-            ) : null}
-            <div className="grid gap-4 lg:grid-cols-3">
-              <label className="field">
-                <span>分配模式</span>
-                <SelectField
-                  ariaLabel="IP 分配模式"
-                  className="w-full"
-                  value={policy.allocationMode}
-                  disabled={!canManage || policySaving}
-                  onValueChange={(value) =>
-                    setPolicy((current) => ({
-                      ...current,
-                      allocationMode: value as AllocationMode,
-                      maxAccountsPerIp:
-                        value === "strict_one_to_one"
-                          ? 1
-                          : current.maxAccountsPerIp,
-                    }))
-                  }
-                  options={[
-                    { value: "strict_one_to_one", label: "严格 1:1" },
-                    { value: "tenant_reuse", label: "租户内复用" },
-                    { value: "least_load", label: "低负载优先（推荐）" },
-                    { value: "manual", label: "仅手动分配" },
-                  ]}
-                />
-                <small>{allocationDescriptions[policy.allocationMode]}</small>
-              </label>
-              <label className="field">
-                <span>国家匹配</span>
-                <SelectField
-                  ariaLabel="国家匹配策略"
-                  className="w-full"
-                  value={policy.countryMatch}
-                  disabled={!canManage || policySaving}
-                  onValueChange={(value) =>
-                    setPolicy((current) => ({
-                      ...current,
-                      countryMatch: value as CountryMatch,
-                    }))
-                  }
-                  options={[
-                    { value: "strict", label: "严格匹配" },
-                    { value: "prefer", label: "国家优先（推荐）" },
-                    { value: "off", label: "关闭匹配" },
-                  ]}
-                />
-                <small>{countryDescriptions[policy.countryMatch]}</small>
-              </label>
-              <label className="field">
-                <span>每个 IP 最多账号数</span>
-                <Input
-                  type="number"
-                  min="1"
-                  max="10000"
-                  value={policy.maxAccountsPerIp}
-                  disabled={
-                    !canManage ||
-                    policySaving ||
-                    policy.allocationMode === "strict_one_to_one"
-                  }
-                  onChange={(event) =>
-                    setPolicy((current) => ({
-                      ...current,
-                      maxAccountsPerIp: Math.max(
-                        1,
-                        Math.min(10000, Number(event.target.value) || 1),
-                      ),
-                    }))
-                  }
-                />
-                <small>
-                  {policy.allocationMode === "strict_one_to_one"
-                    ? "严格 1:1 模式固定按 1 个账号执行。"
-                    : "达到上限的 IP 不再参与自动分配。"}
-                </small>
-              </label>
-            </div>
-            <div className="grid gap-3 md:grid-cols-2">
-              <label className="switch-row">
-                <span>
-                  <strong>避开异常 IP</strong>
-                  <small>自动分配时排除健康检测异常或已停用的代理。</small>
-                </span>
-                <Switch
-                  checked={policy.avoidUnhealthy}
-                  disabled={!canManage || policySaving}
-                  onCheckedChange={(checked) =>
-                    setPolicy((current) => ({
-                      ...current,
-                      avoidUnhealthy: checked,
-                    }))
-                  }
-                  aria-label="避开异常 IP"
-                />
-              </label>
-              <label className="switch-row">
-                <span>
-                  <strong>保持固定绑定</strong>
-                  <small>账号成功分配后持续使用同一 IP，除非管理员手动解绑。</small>
-                </span>
-                <Switch
-                  checked={policy.stickyBinding}
-                  disabled={!canManage || policySaving}
-                  onCheckedChange={(checked) =>
-                    setPolicy((current) => ({
-                      ...current,
-                      stickyBinding: checked,
-                    }))
-                  }
-                  aria-label="保持固定绑定"
-                />
-              </label>
-            </div>
-          </div>
-        )}
-      </section>
-
       <ListToolbar
         search={{
           value: keyword,
@@ -787,6 +705,16 @@ export function IpManagementPage() {
           <>
             <Button
               variant="outline"
+              onClick={() => {
+                setPolicyDrawerOpen(true);
+                void loadPolicy();
+              }}
+            >
+              <SlidersHorizontalIcon size={16} />
+              {policyError ? "分配策略（异常）" : "分配策略"}
+            </Button>
+            <Button
+              variant="outline"
               onClick={() => void load()}
               disabled={loading}
             >
@@ -794,9 +722,9 @@ export function IpManagementPage() {
               刷新
             </Button>
             {canManage ? (
-              <Button onClick={openCreate}>
+              <Button onClick={openBulkCreate}>
                 <PlusIcon size={17} />
-                添加代理
+                批量添加
               </Button>
             ) : null}
           </>
@@ -1028,9 +956,341 @@ export function IpManagementPage() {
       </div>
 
       <Drawer
+        open={policyDrawerOpen}
+        onClose={() => !policySaving && setPolicyDrawerOpen(false)}
+        title="账号 IP 分配策略"
+        description="设置账号首次分配代理时的隔离程度、国家匹配、容量限制和健康保护。"
+        wide
+        footer={
+          <>
+            <Button
+              variant="outline"
+              disabled={policySaving}
+              onClick={() => setPolicyDrawerOpen(false)}
+            >
+              取消
+            </Button>
+            {canManage ? (
+              <Button
+                disabled={
+                  policyLoading || policySaving || Boolean(policyError)
+                }
+                onClick={() => void savePolicy()}
+              >
+                {policySaving ? <Spinner /> : <SaveIcon size={16} />}
+                保存策略
+              </Button>
+            ) : null}
+          </>
+        }
+      >
+        {policyLoading ? (
+          <div className="loading-state min-h-44">
+            <Spinner />
+            正在加载分配策略…
+          </div>
+        ) : (
+          <div className="drawer-form">
+            {policyError ? (
+              <div className="flex flex-col items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive md:flex-row md:items-center md:justify-between">
+                <span>{policyError}</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void loadPolicy()}
+                >
+                  重新读取
+                </Button>
+              </div>
+            ) : null}
+            <div className="form-grid">
+              <label className="field">
+                <span>分配模式</span>
+                <SelectField
+                  ariaLabel="IP 分配模式"
+                  className="w-full"
+                  value={policy.allocationMode}
+                  disabled={!canManage || policySaving || Boolean(policyError)}
+                  onValueChange={(value) =>
+                    setPolicy((current) => ({
+                      ...current,
+                      allocationMode: value as AllocationMode,
+                      maxAccountsPerIp:
+                        value === "strict_one_to_one"
+                          ? 1
+                          : current.maxAccountsPerIp,
+                    }))
+                  }
+                  options={[
+                    { value: "strict_one_to_one", label: "严格 1:1" },
+                    { value: "tenant_reuse", label: "租户内复用" },
+                    { value: "least_load", label: "低负载优先（推荐）" },
+                    { value: "manual", label: "仅手动分配" },
+                  ]}
+                />
+                <small>{allocationDescriptions[policy.allocationMode]}</small>
+              </label>
+              <label className="field">
+                <span>国家匹配</span>
+                <SelectField
+                  ariaLabel="国家匹配策略"
+                  className="w-full"
+                  value={policy.countryMatch}
+                  disabled={!canManage || policySaving || Boolean(policyError)}
+                  onValueChange={(value) =>
+                    setPolicy((current) => ({
+                      ...current,
+                      countryMatch: value as CountryMatch,
+                    }))
+                  }
+                  options={[
+                    { value: "strict", label: "严格匹配" },
+                    { value: "prefer", label: "国家优先（推荐）" },
+                    { value: "off", label: "关闭匹配" },
+                  ]}
+                />
+                <small>{countryDescriptions[policy.countryMatch]}</small>
+              </label>
+              <label className="field form-span-2">
+                <span>每个 IP 最多账号数</span>
+                <Input
+                  type="number"
+                  min="1"
+                  max="10000"
+                  value={policy.maxAccountsPerIp}
+                  disabled={
+                    !canManage ||
+                    policySaving ||
+                    Boolean(policyError) ||
+                    policy.allocationMode === "strict_one_to_one"
+                  }
+                  onChange={(event) =>
+                    setPolicy((current) => ({
+                      ...current,
+                      maxAccountsPerIp: Math.max(
+                        1,
+                        Math.min(10000, Number(event.target.value) || 1),
+                      ),
+                    }))
+                  }
+                />
+                <small>
+                  {policy.allocationMode === "strict_one_to_one"
+                    ? "严格 1:1 模式固定按 1 个账号执行。"
+                    : "达到上限的 IP 不再参与自动分配。"}
+                </small>
+              </label>
+            </div>
+            <div className="grid gap-3">
+              <label className="switch-row">
+                <span>
+                  <strong>避开异常 IP</strong>
+                  <small>自动分配时排除健康检测异常或已停用的代理。</small>
+                </span>
+                <Switch
+                  checked={policy.avoidUnhealthy}
+                  disabled={!canManage || policySaving || Boolean(policyError)}
+                  onCheckedChange={(checked) =>
+                    setPolicy((current) => ({
+                      ...current,
+                      avoidUnhealthy: checked,
+                    }))
+                  }
+                  aria-label="避开异常 IP"
+                />
+              </label>
+              <label className="switch-row">
+                <span>
+                  <strong>保持固定绑定</strong>
+                  <small>账号成功分配后持续使用同一 IP，除非管理员手动解绑。</small>
+                </span>
+                <Switch
+                  checked={policy.stickyBinding}
+                  disabled={!canManage || policySaving || Boolean(policyError)}
+                  onCheckedChange={(checked) =>
+                    setPolicy((current) => ({
+                      ...current,
+                      stickyBinding: checked,
+                    }))
+                  }
+                  aria-label="保持固定绑定"
+                />
+              </label>
+            </div>
+          </div>
+        )}
+      </Drawer>
+
+      <Drawer
+        open={bulkDrawerOpen}
+        onClose={() => !bulkPending && setBulkDrawerOpen(false)}
+        title="批量添加 IP 代理"
+        description="每行一个代理，整批共用下方默认设置；代理凭证会加密保存。"
+        wide
+        footer={
+          <>
+            <Button
+              variant="outline"
+              disabled={bulkPending}
+              onClick={() => setBulkDrawerOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              disabled={
+                bulkPending || !bulkLineCount || bulkLineCount > 1000
+              }
+              onClick={() => void bulkCreate()}
+            >
+              {bulkPending ? (
+                <LoaderCircleIcon className="spin" size={17} />
+              ) : (
+                <PlusIcon size={17} />
+              )}
+              开始导入
+            </Button>
+          </>
+        }
+      >
+        <div className="drawer-form">
+          <label className="field">
+            <span>代理列表</span>
+            <Textarea
+              className="min-h-64 resize-y font-mono"
+              value={bulkText}
+              onChange={(event) => {
+                setBulkText(event.target.value);
+                setBulkResult(null);
+              }}
+              placeholder={[
+                "203.0.113.10:8080",
+                "203.0.113.11:8080:username:password",
+                "username:password@203.0.113.12:1080",
+                "socks5://username:password@203.0.113.13:1080",
+              ].join("\n")}
+              spellCheck={false}
+            />
+            <small>
+              已填写 {bulkLineCount} / 1000 条。支持 host:port、
+              host:port:用户名:密码、用户名:密码@host:port 和带协议 URL；空行或
+              # 开头的注释会忽略。
+            </small>
+          </label>
+
+          <div className="grid gap-3 sm:grid-cols-3">
+            <label className="field">
+              <span>默认协议</span>
+              <SelectField
+                value={bulkDefaults.protocol}
+                onValueChange={(value) =>
+                  setBulkDefaults((current) => ({
+                    ...current,
+                    protocol: value,
+                  }))
+                }
+                options={[
+                  { value: "http", label: "HTTP" },
+                  { value: "https", label: "HTTPS" },
+                  { value: "socks5", label: "SOCKS5" },
+                ]}
+              />
+            </label>
+            <label className="field">
+              <span>国家代码（可选）</span>
+              <Input
+                value={bulkDefaults.countryCode}
+                maxLength={2}
+                onChange={(event) =>
+                  setBulkDefaults((current) => ({
+                    ...current,
+                    countryCode: event.target.value,
+                  }))
+                }
+                placeholder="US"
+              />
+            </label>
+            <label className="field">
+              <span>代理供应商（可选）</span>
+              <Input
+                value={bulkDefaults.provider}
+                maxLength={120}
+                onChange={(event) =>
+                  setBulkDefaults((current) => ({
+                    ...current,
+                    provider: event.target.value,
+                  }))
+                }
+                placeholder="例如：IPRoyal"
+              />
+            </label>
+          </div>
+
+          <label className="switch-row">
+            <span>
+              <strong>导入后启用</strong>
+              <small>关闭时代理仍会入库，但不会参与自动分配。</small>
+            </span>
+            <Switch
+              checked={bulkDefaults.enabled}
+              onCheckedChange={(checked) =>
+                setBulkDefaults((current) => ({
+                  ...current,
+                  enabled: checked,
+                }))
+              }
+              aria-label="导入后启用"
+            />
+          </label>
+
+          {bulkLineCount > 1000 ? (
+            <div className="form-error" role="alert">
+              一次最多导入 1000 条，请拆分后再提交。
+            </div>
+          ) : null}
+
+          {bulkResult ? (
+            <div className="rounded-lg border bg-muted/30 p-4">
+              <strong>导入结果</strong>
+              <p className="mt-1 text-sm text-muted-foreground">
+                共 {bulkResult.summary.total} 条 · 新增 {bulkResult.summary.created}
+                条 · 重复 {bulkResult.summary.duplicate} 条 · 失败 {bulkResult.summary.failed}
+                条
+              </p>
+              {bulkResult.results.some(
+                (item) => item.status !== "created",
+              ) ? (
+                <div className="mt-3 max-h-44 space-y-2 overflow-y-auto">
+                  {bulkResult.results
+                    .filter((item) => item.status !== "created")
+                    .map((item) => (
+                      <div
+                        className="flex items-start gap-2 rounded-md border bg-background px-3 py-2 text-sm"
+                        key={`${item.line}-${item.status}`}
+                      >
+                        <Badge
+                          tone={
+                            item.status === "failed" ? "danger" : "warning"
+                          }
+                        >
+                          {item.status === "failed" ? "失败" : "重复"}
+                        </Badge>
+                        <span>
+                          第 {item.line} 行
+                          {item.reason ? `：${item.reason}` : ""}
+                        </span>
+                      </div>
+                    ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      </Drawer>
+
+      <Drawer
         open={dialogOpen}
         onClose={() => !pending && setDialogOpen(false)}
-        title={editing ? "编辑 IP 代理" : "添加 IP 代理"}
+        title="编辑 IP 代理"
         description="代理凭证只会加密保存；页面和接口不返回原始密码。"
         footer={
           <>
@@ -1095,22 +1355,22 @@ export function IpManagementPage() {
               />
             </label>
             <label className="field">
-              <span>用户名{editing ? "（留空不修改）" : ""}</span>
+              <span>用户名（留空不修改）</span>
               <Input
                 value={form.username}
                 onChange={(event) => updateForm("username", event.target.value)}
                 autoComplete="off"
-                placeholder={editing ? editing.usernameMasked : "可选"}
+                placeholder={editing?.usernameMasked || "未设置"}
               />
             </label>
             <label className="field">
-              <span>密码{editing ? "（留空不修改）" : ""}</span>
+              <span>密码（留空不修改）</span>
               <Input
                 type="password"
                 value={form.password}
                 onChange={(event) => updateForm("password", event.target.value)}
                 autoComplete="new-password"
-                placeholder={editing ? editing.passwordMasked : "可选"}
+                placeholder={editing?.passwordMasked || "未设置"}
               />
             </label>
             <label className="field">

@@ -96,10 +96,10 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
   {
     title: "5. 多语言与首屏",
     description:
-      "所有用户可见文案都进入 locales 语言包，使用平台下发的 resolvedLocale。",
+      "所有用户可见文案都进入 locales 语言包；平台会在返回 HTML 前按 resolvedLocale 注入首屏文案，并通过 localizedCopy 下发同一份文案供后续交互使用。",
     bullets: [
       "语言包缺失时依次回退 defaultLocale 和 fallbackLocale。",
-      "首次可见内容必须已经是目标语言；加载语言包期间使用无文案骨架或隐藏翻译节点，禁止先闪现英文再替换。",
+      "首屏元素使用 data-copy=\"key\"，可翻译属性使用 data-copy-placeholder、data-copy-aria-label、data-copy-title、data-copy-value 或 data-copy-content；禁止依赖延迟脚本完成首次翻译。",
       "语言就绪时同步设置 html lang、RTL 语言的 dir=rtl 和 document.title。",
       "语言包请求使用相对路径与 credentials: omit；错误、配对和重试文案同样必须翻译。",
     ],

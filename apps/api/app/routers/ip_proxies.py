@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from urllib.parse import unquote, urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, status
+from pydantic import ValidationError
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
@@ -13,6 +16,7 @@ from app.models import AccountProxyBinding, IpAllocationPolicy, PersonalAccount,
 from app.schemas import (
     AccountProxyBindingCreate,
     AccountProxyBindingUpdate,
+    ProxyEndpointBulkCreate,
     ProxyEndpointCreate,
     ProxyEndpointUpdate,
     IpAllocationPolicyUpdate,
@@ -24,6 +28,84 @@ from app.services.wa_gateway import GatewayError, WaGatewayClient
 
 
 router = APIRouter(tags=["ip-proxies"])
+
+
+@dataclass(frozen=True)
+class _ParsedProxyLine:
+    protocol: str
+    host: str
+    port: int
+    username: str | None
+    password: str | None
+
+
+def _parse_proxy_line(raw_line: str, default_protocol: str) -> _ParsedProxyLine:
+    """Parse one proxy without ever returning or logging the original line."""
+    raw = raw_line.strip()
+    protocol = default_protocol
+    host = ""
+    port: int | str = 0
+    username: str | None = None
+    password: str | None = None
+
+    try:
+        simple_parts = raw.split(":", 3)
+        is_four_part = (
+            "://" not in raw
+            and not raw.startswith("[")
+            and len(simple_parts) == 4
+            and simple_parts[1].isdigit()
+        )
+        if "://" in raw or (not is_four_part and ("@" in raw or raw.startswith("["))):
+            target = raw if "://" in raw else f"//{raw}"
+            parsed = urlsplit(target)
+            if parsed.scheme:
+                protocol = parsed.scheme.lower()
+            if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+                raise ValueError("代理地址不能包含路径、查询参数或片段")
+            host = parsed.hostname or ""
+            port = parsed.port or 0
+            username = unquote(parsed.username) if parsed.username is not None else None
+            password = unquote(parsed.password) if parsed.password is not None else None
+        else:
+            parts = simple_parts
+            if len(parts) not in {2, 4}:
+                raise ValueError("格式应为 host:port 或 host:port:用户名:密码")
+            host, port = parts[0], parts[1]
+            if len(parts) == 4:
+                username, password = parts[2], parts[3]
+    except (ValueError, UnicodeError) as exc:
+        message = str(exc) or "代理格式不正确"
+        if "Port could not be cast" in message:
+            message = "代理端口必须是 1 到 65535 的整数"
+        raise ValueError(message) from None
+
+    if protocol not in {"http", "https", "socks5"}:
+        raise ValueError("仅支持 HTTP、HTTPS 和 SOCKS5 协议")
+    if not host:
+        raise ValueError("代理主机不能为空")
+    if not port:
+        raise ValueError("代理端口不能为空")
+
+    try:
+        validated = ProxyEndpointCreate(
+            name="bulk-proxy",
+            protocol=protocol,
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+        )
+    except ValidationError as exc:
+        message = str(exc.errors()[0].get("msg") or "代理格式不正确")
+        raise ValueError(message.removeprefix("Value error, ")) from None
+    return _ParsedProxyLine(
+        protocol=validated.protocol,
+        host=validated.host,
+        port=validated.port,
+        username=validated.username or None,
+        password=validated.password or None,
+    )
 
 
 def _policy_row(item: IpAllocationPolicy) -> dict:
@@ -221,6 +303,98 @@ def create_proxy(payload: ProxyEndpointCreate, db: DbSession, _admin: AdminUser)
     db.commit()
     db.refresh(proxy)
     return {"data": {"proxy": proxy_endpoint_row(proxy)}}
+
+
+@router.post("/api/ip-proxies/bulk", status_code=status.HTTP_201_CREATED)
+def bulk_create_proxies(
+    payload: ProxyEndpointBulkCreate,
+    db: DbSession,
+    _admin: AdminUser,
+) -> dict:
+    existing_keys = {
+        (proxy.protocol.lower(), proxy.host.lower(), proxy.port)
+        for proxy in db.scalars(
+            select(ProxyEndpoint).where(ProxyEndpoint.archived_at.is_(None))
+        ).all()
+    }
+    seen_keys: set[tuple[str, str, int]] = set()
+    results: list[dict] = []
+    created: list[ProxyEndpoint] = []
+    result_indexes: list[int] = []
+
+    for line_number, raw_line in enumerate(payload.lines, start=1):
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        try:
+            parsed = _parse_proxy_line(stripped, payload.default_protocol)
+        except ValueError as exc:
+            results.append(
+                {"line": line_number, "status": "failed", "reason": str(exc)}
+            )
+            continue
+
+        key = (parsed.protocol, parsed.host.lower(), parsed.port)
+        if key in existing_keys or key in seen_keys:
+            results.append(
+                {
+                    "line": line_number,
+                    "status": "duplicate",
+                    "reason": "相同协议、主机和端口的代理已存在",
+                }
+            )
+            continue
+
+        username = (parsed.username or "").strip()
+        password = (parsed.password or "").strip()
+        display_name = f"{parsed.protocol.upper()} {parsed.host}:{parsed.port}"[:120]
+        proxy = ProxyEndpoint(
+            public_id=new_public_id("ipx"),
+            name=display_name,
+            protocol=parsed.protocol,
+            host=parsed.host,
+            port=parsed.port,
+            username_ciphertext=encrypt_secret(username) if username else None,
+            username_last4=username[-4:] if username else "",
+            password_ciphertext=encrypt_secret(password) if password else None,
+            password_last4=password[-4:] if password else "",
+            country_code=payload.country_code,
+            provider=payload.provider or None,
+            enabled=payload.enabled,
+            health_status="untested",
+        )
+        seen_keys.add(key)
+        created.append(proxy)
+        result_indexes.append(len(results))
+        results.append({"line": line_number, "status": "created"})
+
+    if not results:
+        raise HTTPException(status_code=422, detail="请至少填写一行代理配置")
+
+    if created:
+        db.add_all(created)
+        db.flush()
+        created_rows = [proxy_endpoint_row(proxy) for proxy in created]
+        for index, proxy in zip(result_indexes, created, strict=True):
+            results[index]["proxyId"] = proxy.public_id
+        db.commit()
+    else:
+        created_rows = []
+
+    duplicate_count = sum(item["status"] == "duplicate" for item in results)
+    failed_count = sum(item["status"] == "failed" for item in results)
+    return {
+        "data": {
+            "rows": created_rows,
+            "results": results,
+            "summary": {
+                "total": len(results),
+                "created": len(created_rows),
+                "duplicate": duplicate_count,
+                "failed": failed_count,
+            },
+        }
+    }
 
 
 @router.get("/api/ip-proxies/{public_id}")

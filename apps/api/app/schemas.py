@@ -201,6 +201,33 @@ class ProxyEndpointCreate(ApiModel):
         return normalized
 
 
+class ProxyEndpointBulkCreate(ApiModel):
+    lines: list[str] = Field(min_length=1, max_length=1000)
+    default_protocol: Literal["http", "https", "socks5"] = Field(
+        default="http", alias="defaultProtocol"
+    )
+    country_code: str | None = Field(default=None, alias="countryCode", max_length=2)
+    provider: str | None = Field(default=None, max_length=120)
+    enabled: bool = True
+
+    @field_validator("lines")
+    @classmethod
+    def valid_lines(cls, value: list[str]) -> list[str]:
+        if any(len(line) > 8192 for line in value):
+            raise ValueError("单行代理配置不能超过 8192 个字符")
+        return value
+
+    @field_validator("country_code")
+    @classmethod
+    def valid_country_code(cls, value: str | None) -> str | None:
+        if value in {None, ""}:
+            return None
+        normalized = value.upper()
+        if len(normalized) != 2 or not normalized.isalpha():
+            raise ValueError("国家代码必须是两个字母")
+        return normalized
+
+
 class ProxyEndpointUpdate(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     protocol: Literal["http", "https", "socks5"] | None = None

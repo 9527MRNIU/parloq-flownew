@@ -1,6 +1,6 @@
 {
   "schema": "parloq-promotion-template/v1",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "entry": "index.html",
   "format": "static-bundle",
   "capabilities": ["phone-pairing"],

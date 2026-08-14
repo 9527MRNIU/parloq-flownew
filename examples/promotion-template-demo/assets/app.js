@@ -49,7 +49,9 @@
   async function boot() {
     const config = runtimeConfig()
     const locale = config.resolvedLocale || config.defaultLocale || 'en'
-    const copy = await loadCopy(locale)
+    const copy = config.localizedCopy && Object.keys(config.localizedCopy).length
+      ? { ...fallback, ...config.localizedCopy }
+      : await loadCopy(locale)
     applyCopy(copy, locale)
     const form = document.getElementById('lead-form')
     const input = document.getElementById('phone')

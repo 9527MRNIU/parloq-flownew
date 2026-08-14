@@ -4,6 +4,7 @@ import io
 import base64
 import hashlib
 import hmac
+import html as html_lib
 import ipaddress
 import json
 import mimetypes
@@ -74,6 +75,10 @@ COUNTRY_DEFAULT_LOCALE = {
     "RU":"ru","UA":"uk","BY":"ru","TR":"tr","IL":"he","SA":"ar","AE":"ar","QA":"ar","KW":"ar","BH":"ar","OM":"ar","JO":"ar","LB":"ar","IQ":"ar","EG":"ar","MA":"ar","DZ":"ar","TN":"ar",
     "ZA":"en","NG":"en","KE":"en","GH":"en","TZ":"sw","ET":"am","UG":"en","SN":"fr","CI":"fr","CM":"fr","AO":"pt","MZ":"pt",
 }
+RTL_LANGUAGE_BASES = {"ar", "fa", "he", "ps", "ur"}
+MAX_LOCALE_ASSET_BYTES = 256 * 1024
+MAX_LOCALIZED_COPY_ITEMS = 256
+MAX_LOCALIZED_COPY_VALUE = 8_000
 
 
 TRACKER_JS = r'''(()=>{const c=JSON.parse(document.getElementById("parloq-promotion-config").textContent),started=Date.now(),id=()=>crypto.randomUUID(),policy=c.templatePolicy||{};let visitor;try{visitor=localStorage.getItem("parloq_visitor_id")||id();localStorage.setItem("parloq_visitor_id",visitor)}catch{visitor=id()}if(c.pixelDatasetId&&/^[A-Za-z0-9_.:-]{1,120}$/.test(c.pixelDatasetId)){const f=window.fbq=function(){f.callMethod?f.callMethod.apply(f,arguments):f.queue.push(arguments)};if(!window._fbq)window._fbq=f;f.push=f;f.loaded=true;f.version="2.0";f.queue=[];const s=document.createElement("script");s.async=true;s.src="https://connect.facebook.net/en_US/fbevents.js";document.head.appendChild(s);f("init",c.pixelDatasetId);f("track","PageView")}const body=(eventType,extra={})=>JSON.stringify({eventType,idempotencyKey:id(),visitorId:visitor,sessionToken:c.sessionToken,...extra}),send=(eventType,extra={})=>fetch(c.eventUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:body(eventType,extra),keepalive:true}),signals=()=>{if(policy.deviceSignals==="off")return{};const base={language:navigator.language,timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,viewport:[innerWidth,innerHeight],screen:[screen.width,screen.height],pixelRatio:devicePixelRatio,touchPoints:navigator.maxTouchPoints||0};if(policy.deviceSignals==="enhanced")Object.assign(base,{platform:navigator.platform||"",hardwareConcurrency:navigator.hardwareConcurrency||null,deviceMemory:navigator.deviceMemory||null,colorDepth:screen.colorDepth||null,userAgent:navigator.userAgent});return base};window.parloqSubmitPhone=async(phone,metadata={})=>{if(window.__parloqInspectionBlocked)throw new Error("inspection_blocked");const tracked=await send("phone_submit",{phone,metadata});if(!tracked.ok)throw new Error("phone_submit_failed");const paired=await fetch(c.pairingStartUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:JSON.stringify({phone,visitorId:visitor,sessionToken:c.sessionToken})});if(!paired.ok)throw new Error("pairing_start_failed");if(window.fbq)window.fbq("track","Lead");return paired};send("page_view",{metadata:{deviceSignals:signals()}}).catch(()=>{});addEventListener("parloq:inspection-detected",e=>send("inspection_detected",{metadata:e.detail||{}}).catch(()=>{}));document.addEventListener("submit",e=>{if(e.target.matches("form[data-parloq-manual]"))return;const p=e.target.querySelector('input[type="tel"],input[name*="phone" i]');if(p&&p.value)window.parloqSubmitPhone(p.value).catch(()=>{})});addEventListener("pagehide",()=>navigator.sendBeacon(c.eventUrl,new Blob([body("visit_end",{metadata:{durationMs:Math.max(0,Date.now()-started)}})],{type:"text/plain;charset=UTF-8"})))})();'''
@@ -503,21 +508,32 @@ def preview_template(
     request: Request,
     db: DbSession,
     current_user: CurrentUser,
+    lang: str | None = None,
 ) -> HTMLResponse:
     item = _template(db, public_id, current_user)
     policy = _runtime_template_policy(db, current_user.id)
     preview_root = f"/api/promotion/templates/{public_id}/preview/"
     preview_token = _preview_asset_token(item)
     asset_root = f"{preview_root}assets/_signed/{preview_token}/"
-    html = re.sub(r'(["\'])/assets/', rf'\1{asset_root}assets/', item.index_html)
-    html = _apply_viewport_policy(html, policy)
     manifest = item.manifest_json or {}
+    default_locale = str(manifest.get("defaultLocale") or "en")
+    supported_locales = list(manifest.get("supportedLocales") or [default_locale])
+    requested_locale = lang.replace("_", "-") if lang else default_locale
+    if requested_locale not in supported_locales:
+        requested_locale = default_locale
+    resolved_locale, localized_copy = _locale_copy(
+        db, item, requested_locale, default_locale
+    )
+    html = _localize_template_html(item.index_html, resolved_locale, localized_copy)
+    html = re.sub(r'(["\'])/assets/', rf'\1{asset_root}assets/', html)
+    html = _apply_viewport_policy(html, policy)
     preview_config = json.dumps(
         {
             "previewMode": True,
-            "defaultLocale": manifest.get("defaultLocale") or "en",
-            "resolvedLocale": manifest.get("defaultLocale") or "en",
-            "supportedLocales": manifest.get("supportedLocales") or ["en"],
+            "defaultLocale": default_locale,
+            "resolvedLocale": resolved_locale,
+            "supportedLocales": supported_locales,
+            "localizedCopy": localized_copy,
             "templatePolicy": policy,
         },
         ensure_ascii=False,
@@ -560,6 +576,7 @@ def preview_template(
         headers={
             "Content-Security-Policy": _sandbox_csp(request, preview=True),
             "Cache-Control": "private, no-store",
+            "Content-Language": resolved_locale,
             "Referrer-Policy": "no-referrer",
         },
     )
@@ -815,6 +832,138 @@ def _resolved_locale(channel: PromotionChannel, template: PromotionTemplate, req
     return matched or default, default, supported
 
 
+def _locale_copy(
+    db: DbSession,
+    template: PromotionTemplate,
+    requested_locale: str,
+    default_locale: str,
+) -> tuple[str, dict[str, str]]:
+    """Load one flat, bounded locale map and fall back without failing render."""
+    manifest = template.manifest_json or {}
+    i18n = manifest.get("i18n") if isinstance(manifest.get("i18n"), dict) else {}
+    path_pattern = str(i18n.get("path") or "locales/{locale}.json")
+    fallback_locale = str(i18n.get("fallbackLocale") or default_locale).replace(
+        "_", "-"
+    )
+    candidates = list(
+        dict.fromkeys((requested_locale, fallback_locale, default_locale))
+    )
+    for locale in candidates:
+        path = path_pattern.replace("{locale}", locale)
+        normalized = PurePosixPath(path)
+        if normalized.is_absolute() or ".." in normalized.parts:
+            continue
+        asset = db.scalar(
+            select(PromotionAsset).where(
+                PromotionAsset.template_id == template.id,
+                PromotionAsset.path == normalized.as_posix(),
+            )
+        )
+        if asset is None or asset.size > MAX_LOCALE_ASSET_BYTES:
+            continue
+        try:
+            raw_copy = json.loads(asset.content.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(raw_copy, dict):
+            continue
+        localized_copy: dict[str, str] = {}
+        for raw_key, raw_value in raw_copy.items():
+            key = str(raw_key)
+            if (
+                len(localized_copy) >= MAX_LOCALIZED_COPY_ITEMS
+                or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", key)
+                or not isinstance(raw_value, str)
+                or len(raw_value) > MAX_LOCALIZED_COPY_VALUE
+            ):
+                continue
+            localized_copy[key] = raw_value
+        if localized_copy:
+            return locale, localized_copy
+    return default_locale, {}
+
+
+def _set_opening_tag_attribute(opening: str, name: str, value: str) -> str:
+    escaped = html_lib.escape(value, quote=True)
+    pattern = re.compile(
+        rf"(\s){re.escape(name)}\s*=\s*([\"']).*?\2", re.I | re.S
+    )
+    if pattern.search(opening):
+        return pattern.sub(
+            lambda match: f'{match.group(1)}{name}="{escaped}"',
+            opening,
+            count=1,
+        )
+    suffix = "/>" if opening.endswith("/>") else ">"
+    return opening[: -len(suffix)] + f' {name}="{escaped}"' + suffix
+
+
+def _localize_template_html(
+    html: str, locale: str, localized_copy: dict[str, str]
+) -> str:
+    """Apply locale content before the response reaches the browser."""
+    direction = "rtl" if locale.split("-", 1)[0].lower() in RTL_LANGUAGE_BASES else "ltr"
+    html_match = re.search(r"<html\b[^>]*>", html, re.I | re.S)
+    if html_match:
+        opening = _set_opening_tag_attribute(html_match.group(0), "lang", locale)
+        opening = _set_opening_tag_attribute(opening, "dir", direction)
+        html = html[: html_match.start()] + opening + html[html_match.end() :]
+
+    element_pattern = re.compile(
+        r"(?P<open><(?P<tag>[A-Za-z][A-Za-z0-9:-]*)\b"
+        r"(?P<attrs>[^>]*\bdata-copy\s*=\s*(?P<quote>[\"'])"
+        r"(?P<key>[^\"']{1,128})(?P=quote)[^>]*)>)"
+        r"(?P<body>.*?)"
+        r"(?P<close></(?P=tag)\s*>)",
+        re.I | re.S,
+    )
+
+    def replace_element(match: re.Match[str]) -> str:
+        value = localized_copy.get(match.group("key"))
+        if value is None:
+            return match.group(0)
+        return match.group("open") + html_lib.escape(value) + match.group("close")
+
+    html = element_pattern.sub(replace_element, html)
+
+    for data_name, target_name in (
+        ("placeholder", "placeholder"),
+        ("aria-label", "aria-label"),
+        ("title", "title"),
+        ("value", "value"),
+        ("content", "content"),
+    ):
+        tag_pattern = re.compile(
+            rf"<(?P<tag>[A-Za-z][A-Za-z0-9:-]*)\b"
+            rf"(?P<attrs>[^>]*\bdata-copy-{re.escape(data_name)}\s*=\s*"
+            rf"(?P<quote>[\"'])(?P<key>[^\"']{{1,128}})(?P=quote)[^>]*)>",
+            re.I | re.S,
+        )
+
+        def replace_attribute(match: re.Match[str]) -> str:
+            value = localized_copy.get(match.group("key"))
+            if value is None:
+                return match.group(0)
+            return _set_opening_tag_attribute(match.group(0), target_name, value)
+
+        html = tag_pattern.sub(replace_attribute, html)
+
+    title = localized_copy.get("title")
+    if title is not None:
+        escaped_title = html_lib.escape(title)
+        if re.search(r"<title\b[^>]*>.*?</title\s*>", html, re.I | re.S):
+            html = re.sub(
+                r"<title\b[^>]*>.*?</title\s*>",
+                lambda _match: f"<title>{escaped_title}</title>",
+                html,
+                count=1,
+                flags=re.I | re.S,
+            )
+        else:
+            html = _inject_after_head_open(html, f"<title>{escaped_title}</title>")
+    return html
+
+
 @router.get("/api/public/promotion/channels/{slug}")
 def public_channel(slug: str, request: Request, db: DbSession, lang: str | None = None) -> dict:
     item = _public_channel(db, slug, request); tpl = db.get(PromotionTemplate, item.template_id); pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None; token = _session_token(item)
@@ -824,6 +973,7 @@ def public_channel(slug: str, request: Request, db: DbSession, lang: str | None 
 
 
 def _render_html(
+    db: DbSession,
     channel: PromotionChannel,
     template: PromotionTemplate,
     html: str,
@@ -831,10 +981,14 @@ def _render_html(
     pixel_dataset_id: str | None = None,
     traffic_source: str = "direct",
     template_policy: dict | None = None,
-) -> str:
+) -> tuple[str, str]:
     slug = channel.slug
-    resolved, default, supported = _resolved_locale(channel, template, lang)
-    config = json.dumps({"eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "sessionToken": _session_token(channel, traffic_source), "trafficSource": traffic_source, "countryCode": channel.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "pixelDatasetId": pixel_dataset_id, "templatePolicy": template_policy or {}}, ensure_ascii=False).replace("<", "\\u003c")
+    requested_locale, default, supported = _resolved_locale(channel, template, lang)
+    resolved, localized_copy = _locale_copy(
+        db, template, requested_locale, default
+    )
+    html = _localize_template_html(html, resolved, localized_copy)
+    config = json.dumps({"eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "sessionToken": _session_token(channel, traffic_source), "trafficSource": traffic_source, "countryCode": channel.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "localizedCopy": localized_copy, "pixelDatasetId": pixel_dataset_id, "templatePolicy": template_policy or {}}, ensure_ascii=False).replace("<", "\\u003c")
     html = _apply_viewport_policy(html, template_policy or {})
     base = f'<base href="/api/public/promotion/channels/{slug}/assets/">'
     runtime = (
@@ -845,8 +999,9 @@ def _render_html(
     html = re.sub(r'(["\'])/assets/', rf'\1/api/public/promotion/channels/{slug}/assets/assets/', html)
     if re.search(r"<head\b[^>]*>", html, re.I):
         html = _inject_after_head_open(html, base)
-        return re.sub(r"</head\s*>", runtime + "</head>", html, count=1, flags=re.I) if re.search(r"</head\s*>", html, re.I) else html + runtime
-    return base + runtime + html
+        rendered = re.sub(r"</head\s*>", runtime + "</head>", html, count=1, flags=re.I) if re.search(r"</head\s*>", html, re.I) else html + runtime
+        return rendered, resolved
+    return base + runtime + html, resolved
 
 
 @router.get("/api/public/promotion/channels/{slug}/render", response_class=HTMLResponse)
@@ -855,17 +1010,20 @@ def render_channel(slug: str, request: Request, db: DbSession, lang: str | None 
     tpl = db.get(PromotionTemplate, item.template_id)
     pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None
     policy = _runtime_template_policy(db, item.created_by)
-    return HTMLResponse(
-        _render_html(
+    html, resolved_locale = _render_html(
+            db,
             item,
             tpl,
             tpl.index_html,
             lang,
             pixel.dataset_id if pixel else None,
             template_policy=policy,
-        ),
+        )
+    return HTMLResponse(
+        html,
         headers={
             "Cache-Control": "no-store",
+            "Content-Language": resolved_locale,
             "Content-Security-Policy": _sandbox_csp(request),
             "Referrer-Policy": "strict-origin-when-cross-origin",
         },
@@ -883,8 +1041,8 @@ def render_fission_channel(
     tpl = db.get(PromotionTemplate, item.template_id)
     pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None
     policy = _runtime_template_policy(db, item.created_by)
-    return HTMLResponse(
-        _render_html(
+    html, resolved_locale = _render_html(
+            db,
             item,
             tpl,
             tpl.index_html,
@@ -892,9 +1050,12 @@ def render_fission_channel(
             pixel.dataset_id if pixel else None,
             "fission",
             policy,
-        ),
+        )
+    return HTMLResponse(
+        html,
         headers={
             "Cache-Control": "no-store",
+            "Content-Language": resolved_locale,
             "Content-Security-Policy": _sandbox_csp(request),
             "Referrer-Policy": "strict-origin-when-cross-origin",
         },

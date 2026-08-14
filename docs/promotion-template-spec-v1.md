@@ -96,6 +96,7 @@ interface ParloqPromotionConfigV1 {
   defaultLocale: string
   supportedLocales: string[]
   resolvedLocale: string
+  localizedCopy: Record<string, string>
   trafficSource?: 'direct' | 'fission'
   pixelDatasetId?: string | null
 }
@@ -135,9 +136,10 @@ window.parloqSubmitPhone(
 
 ```html
 <form id="lead-form" data-parloq-manual novalidate>
-  <label for="phone">WhatsApp number</label>
-  <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" required />
-  <button type="submit">Continue</button>
+  <label for="phone" data-copy="phoneLabel">WhatsApp number</label>
+  <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel"
+         data-copy-placeholder="phonePlaceholder" required />
+  <button type="submit" data-copy="submit">Continue</button>
   <p id="form-status" role="status" aria-live="polite"></p>
 </form>
 ```
@@ -172,10 +174,11 @@ window.parloqSubmitPhone(
 
 ## 7. 多语言
 
-- 默认使用 `resolvedLocale`，找不到语言包时回退 `defaultLocale`。
-- 语言包请求使用相对路径和 `credentials: 'omit'`。
-- `ar` 等 RTL 语言必须设置 `document.documentElement.dir = 'rtl'`。
-- 页面初始 HTML 必须包含默认语言文案，不能在 JavaScript 执行前完全空白。
+- 平台按 `resolvedLocale` 在服务端读取语言包并直接本地化 HTML，找不到或无法解析时依次回退 `fallbackLocale`、`defaultLocale`。
+- 普通文本使用 `data-copy="key"`；属性使用 `data-copy-placeholder`、`data-copy-aria-label`、`data-copy-title`、`data-copy-value` 或 `data-copy-content`。
+- 平台在首屏响应中同步设置 `<html lang>`、RTL 的 `dir="rtl"`、`<title>` 和 `Content-Language`，浏览器不得先渲染默认英文再延迟替换。
+- 同一份已校验语言映射通过 `localizedCopy` 下发，表单错误、配对状态和重试等后续交互应优先复用；仅为兼容旧平台时再通过相对路径请求语言包。
+- 页面初始 HTML 仍必须包含 `defaultLocale` 文案，作为语言资产全部异常时的最终静态回退。
 - 文案不得以图片承载，按钮和错误信息必须可翻译。
 
 ## 8. 前端体验基线
@@ -244,6 +247,7 @@ window.parloqSubmitPhone(
 - [ ] 连续点击不会重复提交
 - [ ] 错误、超时和过期后可重试
 - [ ] 所有语言包完整，RTL 正常
+- [ ] 查看原始 HTML 已是目标语言，刷新时没有默认语言闪烁
 - [ ] 四个规定尺寸无横向滚动、遮挡或不可点击元素
 - [ ] 键盘、焦点、label 和 `aria-live` 验收通过
 - [ ] 生产构建已压缩且不包含 source map

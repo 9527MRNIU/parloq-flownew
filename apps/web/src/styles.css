@@ -996,10 +996,13 @@ tr.selected-row {
 }
 .template-design-spec {
   display: grid;
+  min-width: 0;
   gap: 14px;
+  overflow-x: hidden;
 }
 .template-design-spec__intro,
 .template-design-spec__section {
+  min-width: 0;
   padding: 16px;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -1022,6 +1025,7 @@ tr.selected-row {
   color: var(--muted-foreground);
   font-size: 12px;
   line-height: 1.7;
+  overflow-wrap: anywhere;
 }
 .template-design-spec__section ul {
   display: grid;
@@ -1031,6 +1035,11 @@ tr.selected-row {
   color: var(--foreground);
   font-size: 12px;
   line-height: 1.65;
+}
+.template-design-spec__section li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .template-design-spec__section ul.is-checklist {
   list-style: none;
@@ -1042,17 +1051,25 @@ tr.selected-row {
   color: var(--primary);
 }
 .template-design-spec__section pre {
+  min-width: 0;
   max-width: 100%;
   margin: 12px 0 0;
   padding: 13px 14px;
-  overflow-x: auto;
+  overflow-x: hidden;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--muted-2);
   color: var(--foreground);
   font-size: 11px;
   line-height: 1.6;
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.template-design-spec__section pre code {
+  white-space: inherit;
+  overflow-wrap: inherit;
+  word-break: inherit;
 }
 .channel-data-bar {
   display: flex;
