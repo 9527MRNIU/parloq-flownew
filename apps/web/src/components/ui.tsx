@@ -84,7 +84,9 @@ export function Drawer({
     >
       <SheetContent
         className={
-          wide ? "gap-0 sm:max-w-[1080px]" : "gap-0 sm:max-w-[870px]"
+          wide
+            ? "gap-0 data-[side=right]:sm:max-w-[1080px]"
+            : "gap-0 data-[side=right]:sm:max-w-[870px]"
         }
       >
         <SheetHeader>
