@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.deps import CurrentUser, DbSession
+from app.snowflake import new_public_id
+
 from app.models import MetaPixel
 from app.schemas import MetaPixelCreate, MetaPixelUpdate
 from app.security import encrypt_secret, utcnow
@@ -43,7 +44,7 @@ def list_pixels(db: DbSession, current_user: CurrentUser) -> dict:
 def create_pixel(payload: MetaPixelCreate, db: DbSession, current_user: CurrentUser) -> dict:
     token = (payload.capi_token or "").strip()
     pixel = MetaPixel(
-        public_id=f"pxl_{uuid4().hex}",
+        public_id=new_public_id("pxl"),
         name=payload.name,
         dataset_id=payload.dataset_id,
         capi_token_ciphertext=encrypt_secret(token) if token else None,

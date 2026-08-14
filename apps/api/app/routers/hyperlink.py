@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import date
-from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, select
@@ -13,6 +12,8 @@ from app.business_schemas import (
     RecipientsImport, StrategyCreate, StrategyUpdate, TaskCreate, TaskUpdate,
 )
 from app.deps import CurrentUser, DbSession
+from app.snowflake import new_public_id
+
 from app.models import (
     DataPackage, DataPackageRecipient, HyperlinkMaterial,
     HyperlinkStrategy, HyperlinkTask, HyperlinkTaskDelivery, HyperlinkTemplate,
@@ -92,7 +93,7 @@ def materials(db: DbSession, current_user: CurrentUser) -> dict:
     rows=[material_row(x) for x in _list(db, HyperlinkMaterial, current_user)]; return {"data":{"rows":rows,"total":len(rows)}}
 @router.post("/materials", status_code=201)
 def create_material(p: MaterialCreate, db: DbSession, current_user: CurrentUser) -> dict:
-    x=HyperlinkMaterial(public_id=f"hmat_{uuid4().hex}",name=p.name,material_type=p.material_type,content_json=p.content_json,enabled=p.enabled,created_by=current_user.id);db.add(x);db.commit();return {"data":{"material":material_row(x)}}
+    x=HyperlinkMaterial(public_id=new_public_id("hmat"),name=p.name,material_type=p.material_type,content_json=p.content_json,enabled=p.enabled,created_by=current_user.id);db.add(x);db.commit();return {"data":{"material":material_row(x)}}
 @router.get("/materials/{pid}")
 def get_material(pid:str,db:DbSession,current_user:CurrentUser)->dict:return {"data":{"material":material_row(_one(db,HyperlinkMaterial,pid,"素材",current_user))}}
 @router.patch("/materials/{pid}")
@@ -122,7 +123,7 @@ def templates(db:DbSession,current_user:CurrentUser)->dict:
     rows=[template_row(db,x) for x in _list(db,HyperlinkTemplate,current_user)];return {"data":{"rows":rows,"total":len(rows)}}
 @router.post("/templates",status_code=201)
 def create_template(p:HyperlinkTemplateCreate,db:DbSession,current_user:CurrentUser)->dict:
-    mat,promo=_template_refs(db,current_user,p.material_id,p.promotion_channel_id);x=HyperlinkTemplate(public_id=f"htpl_{uuid4().hex}",name=p.name,content_json=p.content_json,material_id=mat,promotion_channel_id=promo,enabled=p.enabled,created_by=current_user.id);db.add(x);db.commit();return {"data":{"template":template_row(db,x)}}
+    mat,promo=_template_refs(db,current_user,p.material_id,p.promotion_channel_id);x=HyperlinkTemplate(public_id=new_public_id("htpl"),name=p.name,content_json=p.content_json,material_id=mat,promotion_channel_id=promo,enabled=p.enabled,created_by=current_user.id);db.add(x);db.commit();return {"data":{"template":template_row(db,x)}}
 @router.get("/templates/{pid}")
 def get_template(pid:str,db:DbSession,current_user:CurrentUser)->dict:return {"data":{"template":template_row(db,_one(db,HyperlinkTemplate,pid,"模板",current_user))}}
 @router.patch("/templates/{pid}")
@@ -146,7 +147,7 @@ def strategies(db:DbSession,current_user:CurrentUser)->dict:
     rows=[strategy_row(x) for x in _list(db,HyperlinkStrategy,current_user)];return {"data":{"rows":rows,"total":len(rows)}}
 @router.post("/strategies",status_code=201)
 def create_strategy(p:StrategyCreate,db:DbSession,current_user:CurrentUser)->dict:
-    x=HyperlinkStrategy(public_id=f"hstr_{uuid4().hex}",name=p.name,max_qps=p.max_qps,concurrency=p.concurrency,batch_size=p.batch_size,retry_limit=p.retry_limit,rules_json=p.rules_json,enabled=p.enabled,created_by=current_user.id);db.add(x);db.commit();return {"data":{"strategy":strategy_row(x)}}
+    x=HyperlinkStrategy(public_id=new_public_id("hstr"),name=p.name,max_qps=p.max_qps,concurrency=p.concurrency,batch_size=p.batch_size,retry_limit=p.retry_limit,rules_json=p.rules_json,enabled=p.enabled,created_by=current_user.id);db.add(x);db.commit();return {"data":{"strategy":strategy_row(x)}}
 @router.get("/strategies/{pid}")
 def get_strategy(pid:str,db:DbSession,current_user:CurrentUser)->dict:return {"data":{"strategy":strategy_row(_one(db,HyperlinkStrategy,pid,"策略",current_user))}}
 @router.patch("/strategies/{pid}")
@@ -166,7 +167,7 @@ def _add_recipients(db, package, values):
     existing=set(db.scalars(select(DataPackageRecipient.phone_e164).where(DataPackageRecipient.data_package_id==package.id)).all());created=0
     for p in values:
         if p.phone in existing:continue
-        db.add(DataPackageRecipient(public_id=f"hrcp_{uuid4().hex}",data_package_id=package.id,phone_e164=p.phone,country_code=p.country_code,variables_json=p.variables));existing.add(p.phone);created+=1
+        db.add(DataPackageRecipient(public_id=new_public_id("hrcp"),data_package_id=package.id,phone_e164=p.phone,country_code=p.country_code,variables_json=p.variables));existing.add(p.phone);created+=1
     db.commit();return created
 
 
@@ -175,7 +176,7 @@ def packages(db:DbSession,current_user:CurrentUser)->dict:
     rows=[package_row(db,x) for x in _list(db,DataPackage,current_user)];return {"data":{"rows":rows,"total":len(rows)}}
 @router.post("/data-packages",status_code=201)
 def create_package(p:DataPackageCreate,db:DbSession,current_user:CurrentUser)->dict:
-    x=DataPackage(public_id=f"hpkg_{uuid4().hex}",name=p.name,status="ready",created_by=current_user.id);db.add(x);db.flush();_add_recipients(db,x,p.recipients);return {"data":{"dataPackage":package_row(db,x)}}
+    x=DataPackage(public_id=new_public_id("hpkg"),name=p.name,status="ready",created_by=current_user.id);db.add(x);db.flush();_add_recipients(db,x,p.recipients);return {"data":{"dataPackage":package_row(db,x)}}
 @router.get("/data-packages/{pid}")
 def get_package(pid:str,db:DbSession,current_user:CurrentUser)->dict:return {"data":{"dataPackage":package_row(db,_one(db,DataPackage,pid,"数据包",current_user))}}
 @router.patch("/data-packages/{pid}")
@@ -218,7 +219,7 @@ def tasks(db:DbSession,current_user:CurrentUser)->dict:
     items=_list(db,HyperlinkTask,current_user);rows=[task_row(db,x) for x in items];db.commit();return {"data":{"rows":rows,"total":len(rows)}}
 @router.post("/tasks",status_code=201)
 def create_task(p:TaskCreate,db:DbSession,current_user:CurrentUser)->dict:
-    tpl,s,pkg,ids=_task_refs(db,p,current_user);x=HyperlinkTask(public_id=f"htsk_{uuid4().hex}",name=p.name,template_id=tpl,strategy_id=s,data_package_id=pkg,account_public_ids=ids,channel=p.channel,status="draft",created_by=current_user.id);db.add(x);db.commit();return {"data":{"task":task_row(db,x)}}
+    tpl,s,pkg,ids=_task_refs(db,p,current_user);x=HyperlinkTask(public_id=new_public_id("htsk"),name=p.name,template_id=tpl,strategy_id=s,data_package_id=pkg,account_public_ids=ids,channel=p.channel,status="draft",created_by=current_user.id);db.add(x);db.commit();return {"data":{"task":task_row(db,x)}}
 @router.get("/tasks/{pid}")
 def get_task(pid:str,db:DbSession,current_user:CurrentUser)->dict:
     x=_one(db,HyperlinkTask,pid,"任务",current_user);row=task_row(db,x);db.commit();return {"data":{"task":row}}
@@ -260,7 +261,7 @@ def start_task(pid:str,db:DbSession,current_user:CurrentUser)->dict:
     for index,recipient in enumerate(recipients):
         if recipient.id in existing:continue
         account=accounts[index%len(accounts)]
-        db.add(HyperlinkTaskDelivery(public_id=f"htd_{uuid4().hex}",task_id=task.id,recipient_id=recipient.id,account_id=account.id,status="queued",attempt_count=0))
+        db.add(HyperlinkTaskDelivery(public_id=new_public_id("htd"),task_id=task.id,recipient_id=recipient.id,account_id=account.id,status="queued",attempt_count=0))
         if (index + 1) % 500 == 0:
             db.flush()
     task.status="running";task.started_at=task.started_at or utcnow();task.completed_at=None

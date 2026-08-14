@@ -1,6 +1,7 @@
 import pg from 'pg'
 import type { Account, AccountState, AccountStateTransition, Message, SessionCompleteness, SessionStatus, StoredAuth, StoredKey } from './domain.js'
 import { GatewayError } from './domain.js'
+import { nextSnowflakeId } from './snowflake.js'
 
 const { Pool } = pg
 
@@ -91,6 +92,144 @@ CREATE TABLE IF NOT EXISTS wa_gateway_baileys.auth_keys (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (account_id, category, key_id)
 );
+ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS internal_id BIGINT;
+ALTER TABLE wa_gateway_baileys.messages ADD COLUMN IF NOT EXISTS internal_id BIGINT;
+ALTER TABLE wa_gateway_baileys.messages ADD COLUMN IF NOT EXISTS account_internal_id BIGINT;
+ALTER TABLE wa_gateway_baileys.auth_creds ADD COLUMN IF NOT EXISTS internal_id BIGINT;
+ALTER TABLE wa_gateway_baileys.auth_creds ADD COLUMN IF NOT EXISTS account_internal_id BIGINT;
+ALTER TABLE wa_gateway_baileys.auth_keys ADD COLUMN IF NOT EXISTS internal_id BIGINT;
+ALTER TABLE wa_gateway_baileys.auth_keys ADD COLUMN IF NOT EXISTS account_internal_id BIGINT;
+
+WITH ranked AS (
+  SELECT ctid, row_number() OVER (ORDER BY created_at,id) AS rn
+  FROM wa_gateway_baileys.accounts WHERE internal_id IS NULL
+)
+UPDATE wa_gateway_baileys.accounts AS target
+SET internal_id = (
+  ((GREATEST((EXTRACT(EPOCH FROM clock_timestamp())*1000)::BIGINT,1785542400000)-1785542400000+(ranked.rn-1)/4096) << 22)
+  | (1000::BIGINT << 12) | ((ranked.rn-1)%4096)
+)
+FROM ranked WHERE target.ctid=ranked.ctid;
+WITH ranked AS (
+  SELECT ctid, row_number() OVER (ORDER BY queued_at,message_id) AS rn
+  FROM wa_gateway_baileys.messages WHERE internal_id IS NULL
+)
+UPDATE wa_gateway_baileys.messages AS target
+SET internal_id = (
+  ((GREATEST((EXTRACT(EPOCH FROM clock_timestamp())*1000)::BIGINT,1785542400000)-1785542400000+(ranked.rn-1)/4096) << 22)
+  | (1001::BIGINT << 12) | ((ranked.rn-1)%4096)
+)
+FROM ranked WHERE target.ctid=ranked.ctid;
+WITH ranked AS (
+  SELECT ctid, row_number() OVER (ORDER BY account_id) AS rn
+  FROM wa_gateway_baileys.auth_creds WHERE internal_id IS NULL
+)
+UPDATE wa_gateway_baileys.auth_creds AS target
+SET internal_id = (
+  ((GREATEST((EXTRACT(EPOCH FROM clock_timestamp())*1000)::BIGINT,1785542400000)-1785542400000+(ranked.rn-1)/4096) << 22)
+  | (1002::BIGINT << 12) | ((ranked.rn-1)%4096)
+)
+FROM ranked WHERE target.ctid=ranked.ctid;
+WITH ranked AS (
+  SELECT ctid, row_number() OVER (ORDER BY account_id,category,key_id) AS rn
+  FROM wa_gateway_baileys.auth_keys WHERE internal_id IS NULL
+)
+UPDATE wa_gateway_baileys.auth_keys AS target
+SET internal_id = (
+  ((GREATEST((EXTRACT(EPOCH FROM clock_timestamp())*1000)::BIGINT,1785542400000)-1785542400000+(ranked.rn-1)/4096) << 22)
+  | (1003::BIGINT << 12) | ((ranked.rn-1)%4096)
+)
+FROM ranked WHERE target.ctid=ranked.ctid;
+
+UPDATE wa_gateway_baileys.messages AS child SET account_internal_id=parent.internal_id
+FROM wa_gateway_baileys.accounts AS parent
+WHERE child.account_id=parent.id AND child.account_internal_id IS NULL;
+UPDATE wa_gateway_baileys.auth_creds AS child SET account_internal_id=parent.internal_id
+FROM wa_gateway_baileys.accounts AS parent
+WHERE child.account_id=parent.id AND child.account_internal_id IS NULL;
+UPDATE wa_gateway_baileys.auth_keys AS child SET account_internal_id=parent.internal_id
+FROM wa_gateway_baileys.accounts AS parent
+WHERE child.account_id=parent.id AND child.account_internal_id IS NULL;
+
+ALTER TABLE wa_gateway_baileys.accounts ALTER COLUMN internal_id SET NOT NULL;
+ALTER TABLE wa_gateway_baileys.messages ALTER COLUMN internal_id SET NOT NULL;
+ALTER TABLE wa_gateway_baileys.messages ALTER COLUMN account_internal_id SET NOT NULL;
+ALTER TABLE wa_gateway_baileys.auth_creds ALTER COLUMN internal_id SET NOT NULL;
+ALTER TABLE wa_gateway_baileys.auth_creds ALTER COLUMN account_internal_id SET NOT NULL;
+ALTER TABLE wa_gateway_baileys.auth_keys ALTER COLUMN internal_id SET NOT NULL;
+ALTER TABLE wa_gateway_baileys.auth_keys ALTER COLUMN account_internal_id SET NOT NULL;
+
+ALTER TABLE wa_gateway_baileys.messages DROP CONSTRAINT IF EXISTS messages_account_id_fkey;
+ALTER TABLE wa_gateway_baileys.auth_creds DROP CONSTRAINT IF EXISTS auth_creds_account_id_fkey;
+ALTER TABLE wa_gateway_baileys.auth_keys DROP CONSTRAINT IF EXISTS auth_keys_account_id_fkey;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='accounts_id_snowflake_key' AND connamespace='wa_gateway_baileys'::regnamespace) THEN
+    ALTER TABLE wa_gateway_baileys.accounts ADD CONSTRAINT accounts_id_snowflake_key UNIQUE(id);
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint c
+    JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=ANY(c.conkey)
+    WHERE c.conrelid='wa_gateway_baileys.accounts'::regclass AND c.contype='p' AND a.attname='id'
+  ) THEN ALTER TABLE wa_gateway_baileys.accounts DROP CONSTRAINT accounts_pkey; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='wa_gateway_baileys.accounts'::regclass AND contype='p') THEN
+    ALTER TABLE wa_gateway_baileys.accounts ADD CONSTRAINT accounts_pkey PRIMARY KEY(internal_id);
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='messages_message_id_snowflake_key' AND connamespace='wa_gateway_baileys'::regnamespace) THEN
+    ALTER TABLE wa_gateway_baileys.messages ADD CONSTRAINT messages_message_id_snowflake_key UNIQUE(message_id);
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint c
+    JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=ANY(c.conkey)
+    WHERE c.conrelid='wa_gateway_baileys.messages'::regclass AND c.contype='p' AND a.attname='message_id'
+  ) THEN ALTER TABLE wa_gateway_baileys.messages DROP CONSTRAINT messages_pkey; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='wa_gateway_baileys.messages'::regclass AND contype='p') THEN
+    ALTER TABLE wa_gateway_baileys.messages ADD CONSTRAINT messages_pkey PRIMARY KEY(internal_id);
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='auth_creds_account_id_snowflake_key' AND connamespace='wa_gateway_baileys'::regnamespace) THEN
+    ALTER TABLE wa_gateway_baileys.auth_creds ADD CONSTRAINT auth_creds_account_id_snowflake_key UNIQUE(account_id);
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint c
+    JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=ANY(c.conkey)
+    WHERE c.conrelid='wa_gateway_baileys.auth_creds'::regclass AND c.contype='p' AND a.attname='account_id'
+  ) THEN ALTER TABLE wa_gateway_baileys.auth_creds DROP CONSTRAINT auth_creds_pkey; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='wa_gateway_baileys.auth_creds'::regclass AND contype='p') THEN
+    ALTER TABLE wa_gateway_baileys.auth_creds ADD CONSTRAINT auth_creds_pkey PRIMARY KEY(internal_id);
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='auth_keys_lookup_snowflake_key' AND connamespace='wa_gateway_baileys'::regnamespace) THEN
+    ALTER TABLE wa_gateway_baileys.auth_keys ADD CONSTRAINT auth_keys_lookup_snowflake_key UNIQUE(account_id,category,key_id);
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint c
+    JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=ANY(c.conkey)
+    WHERE c.conrelid='wa_gateway_baileys.auth_keys'::regclass AND c.contype='p' AND a.attname='account_id'
+  ) THEN ALTER TABLE wa_gateway_baileys.auth_keys DROP CONSTRAINT auth_keys_pkey; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='wa_gateway_baileys.auth_keys'::regclass AND contype='p') THEN
+    ALTER TABLE wa_gateway_baileys.auth_keys ADD CONSTRAINT auth_keys_pkey PRIMARY KEY(internal_id);
+  END IF;
+END $$;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='messages_account_internal_id_fkey' AND connamespace='wa_gateway_baileys'::regnamespace) THEN
+    ALTER TABLE wa_gateway_baileys.messages
+      ADD CONSTRAINT messages_account_internal_id_fkey FOREIGN KEY(account_internal_id)
+      REFERENCES wa_gateway_baileys.accounts(internal_id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='auth_creds_account_internal_id_fkey' AND connamespace='wa_gateway_baileys'::regnamespace) THEN
+    ALTER TABLE wa_gateway_baileys.auth_creds
+      ADD CONSTRAINT auth_creds_account_internal_id_fkey FOREIGN KEY(account_internal_id)
+      REFERENCES wa_gateway_baileys.accounts(internal_id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='auth_keys_account_internal_id_fkey' AND connamespace='wa_gateway_baileys'::regnamespace) THEN
+    ALTER TABLE wa_gateway_baileys.auth_keys
+      ADD CONSTRAINT auth_keys_account_internal_id_fkey FOREIGN KEY(account_internal_id)
+      REFERENCES wa_gateway_baileys.accounts(internal_id) ON DELETE CASCADE;
+  END IF;
+END $$;
 `
 
 interface AccountRow {
@@ -181,8 +320,8 @@ export class PostgresStore implements Store {
   async createAccount(input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state'>): Promise<Account> {
     try {
       const result = await this.pool.query<AccountRow>(`
-        INSERT INTO wa_gateway_baileys.accounts(id, phone_e164, proxy_url, state)
-        VALUES($1,$2,$3,$4) RETURNING *`, [input.id, input.phoneE164, input.proxyUrl, input.state])
+        INSERT INTO wa_gateway_baileys.accounts(internal_id,id, phone_e164, proxy_url, state)
+        VALUES($1,$2,$3,$4,$5) RETURNING *`, [nextSnowflakeId(), input.id, input.phoneE164, input.proxyUrl, input.state])
       return accountFromRow(result.rows[0]!)
     } catch (error) {
       if ((error as { code?: string }).code === '23505') throw new GatewayError('conflict', 'account id or phone already exists')
@@ -199,12 +338,14 @@ export class PostgresStore implements Store {
       await client.query('BEGIN')
       const result = await client.query<AccountRow>(`
         INSERT INTO wa_gateway_baileys.accounts
-          (id,phone_e164,proxy_url,state,device_jid,auto_connect,session_status,session_completeness,reason_category)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,'session_imported') RETURNING *`,
-      [input.id, input.phoneE164, input.proxyUrl, input.state, input.deviceJid, input.autoConnect, input.sessionStatus, input.sessionCompleteness])
-      await client.query('INSERT INTO wa_gateway_baileys.auth_creds(account_id,value) VALUES($1,$2)', [input.id, auth.creds])
+          (internal_id,id,phone_e164,proxy_url,state,device_jid,auto_connect,session_status,session_completeness,reason_category)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'session_imported') RETURNING *`,
+      [nextSnowflakeId(), input.id, input.phoneE164, input.proxyUrl, input.state, input.deviceJid, input.autoConnect, input.sessionStatus, input.sessionCompleteness])
+      await client.query(`INSERT INTO wa_gateway_baileys.auth_creds(internal_id,account_internal_id,account_id,value)
+        SELECT $1,internal_id,id,$3 FROM wa_gateway_baileys.accounts WHERE id=$2`, [nextSnowflakeId(), input.id, auth.creds])
       for (const key of auth.keys) {
-        await client.query('INSERT INTO wa_gateway_baileys.auth_keys(account_id,category,key_id,value) VALUES($1,$2,$3,$4)', [input.id, key.type, key.id, key.value])
+        await client.query(`INSERT INTO wa_gateway_baileys.auth_keys(internal_id,account_internal_id,account_id,category,key_id,value)
+          SELECT $1,internal_id,id,$3,$4,$5 FROM wa_gateway_baileys.accounts WHERE id=$2`, [nextSnowflakeId(), input.id, key.type, key.id, key.value])
       }
       await client.query('COMMIT')
       return accountFromRow(result.rows[0]!)
@@ -289,9 +430,10 @@ export class PostgresStore implements Store {
 
   async createMessage(message: Message): Promise<{ message: Message; created: boolean }> {
     const result = await this.pool.query<MessageRow>(`
-      INSERT INTO wa_gateway_baileys.messages(message_id,account_id,recipient_e164,status,queued_at)
-      VALUES($1,$2,$3,$4,$5) ON CONFLICT(message_id) DO NOTHING RETURNING *`,
-    [message.messageId, message.accountId, message.recipientE164, message.status, message.queuedAt])
+      INSERT INTO wa_gateway_baileys.messages(internal_id,message_id,account_internal_id,account_id,recipient_e164,status,queued_at)
+      SELECT $1,$2,internal_id,id,$4,$5,$6 FROM wa_gateway_baileys.accounts WHERE id=$3
+      ON CONFLICT(message_id) DO NOTHING RETURNING *`,
+    [nextSnowflakeId(), message.messageId, message.accountId, message.recipientE164, message.status, message.queuedAt])
     if (result.rows[0]) return { message: messageFromRow(result.rows[0]), created: true }
     return { message: await this.getMessage(message.messageId), created: false }
   }
@@ -326,8 +468,9 @@ export class PostgresStore implements Store {
   }
 
   async setCreds(accountId: string, creds: unknown): Promise<void> {
-    await this.pool.query(`INSERT INTO wa_gateway_baileys.auth_creds(account_id,value) VALUES($1,$2)
-      ON CONFLICT(account_id) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`, [accountId, creds])
+    await this.pool.query(`INSERT INTO wa_gateway_baileys.auth_creds(internal_id,account_internal_id,account_id,value)
+      SELECT $1,internal_id,id,$3 FROM wa_gateway_baileys.accounts WHERE id=$2
+      ON CONFLICT(account_id) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`, [nextSnowflakeId(), accountId, creds])
   }
 
   async getKeys(accountId: string, type: string, ids: string[]): Promise<Record<string, unknown>> {
@@ -347,8 +490,9 @@ export class PostgresStore implements Store {
         if (key.value === null) {
           await client.query('DELETE FROM wa_gateway_baileys.auth_keys WHERE account_id=$1 AND category=$2 AND key_id=$3', [accountId, key.type, key.id])
         } else {
-          await client.query(`INSERT INTO wa_gateway_baileys.auth_keys(account_id,category,key_id,value) VALUES($1,$2,$3,$4)
-            ON CONFLICT(account_id,category,key_id) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`, [accountId, key.type, key.id, key.value])
+          await client.query(`INSERT INTO wa_gateway_baileys.auth_keys(internal_id,account_internal_id,account_id,category,key_id,value)
+            SELECT $1,internal_id,id,$3,$4,$5 FROM wa_gateway_baileys.accounts WHERE id=$2
+            ON CONFLICT(account_id,category,key_id) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`, [nextSnowflakeId(), accountId, key.type, key.id, key.value])
         }
       }
       await client.query('COMMIT')
@@ -369,10 +513,12 @@ export class PostgresStore implements Store {
     try {
       await client.query('BEGIN')
       await client.query('DELETE FROM wa_gateway_baileys.auth_keys WHERE account_id=$1', [accountId])
-      await client.query(`INSERT INTO wa_gateway_baileys.auth_creds(account_id,value) VALUES($1,$2)
-        ON CONFLICT(account_id) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`, [accountId, auth.creds])
+      await client.query(`INSERT INTO wa_gateway_baileys.auth_creds(internal_id,account_internal_id,account_id,value)
+        SELECT $1,internal_id,id,$3 FROM wa_gateway_baileys.accounts WHERE id=$2
+        ON CONFLICT(account_id) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`, [nextSnowflakeId(), accountId, auth.creds])
       for (const key of auth.keys) {
-        await client.query('INSERT INTO wa_gateway_baileys.auth_keys(account_id,category,key_id,value) VALUES($1,$2,$3,$4)', [accountId, key.type, key.id, key.value])
+        await client.query(`INSERT INTO wa_gateway_baileys.auth_keys(internal_id,account_internal_id,account_id,category,key_id,value)
+          SELECT $1,internal_id,id,$3,$4,$5 FROM wa_gateway_baileys.accounts WHERE id=$2`, [nextSnowflakeId(), accountId, key.type, key.id, key.value])
       }
       await client.query('COMMIT')
     } catch (error) {

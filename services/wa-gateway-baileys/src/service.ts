@@ -1,10 +1,10 @@
-import { randomUUID } from 'node:crypto'
 import type { Logger } from 'pino'
 import type { Account, AccountState, Message, PublicAccount } from './domain.js'
-import { GatewayError, normalizeE164, publicAccount, randomId, safeError, validateProxy } from './domain.js'
+import { GatewayError, normalizeE164, publicAccount, safeError, validateProxy } from './domain.js'
 import type { EngineEvent, PairResult, ProtocolEngine } from './engine.js'
 import { exportSession, parseImportedSession, phoneFromDeviceJid } from './session.js'
 import type { Store } from './store.js'
+import { newPublicId } from './snowflake.js'
 import { WebhookClient } from './webhook.js'
 
 export interface CreateAccountRequest { id?: string; phoneE164: string; proxyUrl?: string }
@@ -54,7 +54,7 @@ export class GatewayService {
   async createAccount(request: CreateAccountRequest): Promise<PublicAccount> {
     const phoneE164 = normalizeE164(request.phoneE164)
     const proxyUrl = validateProxy(request.proxyUrl ?? '')
-    const id = request.id?.trim() || randomId('wa')
+    const id = request.id?.trim() || newPublicId('wa')
     if (!/^[A-Za-z0-9_.-]{1,80}$/.test(id)) throw new GatewayError('invalid_argument', 'account id contains unsupported characters')
     return publicAccount(await this.store.createAccount({ id, phoneE164, proxyUrl, state: 'unpaired' }))
   }
@@ -233,7 +233,7 @@ export class GatewayService {
       const occurredAt = result.account.stateChangedAt
       this.webhook.deliverAccountState({
         event: 'account.state',
-        eventId: `ast_${randomUUID()}`,
+        eventId: newPublicId('ast'),
         accountId: id,
         fromState: result.fromState,
         toState: state,

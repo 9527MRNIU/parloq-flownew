@@ -157,17 +157,17 @@ class WaGatewayClient:
         return value if isinstance(value, dict) else {}
 
     def send(
-        self, account_id: str, request_id: str, to: str, message: str
+        self, account_id: str, message_id: str, to: str, message: str
     ) -> dict[str, Any]:
         if self.settings.wa_gateway_mock:
-            digest = hashlib.sha256(f"{account_id}\0{request_id}".encode()).hexdigest()[:16]
+            digest = hashlib.sha256(f"{account_id}\0{message_id}".encode()).hexdigest()[:16]
             return {
-                "messageId": request_id,
+                "messageId": message_id,
                 "providerMessageId": f"mock-{digest}",
                 "status": "queued",
                 "queuedAt": utcnow().isoformat(),
             }
         return self._post(
             f"/v1/accounts/{account_id}/messages",
-            {"messageId": request_id, "toE164": to, "text": message},
+            {"messageId": message_id, "toE164": to, "text": message},
         )

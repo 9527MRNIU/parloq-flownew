@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 
 from app.deps import CurrentUser, DbSession
+from app.snowflake import new_public_id
+
 from app.models import BitlyProviderAccount, DirectShortLink
 from app.schemas import DirectShortLinkCreate, DirectShortLinkUpdate
 from app.security import decrypt_secret, utcnow
@@ -119,7 +120,7 @@ def create_link(
     if not bitlink_id or not short_url:
         raise HTTPException(status_code=502, detail="Bitly 未返回有效短链")
     link = DirectShortLink(
-        public_id=f"dsl_{uuid4().hex}",
+        public_id=new_public_id("dsl"),
         title=payload.title,
         target_url=target_url,
         bitlink_id=bitlink_id,

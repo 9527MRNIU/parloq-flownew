@@ -53,6 +53,7 @@ services:
       - "8000"
       - --reload
     environment:
+      SNOWFLAKE_NODE_ID: ${API_SNOWFLAKE_NODE_ID:-1}
       APP_ENV: ${APP_ENV:-development}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://parloq:parloq-local@postgres:5432/parloq_flow}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -117,6 +118,7 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "app.task_worker"]
     environment:
+      SNOWFLAKE_NODE_ID: ${WORKER_SNOWFLAKE_NODE_ID:-2}
       APP_ENV: ${APP_ENV:-development}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://parloq:parloq-local@postgres:5432/parloq_flow}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -142,6 +144,7 @@ services:
       context: ./services/wa-gateway-baileys
     restart: unless-stopped
     environment:
+      SNOWFLAKE_NODE_ID: ${WA_GATEWAY_SNOWFLAKE_NODE_ID:-3}
       WA_ENGINE: ${WA_ENGINE:-mock}
       WA_GATEWAY_ADDR: ${WA_GATEWAY_ADDR:-:8010}
       WA_GATEWAY_INSTANCE_ID: ${WA_GATEWAY_INSTANCE_ID:-local-wa-gateway-1}

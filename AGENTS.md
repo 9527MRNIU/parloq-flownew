@@ -19,6 +19,20 @@ together with the current user request.
 - Do not enable the real Baileys engine locally except for an explicit test
   with a disposable WhatsApp account and a fixed proxy.
 
+## ID Policy
+
+- All Parloq entity primary and foreign keys use signed `BIGINT` Snowflake IDs.
+- The custom Snowflake epoch is `2026-08-01 00:00:00 UTC`, with a
+  41-bit millisecond timestamp, 10-bit writer node, and 12-bit sequence.
+- Public business IDs retain their resource prefix and use the Snowflake value,
+  for example `ptpl_<snowflake>`, `htsk_<snowflake>`, and `msg_<snowflake>`.
+- Serialize Snowflake values as strings at HTTP/JavaScript boundaries. Never
+  coerce them to a JavaScript `Number`.
+- Every concurrent API, worker, gateway, migration, or future writer process
+  needs a distinct configured node ID. Follow `docs/id-conventions.md`.
+- Cryptographic tokens, client idempotency keys, protocol key IDs, and IDs
+  assigned by third-party providers are not Parloq entity IDs.
+
 ## Production Environment
 
 - Production host: `216.106.185.81`.

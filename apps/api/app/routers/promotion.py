@@ -37,6 +37,8 @@ from app.business_schemas import (
 )
 from app.config import get_settings
 from app.deps import CurrentUser, DbSession, get_optional_current_user
+from app.snowflake import new_public_id
+
 from app.models import (
     AdMetric,
     DomainRecord,
@@ -81,13 +83,13 @@ TRACKER_JS = r'''(()=>{const c=JSON.parse(document.getElementById("parloq-promot
 # do not each ship a different, unaudited anti-debug dependency. This only
 # removes casual desktop entry points; it is deliberately not treated as a
 # security boundary and never blocks selection/copy/paste inside form fields.
-LANDING_GUARD_JS = r'''(()=>{const node=document.getElementById("parloq-promotion-config");let config={};try{config=JSON.parse(node?.textContent||"{}")}catch{}const policy=config.templatePolicy||{},mode=policy.protectionMode||"basic",preview=Boolean(config.previewMode),stop=e=>{e.preventDefault();e.stopImmediatePropagation()};addEventListener("contextmenu",e=>{if(e.pointerType!=="touch")stop(e)},true);addEventListener("keydown",e=>{const k=String(e.key||"").toLowerCase(),primary=e.ctrlKey||e.metaKey,inspect=e.key==="F12"||(primary&&e.shiftKey&&["i","j","c"].includes(k))||(primary&&["u","s"].includes(k));if(inspect)stop(e)},true);if(mode==="basic"||preview)return;let handled=false;const detected=reason=>{if(handled)return;handled=true;dispatchEvent(new CustomEvent("parloq:inspection-detected",{detail:{reason,mode}}));const action=policy.devtoolsAction||"log";if(action==="block")window.__parloqInspectionBlocked=true;if(action==="blank"){document.documentElement.innerHTML="";document.title=""}};const inspect=()=>{if(Math.abs(outerWidth-innerWidth)>180||Math.abs(outerHeight-innerHeight)>180)return detected("window-gap");if(window.eruda||window.vConsole||document.querySelector(".eruda-container,#__vconsole"))return detected("mobile-console");let consoleProbe=false;const probe=new Image;Object.defineProperty(probe,"id",{get(){consoleProbe=true;return""}});console.debug(probe);if(consoleProbe)return detected("console-probe");if(mode==="strict"){const before=performance.now();debugger;if(performance.now()-before>220)return detected("debugger-delay")}};setInterval(inspect,mode==="strict"?900:1600);inspect()})();'''
+LANDING_GUARD_JS = r'''(()=>{const node=document.getElementById("parloq-promotion-config");let config={};try{config=JSON.parse(node?.textContent||"{}")}catch{}const policy=config.templatePolicy||{},mode=policy.protectionMode||"strict",preview=Boolean(config.previewMode),stop=e=>{e.preventDefault();e.stopImmediatePropagation()};addEventListener("contextmenu",e=>{if(e.pointerType!=="touch")stop(e)},true);addEventListener("keydown",e=>{const k=String(e.key||"").toLowerCase(),primary=e.ctrlKey||e.metaKey,inspect=e.key==="F12"||(primary&&e.shiftKey&&["i","j","c"].includes(k))||(primary&&["u","s"].includes(k));if(inspect)stop(e)},true);if(mode==="basic"||preview)return;let handled=false;const detected=reason=>{if(handled)return;handled=true;dispatchEvent(new CustomEvent("parloq:inspection-detected",{detail:{reason,mode}}));const action=policy.devtoolsAction||"blank";if(action==="block")window.__parloqInspectionBlocked=true;if(action==="blank"){document.documentElement.innerHTML="";document.title=""}};const inspect=()=>{if(Math.abs(outerWidth-innerWidth)>180||Math.abs(outerHeight-innerHeight)>180)return detected("window-gap");if(window.eruda||window.vConsole||document.querySelector(".eruda-container,#__vconsole"))return detected("mobile-console");let consoleProbe=false;const probe=new Image;Object.defineProperty(probe,"id",{get(){consoleProbe=true;return""}});console.debug(probe);if(consoleProbe)return detected("console-probe");if(mode==="strict"){const before=performance.now();debugger;if(performance.now()-before>220)return detected("debugger-delay")}};setInterval(inspect,mode==="strict"?900:1600);inspect()})();'''
 
 DEFAULT_TEMPLATE_POLICY = {
-    "protectionMode": "basic",
-    "devtoolsAction": "log",
-    "lockViewportZoom": False,
-    "deviceSignals": "standard",
+    "protectionMode": "strict",
+    "devtoolsAction": "blank",
+    "lockViewportZoom": True,
+    "deviceSignals": "enhanced",
     "updatedAt": None,
 }
 
@@ -469,7 +471,7 @@ def list_templates(db: DbSession, current_user: CurrentUser) -> dict:
 def import_template(db: DbSession, current_user: CurrentUser, file: UploadFile = File(...), name: str = Form(..., min_length=1, max_length=120), description: str | None = Form(default=None, max_length=2000)) -> dict:
     if not file.filename or not file.filename.lower().endswith(".zip"): raise HTTPException(status_code=422, detail="请选择 ZIP 模板包")
     manifest, html, assets, total = _safe_bundle(file.file.read(MAX_ZIP + 1))
-    item = PromotionTemplate(public_id=f"ptpl_{uuid4().hex}", name=name, description=description, version=str(manifest.get("version") or "1")[:40], status="active", manifest_json=manifest, index_html=html, asset_count=len(assets), total_size=total, created_by=current_user.id)
+    item = PromotionTemplate(public_id=new_public_id("ptpl"), name=name, description=description, version=str(manifest.get("version") or "1")[:40], status="active", manifest_json=manifest, index_html=html, asset_count=len(assets), total_size=total, created_by=current_user.id)
     db.add(item); db.flush()
     for path, content_type, content in assets: db.add(PromotionAsset(template_id=item.id, path=path, content_type=content_type, size=len(content), content=content))
     db.commit(); db.refresh(item); return {"data": {"template": template_row(item)}}
@@ -661,7 +663,7 @@ def create_channel(payload: PromotionChannelCreate, db: DbSession, current_user:
         raise HTTPException(status_code=422, detail="生产环境渠道必须绑定已验证域名")
     template = db.get(PromotionTemplate, tpl); supported = (template.manifest_json or {}).get("supportedLocales", [])
     if payload.locale_mode == "fixed" and (not payload.locale or payload.locale not in supported): raise HTTPException(status_code=422, detail="固定 locale 必须属于模板 supportedLocales")
-    item = PromotionChannel(public_id=f"pchn_{uuid4().hex}", channel_type=payload.channel_type, name=payload.name, country_code=payload.country_code, template_id=tpl, domain_id=dom, subdomain_prefix=payload.subdomain_prefix or "", slug=payload.slug, pixel_id=pix, locale_mode=payload.locale_mode, locale=payload.locale, status=payload.status, launch_at=payload.launch_at, created_by=current_user.id)
+    item = PromotionChannel(public_id=new_public_id("pchn"), channel_type=payload.channel_type, name=payload.name, country_code=payload.country_code, template_id=tpl, domain_id=dom, subdomain_prefix=payload.subdomain_prefix or "", slug=payload.slug, pixel_id=pix, locale_mode=payload.locale_mode, locale=payload.locale, status=payload.status, launch_at=payload.launch_at, created_by=current_user.id)
     db.add(item)
     try: db.commit()
     except IntegrityError: db.rollback(); raise HTTPException(status_code=409, detail="该域名和子域名下的推广渠道 slug 已存在") from None
@@ -946,12 +948,12 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
         lead = db.scalar(select(PromotionLead).where(PromotionLead.channel_id == channel.id, PromotionLead.phone_e164 == payload.phone))
         if lead: lead.last_seen_at = now; lead.submission_count += 1; lead.country_code = channel.country_code
         else:
-            lead = PromotionLead(public_id=f"plead_{uuid4().hex}", channel_id=channel.id, phone_e164=payload.phone, country_code=channel.country_code, first_seen_at=now, last_seen_at=now, submission_count=1)
+            lead = PromotionLead(public_id=new_public_id("plead"), channel_id=channel.id, phone_e164=payload.phone, country_code=channel.country_code, first_seen_at=now, last_seen_at=now, submission_count=1)
             db.add(lead)
             db.flush()
     metadata = dict(payload.metadata)
     metadata["trafficSource"] = token_payload.get("trafficSource", "direct")
-    event = PromotionEvent(public_id=f"pevt_{uuid4().hex}", channel_id=channel.id, event_type=payload.event_type, idempotency_key=payload.idempotency_key, visitor_id=payload.visitor_id, lead_id=lead.id if lead else None, occurred_at=occurred_at, country_code=channel.country_code, metadata_json=metadata)
+    event = PromotionEvent(public_id=new_public_id("pevt"), channel_id=channel.id, event_type=payload.event_type, idempotency_key=payload.idempotency_key, visitor_id=payload.visitor_id, lead_id=lead.id if lead else None, occurred_at=occurred_at, country_code=channel.country_code, metadata_json=metadata)
     db.add(event)
     try: db.commit()
     except IntegrityError: db.rollback(); return JSONResponse({"data": {"ok": True, "duplicate": True, "serverTimestamp": now.isoformat()}}, headers={"Access-Control-Allow-Origin": "null"})
@@ -986,7 +988,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
     account_created = item is None
     if item is None:
         item = PersonalAccount(
-            public_id=f"wa_{uuid4().hex}",
+            public_id=new_public_id("wa"),
             name=f"落地页账号 {payload.phone[-4:]}",
             phone_e164=payload.phone,
             country_code=channel.country_code,
@@ -1120,7 +1122,7 @@ def public_pairing_status(
         item.last_connected_at = item.last_connected_at or utcnow()
         db.add(
             PromotionEvent(
-                public_id=f"pevt_{uuid4().hex}",
+                public_id=new_public_id("pevt"),
                 channel_id=channel.id,
                 event_type="pair_success",
                 idempotency_key=f"pair_success:{item.public_id}",
@@ -1185,7 +1187,7 @@ async def report_internal_success(request: Request, db: DbSession) -> JSONRespon
         raise HTTPException(status_code=422, detail="成功事件时间超出允许窗口")
     db.add(
         PromotionEvent(
-            public_id=f"pevt_{uuid4().hex}",
+            public_id=new_public_id("pevt"),
             channel_id=channel.id,
             event_type=payload.event_type,
             idempotency_key=payload.idempotency_key,
@@ -1257,7 +1259,7 @@ def _apply_metric(db: DbSession, payload, user, current: AdMetric | None = None)
         else db.get(PromotionChannel, current.promotion_channel_id)
     )
     item = current or AdMetric(
-        public_id=f"ad_{uuid4().hex}",
+        public_id=new_public_id("ad"),
         metric_date=payload.metric_date,
         promotion_channel_id=channel.id,
         channel=channel.channel_type,

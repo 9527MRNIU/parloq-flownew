@@ -34,6 +34,7 @@ class BaoTaDeploymentTests(unittest.TestCase):
             web_image="parloq-web:a",
             gateway_image="parloq-gateway:a",
             status_file="/tmp/parloq-status.json",
+            compose_content="services:\n  api:\n    image: parloq-api:a\n",
         )
         self.assertIn("--profile migration", script)
         self.assertIn("run --interactive=false -T --rm migrate", script)
@@ -43,6 +44,9 @@ class BaoTaDeploymentTests(unittest.TestCase):
         self.assertNotIn(" down ", script)
         self.assertNotIn("down -v", script)
         self.assertNotIn("/data/waba", script)
+        self.assertIn('compose_backup=', script)
+        self.assertIn('base64 -d >"${compose_candidate}"', script)
+        self.assertIn('cp -p "${compose_backup}" "${compose_file}"', script)
 
     def test_release_script_rejects_unsafe_image_reference(self) -> None:
         with self.assertRaises(BAOTA.BaoTaError):
@@ -55,6 +59,7 @@ class BaoTaDeploymentTests(unittest.TestCase):
                 web_image="parloq-web:a",
                 gateway_image="parloq-gateway:a",
                 status_file="/tmp/parloq-status.json",
+                compose_content="services:\n  api:\n    image: parloq-api:a\n",
             )
 
 

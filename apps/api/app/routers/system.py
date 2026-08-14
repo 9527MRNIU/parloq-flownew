@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.deps import AdminUser, CurrentUser, DbSession
+from app.snowflake import new_public_id
+
 from app.models import (
     RoleActionPermission,
     RoleMenuPermission,
@@ -98,7 +99,7 @@ def _role_row(db: DbSession, item: UserGroup) -> dict:
         )
     ]
     return {
-        "id": item.id,
+        "id": str(item.id),
         "name": item.name,
         "systemKey": item.system_key,
         "description": item.description,
@@ -291,7 +292,7 @@ def create_menu(payload: MenuCreate, db: DbSession, _admin: AdminUser) -> dict:
     if parent is not None and parent.menu_type != "directory":
         raise HTTPException(status_code=422, detail="父菜单必须是目录")
     item = SystemMenu(
-        public_id=f"menu_{uuid4().hex}",
+        public_id=new_public_id("menu"),
         parent_id=parent.id if parent else None,
         name=payload.name,
         menu_type=payload.menu_type,

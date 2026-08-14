@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import secrets
 from datetime import UTC, timedelta
-from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
@@ -18,6 +17,8 @@ from app.business_schemas import (
 )
 from app.config import get_settings
 from app.deps import CurrentUser, DbSession
+from app.snowflake import new_public_id
+
 from app.models import DomainOrder, DomainQuote, DomainRecord, PromotionChannel
 from app.security import utcnow
 from app.serializers import iso
@@ -173,7 +174,7 @@ def list_domains(db: DbSession, current_user: CurrentUser) -> dict:
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_domain(payload: DomainCreate, db: DbSession, current_user: CurrentUser) -> dict:
     item = DomainRecord(
-        public_id=f"dom_{uuid4().hex}",
+        public_id=new_public_id("dom"),
         hostname=payload.hostname,
         acquisition_type="connected",
         management_mode=payload.management_mode,
@@ -245,7 +246,7 @@ def create_domain_quote(
     if not registrar_quote.available:
         raise HTTPException(status_code=409, detail="域名已被注册")
     item = DomainQuote(
-        public_id=f"dquote_{uuid4().hex}",
+        public_id=new_public_id("dquote"),
         hostname=payload.hostname,
         years=payload.years,
         amount=registrar_quote.amount,
@@ -330,7 +331,7 @@ def create_domain_order(
     if _hostname_occupied(db, quote.hostname):
         raise HTTPException(status_code=409, detail="域名不可购买或已有进行中的订单")
     item = DomainOrder(
-        public_id=f"dord_{uuid4().hex}",
+        public_id=new_public_id("dord"),
         quote_id=quote.id,
         hostname=quote.hostname,
         years=quote.years,
@@ -376,7 +377,7 @@ def mock_pay_domain_order(
 def _complete_order(db: DbSession, item: DomainOrder, provider_order_ref: str) -> DomainRecord:
     now = utcnow()
     domain = DomainRecord(
-        public_id=f"dom_{uuid4().hex}",
+        public_id=new_public_id("dom"),
         hostname=item.hostname,
         acquisition_type="purchased",
         management_mode="platform",

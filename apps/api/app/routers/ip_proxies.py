@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, or_, select
@@ -8,6 +7,8 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
 from app.deps import AdminUser, CurrentUser, DbSession
+from app.snowflake import new_public_id
+
 from app.models import AccountProxyBinding, IpAllocationPolicy, PersonalAccount, ProxyEndpoint
 from app.schemas import (
     AccountProxyBindingCreate,
@@ -43,7 +44,7 @@ def _owner_policy(db: DbSession, owner_id: int) -> IpAllocationPolicy:
     )
     if item is None:
         item = IpAllocationPolicy(
-            public_id=f"ipp_{uuid4().hex}",
+            public_id=new_public_id("ipp"),
             allocation_mode="least_load",
             country_match="prefer",
             max_accounts_per_ip=100,
@@ -202,7 +203,7 @@ def create_proxy(payload: ProxyEndpointCreate, db: DbSession, _admin: AdminUser)
     username = (payload.username or "").strip()
     password = (payload.password or "").strip()
     proxy = ProxyEndpoint(
-        public_id=f"ipx_{uuid4().hex}",
+        public_id=new_public_id("ipx"),
         name=payload.name,
         protocol=payload.protocol,
         host=payload.host,
@@ -343,7 +344,7 @@ def create_binding(
     if not proxy.enabled:
         raise HTTPException(status_code=409, detail="不能绑定已停用的代理")
     binding = AccountProxyBinding(
-        public_id=f"ipb_{uuid4().hex}",
+        public_id=new_public_id("ipb"),
         account_public_id=payload.account_public_id,
         proxy_id=proxy.id,
     )

@@ -8,6 +8,8 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
 from app.deps import AdminUser, CurrentUser, DbSession
+from app.snowflake import new_public_id
+
 from app.models import BitlyProviderAccount
 from app.schemas import BitlyAccountCreate, BitlyAccountUpdate
 from app.security import encrypt_secret, secret_fingerprint, utcnow
@@ -75,7 +77,7 @@ def create_account(payload: BitlyAccountCreate, db: DbSession, _admin: AdminUser
     except BitlyServiceError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from None
     account = BitlyProviderAccount(
-        public_id=f"bitly_{uuid4().hex}",
+        public_id=new_public_id("bitly"),
         name=payload.name,
         token_ciphertext=encrypt_secret(access_token),
         token_fingerprint=secret_fingerprint(access_token),

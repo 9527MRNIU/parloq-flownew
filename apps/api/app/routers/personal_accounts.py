@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from urllib.parse import quote
-from uuid import uuid4
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import case, exists, func, or_, select
@@ -17,6 +16,8 @@ from app.business_schemas import (
     SendRequest,
 )
 from app.deps import CurrentUser, DbSession
+from app.snowflake import new_public_id
+
 from app.models import (
     AccountGroup,
     AccountProxyBinding,
@@ -130,7 +131,7 @@ def create_account_group(
     payload: AccountGroupCreate, db: DbSession, current_user: CurrentUser
 ) -> dict:
     item = AccountGroup(
-        public_id=f"wag_{uuid4().hex}",
+        public_id=new_public_id("wag"),
         name=payload.name,
         description=payload.description,
         created_by=current_user.id,
@@ -294,7 +295,7 @@ def delivery_row(item: MessageDelivery) -> dict:
     return {
         "id": item.public_id,
         "publicId": item.public_id,
-        "messageId": item.request_id,
+        "messageId": item.public_id,
         "providerMessageId": item.provider_message_id,
         "requestId": item.request_id,
         "to": item.recipient_e164,
@@ -391,7 +392,7 @@ def _set_binding(db: DbSession, account_id: str, proxy_public_id: str | None) ->
     else:
         db.add(
             AccountProxyBinding(
-                public_id=f"ipb_{uuid4().hex}", account_public_id=account_id, proxy_id=proxy.id
+                public_id=new_public_id("ipb"), account_public_id=account_id, proxy_id=proxy.id
             )
         )
 
@@ -537,7 +538,7 @@ def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: 
         db, current_user.id, payload.protocol_public_id
     )
     item = PersonalAccount(
-        public_id=f"wa_{uuid4().hex}",
+        public_id=new_public_id("wa"),
         name=payload.name,
         phone_e164=payload.phone,
         country_code=payload.country_code,
@@ -642,7 +643,7 @@ async def import_account(
 
     protocol = select_ingress_protocol(db, current_user.id, protocol_public_id)
     item = PersonalAccount(
-        public_id=f"wa_{uuid4().hex}",
+        public_id=new_public_id("wa"),
         name=normalized_name,
         phone_e164=session.phone_e164,
         status="validating",
@@ -1004,13 +1005,15 @@ def send_message(db: DbSession, item: PersonalAccount, payload: SendRequest) -> 
     if existing:
         return existing
     delivery = MessageDelivery(
-        public_id=f"msg_{uuid4().hex}", request_id=payload.idempotency_key,
+        public_id=new_public_id("msg"), request_id=payload.idempotency_key,
         account_id=item.id, recipient_e164=payload.to, status="queued", queued_at=utcnow(),
     )
     db.add(delivery)
     db.commit()
     try:
-        result = WaGatewayClient().send(item.public_id, payload.idempotency_key, payload.to, payload.message)
+        result = WaGatewayClient().send(
+            item.public_id, delivery.public_id, payload.to, payload.message
+        )
         delivery.provider_message_id = str(result.get("providerMessageId") or "") or None
         # HTTP 202 only means the gateway durably accepted the queue item.  One
         # tick and two ticks are advanced exclusively by signed status events.

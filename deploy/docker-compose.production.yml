@@ -62,6 +62,7 @@ services:
     command: ["alembic", "upgrade", "head"]
     environment:
       <<: *api-environment
+      SNOWFLAKE_NODE_ID: ${MIGRATION_SNOWFLAKE_NODE_ID:-0}
     depends_on:
       postgres:
         condition: service_healthy
@@ -70,6 +71,7 @@ services:
     image: ${PARLOQ_WA_GATEWAY_IMAGE:?PARLOQ_WA_GATEWAY_IMAGE is required}
     restart: unless-stopped
     environment:
+      SNOWFLAKE_NODE_ID: ${WA_GATEWAY_SNOWFLAKE_NODE_ID:-3}
       NODE_ENV: production
       LOG_LEVEL: ${WA_GATEWAY_LOG_LEVEL:-info}
       WA_ENGINE: baileys
@@ -99,6 +101,7 @@ services:
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
     environment:
       <<: *api-environment
+      SNOWFLAKE_NODE_ID: ${API_SNOWFLAKE_NODE_ID:-1}
     depends_on:
       postgres:
         condition: service_healthy
@@ -119,6 +122,7 @@ services:
     command: ["python", "-m", "app.task_worker"]
     environment:
       <<: *api-environment
+      SNOWFLAKE_NODE_ID: ${WORKER_SNOWFLAKE_NODE_ID:-2}
     depends_on:
       postgres:
         condition: service_healthy

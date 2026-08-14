@@ -281,6 +281,7 @@ class BaoTaClient:
 def release_script(
     *, commit: str, short_sha: str, archive: str, checksum: str,
     api_image: str, web_image: str, gateway_image: str, status_file: str,
+    compose_content: str,
 ) -> str:
     for value in (commit, short_sha):
         if not re.fullmatch(r"[0-9a-f]{7,40}", value):
@@ -288,6 +289,9 @@ def release_script(
     for image in (api_image, web_image, gateway_image):
         if not re.fullmatch(r"[A-Za-z0-9._/:@-]+", image):
             raise BaoTaError("invalid image reference")
+    if not compose_content.strip() or len(compose_content.encode()) > 128_000:
+        raise BaoTaError("invalid managed Compose content")
+    compose_b64 = base64.b64encode(compose_content.encode()).decode()
     q = shlex.quote
     return f"""#!/usr/bin/env bash
 set -Eeuo pipefail
@@ -302,7 +306,10 @@ status_file={q(status_file)}
 api_image={q(api_image)}
 web_image={q(web_image)}
 gateway_image={q(gateway_image)}
+compose_b64={q(compose_b64)}
 backup="${{env_file}}.backup-${{short_sha}}-$(date -u +%Y%m%dT%H%M%SZ)"
+compose_backup="${{compose_file}}.backup-${{short_sha}}-$(date -u +%Y%m%dT%H%M%SZ)"
+compose_candidate="${{compose_file}}.candidate-${{short_sha}}"
 switched=0
 write_status() {{
   mkdir -p "$(dirname "${{status_file}}")"
@@ -311,8 +318,9 @@ write_status() {{
 rollback() {{
   code=$?
   rollback_succeeded=0
-  if [ "${{switched}}" = 1 ] && [ -f "${{backup}}" ]; then
-    if cp -p "${{backup}}" "${{env_file}}"; then
+  rm -f "${{compose_candidate}}"
+  if [ "${{switched}}" = 1 ] && [ -f "${{backup}}" ] && [ -f "${{compose_backup}}" ]; then
+    if cp -p "${{backup}}" "${{env_file}}" && cp -p "${{compose_backup}}" "${{compose_file}}"; then
       cd "${{remote_dir}}"
       if docker compose --env-file "${{env_file}}" -f "${{compose_file}}" up -d --no-deps wa-gateway api api-worker web; then
         rollback_succeeded=1
@@ -328,6 +336,12 @@ docker image load <"${{archive}}"
 [ -f "${{compose_file}}" ]
 [ -f "${{env_file}}" ]
 cp -p "${{env_file}}" "${{backup}}"
+cp -p "${{compose_file}}" "${{compose_backup}}"
+switched=1
+printf '%s' "${{compose_b64}}" | base64 -d >"${{compose_candidate}}"
+chmod --reference="${{compose_file}}" "${{compose_candidate}}"
+docker compose --env-file "${{env_file}}" -f "${{compose_candidate}}" config --quiet
+mv "${{compose_candidate}}" "${{compose_file}}"
 update_env() {{
   key="$1"; value="$2"
   if grep -q "^${{key}}=" "${{env_file}}"; then
@@ -340,7 +354,6 @@ update_env PARLOQ_API_IMAGE "${{api_image}}"
 update_env PARLOQ_WEB_IMAGE "${{web_image}}"
 update_env PARLOQ_WA_GATEWAY_IMAGE "${{gateway_image}}"
 chmod 600 "${{env_file}}"
-switched=1
 cd "${{remote_dir}}"
 docker compose --env-file "${{env_file}}" -f "${{compose_file}}" config --quiet
 docker compose --env-file "${{env_file}}" -f "${{compose_file}}" up -d postgres redis
@@ -357,7 +370,7 @@ for service in api api-worker web wa-gateway; do
   [ "${{revision}}" = "${{commit}}" ]
 done
 trap - ERR
-write_status '{{"status":"success","commit":"'"${{commit}}"'","backup":"'"${{backup}}"'"}}'
+write_status '{{"status":"success","commit":"'"${{commit}}"'","backup":"'"${{backup}}"'","composeBackup":"'"${{compose_backup}}"'"}}'
 """
 
 
@@ -388,6 +401,9 @@ def command_release(client: BaoTaClient, args: argparse.Namespace) -> None:
     archive = Path(args.archive).resolve()
     if not archive.is_file() or archive.suffix != ".tar":
         raise BaoTaError("release archive must be an existing .tar file")
+    compose_file = Path(args.compose_file).resolve()
+    if not compose_file.is_file():
+        raise BaoTaError("managed Compose file does not exist")
     remote_archive = client.upload(archive, RELEASE_DIR)
     status_file = f"{RELEASE_DIR}/status-{args.short_sha}.json"
     script = release_script(
@@ -399,6 +415,7 @@ def command_release(client: BaoTaClient, args: argparse.Namespace) -> None:
         web_image=args.web_image,
         gateway_image=args.gateway_image,
         status_file=status_file,
+        compose_content=compose_file.read_text(encoding="utf-8"),
     )
     task_id = client.add_shell_task(f"parloq-release-{args.short_sha}", script)
     result = client.wait_status(status_file)
@@ -409,7 +426,12 @@ def command_release(client: BaoTaClient, args: argparse.Namespace) -> None:
     client.delete_task(task_id)
     client.delete_file(remote_archive)
     client.delete_file(status_file)
-    print(json.dumps({"status": "success", "commit": args.commit, "backup": result.get("backup")}))
+    print(json.dumps({
+        "status": "success",
+        "commit": args.commit,
+        "backup": result.get("backup"),
+        "composeBackup": result.get("composeBackup"),
+    }))
 
 
 def parser() -> argparse.ArgumentParser:
@@ -429,6 +451,7 @@ def parser() -> argparse.ArgumentParser:
     release.add_argument("--api-image", required=True)
     release.add_argument("--web-image", required=True)
     release.add_argument("--gateway-image", required=True)
+    release.add_argument("--compose-file", required=True)
     return result
 
 

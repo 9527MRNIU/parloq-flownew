@@ -152,10 +152,6 @@ export function validateProxy(raw: string): string {
   return trimmed
 }
 
-export function randomId(prefix: string): string {
-  return `${prefix}_${crypto.randomUUID().replaceAll('-', '').slice(0, 24)}`
-}
-
 export function safeError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
   return message.replace(/((?:https?|socks5h?|socks):\/\/)[^@\s/]+@/gi, '$1[REDACTED]@')

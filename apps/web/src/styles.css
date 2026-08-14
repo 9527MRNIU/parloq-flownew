@@ -994,6 +994,66 @@ tr.selected-row {
   color: var(--muted-foreground);
   font-size: 11px;
 }
+.template-design-spec {
+  display: grid;
+  gap: 14px;
+}
+.template-design-spec__intro,
+.template-design-spec__section {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+.template-design-spec__intro {
+  border-color: color-mix(in srgb, var(--primary) 28%, var(--border));
+  background: color-mix(in srgb, var(--primary) 6%, var(--card));
+}
+.template-design-spec__intro strong,
+.template-design-spec__section h3 {
+  display: block;
+  margin: 0 0 7px;
+  color: var(--foreground);
+  font-size: 14px;
+}
+.template-design-spec__intro p,
+.template-design-spec__section > p {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.template-design-spec__section ul {
+  display: grid;
+  gap: 7px;
+  margin: 12px 0 0;
+  padding-left: 18px;
+  color: var(--foreground);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.template-design-spec__section ul.is-checklist {
+  list-style: none;
+  padding-left: 0;
+}
+.template-design-spec__section ul.is-checklist li::before {
+  content: "□";
+  margin-right: 8px;
+  color: var(--primary);
+}
+.template-design-spec__section pre {
+  max-width: 100%;
+  margin: 12px 0 0;
+  padding: 13px 14px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--muted-2);
+  color: var(--foreground);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre;
+}
 .channel-data-bar {
   display: flex;
   align-items: center;

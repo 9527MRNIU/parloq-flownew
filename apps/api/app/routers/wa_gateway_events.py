@@ -188,8 +188,14 @@ async def receive_status_event(
 
     with SessionLocal() as db:
         delivery = db.scalar(
-            select(MessageDelivery).where(MessageDelivery.request_id == message_id)
+            select(MessageDelivery).where(MessageDelivery.public_id == message_id)
         )
+        if delivery is None:
+            # Compatibility for jobs accepted before messageId switched from the
+            # client idempotency key to msg_<snowflake>.
+            delivery = db.scalar(
+                select(MessageDelivery).where(MessageDelivery.request_id == message_id)
+            )
         if delivery is None:
             raise HTTPException(status_code=404, detail="消息记录不存在")
         account_id = str(payload.get("accountId") or "").strip()

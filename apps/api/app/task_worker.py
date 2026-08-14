@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from uuid import uuid4
+
+# Keep the worker on a distinct Snowflake node even when an older deployment
+# definition has not started passing the explicit role-specific setting yet.
+os.environ.setdefault(
+    "SNOWFLAKE_NODE_ID", os.getenv("WORKER_SNOWFLAKE_NODE_ID", "2")
+)
 
 from sqlalchemy import func, or_, select
 
 from app.config import get_settings
 from app.database import SessionLocal
+from app.snowflake import new_public_id
+
 from app.models import (
     DataPackageRecipient,
     HyperlinkStrategy,
@@ -143,7 +151,7 @@ def _prepare_batch(task_public_id: str) -> tuple[list[SendJob], int, int] | None
             message = existing_messages.get(message_id)
             if message is None:
                 message = MessageDelivery(
-                    public_id=f"msg_{uuid4().hex}",
+                    public_id=new_public_id("msg"),
                     request_id=message_id,
                     account_id=account.id,
                     recipient_e164=recipient.phone_e164,
@@ -165,7 +173,7 @@ def _prepare_batch(task_public_id: str) -> tuple[list[SendJob], int, int] | None
                     task_delivery_id=delivery.id,
                     message_delivery_id=message.id,
                     account_public_id=account.public_id,
-                    message_id=message_id,
+                    message_id=message.public_id,
                     recipient_e164=recipient.phone_e164,
                     text=_render_text(template.content_json, recipient.variables_json),
                 )

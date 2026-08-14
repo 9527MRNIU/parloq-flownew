@@ -73,6 +73,9 @@ Gateway control endpoints require the bearer token from
 [services/wa-gateway-baileys/README.md](services/wa-gateway-baileys/README.md) for REST examples,
 the disconnect/logout distinction and real pairing steps.
 
+Entity IDs and writer-node allocation follow
+[docs/id-conventions.md](docs/id-conventions.md).
+
 ## Promotion template example
 
 `examples/promotion-template-demo.zip` is a ready-to-import promotion template.

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+from app.snowflake import new_public_id
 
 from app.models import ProtocolNode
 
@@ -33,7 +34,7 @@ def select_ingress_protocol(
         # New tenants created after the schema migration receive their default
         # node lazily. A concurrent first ingress may race, so retry selection.
         item = ProtocolNode(
-            public_id=f"proto_{uuid4().hex}",
+            public_id=new_public_id("proto"),
             name="Baileys 默认协议",
             protocol_type="baileys",
             remark="系统默认 Baileys 协议节点",

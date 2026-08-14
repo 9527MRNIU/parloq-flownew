@@ -20,11 +20,11 @@ def iso(value: object | None) -> str | None:
 def user_row(user: UserAccount, group: UserGroup | None = None) -> dict[str, Any]:
     resolved_group = group or user.group
     return {
-        "id": user.id,
+        "id": str(user.id),
         "username": user.username,
         "displayName": user.display_name,
-        "groupId": user.group_id,
-        "roleId": user.group_id,
+        "groupId": str(user.group_id),
+        "roleId": str(user.group_id),
         "groupName": resolved_group.name if resolved_group else None,
         "role": user.role,
         "isAdmin": user.role == "admin",
@@ -38,7 +38,7 @@ def user_row(user: UserAccount, group: UserGroup | None = None) -> dict[str, Any
 
 def group_row(group: UserGroup, user_count: int = 0) -> dict[str, Any]:
     return {
-        "id": group.id,
+        "id": str(group.id),
         "name": group.name,
         "systemKey": group.system_key,
         "description": group.description,

@@ -9,6 +9,7 @@ from app.models import AuthSession, UserAccount
 from app.schemas import LoginRequest
 from app.security import create_session_token, utcnow, verify_password
 from app.serializers import user_row
+from app.snowflake import new_public_id
 
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -24,7 +25,7 @@ def login(payload: LoginRequest, response: Response, db: DbSession) -> dict:
     token, token_hash, expires_at = create_session_token()
     db.add(
         AuthSession(
-            public_id=f"ses_{token_hash[:24]}",
+            public_id=new_public_id("ses"),
             token_hash=token_hash,
             user_id=user.id,
             expires_at=expires_at,

@@ -54,6 +54,7 @@ def seed_initial_data(db: Session) -> None:
         UserGroup,
     )
     from app.security import encrypt_secret, hash_password, secret_fingerprint
+    from app.snowflake import new_public_id
 
     admin_group = db.scalar(select(UserGroup).where(UserGroup.system_key == "admin"))
     if admin_group is None:
@@ -152,7 +153,7 @@ def seed_initial_data(db: Session) -> None:
             mock_token = "local-bitly-mock-token"
             db.add(
                 BitlyProviderAccount(
-                    public_id="bitly_mock",
+                    public_id=new_public_id("bitly"),
                     name="Bitly Mock",
                     token_ciphertext=encrypt_secret(mock_token),
                     token_fingerprint=secret_fingerprint(mock_token),

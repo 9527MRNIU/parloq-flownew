@@ -99,7 +99,11 @@ def test_account_statistics_are_event_based_and_tenant_scoped(
     collection_start = _utc_on(first_day, 6)
 
     with SessionLocal() as db:
-        state = db.get(AccountAnalyticsState, 1)
+        state = db.scalar(
+            select(AccountAnalyticsState).where(
+                AccountAnalyticsState.singleton_key == "global"
+            )
+        )
         assert state is not None
         original_collection_start = state.collection_started_at
         state.collection_started_at = collection_start
@@ -303,7 +307,11 @@ def test_account_statistics_are_event_based_and_tenant_scoped(
     finally:
         owner_client.close()
         with SessionLocal() as db:
-            state = db.get(AccountAnalyticsState, 1)
+            state = db.scalar(
+                select(AccountAnalyticsState).where(
+                    AccountAnalyticsState.singleton_key == "global"
+                )
+            )
             assert state is not None
             state.collection_started_at = original_collection_start
             db.commit()

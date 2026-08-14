@@ -104,7 +104,11 @@ def _active_at(account: PersonalAccount, cutoff: datetime) -> bool:
 
 
 def _collection_started_at(db: Session) -> datetime:
-    state = db.get(AccountAnalyticsState, 1)
+    state = db.scalar(
+        select(AccountAnalyticsState).where(
+            AccountAnalyticsState.singleton_key == "global"
+        )
+    )
     # A missing singleton means the migration has not established a trustworthy
     # history boundary. Starting at "now" is conservative and never invents old
     # snapshots from current account fields.

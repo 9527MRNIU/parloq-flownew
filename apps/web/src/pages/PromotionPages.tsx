@@ -1,5 +1,6 @@
 import {
   ArchiveIcon,
+  BookOpenIcon,
   CopyIcon,
   EyeIcon,
   ExternalLinkIcon,
@@ -53,6 +54,10 @@ import {
 } from "../components/list-page";
 import { useAuth } from "../auth/AuthContext";
 import { countryOptions } from "../lib/countries";
+import {
+  TEMPLATE_DESIGN_SECTIONS,
+  templateAiCreationPrompt,
+} from "../content/promotion-template-design";
 
 const CHANNEL_SLUG_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
 
@@ -138,10 +143,10 @@ type TemplatePolicy = {
 };
 
 const defaultTemplatePolicy: TemplatePolicy = {
-  protectionMode: "basic",
-  devtoolsAction: "log",
-  lockViewportZoom: false,
-  deviceSignals: "standard",
+  protectionMode: "strict",
+  devtoolsAction: "blank",
+  lockViewportZoom: true,
+  deviceSignals: "enhanced",
 };
 
 function templatePolicyRow(input: unknown): TemplatePolicy {
@@ -295,6 +300,7 @@ export function PromotionTemplatesPage() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [pending, setPending] = useState(false);
+  const [designSpecDrawer, setDesignSpecDrawer] = useState(false);
   const [policyDrawer, setPolicyDrawer] = useState(false);
   const [policy, setPolicy] = useState<TemplatePolicy>(defaultTemplatePolicy);
   const [policyLoading, setPolicyLoading] = useState(false);
@@ -407,6 +413,14 @@ export function PromotionTemplatesPage() {
     setPolicyDrawer(true);
     void loadPolicy();
   }
+  async function copyDesignSpec() {
+    try {
+      await navigator.clipboard.writeText(templateAiCreationPrompt());
+      toast.success("设计规范已复制，可以直接发送给 AI");
+    } catch {
+      toast.error("复制失败，请检查浏览器剪贴板权限");
+    }
+  }
   async function savePolicy() {
     if (!canManage || !policyLoaded || policyError) return;
     setPolicySaving(true);
@@ -438,13 +452,17 @@ export function PromotionTemplatesPage() {
         meta={`${visible.length} 个模板`}
         actions={
           <>
-            <Button variant="outline" onClick={openPolicy}>
-              <Settings2Icon size={16} />
-              模板策略
-            </Button>
             <Button variant="outline" onClick={() => void load()}>
               <RefreshCwIcon size={16} />
               刷新
+            </Button>
+            <Button variant="outline" onClick={() => setDesignSpecDrawer(true)}>
+              <BookOpenIcon size={16} />
+              设计规范
+            </Button>
+            <Button variant="outline" onClick={openPolicy}>
+              <Settings2Icon size={16} />
+              模板策略
             </Button>
             {canManage ? (
               <Button onClick={() => openImport()}>
@@ -551,6 +569,53 @@ export function PromotionTemplatesPage() {
           />
         )}
       </ListTableCard>
+      <Drawer
+        open={designSpecDrawer}
+        onClose={() => setDesignSpecDrawer(false)}
+        title="推广模板设计规范"
+        description="面向设计、开发和 AI 生成的 v1 模板交付标准。复制后可直接作为 AI 创建模板的完整提示词。"
+        wide
+        footer={
+          <>
+            <Button
+              variant="outline"
+              onClick={() => setDesignSpecDrawer(false)}
+            >
+              关闭
+            </Button>
+            <Button onClick={() => void copyDesignSpec()}>
+              <CopyIcon size={16} />
+              复制给 AI
+            </Button>
+          </>
+        }
+      >
+        <div className="template-design-spec">
+          <div className="template-design-spec__intro">
+            <strong>使用方式</strong>
+            <p>
+              将完整规范复制给 AI，再补充品牌名称、视觉风格、主色、目标国家和文案语气。AI
+              应输出可直接压缩为 ZIP 的完整目录与文件内容。
+            </p>
+          </div>
+          {TEMPLATE_DESIGN_SECTIONS.map((section) => (
+            <section className="template-design-spec__section" key={section.title}>
+              <h3>{section.title}</h3>
+              {section.description ? <p>{section.description}</p> : null}
+              <ul className={section.checklist ? "is-checklist" : undefined}>
+                {section.bullets.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+              {section.code ? (
+                <pre>
+                  <code>{section.code}</code>
+                </pre>
+              ) : null}
+            </section>
+          ))}
+        </div>
+      </Drawer>
       <Drawer
         open={policyDrawer}
         onClose={() => !policySaving && setPolicyDrawer(false)}
@@ -1136,6 +1201,25 @@ export function PromotionChannelsPage() {
           onChange: setKeyword,
           placeholder: "搜索渠道、国家、域名或 Slug",
         }}
+        filters={
+          <div className="channel-data-bar">
+            <SelectField
+              className="w-[280px]"
+              value={insightChannelId}
+              onValueChange={setInsightChannelId}
+              placeholder="选择渠道查看数据和号码"
+              options={rows.map((row) => ({ value: row.id, label: row.name }))}
+            />
+            <Button
+              variant="outline"
+              disabled={!insightChannelId}
+              onClick={() => void openInsights()}
+            >
+              <EyeIcon size={16} />
+              查看渠道数据
+            </Button>
+          </div>
+        }
         meta={`${visible.length} 个渠道`}
         actions={
           <>
@@ -1271,23 +1355,6 @@ export function PromotionChannelsPage() {
           />
         )}
       </ListTableCard>
-      <div className="channel-data-bar">
-        <SelectField
-          className="w-[280px]"
-          value={insightChannelId}
-          onValueChange={setInsightChannelId}
-          placeholder="选择渠道查看数据和号码"
-          options={rows.map((row) => ({ value: row.id, label: row.name }))}
-        />
-        <Button
-          variant="outline"
-          disabled={!insightChannelId}
-          onClick={() => void openInsights()}
-        >
-          <EyeIcon size={16} />
-          查看渠道数据
-        </Button>
-      </div>
       <Drawer
         open={drawer}
         onClose={() => !pending && setDrawer(false)}

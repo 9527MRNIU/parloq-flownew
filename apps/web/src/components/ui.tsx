@@ -64,6 +64,7 @@ export function Drawer({
   description,
   children,
   footer,
+  wide = false,
   onClose,
 }: {
   open: boolean;
@@ -71,6 +72,7 @@ export function Drawer({
   description?: string;
   children: ReactNode;
   footer?: ReactNode;
+  wide?: boolean;
   onClose: () => void;
 }) {
   return (
@@ -80,7 +82,9 @@ export function Drawer({
         if (!next) onClose();
       }}
     >
-      <SheetContent className="gap-0 sm:max-w-[580px]">
+      <SheetContent
+        className={wide ? "gap-0 sm:max-w-[720px]" : "gap-0 sm:max-w-[580px]"}
+      >
         <SheetHeader>
           <SheetTitle>{title}</SheetTitle>
           {description ? (

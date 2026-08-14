@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -21,6 +22,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+from app.snowflake import next_snowflake_id
 
 
 class TimestampMixin:
@@ -38,7 +40,7 @@ class TimestampMixin:
 class UserGroup(Base, TimestampMixin):
     __tablename__ = "user_groups"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     system_key: Mapped[str | None] = mapped_column(String(32), unique=True, index=True)
     description: Mapped[str | None] = mapped_column(Text)
@@ -57,10 +59,11 @@ class UserGroup(Base, TimestampMixin):
 class UserAccount(Base, TimestampMixin):
     __tablename__ = "user_accounts"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     username: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     display_name: Mapped[str | None] = mapped_column(String(120))
     group_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_groups.id", ondelete="RESTRICT"), index=True
     )
     password_hash: Mapped[str] = mapped_column(Text)
@@ -77,10 +80,11 @@ class UserAccount(Base, TimestampMixin):
 class AuthSession(Base, TimestampMixin):
     __tablename__ = "auth_sessions"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     user_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
@@ -95,9 +99,10 @@ class SystemMenu(Base, TimestampMixin):
         CheckConstraint("menu_type IN ('directory', 'page')", name="ck_system_menus_type"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     parent_id: Mapped[int | None] = mapped_column(
+        BigInteger,
         ForeignKey("system_menus.id", ondelete="RESTRICT"), index=True
     )
     name: Mapped[str] = mapped_column(String(80), index=True)
@@ -122,11 +127,13 @@ class RoleMenuPermission(Base, TimestampMixin):
         UniqueConstraint("role_id", "menu_id", name="uq_role_menu_permission"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     role_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_groups.id", ondelete="CASCADE"), index=True
     )
     menu_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("system_menus.id", ondelete="CASCADE"), index=True
     )
 
@@ -140,8 +147,9 @@ class RoleActionPermission(Base, TimestampMixin):
         UniqueConstraint("role_id", "permission_key", name="uq_role_action_permission"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     role_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_groups.id", ondelete="CASCADE"), index=True
     )
     permission_key: Mapped[str] = mapped_column(String(120), index=True)
@@ -152,7 +160,7 @@ class RoleActionPermission(Base, TimestampMixin):
 class BitlyProviderAccount(Base, TimestampMixin):
     __tablename__ = "bitly_provider_accounts"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120), unique=True)
     token_ciphertext: Mapped[str] = mapped_column(Text)
@@ -174,13 +182,14 @@ class DirectShortLink(Base, TimestampMixin):
         Index("ix_direct_short_links_status_created", "status", "created_at"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     title: Mapped[str | None] = mapped_column(String(255))
     target_url: Mapped[str] = mapped_column(Text)
     bitlink_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     short_url: Mapped[str] = mapped_column(Text)
     provider_account_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("bitly_provider_accounts.id", ondelete="RESTRICT"), index=True
     )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
@@ -188,6 +197,7 @@ class DirectShortLink(Base, TimestampMixin):
     last_error: Mapped[str | None] = mapped_column(Text)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
     )
 
@@ -197,7 +207,7 @@ class DirectShortLink(Base, TimestampMixin):
 class MetaPixel(Base, TimestampMixin):
     __tablename__ = "meta_pixels"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120))
     dataset_id: Mapped[str] = mapped_column(String(120), unique=True, index=True)
@@ -206,6 +216,7 @@ class MetaPixel(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
     )
 
@@ -224,7 +235,7 @@ class ProxyEndpoint(Base, TimestampMixin):
         CheckConstraint("port >= 1 AND port <= 65535", name="ck_proxy_endpoints_port"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
     protocol: Mapped[str] = mapped_column(String(16), index=True)
@@ -265,7 +276,7 @@ class IpAllocationPolicy(Base, TimestampMixin):
         UniqueConstraint("created_by", name="uq_ip_allocation_policies_owner"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     allocation_mode: Mapped[str] = mapped_column(
         String(24), default="least_load", nullable=False, index=True
@@ -277,6 +288,7 @@ class IpAllocationPolicy(Base, TimestampMixin):
     avoid_unhealthy: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     sticky_binding: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_by: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
     )
 
@@ -284,10 +296,11 @@ class IpAllocationPolicy(Base, TimestampMixin):
 class AccountProxyBinding(Base, TimestampMixin):
     __tablename__ = "account_proxy_bindings"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     account_public_id: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     proxy_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("proxy_endpoints.id", ondelete="RESTRICT"), index=True
     )
 
@@ -300,12 +313,13 @@ class AccountGroup(Base, TimestampMixin):
         UniqueConstraint("created_by", "name", name="uq_account_groups_owner_name"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
     description: Mapped[str | None] = mapped_column(Text)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
     )
 
@@ -321,7 +335,7 @@ class ProtocolNode(Base, TimestampMixin):
         ),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(64), index=True)
     protocol_type: Mapped[str] = mapped_column(
@@ -341,6 +355,7 @@ class ProtocolNode(Base, TimestampMixin):
         DateTime(timezone=True), index=True
     )
     created_by: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
     )
 
@@ -362,7 +377,7 @@ class PersonalAccount(Base, TimestampMixin):
         ),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
     phone_e164: Mapped[str | None] = mapped_column(String(20), unique=True, index=True)
@@ -381,9 +396,11 @@ class PersonalAccount(Base, TimestampMixin):
         String(16), default="pending", nullable=False, index=True
     )
     group_id: Mapped[int | None] = mapped_column(
+        BigInteger,
         ForeignKey("account_groups.id", ondelete="SET NULL"), index=True
     )
     protocol_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("protocol_nodes.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     has_avatar: Mapped[bool | None] = mapped_column(Boolean)
@@ -395,7 +412,7 @@ class PersonalAccount(Base, TimestampMixin):
     last_error: Mapped[str | None] = mapped_column(Text)
     last_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    created_by: Mapped[int] = mapped_column(ForeignKey("user_accounts.id", ondelete="RESTRICT"))
+    created_by: Mapped[int] = mapped_column(BigInteger, ForeignKey("user_accounts.id", ondelete="RESTRICT"))
 
 
 class AccountLifecycleEvent(Base):
@@ -413,9 +430,10 @@ class AccountLifecycleEvent(Base):
         ),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     account_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("personal_accounts.id", ondelete="CASCADE"), index=True
     )
     from_state: Mapped[str | None] = mapped_column(String(32))
@@ -431,10 +449,13 @@ class AccountLifecycleEvent(Base):
 class AccountAnalyticsState(Base):
     __tablename__ = "account_analytics_state"
     __table_args__ = (
-        CheckConstraint("id = 1", name="ck_account_analytics_state_singleton"),
+        CheckConstraint("singleton_key = 'global'", name="ck_account_analytics_state_singleton"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
+    singleton_key: Mapped[str] = mapped_column(
+        String(16), default="global", server_default="global", unique=True, nullable=False
+    )
     collection_started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -443,10 +464,11 @@ class AccountAnalyticsState(Base):
 class MessageDelivery(Base, TimestampMixin):
     __tablename__ = "message_deliveries"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     request_id: Mapped[str] = mapped_column(String(160), unique=True, index=True)
     account_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("personal_accounts.id", ondelete="RESTRICT"), index=True
     )
     recipient_e164: Mapped[str] = mapped_column(String(20), index=True)
@@ -480,7 +502,7 @@ class DomainRecord(Base, TimestampMixin):
         ),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     hostname: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     acquisition_type: Mapped[str] = mapped_column(
@@ -509,6 +531,7 @@ class DomainRecord(Base, TimestampMixin):
     last_error: Mapped[str | None] = mapped_column(Text)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
     )
 
@@ -516,7 +539,7 @@ class DomainRecord(Base, TimestampMixin):
 class DomainQuote(Base, TimestampMixin):
     __tablename__ = "domain_quotes"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     hostname: Mapped[str] = mapped_column(String(255), index=True)
     years: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -526,6 +549,7 @@ class DomainQuote(Base, TimestampMixin):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
     )
 
@@ -541,9 +565,10 @@ class DomainOrder(Base, TimestampMixin):
         CheckConstraint("amount >= 0", name="ck_domain_orders_amount"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     quote_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("domain_quotes.id", ondelete="RESTRICT"), unique=True, index=True
     )
     hostname: Mapped[str] = mapped_column(String(255), index=True)
@@ -561,9 +586,11 @@ class DomainOrder(Base, TimestampMixin):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     domain_id: Mapped[int | None] = mapped_column(
+        BigInteger,
         ForeignKey("domains.id", ondelete="SET NULL"), unique=True, index=True
     )
     created_by: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
     )
 
@@ -571,7 +598,7 @@ class DomainOrder(Base, TimestampMixin):
 class PromotionTemplate(Base, TimestampMixin):
     __tablename__ = "promotion_templates"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
     description: Mapped[str | None] = mapped_column(Text)
@@ -583,6 +610,7 @@ class PromotionTemplate(Base, TimestampMixin):
     total_size: Mapped[int] = mapped_column(Integer, default=0)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
     )
 
@@ -605,20 +633,21 @@ class PromotionTemplatePolicy(Base, TimestampMixin):
         ),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     protection_mode: Mapped[str] = mapped_column(
-        String(16), default="basic", nullable=False
+        String(16), default="strict", nullable=False
     )
     devtools_action: Mapped[str] = mapped_column(
-        String(16), default="log", nullable=False
+        String(16), default="blank", nullable=False
     )
     lock_viewport_zoom: Mapped[bool] = mapped_column(
-        Boolean, default=False, nullable=False
+        Boolean, default=True, nullable=False
     )
     device_signals: Mapped[str] = mapped_column(
-        String(16), default="standard", nullable=False
+        String(16), default="enhanced", nullable=False
     )
     created_by: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
@@ -631,8 +660,9 @@ class PromotionAsset(Base, TimestampMixin):
         UniqueConstraint("template_id", "path", name="uq_promotion_asset_path"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     template_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("promotion_templates.id", ondelete="CASCADE"), index=True
     )
     path: Mapped[str] = mapped_column(String(512))
@@ -652,15 +682,17 @@ class PromotionChannel(Base, TimestampMixin):
         ),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     channel_type: Mapped[str] = mapped_column(String(24), default="facebook", index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
     country_code: Mapped[str] = mapped_column(String(2), index=True)
     template_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("promotion_templates.id", ondelete="RESTRICT"), index=True
     )
     domain_id: Mapped[int | None] = mapped_column(
+        BigInteger,
         ForeignKey("domains.id", ondelete="RESTRICT"), index=True
     )
     subdomain_prefix: Mapped[str] = mapped_column(
@@ -668,6 +700,7 @@ class PromotionChannel(Base, TimestampMixin):
     )
     slug: Mapped[str] = mapped_column(String(120), index=True)
     pixel_id: Mapped[int | None] = mapped_column(
+        BigInteger,
         ForeignKey("meta_pixels.id", ondelete="SET NULL"), index=True
     )
     locale_mode: Mapped[str] = mapped_column(String(16), default="auto")
@@ -676,6 +709,7 @@ class PromotionChannel(Base, TimestampMixin):
     launch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
     )
 
@@ -688,15 +722,17 @@ class PromotionEvent(Base, TimestampMixin):
         Index("ix_promotion_events_channel_visitor", "channel_id", "visitor_id"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     channel_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("promotion_channels.id", ondelete="CASCADE"), index=True
     )
     event_type: Mapped[str] = mapped_column(String(32), index=True)
     idempotency_key: Mapped[str] = mapped_column(String(160))
     visitor_id: Mapped[str | None] = mapped_column(String(80))
     lead_id: Mapped[int | None] = mapped_column(
+        BigInteger,
         ForeignKey("promotion_leads.id", ondelete="SET NULL"), index=True
     )
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
@@ -710,9 +746,10 @@ class PromotionLead(Base, TimestampMixin):
         UniqueConstraint("channel_id", "phone_e164", name="uq_promotion_lead_phone"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     channel_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("promotion_channels.id", ondelete="CASCADE"), index=True
     )
     phone_e164: Mapped[str] = mapped_column(String(20), index=True)
@@ -725,7 +762,7 @@ class PromotionLead(Base, TimestampMixin):
 class HyperlinkMaterial(Base, TimestampMixin):
     __tablename__ = "hyperlink_materials"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
     material_type: Mapped[str] = mapped_column(String(24), index=True)
@@ -733,6 +770,7 @@ class HyperlinkMaterial(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
     )
 
@@ -740,19 +778,22 @@ class HyperlinkMaterial(Base, TimestampMixin):
 class HyperlinkTemplate(Base, TimestampMixin):
     __tablename__ = "hyperlink_templates"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
     content_json: Mapped[dict] = mapped_column(JSON, default=dict)
     material_id: Mapped[int | None] = mapped_column(
+        BigInteger,
         ForeignKey("hyperlink_materials.id", ondelete="SET NULL"), index=True
     )
     promotion_channel_id: Mapped[int | None] = mapped_column(
+        BigInteger,
         ForeignKey("promotion_channels.id", ondelete="SET NULL"), index=True
     )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
     )
 
@@ -760,7 +801,7 @@ class HyperlinkTemplate(Base, TimestampMixin):
 class HyperlinkStrategy(Base, TimestampMixin):
     __tablename__ = "hyperlink_strategies"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
     max_qps: Mapped[int] = mapped_column(Integer, default=10)
@@ -771,6 +812,7 @@ class HyperlinkStrategy(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
     )
 
@@ -778,12 +820,13 @@ class HyperlinkStrategy(Base, TimestampMixin):
 class DataPackage(Base, TimestampMixin):
     __tablename__ = "data_packages"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
     status: Mapped[str] = mapped_column(String(16), default="ready", index=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
     )
 
@@ -794,9 +837,10 @@ class DataPackageRecipient(Base, TimestampMixin):
         UniqueConstraint("data_package_id", "phone_e164", name="uq_data_package_phone"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     data_package_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("data_packages.id", ondelete="CASCADE"), index=True
     )
     phone_e164: Mapped[str] = mapped_column(String(20), index=True)
@@ -807,16 +851,19 @@ class DataPackageRecipient(Base, TimestampMixin):
 class HyperlinkTask(Base, TimestampMixin):
     __tablename__ = "hyperlink_tasks"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
     template_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("hyperlink_templates.id", ondelete="RESTRICT"), index=True
     )
     strategy_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("hyperlink_strategies.id", ondelete="RESTRICT"), index=True
     )
     data_package_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("data_packages.id", ondelete="RESTRICT"), index=True
     )
     account_public_ids: Mapped[list] = mapped_column(JSON, default=list)
@@ -831,6 +878,7 @@ class HyperlinkTask(Base, TimestampMixin):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
     )
 
@@ -841,18 +889,22 @@ class HyperlinkTaskDelivery(Base, TimestampMixin):
         UniqueConstraint("task_id", "recipient_id", name="uq_task_recipient_delivery"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     task_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("hyperlink_tasks.id", ondelete="CASCADE"), index=True
     )
     recipient_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("data_package_recipients.id", ondelete="RESTRICT"), index=True
     )
     account_id: Mapped[int | None] = mapped_column(
+        BigInteger,
         ForeignKey("personal_accounts.id", ondelete="SET NULL"), index=True
     )
     message_delivery_id: Mapped[int | None] = mapped_column(
+        BigInteger,
         ForeignKey("message_deliveries.id", ondelete="SET NULL"), index=True
     )
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
@@ -866,10 +918,11 @@ class AdMetric(Base, TimestampMixin):
         UniqueConstraint("metric_date", "promotion_channel_id", name="uq_ad_metric_slice"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     metric_date: Mapped[date] = mapped_column(Date, index=True)
     promotion_channel_id: Mapped[int] = mapped_column(
+        BigInteger,
         ForeignKey("promotion_channels.id", ondelete="CASCADE"), index=True
     )
     channel: Mapped[str] = mapped_column(String(80), index=True)

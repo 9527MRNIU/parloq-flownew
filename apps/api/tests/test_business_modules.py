@@ -237,7 +237,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     assert "connect-src http://testserver" in preview.headers["content-security-policy"]
     assert '"previewMode": true' in preview.text
     assert '"templatePolicy": {' in preview.text
-    assert '"deviceSignals": "standard"' in preview.text
+    assert '"deviceSignals": "enhanced"' in preview.text
     assert "window.parloqSubmitPhone" in preview.text
     assert 'addEventListener("contextmenu"' in preview.text
     assert 'e.key==="F12"' in preview.text
@@ -532,6 +532,8 @@ def test_personal_account_gateway_and_hyperlink_delivery(admin_client: TestClien
     assert sent.status_code == 200
     delivery = sent.json()["data"]["messageDelivery"]
     assert delivery["status"] == "queued"
+    assert re.fullmatch(r"msg_\d+", delivery["messageId"])
+    assert delivery["requestId"] == "manual-message-0001"
     assert "message" not in delivery
     assert admin_client.post(
         "/api/internal/wa-gateway/events",
