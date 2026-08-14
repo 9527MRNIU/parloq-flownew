@@ -289,7 +289,23 @@ export class GatewayService {
           await this.store.updateAccount(event.accountId, { metadataSyncStatus: 'failed' })
         }
       } else if (event.kind === 'disconnected') {
-        await this.transitionAccount(event.accountId, 'linked_offline', {}, event.reasonCategory, event.providerCode)
+        const current = await this.store.getAccount(event.accountId)
+        const hasLinkedSession = current.sessionStatus === 'verified' || Boolean(current.deviceJid)
+        if (hasLinkedSession) {
+          await this.transitionAccount(event.accountId, 'linked_offline', {}, event.reasonCategory, event.providerCode)
+        } else {
+          // A pairing socket can close after a code was issued but before the
+          // phone authorizes the companion. Such a socket cannot complete the
+          // handshake and must never be presented as a linked account.
+          await this.store.clearAuth(event.accountId)
+          await this.transitionAccount(
+            event.accountId,
+            'unpaired',
+            { deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none' },
+            'pairing_connection_lost',
+            event.providerCode,
+          )
+        }
       } else if (event.kind === 'logged_out') {
         await this.store.clearAuth(event.accountId)
         await this.transitionAccount(event.accountId, 'unpaired', { deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none' }, event.reasonCategory, event.providerCode)

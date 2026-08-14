@@ -44,6 +44,8 @@ const pairing = payload?.data?.pairing;
 
 // 展示 pairing.pairingCode，并使用平台返回的
 // pairing.statusUrl + pairing.statusToken 轮询状态。
+// 只有 pairingStatus === "verified" 且 verified === true
+// 才能显示成功；不得根据 accountState 推断配对结果。
 // 不得自行拼接账号、渠道或网关 API。`;
 
 export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
@@ -89,6 +91,7 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
       "表单使用 type=tel、inputmode=tel、autocomplete=tel，并带 data-parloq-manual 防止重复提交。",
       "提交期间禁用按钮；需要有加载、校验失败、线路不可用、配对中、成功、过期和重试状态。",
       "只能使用响应返回的 pairingCode、statusUrl 和 statusToken；不得自行拼接内部接口。",
+      "轮询时只认 pairingStatus：pending 继续等待，verified 且 verified=true 才成功，failed/expired 提示重试；禁止根据 linked_offline 等账号状态推断成功。",
       "连续点击不得创建重复请求；号码不得进入 URL、Cookie、日志或浏览器存储。",
     ],
     code: TEMPLATE_RUNTIME_EXAMPLE,

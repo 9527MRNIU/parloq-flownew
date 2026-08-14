@@ -118,6 +118,30 @@ class TerminalConnectEngine implements ProtocolEngine {
   isOnline(_accountId: string): boolean { return false }
 }
 
+class InterruptedPairingEngine implements ProtocolEngine {
+  readonly name = 'interrupted-pairing-test'
+  private handler: (event: EngineEvent) => void = () => undefined
+  setEventHandler(handler: (event: EngineEvent) => void): void { this.handler = handler }
+  async start(): Promise<void> {}
+  async ready(): Promise<void> {}
+  async close(): Promise<void> {}
+  async pair(account: EngineAccount): Promise<PairResult> {
+    queueMicrotask(() => this.handler({
+      kind: 'disconnected',
+      accountId: account.accountId,
+      reasonCategory: 'protocol_disconnect',
+      providerCode: '428',
+    }))
+    return { accountId: account.accountId, code: 'ABCD-EFGH', expiresAt: new Date(Date.now() + 180_000) }
+  }
+  async connect(_account: EngineAccount): Promise<void> { throw new Error('not implemented') }
+  async disconnect(_accountId: string): Promise<void> {}
+  async logout(_account: EngineAccount): Promise<void> {}
+  async send(_accountId: string, _toE164: string, _text: string): Promise<string> { throw new Error('not implemented') }
+  async getQuality(_accountId: string): Promise<AccountQuality> { return { hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null } }
+  isOnline(_accountId: string): boolean { return false }
+}
+
 describe('Baileys gateway HTTP contract', () => {
   let store: MemoryStore
   let engine: MockEngine
@@ -166,6 +190,31 @@ describe('Baileys gateway HTTP contract', () => {
     expect(claimed.json().data).toMatchObject({ id: 'wa_orphan_new', state: 'unpaired', reasonCategory: 'orphan_reclaimed' })
     expect(store.accounts.has('wa_orphan_old')).toBe(false)
     expect(store.accounts.has('wa_orphan_new')).toBe(true)
+  })
+
+  it('never turns an interrupted unverified pairing socket into a linked account', async () => {
+    const isolatedStore = new MemoryStore()
+    const interruptedEngine = new InterruptedPairingEngine()
+    const logger = pino({ level: 'silent' })
+    const isolatedService = new GatewayService(isolatedStore, interruptedEngine, new WebhookClient('', '', 0, logger), logger)
+    await isolatedService.start()
+    try {
+      await isolatedService.createAccount({ id: 'wa_interrupted_pairing', phoneE164: '+14155550132', proxyUrl: 'socks5://proxy.example:1080' })
+      const pairing = await isolatedService.requestPairingCode('wa_interrupted_pairing')
+      expect(pairing.code).toBe('ABCD-EFGH')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      const account = await isolatedStore.getAccount('wa_interrupted_pairing')
+      expect(account).toMatchObject({
+        state: 'unpaired',
+        sessionStatus: 'none',
+        sessionCompleteness: 'none',
+        deviceJid: '',
+        reasonCategory: 'pairing_connection_lost',
+      })
+    } finally {
+      await isolatedService.close()
+    }
   })
 
   it('imports legacy Baileys creds as pending and exports a complete versioned bundle', async () => {

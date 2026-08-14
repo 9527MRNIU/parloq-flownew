@@ -144,6 +144,10 @@ def _pairing_status_token(
         "account": account.public_id,
         "visitor": visitor_id,
         "iat": issued_at,
+        # Baileys pairing codes currently expire after three minutes. Keeping
+        # this deadline in the signed token lets the public status endpoint
+        # expose a stable terminal state without trusting template timers.
+        "pairExp": issued_at + 180,
         "exp": issued_at + 600,
     }
     encoded = base64.urlsafe_b64encode(
@@ -177,6 +181,19 @@ def _verify_pairing_status_token(
         return payload
     except (ValueError, TypeError, json.JSONDecodeError):
         raise HTTPException(status_code=403, detail="账号链接状态凭证已失效") from None
+
+
+def _public_pairing_status(
+    *, state: str, verified: bool, validation_status: str, token_payload: dict
+) -> str:
+    if verified:
+        return "verified"
+    if state in {"unpaired", "reauth_required", "restricted"} or validation_status == "failed":
+        return "failed"
+    expires_at = int(token_payload.get("pairExp") or int(token_payload.get("iat", 0)) + 180)
+    if expires_at <= int(utcnow().timestamp()):
+        return "expired"
+    return "pending"
 
 
 def _template(db: DbSession, public_id: str, user) -> PromotionTemplate:
@@ -589,7 +606,15 @@ def preview_pairing_status(
 ) -> JSONResponse:
     _verify_preview_asset_token(public_id, token)
     return JSONResponse(
-        {"data": {"state": "ready", "preview": True}},
+        {
+            "data": {
+                "state": "ready",
+                "accountState": "linked_offline",
+                "pairingStatus": "verified",
+                "verified": True,
+                "preview": True,
+            }
+        },
         headers={
             "Access-Control-Allow-Origin": "null",
             "Cache-Control": "private, no-store",
@@ -1295,6 +1320,12 @@ def public_pairing_status(
         or state in {"online_idle", "sending"}
         or (client.settings.wa_gateway_mock and state == "linked_offline")
     )
+    pairing_status = _public_pairing_status(
+        state=state,
+        verified=verified,
+        validation_status=item.validation_status,
+        token_payload=token_payload,
+    )
     if verified:
         item.status = state
         item.validation_status = "ready"
@@ -1324,8 +1355,24 @@ def public_pairing_status(
             )
         ) else None
         db.commit()
+    # `state` remains as a compatibility field for already-imported v1
+    # templates, but now carries only the stable public pairing state. Raw
+    # operational account state is diagnostic and must not drive template UI.
+    legacy_state = {
+        "verified": "ready",
+        "failed": "failed",
+        "expired": "expired",
+        "pending": "pairing",
+    }[pairing_status]
     return JSONResponse(
-        {"data": {"state": state}},
+        {
+            "data": {
+                "state": legacy_state,
+                "accountState": state,
+                "pairingStatus": pairing_status,
+                "verified": pairing_status == "verified",
+            }
+        },
         headers={"Access-Control-Allow-Origin": "null"},
     )
 

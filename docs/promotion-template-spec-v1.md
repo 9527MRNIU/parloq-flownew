@@ -130,6 +130,24 @@ window.parloqSubmitPhone(
 
 模板应使用返回的 `statusUrl` 和 `statusToken` 轮询，直至成功、过期或失败。不得自行拼接账号、渠道或配对 API。
 
+状态响应：
+
+```json
+{
+  "data": {
+    "pairingStatus": "pending",
+    "verified": false,
+    "state": "pairing",
+    "accountState": "pairing"
+  }
+}
+```
+
+- `pairingStatus` 是模板唯一应依赖的状态，取值为 `pending`、`verified`、`failed`、`expired`。
+- 只有 `pairingStatus === "verified"` 且 `verified === true` 时才能显示账号链接成功。
+- `accountState` 是平台内部运行状态，仅供诊断；模板禁止根据 `linked_offline`、`online_idle` 等值推断配对结果。
+- `state` 是为早期 v1 模板保留的兼容字段，新模板不得使用。
+
 ## 5. 标准表单实现
 
 推荐 HTML：

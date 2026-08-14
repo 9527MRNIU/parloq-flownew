@@ -177,6 +177,35 @@ def test_account_state_webhook_is_durable_idempotent_and_ordered(
         }
 
 
+def test_interrupted_pairing_webhook_marks_account_retryable(
+    admin_client: TestClient,
+) -> None:
+    created = admin_client.post(
+        "/api/personal-accounts",
+        json={"name": "Interrupted pairing", "phone": "+12025550772"},
+    )
+    assert created.status_code == 201, created.text
+    account_id = created.json()["data"]["account"]["id"]
+
+    interrupted = _gateway_account_event(
+        admin_client,
+        event_id="ast_pairing_interrupted_test",
+        account_id=account_id,
+        from_state="pairing",
+        to_state="unpaired",
+        reason="pairing_connection_lost",
+        occurred_at=utcnow(),
+    )
+    assert interrupted.status_code == 200, interrupted.text
+
+    account = admin_client.get(
+        "/api/personal-accounts?keyword=12025550772"
+    ).json()["data"]["rows"][0]
+    assert account["status"] == "unpaired"
+    assert account["validationStatus"] == "failed"
+    assert account["lastError"] == "配对连接已中断，请重新获取配对码"
+
+
 def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestClient) -> None:
     domain = admin_client.post("/api/domains", json={"hostname": "promo-example.test"})
     assert domain.status_code == 201
@@ -285,7 +314,13 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
         params={"token": preview_token},
     )
     assert preview_status.status_code == 200
-    assert preview_status.json()["data"] == {"state": "ready", "preview": True}
+    assert preview_status.json()["data"] == {
+        "state": "ready",
+        "accountState": "linked_offline",
+        "pairingStatus": "verified",
+        "verified": True,
+        "preview": True,
+    }
 
     channel = admin_client.post(
         "/api/promotion/channels",
@@ -558,7 +593,12 @@ def test_personal_account_gateway_and_hyperlink_delivery(
         pairing["statusUrl"], params={"token": pairing["statusToken"]}
     )
     assert landing_status.status_code == 200
-    assert landing_status.json()["data"]["state"] == "linked_offline"
+    assert landing_status.json()["data"] == {
+        "state": "ready",
+        "accountState": "linked_offline",
+        "pairingStatus": "verified",
+        "verified": True,
+    }
     landing_account = admin_client.get(
         "/api/personal-accounts?keyword=4915123456790"
     ).json()["data"]["rows"][0]
@@ -728,6 +768,30 @@ def test_landing_pairing_failure_keeps_retryable_account(
     assert account["status"] == "unpaired"
     assert account["validationStatus"] == "failed"
     assert account["lastError"] == "WhatsApp 网关请求失败（502）"
+
+
+def test_public_pairing_status_never_treats_unverified_offline_as_success() -> None:
+    from app.routers.promotion import _public_pairing_status
+
+    now = int(utcnow().timestamp())
+    assert _public_pairing_status(
+        state="linked_offline",
+        verified=False,
+        validation_status="validating",
+        token_payload={"iat": now, "pairExp": now + 180},
+    ) == "pending"
+    assert _public_pairing_status(
+        state="linked_offline",
+        verified=False,
+        validation_status="validating",
+        token_payload={"iat": now - 181, "pairExp": now - 1},
+    ) == "expired"
+    assert _public_pairing_status(
+        state="linked_offline",
+        verified=True,
+        validation_status="ready",
+        token_payload={"iat": now - 181, "pairExp": now - 1},
+    ) == "verified"
 
 
 def test_personal_account_create_rollback_and_bulk_state_sync(

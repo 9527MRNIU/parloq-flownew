@@ -88,14 +88,14 @@
         })
         if (!response.ok) throw new Error('pairing status rejected')
         const payload = await response.json()
-        const state = payload?.data?.state || payload?.data?.account?.status
-        if (['online_idle', 'linked_offline', 'ready'].includes(state)) {
+        const pairingStatus = payload?.data?.pairingStatus
+        if (payload?.data?.verified === true && pairingStatus === 'verified') {
           pairingState.textContent = copy.pairingConnected
           pairingState.className = 'pairing-state connected'
           pairingRetry.hidden = true
           return
         }
-        if (['failed', 'reauth_required', 'unpaired', 'expired'].includes(state)) {
+        if (['failed', 'expired'].includes(pairingStatus)) {
           pairingState.textContent = copy.pairingExpired
           pairingState.className = 'pairing-state error'
           pairingRetry.hidden = false

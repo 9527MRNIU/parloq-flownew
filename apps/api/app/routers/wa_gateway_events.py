@@ -132,9 +132,15 @@ def _account_state_event(payload: dict) -> dict:
             elif to_state == "unpaired" and reason in {
                 "logged_out",
                 "manual_logout",
+                "pairing_failed",
+                "pairing_connection_lost",
             }:
                 account.validation_status = "failed"
-                account.last_error = "账号会话已退出"
+                account.last_error = (
+                    "配对连接已中断，请重新获取配对码"
+                    if reason in {"pairing_failed", "pairing_connection_lost"}
+                    else "账号会话已退出"
+                )
         db.commit()
         return {
             "data": {
