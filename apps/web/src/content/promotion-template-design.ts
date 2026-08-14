@@ -43,9 +43,13 @@ const payload = await response.json();
 const pairing = payload?.data?.pairing;
 
 // 展示 pairing.pairingCode，并使用平台返回的
-// pairing.statusUrl + pairing.statusToken 轮询状态。
+// 将 pairing.statusToken 放进 X-Parloq-Pairing-Token 请求头，
+// 使用 pairing.statusUrl 轮询状态；不得把令牌放入 URL。
 // 只有 pairingStatus === "verified" 且 verified === true
 // 才能显示成功；不得根据 accountState 推断配对结果。
+// waiting_phone 继续等待，reconnecting 表示连接恢复中且码仍有效；
+// failed / expired / cancelled 停止轮询并提示重试。
+// 用户更换号码时，以同一请求头 POST pairing.cancelUrl。
 // 不得自行拼接账号、渠道或网关 API。`;
 
 export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
@@ -90,8 +94,9 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
     bullets: [
       "表单使用 type=tel、inputmode=tel、autocomplete=tel，并带 data-parloq-manual 防止重复提交。",
       "提交期间禁用按钮；需要有加载、校验失败、线路不可用、配对中、成功、过期和重试状态。",
-      "只能使用响应返回的 pairingCode、statusUrl 和 statusToken；不得自行拼接内部接口。",
-      "轮询时只认 pairingStatus：pending 继续等待，verified 且 verified=true 才成功，failed/expired 提示重试；禁止根据 linked_offline 等账号状态推断成功。",
+      "只能使用响应返回的 pairingCode、statusUrl、cancelUrl 和 statusToken；statusToken 必须放进 X-Parloq-Pairing-Token 请求头，不得写入 URL。",
+      "轮询时只认 pairingStatus：code_issued/waiting_phone 继续等待，reconnecting 显示连接恢复中，verified 且 verified=true 才成功，failed/expired/cancelled 停止并提示重试；禁止根据 linked_offline 等账号状态推断成功。",
+      "用户选择其他号码时，应 POST 平台返回的 cancelUrl 取消当前任务，再回到号码表单。",
       "连续点击不得创建重复请求；号码不得进入 URL、Cookie、日志或浏览器存储。",
     ],
     code: TEMPLATE_RUNTIME_EXAMPLE,

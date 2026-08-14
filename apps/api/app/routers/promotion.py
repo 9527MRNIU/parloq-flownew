@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import ValidationError
 from sqlalchemy import func, select
@@ -42,6 +42,7 @@ from app.snowflake import new_public_id
 
 from app.models import (
     AdMetric,
+    AccountPairingAttempt,
     DomainRecord,
     MetaPixel,
     PromotionAsset,
@@ -78,6 +79,9 @@ COUNTRY_DEFAULT_LOCALE = {
 RTL_LANGUAGE_BASES = {"ar", "fa", "he", "ps", "ur"}
 MAX_LOCALE_ASSET_BYTES = 256 * 1024
 MAX_LOCALIZED_COPY_ITEMS = 256
+ACTIVE_PAIRING_STATUSES = {"code_issued", "waiting_phone", "reconnecting"}
+TERMINAL_PAIRING_STATUSES = {"verified", "expired", "cancelled", "failed"}
+MAX_PAIRING_ATTEMPTS_PER_TEN_MINUTES = 5
 MAX_LOCALIZED_COPY_VALUE = 8_000
 
 
@@ -135,20 +139,26 @@ def _verify_session_token(channel: PromotionChannel, token: str) -> dict:
     return payload
 
 
+def _utc_datetime(value: datetime) -> datetime:
+    return value.replace(tzinfo=value.tzinfo or UTC).astimezone(UTC)
+
+
 def _pairing_status_token(
-    channel: PromotionChannel, account: PersonalAccount, visitor_id: str
+    channel: PromotionChannel,
+    account: PersonalAccount,
+    attempt: AccountPairingAttempt,
+    visitor_id: str,
 ) -> str:
     issued_at = int(utcnow().timestamp())
+    expires_at = int(_utc_datetime(attempt.expires_at).timestamp())
     payload = {
         "channel": channel.public_id,
         "account": account.public_id,
+        "attempt": attempt.public_id,
         "visitor": visitor_id,
         "iat": issued_at,
-        # Baileys pairing codes currently expire after three minutes. Keeping
-        # this deadline in the signed token lets the public status endpoint
-        # expose a stable terminal state without trusting template timers.
-        "pairExp": issued_at + 180,
-        "exp": issued_at + 600,
+        "pairExp": expires_at,
+        "exp": max(issued_at + 600, expires_at + 420),
     }
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":")).encode()
@@ -160,7 +170,10 @@ def _pairing_status_token(
 
 
 def _verify_pairing_status_token(
-    channel: PromotionChannel, account: PersonalAccount, token: str
+    channel: PromotionChannel,
+    account: PersonalAccount,
+    attempt: AccountPairingAttempt,
+    token: str,
 ) -> dict:
     try:
         encoded, signature = token.rsplit(".", 1)
@@ -175,6 +188,7 @@ def _verify_pairing_status_token(
         if (
             payload.get("channel") != channel.public_id
             or payload.get("account") != account.public_id
+            or payload.get("attempt") != attempt.public_id
             or int(payload.get("exp", 0)) < int(utcnow().timestamp())
         ):
             raise ValueError
@@ -184,16 +198,26 @@ def _verify_pairing_status_token(
 
 
 def _public_pairing_status(
-    *, state: str, verified: bool, validation_status: str, token_payload: dict
+    *,
+    state: str,
+    gateway_pairing_status: str,
+    verified: bool,
+    attempt_status: str,
+    expires_at: datetime,
 ) -> str:
+    if attempt_status in TERMINAL_PAIRING_STATUSES:
+        return attempt_status
     if verified:
         return "verified"
-    if state in {"unpaired", "reauth_required", "restricted"} or validation_status == "failed":
-        return "failed"
-    expires_at = int(token_payload.get("pairExp") or int(token_payload.get("iat", 0)) + 180)
-    if expires_at <= int(utcnow().timestamp()):
+    if _utc_datetime(expires_at) <= utcnow():
         return "expired"
-    return "pending"
+    if gateway_pairing_status in {"waiting_phone", "reconnecting"}:
+        return gateway_pairing_status
+    if gateway_pairing_status in {"expired", "cancelled", "failed"}:
+        return gateway_pairing_status
+    if state in {"unpaired", "reauth_required", "restricted"}:
+        return "failed"
+    return "waiting_phone"
 
 
 def _template(db: DbSession, public_id: str, user) -> PromotionTemplate:
@@ -1227,6 +1251,39 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
         item.validation_status = "validating"
         item.protocol_id = protocol.id
 
+    now = utcnow()
+    active_attempt = db.scalar(
+        select(AccountPairingAttempt)
+        .where(
+            AccountPairingAttempt.account_id == item.id,
+            AccountPairingAttempt.channel_id == channel.id,
+            AccountPairingAttempt.status.in_(ACTIVE_PAIRING_STATUSES),
+        )
+        .order_by(AccountPairingAttempt.created_at.desc())
+        .limit(1)
+    )
+    if active_attempt is not None and _utc_datetime(active_attempt.expires_at) <= now:
+        active_attempt.status = "expired"
+        active_attempt.terminal_reason = "pairing_expired"
+        active_attempt = None
+    if active_attempt is not None and active_attempt.visitor_id != payload.visitor_id:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="该号码正在另一浏览器中等待配对")
+    if active_attempt is None:
+        recent_attempts = int(
+            db.scalar(
+                select(func.count(AccountPairingAttempt.id)).where(
+                    AccountPairingAttempt.channel_id == channel.id,
+                    AccountPairingAttempt.visitor_id == payload.visitor_id,
+                    AccountPairingAttempt.created_at >= now - timedelta(minutes=10),
+                )
+            )
+            or 0
+        )
+        if recent_attempts >= MAX_PAIRING_ATTEMPTS_PER_TEN_MINUTES:
+            db.rollback()
+            raise HTTPException(status_code=429, detail="配对请求过于频繁，请稍后再试")
+
     from app.routers.personal_accounts import _auto_proxy, _proxy_url, _set_binding
     from app.services.wa_gateway import GatewayError, WaGatewayClient
 
@@ -1238,6 +1295,17 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
     try:
         _set_binding(db, item.public_id, proxy.public_id)
         db.flush()
+        if active_attempt is None:
+            active_attempt = AccountPairingAttempt(
+                public_id=new_public_id("pair"),
+                account_id=item.id,
+                channel_id=channel.id,
+                visitor_id=payload.visitor_id,
+                status="code_issued",
+                expires_at=now + timedelta(minutes=3),
+            )
+            db.add(active_attempt)
+            db.flush()
         if account_created:
             from app.services.account_lifecycle import record_initial_account_state
 
@@ -1269,6 +1337,19 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
         )
         item.status = "linked_offline" if client.settings.wa_gateway_mock else "pairing"
         item.last_error = None
+        try:
+            expires_at = datetime.fromisoformat(
+                str(result.get("expiresAt") or "").replace("Z", "+00:00")
+            )
+            expires_at = _utc_datetime(expires_at)
+        except ValueError:
+            expires_at = now + timedelta(minutes=3)
+        if not now + timedelta(seconds=15) <= expires_at <= now + timedelta(minutes=10):
+            expires_at = now + timedelta(minutes=3)
+        active_attempt.status = "waiting_phone"
+        active_attempt.expires_at = expires_at
+        active_attempt.terminal_reason = None
+        active_attempt.provider_code = None
         db.commit()
     except GatewayError as exc:
         db.rollback()
@@ -1279,18 +1360,36 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             failed.status = "unpaired"
             failed.validation_status = "failed"
             failed.last_error = str(exc)[:2000]
+            failed_attempt = db.scalar(
+                select(AccountPairingAttempt)
+                .where(
+                    AccountPairingAttempt.account_id == failed.id,
+                    AccountPairingAttempt.status.in_(ACTIVE_PAIRING_STATUSES),
+                )
+                .order_by(AccountPairingAttempt.created_at.desc())
+                .limit(1)
+            )
+            if failed_attempt is not None:
+                failed_attempt.status = "failed"
+                failed_attempt.terminal_reason = "pairing_start_failed"
             db.commit()
         raise HTTPException(status_code=502, detail=str(exc)) from None
 
-    status_token = _pairing_status_token(channel, item, payload.visitor_id)
+    status_token = _pairing_status_token(
+        channel, item, active_attempt, payload.visitor_id
+    )
     return JSONResponse(
         {
             "data": {
                 "pairing": {
                     "pairingCode": result.get("code"),
-                    "expiresAt": result.get("expiresAt"),
+                    "attemptId": active_attempt.public_id,
+                    "pairingStatus": active_attempt.status,
+                    "expiresAt": iso(active_attempt.expires_at),
                     "statusUrl": f"/api/public/promotion/channels/{slug}/pairing/{item.public_id}/status",
+                    "cancelUrl": f"/api/public/promotion/channels/{slug}/pairing/{item.public_id}/cancel",
                     "statusToken": status_token,
+                    "statusTokenHeader": "X-Parloq-Pairing-Token",
                 }
             }
         },
@@ -1306,7 +1405,8 @@ def public_pairing_status(
     account_public_id: str,
     request: Request,
     db: DbSession,
-    token: str = Query(min_length=20, max_length=1000),
+    token: str | None = Query(default=None, min_length=20, max_length=1000),
+    x_parloq_pairing_token: str | None = Header(default=None),
 ) -> JSONResponse:
     channel = _public_channel(db, slug, request)
     item = db.scalar(
@@ -1319,7 +1419,23 @@ def public_pairing_status(
     )
     if item is None:
         raise HTTPException(status_code=404, detail="账号链接不存在")
-    token_payload = _verify_pairing_status_token(channel, item, token)
+    attempt = db.scalar(
+        select(AccountPairingAttempt)
+        .where(
+            AccountPairingAttempt.account_id == item.id,
+            AccountPairingAttempt.channel_id == channel.id,
+        )
+        .order_by(AccountPairingAttempt.created_at.desc())
+        .limit(1)
+    )
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="配对任务不存在")
+    supplied_token = x_parloq_pairing_token or token
+    if not supplied_token:
+        raise HTTPException(status_code=403, detail="缺少账号链接状态凭证")
+    token_payload = _verify_pairing_status_token(
+        channel, item, attempt, supplied_token
+    )
     from app.routers.personal_accounts import _apply_gateway_account
     from app.services.wa_gateway import GatewayError, WaGatewayClient
 
@@ -1327,10 +1443,12 @@ def public_pairing_status(
     try:
         value = client.get(item.public_id)
         state = str(value.get("state") or item.status)
+        gateway_pairing_status = str(value.get("pairingStatus") or "idle")
         _apply_gateway_account(item, value)
     except GatewayError:
         value = {}
         state = item.status
+        gateway_pairing_status = attempt.status
     verified = (
         value.get("sessionStatus") == "verified"
         or state in {"online_idle", "sending"}
@@ -1338,14 +1456,18 @@ def public_pairing_status(
     )
     pairing_status = _public_pairing_status(
         state=state,
+        gateway_pairing_status=gateway_pairing_status,
         verified=verified,
-        validation_status=item.validation_status,
-        token_payload=token_payload,
+        attempt_status=attempt.status,
+        expires_at=attempt.expires_at,
     )
-    if verified:
+    if pairing_status == "verified":
         item.status = state
         item.validation_status = "ready"
         item.last_connected_at = item.last_connected_at or utcnow()
+        attempt.status = "verified"
+        attempt.verified_at = attempt.verified_at or utcnow()
+        attempt.terminal_reason = None
         db.add(
             PromotionEvent(
                 public_id=new_public_id("pevt"),
@@ -1370,7 +1492,16 @@ def public_pairing_status(
                 PromotionEvent.idempotency_key == f"pair_success:{item.public_id}",
             )
         ) else None
-        db.commit()
+    elif pairing_status != attempt.status:
+        attempt.status = pairing_status
+        if pairing_status in {"expired", "cancelled", "failed"}:
+            attempt.terminal_reason = str(
+                value.get("reasonCategory")
+                or ("pairing_expired" if pairing_status == "expired" else pairing_status)
+            )[:64]
+            provider_code = value.get("providerCode")
+            attempt.provider_code = str(provider_code)[:64] if provider_code else None
+    db.commit()
     # `state` remains as a compatibility field for already-imported v1
     # templates, but now carries only the stable public pairing state. Raw
     # operational account state is diagnostic and must not drive template UI.
@@ -1378,7 +1509,10 @@ def public_pairing_status(
         "verified": "ready",
         "failed": "failed",
         "expired": "expired",
-        "pending": "pairing",
+        "cancelled": "failed",
+        "code_issued": "pairing",
+        "waiting_phone": "pairing",
+        "reconnecting": "pairing",
     }[pairing_status]
     return JSONResponse(
         {
@@ -1387,8 +1521,68 @@ def public_pairing_status(
                 "accountState": state,
                 "pairingStatus": pairing_status,
                 "verified": pairing_status == "verified",
+                "attemptId": attempt.public_id,
+                "expiresAt": iso(attempt.expires_at),
+                "reasonCode": attempt.terminal_reason,
+                "providerCode": attempt.provider_code,
+                "retryable": pairing_status in {"expired", "cancelled", "failed"},
+                "nextPollAfterMs": 3000 if pairing_status == "reconnecting" else 2000,
             }
         },
+        headers={"Access-Control-Allow-Origin": "null"},
+    )
+
+
+@router.post(
+    "/api/public/promotion/channels/{slug}/pairing/{account_public_id}/cancel"
+)
+def cancel_public_pairing(
+    slug: str,
+    account_public_id: str,
+    request: Request,
+    db: DbSession,
+    x_parloq_pairing_token: str | None = Header(default=None),
+) -> JSONResponse:
+    channel = _public_channel(db, slug, request)
+    item = db.scalar(
+        select(PersonalAccount).where(
+            PersonalAccount.public_id == account_public_id,
+            PersonalAccount.created_by == channel.created_by,
+            PersonalAccount.source_ref_id == channel.public_id,
+            PersonalAccount.archived_at.is_(None),
+        )
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="账号链接不存在")
+    attempt = db.scalar(
+        select(AccountPairingAttempt)
+        .where(
+            AccountPairingAttempt.account_id == item.id,
+            AccountPairingAttempt.channel_id == channel.id,
+        )
+        .order_by(AccountPairingAttempt.created_at.desc())
+        .limit(1)
+    )
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="配对任务不存在")
+    if not x_parloq_pairing_token:
+        raise HTTPException(status_code=403, detail="缺少账号链接状态凭证")
+    _verify_pairing_status_token(channel, item, attempt, x_parloq_pairing_token)
+    if attempt.status in ACTIVE_PAIRING_STATUSES:
+        from app.services.wa_gateway import GatewayError, WaGatewayClient
+
+        try:
+            WaGatewayClient().cancel_pairing(item.public_id)
+        except GatewayError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+        attempt.status = "cancelled"
+        attempt.terminal_reason = "pairing_cancelled"
+        item.status = "unpaired"
+        item.validation_status = "failed"
+        item.last_error = "配对已取消"
+        db.commit()
+    return JSONResponse(
+        {"data": {"pairingStatus": attempt.status, "cancelled": True}},
         headers={"Access-Control-Allow-Origin": "null"},
     )
 

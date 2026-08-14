@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.models import (
     AccountLifecycleEvent,
+    AccountPairingAttempt,
     HyperlinkTask,
     HyperlinkTaskDelivery,
     MessageDelivery,
@@ -141,6 +142,35 @@ def _account_state_event(payload: dict) -> dict:
                     if reason in {"pairing_failed", "pairing_connection_lost"}
                     else "账号会话已退出"
                 )
+
+            attempt = db.scalar(
+                select(AccountPairingAttempt)
+                .where(AccountPairingAttempt.account_id == account.id)
+                .order_by(AccountPairingAttempt.created_at.desc())
+                .limit(1)
+            )
+            if attempt is not None and attempt.status in {
+                "code_issued",
+                "waiting_phone",
+                "reconnecting",
+            }:
+                if to_state in {"online_idle", "sending"}:
+                    attempt.status = "verified"
+                    attempt.verified_at = occurred_at
+                    attempt.terminal_reason = None
+                    attempt.provider_code = None
+                elif to_state == "unpaired" and reason in {
+                    "pairing_expired",
+                    "pairing_cancelled",
+                    "pairing_failed",
+                    "pairing_connection_lost",
+                }:
+                    attempt.status = {
+                        "pairing_expired": "expired",
+                        "pairing_cancelled": "cancelled",
+                    }.get(reason, "failed")
+                    attempt.terminal_reason = reason
+                    attempt.provider_code = provider_code
         db.commit()
         return {
             "data": {

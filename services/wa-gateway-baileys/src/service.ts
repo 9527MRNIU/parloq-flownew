@@ -11,11 +11,18 @@ export interface CreateAccountRequest { id?: string; phoneE164: string; proxyUrl
 export interface UpdateAccountRequest { phoneE164?: string; proxyUrl?: string; autoConnect?: boolean }
 export interface SendTextRequest { messageId: string; toE164: string; text: string }
 
+function pairingCodeFromCreds(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null
+  const code = (value as { pairingCode?: unknown }).pairingCode
+  return typeof code === 'string' && /^[A-Z0-9]{8}$/i.test(code) ? code : null
+}
+
 export class GatewayService {
   private readonly queueDepth = new Map<string, number>()
   private readonly queueTail = new Map<string, Promise<void>>()
   private readonly nextSendAt = new Map<string, number>()
   private readonly pendingEngineEvents = new Map<string, Promise<void>>()
+  private readonly pairingExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
   constructor(
     private readonly store: Store,
@@ -43,12 +50,26 @@ export class GatewayService {
     await this.store.migrate()
     await this.engine.start()
     const accounts = await this.store.listAccounts()
+    for (const account of accounts.filter((item) => item.state === 'pairing' && ['waiting_phone', 'reconnecting'].includes(item.pairingStatus))) {
+      if (!account.pairingExpiresAt || account.pairingExpiresAt.getTime() <= Date.now()) {
+        await this.expirePairing(account.id)
+        continue
+      }
+      this.schedulePairingExpiry(account.id, account.pairingExpiresAt)
+      void this.engine.resumePairing({ accountId: account.id, phoneE164: account.phoneE164, proxyUrl: account.proxyUrl })
+        .catch((error: unknown) => this.logger.warn({ accountId: account.id, error: safeError(error) }, 'pairing_restore_failed'))
+    }
     for (const account of accounts.filter((item) => item.autoConnect && item.deviceJid)) {
       void this.connect(account.id).catch((error: unknown) => this.logger.warn({ accountId: account.id, error: safeError(error) }, 'account_restore_failed'))
     }
   }
 
-  async close(): Promise<void> { await this.engine.close(); await this.store.close() }
+  async close(): Promise<void> {
+    for (const timer of this.pairingExpiryTimers.values()) clearTimeout(timer)
+    this.pairingExpiryTimers.clear()
+    await this.engine.close()
+    await this.store.close()
+  }
   async ready(): Promise<void> { await this.store.ready(); await this.engine.ready() }
 
   async createAccount(request: CreateAccountRequest): Promise<PublicAccount> {
@@ -89,7 +110,23 @@ export class GatewayService {
 
   async requestPairingCode(id: string, phoneOverride?: string): Promise<PairResult> {
     let current = await this.store.getAccount(id)
-    const storedCreds = await this.store.getCreds(id)
+    let storedCreds = await this.store.getCreds(id)
+    const activeCode = pairingCodeFromCreds(storedCreds)
+    if (
+      current.state === 'pairing'
+      && ['waiting_phone', 'reconnecting'].includes(current.pairingStatus)
+      && current.pairingExpiresAt
+      && current.pairingExpiresAt.getTime() > Date.now()
+      && activeCode
+    ) {
+      this.schedulePairingExpiry(id, current.pairingExpiresAt)
+      return { accountId: id, code: activeCode, expiresAt: current.pairingExpiresAt }
+    }
+    if (current.state === 'pairing' && current.pairingExpiresAt && current.pairingExpiresAt.getTime() <= Date.now()) {
+      await this.expirePairing(id)
+      current = await this.store.getAccount(id)
+      storedCreds = await this.store.getCreds(id)
+    }
     const isLegacyInterruptedPairing = current.state === 'linked_offline'
       && !current.deviceJid
       && current.sessionStatus === 'none'
@@ -105,23 +142,52 @@ export class GatewayService {
         autoConnect: false,
         sessionStatus: 'none',
         sessionCompleteness: 'none',
+        pairingStatus: 'idle',
+        pairingExpiresAt: null,
       }, 'legacy_pairing_recovered')
     } else if (current.deviceJid || storedCreds) {
       throw new GatewayError('conflict', 'account already has a session; logout before pairing again')
     }
     if (phoneOverride) current = await this.store.updateAccount(id, { phoneE164: normalizeE164(phoneOverride) })
     if (this.engine.name !== 'mock' && !current.proxyUrl) throw new GatewayError('conflict', 'a fixed proxy is required before pairing')
-    await this.transitionAccount(id, 'pairing', {}, 'pairing_started')
+    const provisionalExpiry = new Date(Date.now() + 3 * 60_000)
+    await this.transitionAccount(id, 'pairing', {
+      pairingStatus: 'waiting_phone',
+      pairingExpiresAt: provisionalExpiry,
+    }, 'pairing_started')
     try {
       const result = await this.engine.pair({ accountId: id, phoneE164: current.phoneE164, proxyUrl: current.proxyUrl })
+      const expiresAt = result.expiresAt.getTime() > Date.now() ? result.expiresAt : provisionalExpiry
+      await this.store.updateAccount(id, { pairingStatus: 'waiting_phone', pairingExpiresAt: expiresAt })
+      this.schedulePairingExpiry(id, expiresAt)
+      result.expiresAt = expiresAt
       return result
     } catch (error) {
+      this.clearPairingExpiry(id)
       await this.engine.disconnect(id)
       await this.store.clearAuth(id)
-      await this.transitionAccount(id, 'unpaired', {}, 'pairing_failed')
+      await this.transitionAccount(id, 'unpaired', { pairingStatus: 'failed', pairingExpiresAt: null }, 'pairing_failed')
       this.logger.warn({ accountId: id, error: safeError(error) }, 'pairing_code_failed')
       throw new GatewayError('protocol_error', 'unable to request a pairing code; verify the phone number, proxy and network')
     }
+  }
+
+  async cancelPairing(id: string): Promise<PublicAccount> {
+    const current = await this.store.getAccount(id)
+    if (current.state !== 'pairing' || !['waiting_phone', 'reconnecting'].includes(current.pairingStatus)) {
+      return publicAccount(current)
+    }
+    this.clearPairingExpiry(id)
+    await this.engine.disconnect(id)
+    await this.store.clearAuth(id)
+    return publicAccount(await this.transitionAccount(id, 'unpaired', {
+      deviceJid: '',
+      autoConnect: false,
+      sessionStatus: 'none',
+      sessionCompleteness: 'none',
+      pairingStatus: 'cancelled',
+      pairingExpiresAt: null,
+    }, 'pairing_cancelled'))
   }
 
   async connect(id: string): Promise<PublicAccount> {
@@ -152,6 +218,9 @@ export class GatewayService {
 
   async disconnect(id: string): Promise<PublicAccount> {
     const current = await this.store.getAccount(id)
+    if (current.state === 'pairing' && ['waiting_phone', 'reconnecting'].includes(current.pairingStatus)) {
+      return this.cancelPairing(id)
+    }
     await this.engine.disconnect(id)
     const state: AccountState = ['restricted', 'reauth_required', 'unpaired'].includes(current.state)
       ? current.state
@@ -168,7 +237,8 @@ export class GatewayService {
     }
     await this.pendingEngineEvents.get(id)
     await this.store.clearAuth(id)
-    return publicAccount(await this.transitionAccount(id, 'unpaired', { deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none' }, 'manual_logout'))
+    this.clearPairingExpiry(id)
+    return publicAccount(await this.transitionAccount(id, 'unpaired', { deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'idle', pairingExpiresAt: null }, 'manual_logout'))
   }
 
   async importSession(id: string, session: unknown, proxyUrl?: string): Promise<{ account: PublicAccount; format: string; status: string }> {
@@ -205,7 +275,7 @@ export class GatewayService {
       sessionCompleteness: parsed.completeness,
     }
     if (proxyUrl !== undefined) await this.store.updateAccount(id, { proxyUrl: nextProxy })
-    const account = await this.transitionAccount(id, 'linked_offline', changes, 'session_imported')
+    const account = await this.transitionAccount(id, 'linked_offline', { ...changes, pairingStatus: 'idle', pairingExpiresAt: null }, 'session_imported')
     return { account: publicAccount(account), format: parsed.completeness === 'full' ? 'parloq-baileys-session/v1' : 'baileys-creds', status: 'pending_verification' }
   }
 
@@ -253,7 +323,7 @@ export class GatewayService {
   private async transitionAccount(
     id: string,
     state: AccountState,
-    changes: Partial<Pick<Account, 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'metadataSyncStatus'>>,
+    changes: Partial<Pick<Account, 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'pairingStatus' | 'pairingExpiresAt' | 'metadataSyncStatus'>>,
     reasonCategory: string,
     providerCode?: string,
   ): Promise<Account> {
@@ -272,6 +342,51 @@ export class GatewayService {
       })
     }
     return result.account
+  }
+
+  private clearPairingExpiry(id: string): void {
+    const timer = this.pairingExpiryTimers.get(id)
+    if (timer) clearTimeout(timer)
+    this.pairingExpiryTimers.delete(id)
+  }
+
+  private schedulePairingExpiry(id: string, expiresAt: Date): void {
+    this.clearPairingExpiry(id)
+    const delay = Math.max(0, expiresAt.getTime() - Date.now())
+    const timer = setTimeout(() => {
+      this.pairingExpiryTimers.delete(id)
+      void this.expirePairing(id).catch((error: unknown) => {
+        this.logger.warn({ accountId: id, error: safeError(error) }, 'pairing_expiry_failed')
+      })
+    }, delay)
+    timer.unref()
+    this.pairingExpiryTimers.set(id, timer)
+  }
+
+  private async expirePairing(id: string): Promise<Account> {
+    const current = await this.store.getAccount(id)
+    if (
+      current.state !== 'pairing'
+      || !['waiting_phone', 'reconnecting'].includes(current.pairingStatus)
+      || current.sessionStatus === 'verified'
+    ) {
+      this.clearPairingExpiry(id)
+      return current
+    }
+    if (current.pairingExpiresAt && current.pairingExpiresAt.getTime() > Date.now()) {
+      this.schedulePairingExpiry(id, current.pairingExpiresAt)
+      return current
+    }
+    this.clearPairingExpiry(id)
+    await this.engine.disconnect(id)
+    await this.store.clearAuth(id)
+    return this.transitionAccount(id, 'unpaired', {
+      deviceJid: '',
+      autoConnect: false,
+      sessionStatus: 'none',
+      sessionCompleteness: 'none',
+      pairingStatus: 'expired',
+    }, 'pairing_expired')
   }
 
   private async processSend(messageId: string, accountId: string, recipient: string, text: string): Promise<void> {
@@ -297,7 +412,15 @@ export class GatewayService {
     try {
       if (event.kind === 'connected') {
         const current = await this.store.getAccount(event.accountId)
-        await this.transitionAccount(event.accountId, 'online_idle', { deviceJid: event.deviceJid || current.deviceJid, autoConnect: true, sessionStatus: 'verified', metadataSyncStatus: 'syncing' }, 'connected')
+        const completedPairing = current.state === 'pairing' && ['waiting_phone', 'reconnecting'].includes(current.pairingStatus)
+        if (completedPairing) this.clearPairingExpiry(event.accountId)
+        await this.transitionAccount(event.accountId, 'online_idle', {
+          deviceJid: event.deviceJid || current.deviceJid,
+          autoConnect: true,
+          sessionStatus: 'verified',
+          ...(completedPairing ? { pairingStatus: 'verified' as const, pairingExpiresAt: null } : {}),
+          metadataSyncStatus: 'syncing',
+        }, 'connected')
         try {
           const quality = await this.engine.getQuality(event.accountId)
           await this.store.updateAccount(event.accountId, {
@@ -309,6 +432,21 @@ export class GatewayService {
         }
       } else if (event.kind === 'disconnected') {
         const current = await this.store.getAccount(event.accountId)
+        const pairingActive = current.state === 'pairing'
+          && ['waiting_phone', 'reconnecting'].includes(current.pairingStatus)
+          && current.pairingExpiresAt !== null
+          && current.pairingExpiresAt.getTime() > Date.now()
+        if (pairingActive) {
+          // A 428/515 socket close during phone-code pairing is recoverable.
+          // The engine reconnects with the same unregistered auth state while
+          // the public attempt remains pending.
+          await this.store.updateAccount(event.accountId, { pairingStatus: 'reconnecting' })
+          return
+        }
+        if (current.state === 'pairing' && ['waiting_phone', 'reconnecting'].includes(current.pairingStatus)) {
+          await this.expirePairing(event.accountId)
+          return
+        }
         const hasLinkedSession = current.sessionStatus === 'verified' || Boolean(current.deviceJid)
         if (hasLinkedSession) {
           await this.transitionAccount(event.accountId, 'linked_offline', {}, event.reasonCategory, event.providerCode)
@@ -320,17 +458,20 @@ export class GatewayService {
           await this.transitionAccount(
             event.accountId,
             'unpaired',
-            { deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none' },
+            { deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'failed', pairingExpiresAt: null },
             'pairing_connection_lost',
             event.providerCode,
           )
         }
       } else if (event.kind === 'logged_out') {
+        this.clearPairingExpiry(event.accountId)
         await this.store.clearAuth(event.accountId)
-        await this.transitionAccount(event.accountId, 'unpaired', { deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none' }, event.reasonCategory, event.providerCode)
+        await this.transitionAccount(event.accountId, 'unpaired', { deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'failed', pairingExpiresAt: null }, event.reasonCategory, event.providerCode)
       } else if (event.kind === 'reauth_required') {
+        this.clearPairingExpiry(event.accountId)
         await this.transitionAccount(event.accountId, 'reauth_required', { autoConnect: false }, event.reasonCategory, event.providerCode)
       } else if (event.kind === 'restricted') {
+        this.clearPairingExpiry(event.accountId)
         await this.transitionAccount(event.accountId, 'restricted', { autoConnect: false }, event.reasonCategory, event.providerCode)
       } else if (event.kind === 'delivered') {
         const message = await this.store.markDeliveredByProvider(event.accountId, event.providerMessageId)

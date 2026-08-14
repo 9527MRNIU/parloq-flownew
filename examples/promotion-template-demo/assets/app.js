@@ -15,8 +15,11 @@
     pairingTitle: 'Enter this code in WhatsApp',
     pairingHelp: 'Open WhatsApp → Linked devices → Link with phone number, then enter the code below.',
     pairingWaiting: 'Waiting for your phone…',
+    pairingReconnecting: 'The secure connection is recovering. Your code remains valid…',
     pairingConnected: 'Account linked successfully. You can close this page.',
     pairingExpired: 'This code expired. Please request a new one.',
+    pairingFailed: 'Account linking stopped. Please request a new code.',
+    pairingCancelled: 'Account linking was cancelled.',
     pairingRetry: 'Use another number'
   }
 
@@ -62,14 +65,27 @@
     const pairingState = document.getElementById('pairing-state')
     const pairingRetry = document.getElementById('pairing-retry')
     let pollTimer
+    let activePairing
 
     const stopPolling = () => {
       if (pollTimer) window.clearTimeout(pollTimer)
       pollTimer = undefined
     }
 
-    const resetPairing = () => {
+    const resetPairing = async () => {
       stopPolling()
+      const pairing = activePairing
+      activePairing = undefined
+      if (pairing?.cancelUrl && pairing?.statusToken) {
+        try {
+          await fetch(pairing.cancelUrl, {
+            method: 'POST',
+            credentials: 'omit',
+            cache: 'no-store',
+            headers: { 'X-Parloq-Pairing-Token': pairing.statusToken }
+          })
+        } catch {}
+      }
       pairingPanel.hidden = true
       pairingRetry.hidden = true
       form.hidden = false
@@ -81,10 +97,10 @@
     const pollPairing = async (pairing) => {
       if (!pairing.statusUrl || !pairing.statusToken) return
       try {
-        const separator = pairing.statusUrl.includes('?') ? '&' : '?'
-        const response = await fetch(`${pairing.statusUrl}${separator}token=${encodeURIComponent(pairing.statusToken)}`, {
+        const response = await fetch(pairing.statusUrl, {
           credentials: 'omit',
-          cache: 'no-store'
+          cache: 'no-store',
+          headers: { 'X-Parloq-Pairing-Token': pairing.statusToken }
         })
         if (!response.ok) throw new Error('pairing status rejected')
         const payload = await response.json()
@@ -95,13 +111,27 @@
           pairingRetry.hidden = true
           return
         }
-        if (['failed', 'expired'].includes(pairingStatus)) {
+        if (pairingStatus === 'reconnecting') {
+          pairingState.textContent = copy.pairingReconnecting
+          pairingState.className = 'pairing-state'
+        } else if (pairingStatus === 'expired') {
           pairingState.textContent = copy.pairingExpired
           pairingState.className = 'pairing-state error'
           pairingRetry.hidden = false
           return
+        } else if (pairingStatus === 'cancelled') {
+          pairingState.textContent = copy.pairingCancelled
+          pairingState.className = 'pairing-state error'
+          pairingRetry.hidden = false
+          return
+        } else if (pairingStatus === 'failed') {
+          pairingState.textContent = copy.pairingFailed
+          pairingState.className = 'pairing-state error'
+          pairingRetry.hidden = false
+          return
         }
-        pollTimer = window.setTimeout(() => pollPairing(pairing), 2500)
+        const delay = Number(payload?.data?.nextPollAfterMs)
+        pollTimer = window.setTimeout(() => pollPairing(pairing), Number.isFinite(delay) ? delay : 2500)
       } catch {
         pollTimer = window.setTimeout(() => pollPairing(pairing), 4000)
       }
@@ -131,6 +161,7 @@
         form.hidden = true
         pairingPanel.hidden = false
         pairingRetry.hidden = true
+        activePairing = pairing
         void pollPairing(pairing)
       } catch {
         status.textContent = copy.failure

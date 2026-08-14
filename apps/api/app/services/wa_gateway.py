@@ -128,6 +128,16 @@ class WaGatewayClient:
         value = self._post(f"/v1/accounts/{account_id}/disconnect")
         return value if isinstance(value, dict) else {}
 
+    def cancel_pairing(self, account_id: str) -> dict[str, Any]:
+        if self.settings.wa_gateway_mock:
+            return {
+                "id": account_id,
+                "state": "unpaired",
+                "pairingStatus": "cancelled",
+            }
+        value = self._post(f"/v1/accounts/{account_id}/pairing-cancel")
+        return value if isinstance(value, dict) else {}
+
     def logout(self, account_id: str) -> dict[str, Any]:
         value = self._post(f"/v1/accounts/{account_id}/logout")
         return value if isinstance(value, dict) else {}

@@ -46,6 +46,7 @@ export function buildServer(options: ServerOptions) {
   app.get<{ Params: { accountId: string } }>('/v1/accounts/:accountId', async (request) => ({ data: await options.service.getAccount(request.params.accountId) }))
   app.patch<{ Params: { accountId: string }; Body: { phoneE164?: string; proxyUrl?: string; autoConnect?: boolean } }>('/v1/accounts/:accountId', async (request) => ({ data: await options.service.updateAccount(request.params.accountId, request.body) }))
   app.post<{ Params: { accountId: string }; Body: { phoneE164?: string } }>('/v1/accounts/:accountId/pairing-code', async (request) => ({ data: await options.service.requestPairingCode(request.params.accountId, request.body?.phoneE164) }))
+  app.post<{ Params: { accountId: string } }>('/v1/accounts/:accountId/pairing-cancel', async (request) => ({ data: await options.service.cancelPairing(request.params.accountId) }))
   app.post<{ Params: { accountId: string } }>('/v1/accounts/:accountId/connect', async (request) => ({ data: await options.service.connect(request.params.accountId) }))
   app.post<{ Params: { accountId: string } }>('/v1/accounts/:accountId/disconnect', async (request) => ({
     data: await options.service.disconnect(request.params.accountId),

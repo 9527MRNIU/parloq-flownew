@@ -1,5 +1,5 @@
 import pg from 'pg'
-import type { Account, AccountState, AccountStateTransition, Message, SessionCompleteness, SessionStatus, StoredAuth, StoredKey } from './domain.js'
+import type { Account, AccountState, AccountStateTransition, Message, PairingStatus, SessionCompleteness, SessionStatus, StoredAuth, StoredKey } from './domain.js'
 import { GatewayError } from './domain.js'
 import { nextSnowflakeId } from './snowflake.js'
 
@@ -14,8 +14,8 @@ export interface Store {
   createImportedAccount(account: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness'>, auth: StoredAuth): Promise<Account>
   listAccounts(): Promise<Account[]>
   getAccount(id: string): Promise<Account>
-  updateAccount(id: string, changes: Partial<Pick<Account, 'phoneE164' | 'proxyUrl' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'metadataSyncStatus' | 'hasAvatar' | 'groupCount' | 'friendCount' | 'mutualContactCount'>>): Promise<Account>
-  transitionAccount(id: string, state: AccountState, changes: Partial<Pick<Account, 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'metadataSyncStatus'>>, reasonCategory: string, providerCode?: string): Promise<AccountStateTransition>
+  updateAccount(id: string, changes: Partial<Pick<Account, 'phoneE164' | 'proxyUrl' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'pairingStatus' | 'pairingExpiresAt' | 'metadataSyncStatus' | 'hasAvatar' | 'groupCount' | 'friendCount' | 'mutualContactCount'>>): Promise<Account>
+  transitionAccount(id: string, state: AccountState, changes: Partial<Pick<Account, 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'pairingStatus' | 'pairingExpiresAt' | 'metadataSyncStatus'>>, reasonCategory: string, providerCode?: string): Promise<AccountStateTransition>
   createMessage(message: Message): Promise<{ message: Message; created: boolean }>
   getMessage(id: string): Promise<Message>
   updateMessage(id: string, changes: Partial<Pick<Message, 'providerMessageId' | 'status' | 'errorCode' | 'sentAt' | 'deliveredAt'>>): Promise<Message>
@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS wa_gateway_baileys.accounts (
   auto_connect BOOLEAN NOT NULL DEFAULT FALSE,
   session_status TEXT NOT NULL DEFAULT 'none',
   session_completeness TEXT NOT NULL DEFAULT 'none',
+  pairing_status TEXT NOT NULL DEFAULT 'idle',
+  pairing_expires_at TIMESTAMPTZ,
   metadata_sync_status TEXT NOT NULL DEFAULT 'pending',
   has_avatar BOOLEAN,
   group_count INTEGER,
@@ -62,6 +64,8 @@ ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS state_changed_a
 ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS invalidated_at TIMESTAMPTZ;
 ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS reason_category TEXT NOT NULL DEFAULT 'created';
 ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS provider_code TEXT;
+ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS pairing_status TEXT NOT NULL DEFAULT 'idle';
+ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS pairing_expires_at TIMESTAMPTZ;
 UPDATE wa_gateway_baileys.accounts
   SET invalidated_at=COALESCE(invalidated_at,state_changed_at), reason_category='restricted'
   WHERE state='restricted' AND invalidated_at IS NULL;
@@ -242,6 +246,8 @@ interface AccountRow {
   auto_connect: boolean
   session_status: SessionStatus
   session_completeness: SessionCompleteness
+  pairing_status: PairingStatus
+  pairing_expires_at: Date | null
   metadata_sync_status: Account['metadataSyncStatus']
   has_avatar: boolean | null
   group_count: number | null
@@ -278,6 +284,8 @@ function accountFromRow(row: AccountRow): Account {
     autoConnect: row.auto_connect,
     sessionStatus: row.session_status,
     sessionCompleteness: row.session_completeness,
+    pairingStatus: row.pairing_status,
+    pairingExpiresAt: row.pairing_expires_at,
     metadataSyncStatus: row.metadata_sync_status,
     hasAvatar: row.has_avatar,
     groupCount: row.group_count,
@@ -385,10 +393,10 @@ export class PostgresStore implements Store {
     return accountFromRow(result.rows[0])
   }
 
-  async updateAccount(id: string, changes: Partial<Pick<Account, 'phoneE164' | 'proxyUrl' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'metadataSyncStatus' | 'hasAvatar' | 'groupCount' | 'friendCount' | 'mutualContactCount'>>): Promise<Account> {
+  async updateAccount(id: string, changes: Partial<Pick<Account, 'phoneE164' | 'proxyUrl' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'pairingStatus' | 'pairingExpiresAt' | 'metadataSyncStatus' | 'hasAvatar' | 'groupCount' | 'friendCount' | 'mutualContactCount'>>): Promise<Account> {
     const entries = Object.entries(changes)
     if (!entries.length) return this.getAccount(id)
-    const columns: Record<string, string> = { phoneE164: 'phone_e164', proxyUrl: 'proxy_url', deviceJid: 'device_jid', autoConnect: 'auto_connect', sessionStatus: 'session_status', sessionCompleteness: 'session_completeness', metadataSyncStatus: 'metadata_sync_status', hasAvatar: 'has_avatar', groupCount: 'group_count', friendCount: 'friend_count', mutualContactCount: 'mutual_contact_count' }
+    const columns: Record<string, string> = { phoneE164: 'phone_e164', proxyUrl: 'proxy_url', deviceJid: 'device_jid', autoConnect: 'auto_connect', sessionStatus: 'session_status', sessionCompleteness: 'session_completeness', pairingStatus: 'pairing_status', pairingExpiresAt: 'pairing_expires_at', metadataSyncStatus: 'metadata_sync_status', hasAvatar: 'has_avatar', groupCount: 'group_count', friendCount: 'friend_count', mutualContactCount: 'mutual_contact_count' }
     const values = entries.map(([, value]) => value)
     const setters = entries.map(([key], index) => `${columns[key]}=$${index + 2}`).join(', ')
     try {
@@ -404,7 +412,7 @@ export class PostgresStore implements Store {
   async transitionAccount(
     id: string,
     state: AccountState,
-    changes: Partial<Pick<Account, 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'metadataSyncStatus'>>,
+    changes: Partial<Pick<Account, 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'pairingStatus' | 'pairingExpiresAt' | 'metadataSyncStatus'>>,
     reasonCategory: string,
     providerCode?: string,
   ): Promise<AccountStateTransition> {
@@ -416,7 +424,7 @@ export class PostgresStore implements Store {
       const current = currentResult.rows[0]
       if (!current) throw new GatewayError('not_found', 'account does not exist')
       const changed = current.state !== state
-      const columns: Record<string, string> = { deviceJid: 'device_jid', autoConnect: 'auto_connect', sessionStatus: 'session_status', sessionCompleteness: 'session_completeness', metadataSyncStatus: 'metadata_sync_status' }
+      const columns: Record<string, string> = { deviceJid: 'device_jid', autoConnect: 'auto_connect', sessionStatus: 'session_status', sessionCompleteness: 'session_completeness', pairingStatus: 'pairing_status', pairingExpiresAt: 'pairing_expires_at', metadataSyncStatus: 'metadata_sync_status' }
       const entries = Object.entries(changes)
       const values: unknown[] = [id, state, ...entries.map(([, value]) => value)]
       const setters = [

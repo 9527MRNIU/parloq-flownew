@@ -12,6 +12,7 @@ export const accountStates = [
 export type AccountState = (typeof accountStates)[number]
 export type SessionStatus = 'none' | 'pending_verification' | 'verified'
 export type SessionCompleteness = 'none' | 'credentials_only' | 'full'
+export type PairingStatus = 'idle' | 'waiting_phone' | 'reconnecting' | 'verified' | 'expired' | 'cancelled' | 'failed'
 export type MessageStatus = 'queued' | 'sent' | 'delivered' | 'failed'
 
 export interface Account {
@@ -23,6 +24,8 @@ export interface Account {
   autoConnect: boolean
   sessionStatus: SessionStatus
   sessionCompleteness: SessionCompleteness
+  pairingStatus: PairingStatus
+  pairingExpiresAt: Date | null
   metadataSyncStatus: 'pending' | 'syncing' | 'ready' | 'failed' | 'unsupported'
   hasAvatar: boolean | null
   groupCount: number | null

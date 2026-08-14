@@ -22,7 +22,7 @@ class MemoryStore implements Store {
       throw new GatewayError('conflict', 'duplicate')
     }
     const now = new Date()
-    const account: Account = { ...input, deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none', metadataSyncStatus: 'pending', hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, stateChangedAt: now, invalidatedAt: null, reasonCategory: 'created', providerCode: null, createdAt: now, updatedAt: now }
+    const account: Account = { ...input, deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'idle', pairingExpiresAt: null, metadataSyncStatus: 'pending', hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, stateChangedAt: now, invalidatedAt: null, reasonCategory: 'created', providerCode: null, createdAt: now, updatedAt: now }
     this.accounts.set(account.id, account)
     return account
   }
@@ -40,6 +40,8 @@ class MemoryStore implements Store {
     const now = new Date()
     const account: Account = {
       ...input,
+      pairingStatus: 'idle',
+      pairingExpiresAt: null,
       metadataSyncStatus: 'pending',
       hasAvatar: null,
       groupCount: null,
@@ -101,6 +103,7 @@ class TerminalConnectEngine implements ProtocolEngine {
   async ready(): Promise<void> {}
   async close(): Promise<void> {}
   async pair(_account: EngineAccount): Promise<PairResult> { throw new Error('not implemented') }
+  async resumePairing(_account: EngineAccount): Promise<void> {}
   constructor(private readonly terminalKind: 'reauth_required' | 'restricted' = 'restricted') {}
   async connect(account: EngineAccount): Promise<void> {
     this.handler({
@@ -134,6 +137,7 @@ class InterruptedPairingEngine implements ProtocolEngine {
     }))
     return { accountId: account.accountId, code: 'ABCD-EFGH', expiresAt: new Date(Date.now() + 180_000) }
   }
+  async resumePairing(_account: EngineAccount): Promise<void> {}
   async connect(_account: EngineAccount): Promise<void> { throw new Error('not implemented') }
   async disconnect(_accountId: string): Promise<void> {}
   async logout(_account: EngineAccount): Promise<void> {}
@@ -192,7 +196,7 @@ describe('Baileys gateway HTTP contract', () => {
     expect(store.accounts.has('wa_orphan_new')).toBe(true)
   })
 
-  it('never turns an interrupted unverified pairing socket into a linked account', async () => {
+  it('keeps a transiently interrupted unverified pairing pending for reconnect', async () => {
     const isolatedStore = new MemoryStore()
     const interruptedEngine = new InterruptedPairingEngine()
     const logger = pino({ level: 'silent' })
@@ -206,11 +210,18 @@ describe('Baileys gateway HTTP contract', () => {
 
       const account = await isolatedStore.getAccount('wa_interrupted_pairing')
       expect(account).toMatchObject({
-        state: 'unpaired',
+        state: 'pairing',
+        pairingStatus: 'reconnecting',
         sessionStatus: 'none',
         sessionCompleteness: 'none',
         deviceJid: '',
-        reasonCategory: 'pairing_connection_lost',
+        reasonCategory: 'pairing_started',
+      })
+      const cancelled = await isolatedService.cancelPairing('wa_interrupted_pairing')
+      expect(cancelled).toMatchObject({
+        state: 'unpaired',
+        pairingStatus: 'cancelled',
+        sessionStatus: 'none',
       })
     } finally {
       await isolatedService.close()
@@ -226,10 +237,10 @@ describe('Baileys gateway HTTP contract', () => {
     expect(pairing.code).toBe('0000-0000')
     expect(await store.getCreds('wa_legacy_pairing')).toBeNull()
     expect(await store.getAccount('wa_legacy_pairing')).toMatchObject({
-      state: 'pairing',
-      sessionStatus: 'none',
-      deviceJid: '',
-      reasonCategory: 'pairing_started',
+      state: 'online_idle',
+      sessionStatus: 'verified',
+      pairingStatus: 'verified',
+      reasonCategory: 'connected',
     })
   })
 

@@ -49,6 +49,7 @@ def test_gateway_client_uses_canonical_contract_and_bearer(monkeypatch) -> None:
     )["state"] == "unpaired"
     assert client.export_session("wa_contract") == {"registered": True}
     assert client.pair("wa_contract", "+12025550199", "pairing_code", None)["code"] == "1234-5678"
+    assert client.cancel_pairing("wa_contract")["state"] == "unpaired"
     assert client.send("wa_contract", "idem-12345678", "+12025550200", "hello")["status"] == "queued"
 
     assert calls[0][2]["json"] == {
@@ -69,7 +70,8 @@ def test_gateway_client_uses_canonical_contract_and_bearer(monkeypatch) -> None:
     assert calls[5][1].endswith("/v1/accounts/wa_contract/export-session")
     assert calls[6][1].endswith("/v1/accounts/wa_contract/pairing-code")
     assert calls[6][2]["json"] == {"phoneE164": "+12025550199"}
-    assert calls[7][2]["json"] == {
+    assert calls[7][1].endswith("/v1/accounts/wa_contract/pairing-cancel")
+    assert calls[8][2]["json"] == {
         "messageId": "idem-12345678",
         "toE164": "+12025550200",
         "text": "hello",

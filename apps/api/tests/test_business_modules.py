@@ -593,12 +593,12 @@ def test_personal_account_gateway_and_hyperlink_delivery(
         pairing["statusUrl"], params={"token": pairing["statusToken"]}
     )
     assert landing_status.status_code == 200
-    assert landing_status.json()["data"] == {
-        "state": "ready",
-        "accountState": "linked_offline",
-        "pairingStatus": "verified",
-        "verified": True,
-    }
+    status_data = landing_status.json()["data"]
+    assert status_data["state"] == "ready"
+    assert status_data["accountState"] == "linked_offline"
+    assert status_data["pairingStatus"] == "verified"
+    assert status_data["verified"] is True
+    assert status_data["attemptId"] == pairing["attemptId"]
     landing_account = admin_client.get(
         "/api/personal-accounts?keyword=4915123456790"
     ).json()["data"]["rows"][0]
@@ -808,25 +808,64 @@ def test_legacy_unverified_landing_pairing_can_request_a_fresh_code(
 def test_public_pairing_status_never_treats_unverified_offline_as_success() -> None:
     from app.routers.promotion import _public_pairing_status
 
-    now = int(utcnow().timestamp())
+    now = utcnow()
     assert _public_pairing_status(
         state="linked_offline",
+        gateway_pairing_status="reconnecting",
         verified=False,
-        validation_status="validating",
-        token_payload={"iat": now, "pairExp": now + 180},
-    ) == "pending"
+        attempt_status="waiting_phone",
+        expires_at=now + timedelta(minutes=3),
+    ) == "reconnecting"
     assert _public_pairing_status(
         state="linked_offline",
+        gateway_pairing_status="waiting_phone",
         verified=False,
-        validation_status="validating",
-        token_payload={"iat": now - 181, "pairExp": now - 1},
+        attempt_status="waiting_phone",
+        expires_at=now - timedelta(seconds=1),
     ) == "expired"
     assert _public_pairing_status(
         state="linked_offline",
+        gateway_pairing_status="waiting_phone",
         verified=True,
-        validation_status="ready",
-        token_payload={"iat": now - 181, "pairExp": now - 1},
+        attempt_status="waiting_phone",
+        expires_at=now - timedelta(seconds=1),
     ) == "verified"
+
+
+def test_public_pairing_attempt_can_be_cancelled_with_header_token(
+    admin_client: TestClient,
+) -> None:
+    public_config = admin_client.get(
+        "/api/public/promotion/channels/de-facebook-demo"
+    ).json()["data"]
+    started = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/pairing/start",
+        json={
+            "phone": "+4915123456798",
+            "visitorId": "pairing-cancel-visitor",
+            "sessionToken": public_config["sessionToken"],
+        },
+    )
+    assert started.status_code == 200, started.text
+    pairing = started.json()["data"]["pairing"]
+    assert pairing["statusTokenHeader"] == "X-Parloq-Pairing-Token"
+
+    cancelled = admin_client.post(
+        pairing["cancelUrl"],
+        headers={"X-Parloq-Pairing-Token": pairing["statusToken"]},
+    )
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["data"] == {
+        "pairingStatus": "cancelled",
+        "cancelled": True,
+    }
+    status = admin_client.get(
+        pairing["statusUrl"],
+        headers={"X-Parloq-Pairing-Token": pairing["statusToken"]},
+    )
+    assert status.status_code == 200, status.text
+    assert status.json()["data"]["pairingStatus"] == "cancelled"
+    assert status.json()["data"]["verified"] is False
 
 
 def test_personal_account_create_rollback_and_bulk_state_sync(

@@ -122,20 +122,22 @@ window.parloqSubmitPhone(
       "pairingCode": "12345678",
       "expiresAt": "2026-08-13T10:00:00Z",
       "statusUrl": "/api/public/promotion/channels/example/pairing/wa_x/status",
-      "statusToken": "signed-token"
+      "cancelUrl": "/api/public/promotion/channels/example/pairing/wa_x/cancel",
+      "statusToken": "signed-token",
+      "statusTokenHeader": "X-Parloq-Pairing-Token"
     }
   }
 }
 ```
 
-模板应使用返回的 `statusUrl` 和 `statusToken` 轮询，直至成功、过期或失败。不得自行拼接账号、渠道或配对 API。
+模板应把 `statusToken` 放进 `X-Parloq-Pairing-Token` 请求头，使用返回的 `statusUrl` 轮询，直至成功、过期、取消或失败。用户主动更换号码时，应以同一请求头 POST `cancelUrl`。不得把令牌放入 URL，也不得自行拼接账号、渠道或配对 API。
 
 状态响应：
 
 ```json
 {
   "data": {
-    "pairingStatus": "pending",
+    "pairingStatus": "waiting_phone",
     "verified": false,
     "state": "pairing",
     "accountState": "pairing"
@@ -143,8 +145,10 @@ window.parloqSubmitPhone(
 }
 ```
 
-- `pairingStatus` 是模板唯一应依赖的状态，取值为 `pending`、`verified`、`failed`、`expired`。
+- `pairingStatus` 是模板唯一应依赖的状态，取值为 `code_issued`、`waiting_phone`、`reconnecting`、`verified`、`failed`、`expired`、`cancelled`。
+- `code_issued`、`waiting_phone` 继续等待；`reconnecting` 表示平台正在恢复临时连接，配对码在 `expiresAt` 前仍有效。
 - 只有 `pairingStatus === "verified"` 且 `verified === true` 时才能显示账号链接成功。
+- `failed`、`expired`、`cancelled` 都是终态，应停止轮询并允许用户重新发起。
 - `accountState` 是平台内部运行状态，仅供诊断；模板禁止根据 `linked_offline`、`online_idle` 等值推断配对结果。
 - `state` 是为早期 v1 模板保留的兼容字段，新模板不得使用。
 

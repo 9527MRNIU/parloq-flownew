@@ -714,6 +714,54 @@ class PromotionChannel(Base, TimestampMixin):
     )
 
 
+class AccountPairingAttempt(Base, TimestampMixin):
+    __tablename__ = "account_pairing_attempts"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('code_issued', 'waiting_phone', 'reconnecting', 'verified', 'expired', 'cancelled', 'failed')",
+            name="ck_account_pairing_attempts_status",
+        ),
+        Index(
+            "ix_account_pairing_attempts_account_created",
+            "account_id",
+            "created_at",
+        ),
+        Index(
+            "ix_account_pairing_attempts_channel_visitor_created",
+            "channel_id",
+            "visitor_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=next_snowflake_id
+    )
+    public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    account_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("personal_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    channel_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("promotion_channels.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    visitor_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(
+        String(24), default="code_issued", nullable=False, index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    terminal_reason: Mapped[str | None] = mapped_column(String(64))
+    provider_code: Mapped[str | None] = mapped_column(String(64))
+
+
 class PromotionEvent(Base, TimestampMixin):
     __tablename__ = "promotion_events"
     __table_args__ = (
