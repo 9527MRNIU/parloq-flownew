@@ -217,6 +217,32 @@ describe('Baileys gateway HTTP contract', () => {
     }
   })
 
+  it('recovers legacy interrupted pairing credentials before issuing a fresh code', async () => {
+    await store.createAccount({ id: 'wa_legacy_pairing', phoneE164: '+14155550133', proxyUrl: 'socks5://proxy.example:1080', state: 'linked_offline' })
+    await store.setCreds('wa_legacy_pairing', { temporary: true })
+
+    const pairing = await service.requestPairingCode('wa_legacy_pairing')
+
+    expect(pairing.code).toBe('0000-0000')
+    expect(await store.getCreds('wa_legacy_pairing')).toBeNull()
+    expect(await store.getAccount('wa_legacy_pairing')).toMatchObject({
+      state: 'pairing',
+      sessionStatus: 'none',
+      deviceJid: '',
+      reasonCategory: 'pairing_started',
+    })
+  })
+
+  it('does not replace imported credentials that are still awaiting verification', async () => {
+    await store.createAccount({ id: 'wa_pending_import', phoneE164: '+14155550134', proxyUrl: 'socks5://proxy.example:1080', state: 'linked_offline' })
+    await store.updateAccount('wa_pending_import', { sessionStatus: 'pending_verification', sessionCompleteness: 'credentials_only' })
+    const importedCreds = { imported: true }
+    await store.setCreds('wa_pending_import', importedCreds)
+
+    await expect(service.requestPairingCode('wa_pending_import')).rejects.toThrow('account already has a session')
+    expect(await store.getCreds('wa_pending_import')).toBe(importedCreds)
+  })
+
   it('imports legacy Baileys creds as pending and exports a complete versioned bundle', async () => {
     const headers = { authorization: `Bearer ${token}` }
     const creds = initAuthCreds()

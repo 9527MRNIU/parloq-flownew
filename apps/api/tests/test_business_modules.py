@@ -770,6 +770,41 @@ def test_landing_pairing_failure_keeps_retryable_account(
     assert account["lastError"] == "WhatsApp 网关请求失败（502）"
 
 
+def test_legacy_unverified_landing_pairing_can_request_a_fresh_code(
+    admin_client: TestClient,
+) -> None:
+    public_config = admin_client.get(
+        "/api/public/promotion/channels/de-facebook-demo"
+    ).json()["data"]
+    payload = {
+        "phone": "+4915123456794",
+        "visitorId": "legacy-pairing-retry-visitor",
+        "sessionToken": public_config["sessionToken"],
+    }
+
+    first = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/pairing/start",
+        json=payload,
+    )
+    assert first.status_code == 200, first.text
+
+    # Mock pairing deliberately leaves the same legacy shape that old
+    # production releases persisted before a real connection was verified.
+    stored = admin_client.get(
+        "/api/personal-accounts?keyword=4915123456794"
+    ).json()["data"]["rows"][0]
+    assert stored["status"] == "linked_offline"
+    assert stored["validationStatus"] == "validating"
+    assert stored["lastConnectedAt"] is None
+
+    retried = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/pairing/start",
+        json=payload,
+    )
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["data"]["pairing"]["pairingCode"] == "0000-0000"
+
+
 def test_public_pairing_status_never_treats_unverified_offline_as_success() -> None:
     from app.routers.promotion import _public_pairing_status
 

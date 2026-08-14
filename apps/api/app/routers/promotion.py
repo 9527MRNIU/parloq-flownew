@@ -1199,8 +1199,24 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             db.rollback()
             raise HTTPException(status_code=409, detail="该号码已在账号池中") from None
     else:
-        if item.status not in {"unpaired", "pairing", "reauth_required"}:
+        retryable_legacy_pairing = (
+            item.source == "landing_page"
+            and item.status == "linked_offline"
+            and item.validation_status != "ready"
+            and item.last_connected_at is None
+        )
+        if (
+            item.status not in {"unpaired", "pairing", "reauth_required"}
+            and not retryable_legacy_pairing
+        ):
             raise HTTPException(status_code=409, detail="该号码已经完成链接")
+        if retryable_legacy_pairing:
+            # Releases before the verified-pairing state contract could leave
+            # an interrupted landing-page attempt as linked_offline even
+            # though it had never connected. Treat only that precise legacy
+            # shape as retryable; imported or previously connected sessions
+            # remain protected from replacement.
+            item.status = "unpaired"
         item.source = "landing_page"
         item.source_ref_type = (
             "promotion_channel_fission"

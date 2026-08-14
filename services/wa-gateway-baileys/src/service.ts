@@ -89,7 +89,26 @@ export class GatewayService {
 
   async requestPairingCode(id: string, phoneOverride?: string): Promise<PairResult> {
     let current = await this.store.getAccount(id)
-    if (current.deviceJid || await this.store.getCreds(id)) throw new GatewayError('conflict', 'account already has a session; logout before pairing again')
+    const storedCreds = await this.store.getCreds(id)
+    const isLegacyInterruptedPairing = current.state === 'linked_offline'
+      && !current.deviceJid
+      && current.sessionStatus === 'none'
+      && storedCreds !== null
+    if (isLegacyInterruptedPairing) {
+      // Older releases persisted the temporary creds created while requesting
+      // a code, then mislabeled a dropped pairing socket as linked_offline.
+      // They contain no linked device and are safe to discard before retrying.
+      await this.engine.disconnect(id)
+      await this.store.clearAuth(id)
+      current = await this.transitionAccount(id, 'unpaired', {
+        deviceJid: '',
+        autoConnect: false,
+        sessionStatus: 'none',
+        sessionCompleteness: 'none',
+      }, 'legacy_pairing_recovered')
+    } else if (current.deviceJid || storedCreds) {
+      throw new GatewayError('conflict', 'account already has a session; logout before pairing again')
+    }
     if (phoneOverride) current = await this.store.updateAccount(id, { phoneE164: normalizeE164(phoneOverride) })
     if (this.engine.name !== 'mock' && !current.proxyUrl) throw new GatewayError('conflict', 'a fixed proxy is required before pairing')
     await this.transitionAccount(id, 'pairing', {}, 'pairing_started')
