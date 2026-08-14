@@ -193,9 +193,17 @@ def template_row(item: PromotionTemplate) -> dict:
     return {"id": item.public_id, "publicId": item.public_id, "name": item.name, "description": item.description, "version": item.version, "status": item.status, "manifest": manifest, "defaultLocale": manifest.get("defaultLocale"), "supportedLocales": manifest.get("supportedLocales", []), "i18n": manifest.get("i18n"), "assetCount": item.asset_count, "totalSize": item.total_size, "createdAt": iso(item.created_at), "updatedAt": iso(item.updated_at)}
 
 
+def _channel_hostname(item: PromotionChannel, domain: DomainRecord | None) -> str:
+    if domain is None:
+        return ""
+    prefix = (item.subdomain_prefix or "").strip().lower()
+    return f"{prefix}.{domain.hostname}" if prefix else domain.hostname
+
+
 def channel_row(db: DbSession, item: PromotionChannel) -> dict:
     template = db.get(PromotionTemplate, item.template_id); domain = db.get(DomainRecord, item.domain_id) if item.domain_id else None; pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None
-    return {"id": item.public_id, "publicId": item.public_id, "type": item.channel_type, "name": item.name, "countryCode": item.country_code, "templatePublicId": template.public_id if template else None, "templateName": template.name if template else None, "domainPublicId": domain.public_id if domain else None, "hostname": domain.hostname if domain else None, "slug": item.slug, "pixelPublicId": pixel.public_id if pixel else None, "datasetId": pixel.dataset_id if pixel else None, "localeMode": item.locale_mode, "locale": item.locale, "status": item.status, "launchAt": iso(item.launch_at), "publicUrl": f"https://{domain.hostname}/{item.slug}" if domain else f"/api/public/promotion/channels/{item.slug}/render", "fissionPublicUrl": f"https://{domain.hostname}/{item.slug}/1" if domain else f"/api/public/promotion/channels/{item.slug}/fission/render", "createdAt": iso(item.created_at), "updatedAt": iso(item.updated_at)}
+    hostname = _channel_hostname(item, domain)
+    return {"id": item.public_id, "publicId": item.public_id, "type": item.channel_type, "name": item.name, "countryCode": item.country_code, "templatePublicId": template.public_id if template else None, "templateName": template.name if template else None, "domainPublicId": domain.public_id if domain else None, "baseHostname": domain.hostname if domain else None, "subdomainPrefix": item.subdomain_prefix or None, "hostname": hostname or None, "slug": item.slug, "pixelPublicId": pixel.public_id if pixel else None, "datasetId": pixel.dataset_id if pixel else None, "localeMode": item.locale_mode, "locale": item.locale, "status": item.status, "launchAt": iso(item.launch_at), "publicUrl": f"https://{hostname}/{item.slug}" if hostname else f"/api/public/promotion/channels/{item.slug}/render", "fissionPublicUrl": f"https://{hostname}/{item.slug}/1" if hostname else f"/api/public/promotion/channels/{item.slug}/fission/render", "createdAt": iso(item.created_at), "updatedAt": iso(item.updated_at)}
 
 
 def _manifest_protocol(manifest: dict) -> dict:
@@ -653,10 +661,10 @@ def create_channel(payload: PromotionChannelCreate, db: DbSession, current_user:
         raise HTTPException(status_code=422, detail="生产环境渠道必须绑定已验证域名")
     template = db.get(PromotionTemplate, tpl); supported = (template.manifest_json or {}).get("supportedLocales", [])
     if payload.locale_mode == "fixed" and (not payload.locale or payload.locale not in supported): raise HTTPException(status_code=422, detail="固定 locale 必须属于模板 supportedLocales")
-    item = PromotionChannel(public_id=f"pchn_{uuid4().hex}", channel_type=payload.channel_type, name=payload.name, country_code=payload.country_code, template_id=tpl, domain_id=dom, slug=payload.slug, pixel_id=pix, locale_mode=payload.locale_mode, locale=payload.locale, status=payload.status, launch_at=payload.launch_at, created_by=current_user.id)
+    item = PromotionChannel(public_id=f"pchn_{uuid4().hex}", channel_type=payload.channel_type, name=payload.name, country_code=payload.country_code, template_id=tpl, domain_id=dom, subdomain_prefix=payload.subdomain_prefix or "", slug=payload.slug, pixel_id=pix, locale_mode=payload.locale_mode, locale=payload.locale, status=payload.status, launch_at=payload.launch_at, created_by=current_user.id)
     db.add(item)
     try: db.commit()
-    except IntegrityError: db.rollback(); raise HTTPException(status_code=409, detail="推广渠道 slug 已存在") from None
+    except IntegrityError: db.rollback(); raise HTTPException(status_code=409, detail="该域名和子域名下的推广渠道 slug 已存在") from None
     db.refresh(item); return {"data": {"channel": channel_row(db, item)}}
 
 
@@ -670,6 +678,7 @@ def update_channel(public_id: str, payload: PromotionChannelUpdate, db: DbSessio
     if payload.name is not None: item.name = payload.name
     if payload.country_code is not None: item.country_code = payload.country_code
     if payload.slug is not None: item.slug = payload.slug
+    if "subdomain_prefix" in payload.model_fields_set: item.subdomain_prefix = payload.subdomain_prefix or ""
     if payload.status is not None: item.status = payload.status
     if payload.locale_mode is not None: item.locale_mode = payload.locale_mode
     if "locale" in payload.model_fields_set: item.locale = payload.locale
@@ -682,7 +691,7 @@ def update_channel(public_id: str, payload: PromotionChannelUpdate, db: DbSessio
         raise HTTPException(status_code=422, detail="生产环境渠道必须绑定已验证域名")
     if "pixel_public_id" in payload.model_fields_set: item.pixel_id = pix if payload.pixel_public_id else None
     try: db.commit()
-    except IntegrityError: db.rollback(); raise HTTPException(status_code=409, detail="推广渠道 slug 已存在") from None
+    except IntegrityError: db.rollback(); raise HTTPException(status_code=409, detail="该域名和子域名下的推广渠道 slug 已存在") from None
     return {"data": {"channel": channel_row(db, item)}}
 
 
@@ -724,9 +733,14 @@ def _public_channel(db: DbSession, slug: str, request: Request) -> PromotionChan
     # A ready promotion hostname is always authoritative, even for a signed-in
     # backend user. This prevents an authenticated preview from crossing from
     # one real promotion domain into another domain's same-slug channel.
-    domain = db.scalar(
+    host_candidates = [request_host]
+    requested_subdomain = ""
+    if "." in request_host:
+        first_label, base_host = request_host.split(".", 1)
+        host_candidates.append(base_host)
+    domains = db.scalars(
         select(DomainRecord).where(
-            DomainRecord.hostname == request_host,
+            DomainRecord.hostname.in_(host_candidates),
             DomainRecord.archived_at.is_(None),
             DomainRecord.enabled.is_(True),
             DomainRecord.registration_status == "active",
@@ -734,7 +748,12 @@ def _public_channel(db: DbSession, slug: str, request: Request) -> PromotionChan
             DomainRecord.ssl_status == "verified",
             DomainRecord.hosting_status == "active",
         )
-    )
+    ).all()
+    domain = next((row for row in domains if row.hostname == request_host), None)
+    if domain is None and "." in request_host:
+        domain = next((row for row in domains if row.hostname == base_host), None)
+        if domain is not None:
+            requested_subdomain = first_label
     preview_user = (
         get_optional_current_user(request, db)
         if domain is None and authenticated_preview_host
@@ -759,7 +778,12 @@ def _public_channel(db: DbSession, slug: str, request: Request) -> PromotionChan
     else:
         if domain is None:
             raise HTTPException(status_code=404, detail="推广域名不可用")
-        item = db.scalar(statement.where(PromotionChannel.domain_id == domain.id))
+        item = db.scalar(
+            statement.where(
+                PromotionChannel.domain_id == domain.id,
+                PromotionChannel.subdomain_prefix == requested_subdomain,
+            )
+        )
     if item is None or (
         item.launch_at
         and item.launch_at.replace(tzinfo=item.launch_at.tzinfo or UTC) > utcnow()

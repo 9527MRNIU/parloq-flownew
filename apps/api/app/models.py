@@ -644,7 +644,12 @@ class PromotionAsset(Base, TimestampMixin):
 class PromotionChannel(Base, TimestampMixin):
     __tablename__ = "promotion_channels"
     __table_args__ = (
-        UniqueConstraint("domain_id", "slug", name="uq_promotion_channel_domain_slug"),
+        UniqueConstraint(
+            "domain_id",
+            "subdomain_prefix",
+            "slug",
+            name="uq_promotion_channel_domain_subdomain_slug",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -657,6 +662,9 @@ class PromotionChannel(Base, TimestampMixin):
     )
     domain_id: Mapped[int | None] = mapped_column(
         ForeignKey("domains.id", ondelete="RESTRICT"), index=True
+    )
+    subdomain_prefix: Mapped[str] = mapped_column(
+        String(63), default="", server_default="", index=True
     )
     slug: Mapped[str] = mapped_column(String(120), index=True)
     pixel_id: Mapped[int | None] = mapped_column(

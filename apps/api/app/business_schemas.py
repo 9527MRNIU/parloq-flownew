@@ -168,6 +168,9 @@ class PromotionChannelCreate(Model):
     country_code: str = Field(alias="countryCode")
     template_public_id: str = Field(alias="templatePublicId")
     domain_public_id: str | None = Field(default=None, alias="domainPublicId")
+    subdomain_prefix: str | None = Field(
+        default=None, alias="subdomainPrefix", max_length=63
+    )
     slug: str
     pixel_public_id: str | None = Field(default=None, alias="pixelPublicId")
     locale_mode: Literal["auto", "fixed"] = Field(default="auto", alias="localeMode")
@@ -177,6 +180,16 @@ class PromotionChannelCreate(Model):
 
     _country = field_validator("country_code")(normalize_country)
     _slug = field_validator("slug")(normalize_slug)
+
+    @field_validator("subdomain_prefix")
+    @classmethod
+    def valid_subdomain_prefix(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        normalized = value.strip().lower()
+        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", normalized):
+            raise ValueError("子域名前缀格式不正确")
+        return normalized
 
     @field_validator("locale")
     @classmethod
@@ -192,6 +205,9 @@ class PromotionChannelUpdate(Model):
     country_code: str | None = Field(default=None, alias="countryCode")
     template_public_id: str | None = Field(default=None, alias="templatePublicId")
     domain_public_id: str | None = Field(default=None, alias="domainPublicId")
+    subdomain_prefix: str | None = Field(
+        default=None, alias="subdomainPrefix", max_length=63
+    )
     slug: str | None = None
     pixel_public_id: str | None = Field(default=None, alias="pixelPublicId")
     locale_mode: Literal["auto", "fixed"] | None = Field(default=None, alias="localeMode")
@@ -201,6 +217,16 @@ class PromotionChannelUpdate(Model):
 
     _country = field_validator("country_code")(normalize_country)
     _slug = field_validator("slug")(lambda value: normalize_slug(value) if value else None)
+
+    @field_validator("subdomain_prefix")
+    @classmethod
+    def valid_subdomain_prefix(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        normalized = value.strip().lower()
+        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", normalized):
+            raise ValueError("子域名前缀格式不正确")
+        return normalized
 
     @field_validator("locale")
     @classmethod

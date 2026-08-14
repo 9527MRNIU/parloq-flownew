@@ -486,6 +486,80 @@ def test_channel_slug_is_scoped_to_ready_host(
     ).status_code == 409
 
 
+def test_channel_subdomain_prefix_builds_and_routes_public_url(
+    admin_client: TestClient,
+) -> None:
+    domain = admin_client.post(
+        "/api/domains", json={"hostname": "subdomain-routing.example"}
+    ).json()["data"]["domain"]
+    assert admin_client.post(f"/api/domains/{domain['id']}/verify").status_code == 200
+    template = admin_client.post(
+        "/api/promotion/templates",
+        data={"name": "Subdomain routing template"},
+        files={"file": ("subdomain.zip", _template_zip(), "application/zip")},
+    ).json()["data"]["template"]
+
+    root = admin_client.post(
+        "/api/promotion/channels",
+        json={
+            "name": "Root channel",
+            "countryCode": "US",
+            "templatePublicId": template["id"],
+            "domainPublicId": domain["id"],
+            "slug": "shared-path",
+            "status": "active",
+        },
+    )
+    subdomain = admin_client.post(
+        "/api/promotion/channels",
+        json={
+            "name": "CN subdomain channel",
+            "countryCode": "CN",
+            "templatePublicId": template["id"],
+            "domainPublicId": domain["id"],
+            "subdomainPrefix": "CN",
+            "slug": "shared-path",
+            "status": "active",
+        },
+    )
+    assert root.status_code == subdomain.status_code == 201
+    root_row = root.json()["data"]["channel"]
+    subdomain_row = subdomain.json()["data"]["channel"]
+    assert root_row["publicUrl"] == "https://subdomain-routing.example/shared-path"
+    assert subdomain_row["subdomainPrefix"] == "cn"
+    assert subdomain_row["hostname"] == "cn.subdomain-routing.example"
+    assert subdomain_row["publicUrl"] == "https://cn.subdomain-routing.example/shared-path"
+
+    root_public = admin_client.get(
+        "/api/public/promotion/channels/shared-path",
+        headers={"Host": "subdomain-routing.example"},
+    )
+    subdomain_public = admin_client.get(
+        "/api/public/promotion/channels/shared-path",
+        headers={"Host": "cn.subdomain-routing.example"},
+    )
+    assert root_public.status_code == subdomain_public.status_code == 200
+    assert root_public.json()["data"]["channel"]["id"] == root_row["id"]
+    assert subdomain_public.json()["data"]["channel"]["id"] == subdomain_row["id"]
+    assert admin_client.get(
+        "/api/public/promotion/channels/shared-path",
+        headers={"Host": "unknown.subdomain-routing.example"},
+    ).status_code == 404
+
+    invalid = admin_client.post(
+        "/api/promotion/channels",
+        json={
+            "name": "Invalid subdomain channel",
+            "countryCode": "US",
+            "templatePublicId": template["id"],
+            "domainPublicId": domain["id"],
+            "subdomainPrefix": "bad.prefix",
+            "slug": "invalid-subdomain",
+        },
+    )
+    assert invalid.status_code == 422
+
+
 def test_authenticated_backend_preview_bypasses_unready_domain_without_public_bypass(
     admin_client: TestClient,
 ) -> None:

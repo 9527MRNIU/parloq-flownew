@@ -1,6 +1,8 @@
 import {
   ArchiveIcon,
+  CopyIcon,
   EyeIcon,
+  ExternalLinkIcon,
   LoaderCircleIcon,
   PencilIcon,
   PlusIcon,
@@ -94,8 +96,11 @@ type PromotionChannel = {
   templateId: string;
   templateName: string;
   domainId: string;
+  baseHostname: string;
+  subdomainPrefix: string;
   hostname: string;
   slug: string;
+  publicUrl: string;
   pixelId: string;
   pixelName: string;
   enabled: boolean;
@@ -200,6 +205,8 @@ function channelRow(input: unknown): PromotionChannel {
   const row = object(input);
   const stats = object(row.stats);
   const status = field(row, "status") || "draft";
+  const hostname = field(row, "hostname", "domain");
+  const slug = field(row, "slug");
   return {
     id: field(row, "publicId", "public_id", "id"),
     name: field(row, "name"),
@@ -220,8 +227,13 @@ function channelRow(input: unknown): PromotionChannel {
       "domainId",
       "domain_id",
     ),
-    hostname: field(row, "hostname", "domain"),
-    slug: field(row, "slug"),
+    baseHostname: field(row, "baseHostname", "base_hostname"),
+    subdomainPrefix: field(row, "subdomainPrefix", "subdomain_prefix"),
+    hostname,
+    slug,
+    publicUrl:
+      field(row, "publicUrl", "public_url") ||
+      (hostname && slug ? `https://${hostname}/${slug}` : ""),
     pixelId: field(
       row,
       "pixelPublicId",
@@ -789,6 +801,7 @@ export function PromotionChannelsPage() {
     countryCode: "US",
     templateId: "",
     domainId: "",
+    subdomainPrefix: "",
     slug: "",
     pixelId: "",
     localeMode: "auto",
@@ -861,6 +874,7 @@ export function PromotionChannelsPage() {
             countryCode: row.countryCode,
             templateId: row.templateId,
             domainId: row.domainId,
+            subdomainPrefix: row.subdomainPrefix,
             slug: row.slug,
             pixelId: row.pixelId,
             localeMode: row.localeMode,
@@ -873,6 +887,7 @@ export function PromotionChannelsPage() {
             countryCode: "US",
             templateId: templates[0]?.id || "",
             domainId: "",
+            subdomainPrefix: "",
             slug: randomChannelSlug(rows.map((item) => item.slug)),
             pixelId: "",
             localeMode: "auto",
@@ -899,6 +914,7 @@ export function PromotionChannelsPage() {
         countryCode: form.countryCode.toUpperCase(),
         templatePublicId: form.templateId,
         domainPublicId: form.domainId || undefined,
+        subdomainPrefix: form.subdomainPrefix || undefined,
         slug: form.slug.trim(),
         pixelPublicId: form.pixelId || undefined,
         localeMode: form.localeMode,
@@ -921,6 +937,21 @@ export function PromotionChannelsPage() {
       toast.error(caught instanceof Error ? caught.message : "保存失败");
     } finally {
       setPending(false);
+    }
+  }
+  const selectedDomain = domains.find((row) => row.id === form.domainId);
+  const previewHostname = selectedDomain
+    ? `${form.subdomainPrefix ? `${form.subdomainPrefix}.` : ""}${selectedDomain.label}`
+    : "";
+  const previewPublicUrl = previewHostname
+    ? `https://${previewHostname}/${form.slug || "短码"}`
+    : "";
+  async function copyPublicUrl(value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success("访问地址已复制");
+    } catch {
+      toast.error("复制失败，请手动复制");
     }
   }
   async function toggle(row: PromotionChannel) {
@@ -1163,7 +1194,29 @@ export function PromotionChannelsPage() {
                   <TableCell>
                     <div className="cell-main">
                       <strong>{row.hostname || "-"}</strong>
-                      <span>/{row.slug}</span>
+                      <span className="inline-link">
+                        /{row.slug}
+                        {row.publicUrl ? (
+                          <>
+                            <IconButton
+                              label="打开访问地址"
+                              className="mini-icon"
+                              onClick={() =>
+                                window.open(row.publicUrl, "_blank", "noopener,noreferrer")
+                              }
+                            >
+                              <ExternalLinkIcon size={14} />
+                            </IconButton>
+                            <IconButton
+                              label="复制访问地址"
+                              className="mini-icon"
+                              onClick={() => void copyPublicUrl(row.publicUrl)}
+                            >
+                              <CopyIcon size={14} />
+                            </IconButton>
+                          </>
+                        ) : null}
+                      </span>
                     </div>
                   </TableCell>
                   <TableCell>{row.pixelName || "未绑定"}</TableCell>
@@ -1183,10 +1236,7 @@ export function PromotionChannelsPage() {
                       <IconButton
                         label="打开真实渠道页：提交号码会创建账号并占用 IP"
                         onClick={() =>
-                          window.open(
-                            `/api/public/promotion/channels/${encodeURIComponent(row.slug)}/render`,
-                            "_blank",
-                          )
+                          window.open(row.publicUrl, "_blank", "noopener,noreferrer")
                         }
                       >
                         <EyeIcon size={16} />
@@ -1344,12 +1394,11 @@ export function PromotionChannelsPage() {
           </div>
           <div className="form-grid">
             <label className="field">
-              <span>域名</span>
+              <span>基础域名</span>
               <SelectField
                 className="w-full"
                 value={form.domainId}
-                clearable
-                placeholder="不绑定独立域名"
+                placeholder="请选择落地页域名"
                 onValueChange={(value) => setForm({ ...form, domainId: value })}
                 options={domains.map((row) => ({
                   value: row.id,
@@ -1357,6 +1406,26 @@ export function PromotionChannelsPage() {
                 }))}
               />
             </label>
+            <label className="field">
+              <span>子域名前缀（可选）</span>
+              <Input
+                value={form.subdomainPrefix}
+                maxLength={63}
+                placeholder="例如：cn；不填使用根域名"
+                onChange={(event) =>
+                  setForm({
+                    ...form,
+                    subdomainPrefix: event.target.value
+                      .toLowerCase()
+                      .replace(/[^a-z0-9-]/g, "")
+                      .replace(/^-+/, "")
+                      .slice(0, 63),
+                  })
+                }
+              />
+            </label>
+          </div>
+          <div className="form-grid">
             <label className="field">
               <span>访问短码（Slug）</span>
               <div className="flex gap-2">
@@ -1390,6 +1459,17 @@ export function PromotionChannelsPage() {
               </div>
               <small className="text-muted-foreground">
                 新建时自动生成 8 位随机短码，也可以手动修改。
+              </small>
+            </label>
+            <label className="field">
+              <span>最终访问地址</span>
+              <Input
+                value={previewPublicUrl}
+                readOnly
+                placeholder="选择基础域名后生成"
+              />
+              <small className="text-muted-foreground">
+                子域名需要该基础域名已配置通配符 DNS 和证书。
               </small>
             </label>
           </div>
