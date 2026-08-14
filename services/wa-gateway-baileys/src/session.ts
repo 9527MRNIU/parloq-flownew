@@ -4,7 +4,7 @@ import { GatewayError, type SessionCompleteness, type StoredAuth, type StoredKey
 
 export const SESSION_FORMAT = 'parloq-baileys-session'
 export const SESSION_VERSION = 1
-export const BAILEYS_VERSION = '7.0.0-rc14'
+export const BAILEYS_VERSION = '6.7.24'
 
 interface SessionBundle {
   format: typeof SESSION_FORMAT

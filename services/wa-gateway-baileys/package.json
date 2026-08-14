@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",
-    "@whiskeysockets/baileys": "7.0.0-rc14",
+    "@whiskeysockets/baileys": "6.7.24",
     "fastify": "^5.5.0",
     "pg": "^8.16.3",
     "pino": "^9.9.0",

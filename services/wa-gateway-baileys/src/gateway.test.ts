@@ -103,7 +103,6 @@ class TerminalConnectEngine implements ProtocolEngine {
   async ready(): Promise<void> {}
   async close(): Promise<void> {}
   async pair(_account: EngineAccount): Promise<PairResult> { throw new Error('not implemented') }
-  async resumePairing(_account: EngineAccount): Promise<void> {}
   constructor(private readonly terminalKind: 'reauth_required' | 'restricted' = 'restricted') {}
   async connect(account: EngineAccount): Promise<void> {
     this.handler({
@@ -137,7 +136,6 @@ class InterruptedPairingEngine implements ProtocolEngine {
     }))
     return { accountId: account.accountId, code: 'ABCD-EFGH', expiresAt: new Date(Date.now() + 180_000) }
   }
-  async resumePairing(_account: EngineAccount): Promise<void> {}
   async connect(_account: EngineAccount): Promise<void> { throw new Error('not implemented') }
   async disconnect(_accountId: string): Promise<void> {}
   async logout(_account: EngineAccount): Promise<void> {}
@@ -196,7 +194,7 @@ describe('Baileys gateway HTTP contract', () => {
     expect(store.accounts.has('wa_orphan_new')).toBe(true)
   })
 
-  it('keeps a transiently interrupted unverified pairing pending for reconnect', async () => {
+  it('fails an interrupted unverified pairing instead of reusing its stale code', async () => {
     const isolatedStore = new MemoryStore()
     const interruptedEngine = new InterruptedPairingEngine()
     const logger = pino({ level: 'silent' })
@@ -210,17 +208,17 @@ describe('Baileys gateway HTTP contract', () => {
 
       const account = await isolatedStore.getAccount('wa_interrupted_pairing')
       expect(account).toMatchObject({
-        state: 'pairing',
-        pairingStatus: 'reconnecting',
+        state: 'unpaired',
+        pairingStatus: 'failed',
         sessionStatus: 'none',
         sessionCompleteness: 'none',
         deviceJid: '',
-        reasonCategory: 'pairing_started',
+        reasonCategory: 'pairing_connection_lost',
       })
       const cancelled = await isolatedService.cancelPairing('wa_interrupted_pairing')
       expect(cancelled).toMatchObject({
         state: 'unpaired',
-        pairingStatus: 'cancelled',
+        pairingStatus: 'failed',
         sessionStatus: 'none',
       })
     } finally {
@@ -275,6 +273,7 @@ describe('Baileys gateway HTTP contract', () => {
     const session = exported.json().session
     expect(session.format).toBe('parloq-baileys-session')
     expect(session.version).toBe(1)
+    expect(session.library).toEqual({ name: '@whiskeysockets/baileys', version: '6.7.24' })
     expect(session.auth.keys).toHaveLength(1)
 
     const roundTripImport = await app.inject({ method: 'POST', url: '/v1/accounts/wa_roundtrip/import-session', headers, payload: { session, proxyUrl: 'socks5://proxy-2.example:1080' } })

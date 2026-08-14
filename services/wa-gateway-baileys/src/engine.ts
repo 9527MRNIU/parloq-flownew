@@ -32,7 +32,6 @@ export interface ProtocolEngine {
   ready(): Promise<void>
   close(): Promise<void>
   pair(account: EngineAccount): Promise<PairResult>
-  resumePairing(account: EngineAccount): Promise<void>
   connect(account: EngineAccount): Promise<void>
   disconnect(accountId: string): Promise<void>
   logout(account: EngineAccount): Promise<void>
@@ -101,10 +100,6 @@ export class BaileysEngine implements ProtocolEngine {
     const phone = account.phoneE164.slice(1)
     const code = await requestPairingCodeAfterSocketOpen(active.socket, phone)
     return { accountId: account.accountId, code, expiresAt: new Date(Date.now() + 3 * 60_000) }
-  }
-
-  async resumePairing(account: EngineAccount): Promise<void> {
-    await this.openSocket(account, false)
   }
 
   async connect(account: EngineAccount): Promise<void> {
@@ -257,11 +252,11 @@ export class BaileysEngine implements ProtocolEngine {
               providerCode,
             })
           }
-          // Pairing codes live in the unregistered auth state. WhatsApp may
-          // close or restart that temporary socket before the phone confirms
-          // the code, so reconnect with the same credentials instead of
-          // treating the code as invalid.
-          if (transient && (state.creds.registered || Boolean(state.creds.pairingCode))) {
+          // Only registered sessions are reconnectable. A pairing code is
+          // bound to the unregistered socket that requested it; reopening a
+          // socket with those temporary credentials does not re-submit the
+          // companion registration request and makes the displayed code stale.
+          if (transient && state.creds.registered) {
             this.scheduleReconnect(account)
           }
         }
@@ -308,7 +303,6 @@ export class MockEngine implements ProtocolEngine {
     queueMicrotask(() => this.handler({ kind: 'connected', accountId: account.accountId, deviceJid: `mock-${account.accountId}@s.whatsapp.net` }))
     return { accountId: account.accountId, code: '0000-0000', expiresAt: new Date(Date.now() + 180_000), deviceJid: `mock-${account.accountId}@s.whatsapp.net` }
   }
-  async resumePairing(_account: EngineAccount): Promise<void> {}
   async connect(account: EngineAccount): Promise<void> {
     const current = this.accounts.get(account.accountId) ?? { linked: true, online: false }
     current.online = true

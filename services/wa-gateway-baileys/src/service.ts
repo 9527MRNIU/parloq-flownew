@@ -55,9 +55,18 @@ export class GatewayService {
         await this.expirePairing(account.id)
         continue
       }
-      this.schedulePairingExpiry(account.id, account.pairingExpiresAt)
-      void this.engine.resumePairing({ accountId: account.id, phoneE164: account.phoneE164, proxyUrl: account.proxyUrl })
-        .catch((error: unknown) => this.logger.warn({ accountId: account.id, error: safeError(error) }, 'pairing_restore_failed'))
+      // A phone pairing code belongs to the socket that issued it. If the
+      // gateway restarted, that socket no longer exists and the old code must
+      // not be restored or shown as usable.
+      await this.store.clearAuth(account.id)
+      await this.transitionAccount(account.id, 'unpaired', {
+        deviceJid: '',
+        autoConnect: false,
+        sessionStatus: 'none',
+        sessionCompleteness: 'none',
+        pairingStatus: 'failed',
+        pairingExpiresAt: null,
+      }, 'pairing_interrupted')
     }
     for (const account of accounts.filter((item) => item.autoConnect && item.deviceJid)) {
       void this.connect(account.id).catch((error: unknown) => this.logger.warn({ accountId: account.id, error: safeError(error) }, 'account_restore_failed'))
@@ -437,10 +446,16 @@ export class GatewayService {
           && current.pairingExpiresAt !== null
           && current.pairingExpiresAt.getTime() > Date.now()
         if (pairingActive) {
-          // A 428/515 socket close during phone-code pairing is recoverable.
-          // The engine reconnects with the same unregistered auth state while
-          // the public attempt remains pending.
-          await this.store.updateAccount(event.accountId, { pairingStatus: 'reconnecting' })
+          this.clearPairingExpiry(event.accountId)
+          await this.store.clearAuth(event.accountId)
+          await this.transitionAccount(event.accountId, 'unpaired', {
+            deviceJid: '',
+            autoConnect: false,
+            sessionStatus: 'none',
+            sessionCompleteness: 'none',
+            pairingStatus: 'failed',
+            pairingExpiresAt: null,
+          }, 'pairing_connection_lost', event.providerCode)
           return
         }
         if (current.state === 'pairing' && ['waiting_phone', 'reconnecting'].includes(current.pairingStatus)) {
