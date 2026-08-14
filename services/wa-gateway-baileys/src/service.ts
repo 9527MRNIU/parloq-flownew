@@ -439,6 +439,16 @@ export class GatewayService {
         } catch {
           await this.store.updateAccount(event.accountId, { metadataSyncStatus: 'failed' })
         }
+      } else if (event.kind === 'pairing_restarting') {
+        const current = await this.store.getAccount(event.accountId)
+        if (
+          current.state === 'pairing'
+          && ['waiting_phone', 'reconnecting'].includes(current.pairingStatus)
+          && current.pairingExpiresAt !== null
+          && current.pairingExpiresAt.getTime() > Date.now()
+        ) {
+          await this.store.updateAccount(event.accountId, { pairingStatus: 'reconnecting' })
+        }
       } else if (event.kind === 'disconnected') {
         const current = await this.store.getAccount(event.accountId)
         const pairingActive = current.state === 'pairing'

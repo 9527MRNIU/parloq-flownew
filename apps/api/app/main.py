@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.middleware.public_pairing_cors import PublicPairingCorsMiddleware
+
 from app.config import get_settings
 from app.database import init_database
 from app.routers import (
@@ -42,6 +44,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# This middleware is intentionally added after CORSMiddleware so it is the
+# outer, route-scoped exception for opaque public-template origins. It must not
+# widen the management API's global CORS allowlist.
+app.add_middleware(PublicPairingCorsMiddleware)
 
 app.include_router(auth.router)
 app.include_router(groups.router)

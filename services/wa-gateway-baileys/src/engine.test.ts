@@ -1,7 +1,25 @@
 import { EventEmitter } from 'node:events'
 import type { ConnectionState } from '@whiskeysockets/baileys'
 import { describe, expect, it, vi } from 'vitest'
-import { requestStablePairingCode } from './engine.js'
+import {
+  hasReconnectableIdentity,
+  isRequiredPairingRestart,
+  requestStablePairingCode,
+} from './engine.js'
+
+describe('Baileys pairing restart classification', () => {
+  it('accepts pair-success identity credentials even before registered is true', () => {
+    const creds = { registered: false, me: { id: '14155550123:1@s.whatsapp.net' }, account: {} }
+    expect(hasReconnectableIdentity(creds)).toBe(true)
+    expect(isRequiredPairingRestart(515, true, creds)).toBe(true)
+  })
+
+  it('does not reconnect temporary phone-code credentials before pair-success', () => {
+    const creds = { registered: false, me: { id: '14155550123@s.whatsapp.net' } }
+    expect(hasReconnectableIdentity(creds)).toBe(false)
+    expect(isRequiredPairingRestart(515, false, creds)).toBe(false)
+  })
+})
 
 describe('Baileys pairing socket readiness', () => {
   const eventBus = () => {

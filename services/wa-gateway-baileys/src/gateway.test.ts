@@ -144,6 +144,30 @@ class InterruptedPairingEngine implements ProtocolEngine {
   isOnline(_accountId: string): boolean { return false }
 }
 
+class RestartingPairingEngine implements ProtocolEngine {
+  readonly name = 'restarting-pairing-test'
+  private handler: (event: EngineEvent) => void = () => undefined
+  setEventHandler(handler: (event: EngineEvent) => void): void { this.handler = handler }
+  async start(): Promise<void> {}
+  async ready(): Promise<void> {}
+  async close(): Promise<void> {}
+  async pair(account: EngineAccount): Promise<PairResult> {
+    return { accountId: account.accountId, code: 'ABCD-EFGH', expiresAt: new Date(Date.now() + 180_000) }
+  }
+  restart(accountId: string): void {
+    this.handler({ kind: 'pairing_restarting', accountId, reasonCategory: 'pairing_restart_required', providerCode: '515' })
+  }
+  complete(accountId: string): void {
+    this.handler({ kind: 'connected', accountId, deviceJid: '14155550135:1@s.whatsapp.net' })
+  }
+  async connect(_account: EngineAccount): Promise<void> { throw new Error('not implemented') }
+  async disconnect(_accountId: string): Promise<void> {}
+  async logout(_account: EngineAccount): Promise<void> {}
+  async send(_accountId: string, _toE164: string, _text: string): Promise<string> { throw new Error('not implemented') }
+  async getQuality(_accountId: string): Promise<AccountQuality> { return { hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null } }
+  isOnline(_accountId: string): boolean { return false }
+}
+
 describe('Baileys gateway HTTP contract', () => {
   let store: MemoryStore
   let engine: MockEngine
@@ -240,6 +264,39 @@ describe('Baileys gateway HTTP contract', () => {
       pairingStatus: 'verified',
       reasonCategory: 'connected',
     })
+  })
+
+  it('preserves new credentials across the required 515 pairing restart', async () => {
+    const isolatedStore = new MemoryStore()
+    const restartingEngine = new RestartingPairingEngine()
+    const logger = pino({ level: 'silent' })
+    const isolatedService = new GatewayService(isolatedStore, restartingEngine, new WebhookClient('', '', 0, logger), logger)
+    await isolatedService.start()
+    try {
+      await isolatedService.createAccount({ id: 'wa_pairing_restart', phoneE164: '+14155550135', proxyUrl: 'socks5://proxy.example:1080' })
+      await isolatedService.requestPairingCode('wa_pairing_restart')
+      await isolatedStore.setCreds('wa_pairing_restart', { pairedIdentity: true })
+
+      restartingEngine.restart('wa_pairing_restart')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(await isolatedStore.getAccount('wa_pairing_restart')).toMatchObject({
+        state: 'pairing',
+        pairingStatus: 'reconnecting',
+        sessionStatus: 'none',
+      })
+      expect(await isolatedStore.getCreds('wa_pairing_restart')).toEqual({ pairedIdentity: true })
+
+      restartingEngine.complete('wa_pairing_restart')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(await isolatedStore.getAccount('wa_pairing_restart')).toMatchObject({
+        state: 'online_idle',
+        pairingStatus: 'verified',
+        sessionStatus: 'verified',
+        deviceJid: '14155550135:1@s.whatsapp.net',
+      })
+    } finally {
+      await isolatedService.close()
+    }
   })
 
   it('does not replace imported credentials that are still awaiting verification', async () => {

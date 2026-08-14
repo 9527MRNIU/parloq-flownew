@@ -15,6 +15,7 @@ import { WaWebVersionResolver } from './wa-version.js'
 
 export type EngineEvent =
   | { kind: 'connected'; accountId: string; deviceJid: string }
+  | { kind: 'pairing_restarting'; accountId: string; reasonCategory: string; providerCode?: string }
   | { kind: 'disconnected' | 'logged_out' | 'reauth_required' | 'restricted'; accountId: string; reasonCategory: string; providerCode?: string }
   | { kind: 'delivered'; accountId: string; providerMessageId: string }
 
@@ -57,11 +58,31 @@ type PairingSocket = Pick<WASocket, 'requestPairingCode'> & {
   ev: PairingEventEmitter
 }
 
+interface ReconnectableCredentials {
+  registered?: boolean
+  me?: { id?: string } | null
+  account?: unknown
+}
+
+export function hasReconnectableIdentity(creds: ReconnectableCredentials): boolean {
+  return creds.registered === true || Boolean(creds.me?.id && creds.account)
+}
+
+export function isRequiredPairingRestart(
+  statusCode: number,
+  pairingConfigured: boolean,
+  creds: ReconnectableCredentials,
+): boolean {
+  return statusCode === DisconnectReason.restartRequired
+    && pairingConfigured
+    && hasReconnectableIdentity(creds)
+}
+
 export async function requestStablePairingCode(
   socket: PairingSocket,
   phone: string,
   readyTimeoutMs = 20_000,
-  stabilityMs = 6_000,
+  stabilityMs = 250,
 ): Promise<string> {
   let resolveReady: (() => void) | undefined
   let rejectClosed: ((reason?: unknown) => void) | undefined
@@ -252,11 +273,17 @@ export class BaileysEngine implements ProtocolEngine {
     const active: ActiveSocket = proxyAgent ? { socket, online: false, proxyAgent } : { socket, online: false }
     this.sockets.set(account.accountId, active)
 
-    socket.ev.on('creds.update', async (update) => {
+    let credsSaveTail = Promise.resolve()
+    let pairingConfigured = false
+    socket.ev.on('creds.update', (update) => {
       mergeCreds(state.creds, update)
-      await saveCreds()
+      credsSaveTail = credsSaveTail.catch(() => undefined).then(saveCreds)
+      void credsSaveTail.catch((error: unknown) => {
+        this.protocolLogger.error({ accountId: account.accountId, error }, 'credential_persist_failed')
+      })
     })
     socket.ev.on('connection.update', (update) => {
+      if (update.isNewLogin === true) pairingConfigured = true
       if (update.connection === 'open') {
         active.online = true
         this.reconnectAttempts.delete(account.accountId)
@@ -291,7 +318,25 @@ export class BaileysEngine implements ProtocolEngine {
             DisconnectReason.timedOut,
             DisconnectReason.unavailableService,
           ].includes(statusCode)
-          if (!this.blockedReconnect.has(account.accountId)) {
+          const hasLinkedIdentity = hasReconnectableIdentity(state.creds)
+          const pairingRestart = isRequiredPairingRestart(
+            statusCode,
+            pairingConfigured,
+            state.creds,
+          )
+          if (pairingRestart && !this.blockedReconnect.has(account.accountId)) {
+            // A 515 immediately after pair-success is the normal second half
+            // of Baileys device linking. WhatsApp expects a fresh socket using
+            // the credentials emitted by pair-success. Treating this as an
+            // interrupted pairing clears the new identity and makes the phone
+            // wait until it reports that the device could not be linked.
+            this.handler({
+              kind: 'pairing_restarting',
+              accountId: account.accountId,
+              reasonCategory: 'pairing_restart_required',
+              providerCode,
+            })
+          } else if (!this.blockedReconnect.has(account.accountId)) {
             this.handler({
               kind: 'disconnected',
               accountId: account.accountId,
@@ -299,12 +344,22 @@ export class BaileysEngine implements ProtocolEngine {
               providerCode,
             })
           }
-          // Only registered sessions are reconnectable. A pairing code is
-          // bound to the unregistered socket that requested it; reopening a
-          // socket with those temporary credentials does not re-submit the
-          // companion registration request and makes the displayed code stale.
-          if (transient && state.creds.registered) {
-            this.scheduleReconnect(account)
+          // Temporary code-only auth is not reconnectable: reopening it does
+          // not re-submit the companion registration request. A registered
+          // session or the identity returned by pair-success is reconnectable.
+          if (transient && hasLinkedIdentity) {
+            // Pair-success credentials are persisted asynchronously by
+            // Baileys. Never open the replacement socket before that write is
+            // complete, otherwise the restart can load the pre-pairing state.
+            void credsSaveTail.then(
+              () => this.scheduleReconnect(account),
+              () => this.handler({
+                kind: 'disconnected',
+                accountId: account.accountId,
+                reasonCategory: 'credential_store_failure',
+                providerCode,
+              }),
+            )
           }
         }
       }

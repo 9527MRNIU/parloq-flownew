@@ -589,10 +589,38 @@ def test_personal_account_gateway_and_hyperlink_delivery(
     pairing = landing_pair.json()["data"]["pairing"]
     assert observed_persisted_account[pairing["statusUrl"].split("/")[-2]] is True
     assert pairing["pairingCode"] == "0000-0000"
+    pairing_preflight = admin_client.options(
+        pairing["statusUrl"],
+        headers={
+            "Origin": "null",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "X-Parloq-Pairing-Token",
+        },
+    )
+    assert pairing_preflight.status_code == 204
+    assert pairing_preflight.headers["access-control-allow-origin"] == "null"
+    assert (
+        pairing_preflight.headers["access-control-allow-headers"]
+        == "X-Parloq-Pairing-Token"
+    )
+    unrelated_preflight = admin_client.options(
+        "/api/users",
+        headers={
+            "Origin": "null",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "X-Parloq-Pairing-Token",
+        },
+    )
+    assert unrelated_preflight.status_code == 400
     landing_status = admin_client.get(
-        pairing["statusUrl"], params={"token": pairing["statusToken"]}
+        pairing["statusUrl"],
+        headers={
+            "Origin": "null",
+            "X-Parloq-Pairing-Token": pairing["statusToken"],
+        },
     )
     assert landing_status.status_code == 200
+    assert landing_status.headers["access-control-allow-origin"] == "null"
     status_data = landing_status.json()["data"]
     assert status_data["state"] == "ready"
     assert status_data["accountState"] == "linked_offline"
