@@ -27,6 +27,7 @@ from app.snowflake import new_public_id
 from app.services.protocol_nodes import (
     DEFAULT_SYNC_POLICY,
     ingress_unavailable_reason,
+    normalized_rate_limit_policy,
     normalized_sync_policy,
     protocol_capacity,
     select_ingress_protocol,
@@ -137,6 +138,9 @@ def _row(db: DbSession, item: ProtocolNode) -> dict:
         "postVerifyGraceSeconds": item.post_verify_grace_seconds,
         "syncPolicyVersion": item.sync_policy_version,
         "syncPolicy": normalized_sync_policy(item.sync_policy_json),
+        "rateLimitPolicy": normalized_rate_limit_policy(
+            item.rate_limit_policy_json
+        ),
         "createdAt": item.created_at.isoformat(),
         "updatedAt": item.updated_at.isoformat(),
     }
@@ -164,6 +168,7 @@ def create_protocol_node(
         post_verify_grace_seconds=payload.post_verify_grace_seconds,
         sync_policy_version=1,
         sync_policy_json=payload.sync_policy.model_dump(by_alias=True),
+        rate_limit_policy_json=payload.rate_limit_policy.model_dump(by_alias=True),
         created_by=current_user.id,
     )
     db.add(item)
@@ -228,6 +233,24 @@ def update_protocol_node(
         if normalized_sync_policy(item.sync_policy_json) != next_policy:
             item.sync_policy_json = next_policy
             item.sync_policy_version = int(item.sync_policy_version or 1) + 1
+    if payload.rate_limit_policy is not None:
+        next_rate_policy = normalized_rate_limit_policy(
+            item.rate_limit_policy_json
+        )
+        rate_aliases = {
+            "visitor_check": "visitorCheck",
+            "visitor_attempt": "visitorAttempt",
+            "ip_start": "ipStart",
+            "phone_attempt": "phoneAttempt",
+            "channel_attempt": "channelAttempt",
+            "status": "status",
+            "cancel": "cancel",
+        }
+        for field_name in payload.rate_limit_policy.model_fields_set:
+            next_rate_policy[rate_aliases[field_name]] = getattr(
+                payload.rate_limit_policy, field_name
+            ).model_dump(by_alias=True)
+        item.rate_limit_policy_json = next_rate_policy
     wakeup_group_ids: set[int] = set()
     if (
         not marketing_was_enabled
@@ -410,11 +433,24 @@ def protocol_integration_spec(
                 "tokenHeader": "Authorization",
                 "tokenScheme": "Bearer",
             },
+            "rateLimit": {
+                "source": "protocol-node",
+                "policy": normalized_rate_limit_policy(
+                    item.rate_limit_policy_json
+                ),
+                "response": {
+                    "status": 429,
+                    "code": "rate_limited",
+                    "retryAfterHeader": "Retry-After",
+                    "retryAfterField": "error.retryAfterSeconds",
+                },
+            },
             "rules": [
                 "v2 模板必须通过 PromotionBridge 调用 start/status/cancel，不自行拼接鉴权头。",
                 "只使用 start 返回的 statusUrl、cancelUrl 和 statusToken。",
                 "linked_offline 不是配对成功，模板只认 verified 终态。",
                 "令牌只能按 Bearer 方案放在 Authorization 请求头，不能放进 URL。",
+                "收到 429 时按 Retry-After 等待；模板不得自行提高轮询频率。",
                 "用户可见号码不得显示前导加号。",
             ],
         }

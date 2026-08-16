@@ -549,6 +549,16 @@ class AccountLinkFlow extends HTMLElement {
     if (!bridge?.getPairingStatus) { this.status.setState("failed"); return; }
     try {
       const response = await bridge.getPairingStatus(this.pairing);
+      if (response.status === 429) {
+        const retryAfterSeconds = Number(response.headers.get("Retry-After"));
+        this.pollFailures = 0;
+        this.schedule(
+          Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+            ? retryAfterSeconds * 1000
+            : 5000,
+        );
+        return;
+      }
       if (!response.ok) throw new Error("status rejected");
       const payload = await response.json();
       this.applyPairingState(payload?.data || {}, true);

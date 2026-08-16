@@ -33,6 +33,16 @@ DEFAULT_SYNC_POLICY: dict[str, bool] = {
     "blocklist": False,
 }
 
+DEFAULT_RATE_LIMIT_POLICY: dict[str, dict[str, int]] = {
+    "visitorCheck": {"maxRequests": 5, "windowSeconds": 600},
+    "visitorAttempt": {"maxRequests": 5, "windowSeconds": 600},
+    "ipStart": {"maxRequests": 20, "windowSeconds": 600},
+    "phoneAttempt": {"maxRequests": 3, "windowSeconds": 600},
+    "channelAttempt": {"maxRequests": 100, "windowSeconds": 60},
+    "status": {"maxRequests": 60, "windowSeconds": 60},
+    "cancel": {"maxRequests": 10, "windowSeconds": 60},
+}
+
 ONLINE_ACCOUNT_STATES = {"warming", "online_idle", "sending", "draining"}
 ACTIVE_PAIRING_STATUSES = {
     "code_issued",
@@ -65,6 +75,40 @@ def normalized_sync_policy(value: dict | None) -> dict[str, bool]:
             result[key] = raw
     if result["groupDetails"]:
         result["groupSummary"] = True
+    return result
+
+
+def normalized_rate_limit_policy(value: dict | None) -> dict[str, dict[str, int]]:
+    source = value if isinstance(value, dict) else {}
+    snake_aliases = {
+        "visitorCheck": "visitor_check",
+        "visitorAttempt": "visitor_attempt",
+        "ipStart": "ip_start",
+        "phoneAttempt": "phone_attempt",
+        "channelAttempt": "channel_attempt",
+    }
+    result: dict[str, dict[str, int]] = {}
+    for key, defaults in DEFAULT_RATE_LIMIT_POLICY.items():
+        raw = source.get(key, source.get(snake_aliases.get(key, ""), {}))
+        rule = raw if isinstance(raw, dict) else {}
+        max_requests = rule.get("maxRequests", rule.get("max_requests"))
+        window_seconds = rule.get("windowSeconds", rule.get("window_seconds"))
+        result[key] = {
+            "maxRequests": (
+                max_requests
+                if isinstance(max_requests, int)
+                and not isinstance(max_requests, bool)
+                and max_requests > 0
+                else defaults["maxRequests"]
+            ),
+            "windowSeconds": (
+                window_seconds
+                if isinstance(window_seconds, int)
+                and not isinstance(window_seconds, bool)
+                and window_seconds > 0
+                else defaults["windowSeconds"]
+            ),
+        }
     return result
 
 
@@ -158,6 +202,9 @@ def _new_default_node(owner_id: int) -> ProtocolNode:
         post_verify_grace_seconds=120,
         sync_policy_version=1,
         sync_policy_json=dict(DEFAULT_SYNC_POLICY),
+        rate_limit_policy_json={
+            key: dict(rule) for key, rule in DEFAULT_RATE_LIMIT_POLICY.items()
+        },
         created_by=owner_id,
     )
 
@@ -265,6 +312,42 @@ def resolve_channel_ingress_protocol(
     channel.protocol_pool_id = None
     channel.route_version = max(int(channel.route_version or 1), 1)
     return item
+
+
+def channel_rate_limit_protocol(
+    db: Session,
+    channel: PromotionChannel,
+) -> ProtocolNode:
+    """Return the configured node whose policy protects a start preflight.
+
+    Pool routes use their first enabled member for the preflight. The final
+    selected member applies its own attempt-creation limits after routing.
+    """
+
+    if channel.protocol_node_id is not None:
+        item = db.get(ProtocolNode, channel.protocol_node_id)
+        if item is not None and item.created_by == channel.created_by:
+            return item
+        raise HTTPException(status_code=409, detail="渠道绑定的协议节点不存在")
+    if channel.protocol_pool_id is not None:
+        item = db.scalar(
+            select(ProtocolNode)
+            .join(
+                ProtocolPoolMember,
+                ProtocolPoolMember.protocol_node_id == ProtocolNode.id,
+            )
+            .where(
+                ProtocolPoolMember.pool_id == channel.protocol_pool_id,
+                ProtocolPoolMember.enabled.is_(True),
+                ProtocolNode.created_by == channel.created_by,
+            )
+            .order_by(ProtocolPoolMember.priority, ProtocolPoolMember.id)
+            .limit(1)
+        )
+        if item is not None:
+            return item
+        raise HTTPException(status_code=409, detail="协议池中没有可用的协议节点配置")
+    return select_ingress_protocol(db, channel.created_by)
 
 
 def marketing_protocol_available(db: Session, protocol_id: int | None) -> bool:

@@ -33,6 +33,7 @@ class Settings:
     wa_gateway_webhook_secret: str
     redis_url: str
     task_queue_mock: bool
+    pairing_rate_limit_mock: bool
     task_worker_max_concurrency: int
     domain_verify_mock: bool
     domain_registrar_mock: bool
@@ -86,6 +87,7 @@ def get_settings() -> Settings:
         wa_gateway_webhook_secret=os.getenv("WA_GATEWAY_WEBHOOK_SECRET", ""),
         redis_url=os.getenv("REDIS_URL", "redis://redis:6379/0"),
         task_queue_mock=_bool_env("TASK_QUEUE_MOCK", False),
+        pairing_rate_limit_mock=_bool_env("PAIRING_RATE_LIMIT_MOCK", False),
         task_worker_max_concurrency=max(
             1, min(int(os.getenv("TASK_WORKER_MAX_CONCURRENCY", "200")), 1000)
         ),

@@ -66,6 +66,7 @@ type ProtocolNode = {
   idleDisconnectSeconds: number;
   postVerifyGraceSeconds: number;
   syncPolicy: SyncPolicy;
+  rateLimitPolicy: RateLimitPolicy;
   createdAt: string;
 };
 
@@ -80,6 +81,28 @@ type SyncPolicy = {
   messageHistory: boolean;
   privacySettings: boolean;
   blocklist: boolean;
+};
+
+type RateLimitRule = {
+  maxRequests: number;
+  windowSeconds: number;
+};
+
+type RateLimitPolicy = {
+  visitorCheck: RateLimitRule;
+  visitorAttempt: RateLimitRule;
+  ipStart: RateLimitRule;
+  phoneAttempt: RateLimitRule;
+  channelAttempt: RateLimitRule;
+  status: RateLimitRule;
+  cancel: RateLimitRule;
+};
+
+type RateLimitPolicyForm = {
+  [Key in keyof RateLimitPolicy]: {
+    maxRequests: string;
+    windowSeconds: string;
+  };
 };
 
 type ProtocolPool = {
@@ -107,6 +130,54 @@ const DEFAULT_SYNC_POLICY: SyncPolicy = {
   privacySettings: false,
   blocklist: false,
 };
+
+const DEFAULT_RATE_LIMIT_POLICY: RateLimitPolicy = {
+  visitorCheck: { maxRequests: 5, windowSeconds: 600 },
+  visitorAttempt: { maxRequests: 5, windowSeconds: 600 },
+  ipStart: { maxRequests: 20, windowSeconds: 600 },
+  phoneAttempt: { maxRequests: 3, windowSeconds: 600 },
+  channelAttempt: { maxRequests: 100, windowSeconds: 60 },
+  status: { maxRequests: 60, windowSeconds: 60 },
+  cancel: { maxRequests: 10, windowSeconds: 60 },
+};
+
+const RATE_LIMIT_FIELDS: Array<[
+  keyof RateLimitPolicy,
+  string,
+  string,
+]> = [
+  ["visitorCheck", "访客绑定检查", "同一渠道、同一访客发起绑定检查"],
+  ["visitorAttempt", "访客新建配对", "同一渠道、同一访客创建新配对任务"],
+  ["ipStart", "来源 IP 请求", "同一渠道、同一来源 IP 调用开始绑定"],
+  ["phoneAttempt", "号码新建配对", "同一租户、同一号码创建新配对任务"],
+  ["channelAttempt", "渠道新建配对", "单个渠道创建新配对任务的总量"],
+  ["status", "状态查询", "同一个配对任务查询绑定状态"],
+  ["cancel", "取消请求", "同一个配对任务调用取消操作"],
+];
+
+function toRateLimitForm(policy: RateLimitPolicy): RateLimitPolicyForm {
+  return Object.fromEntries(
+    Object.entries(policy).map(([key, rule]) => [
+      key,
+      {
+        maxRequests: String(rule.maxRequests),
+        windowSeconds: String(rule.windowSeconds),
+      },
+    ]),
+  ) as RateLimitPolicyForm;
+}
+
+function validRateLimitForm(policy: RateLimitPolicyForm) {
+  return Object.values(policy).every(
+    (rule) =>
+      Number.isInteger(Number(rule.maxRequests)) &&
+      Number(rule.maxRequests) >= 1 &&
+      Number(rule.maxRequests) <= 100_000 &&
+      Number.isInteger(Number(rule.windowSeconds)) &&
+      Number(rule.windowSeconds) >= 1 &&
+      Number(rule.windowSeconds) <= 86_400,
+  );
+}
 
 const value = (row: Record<string, unknown>, ...keys: string[]) => {
   for (const key of keys) if (row[key] != null) return row[key];
@@ -145,6 +216,7 @@ function protocolNode(input: unknown): ProtocolNode {
   const validCount = number(row, "validCount", "valid_count", "validAccounts", "valid_accounts", "effectiveCount", "effective_count");
   const onlineCount = number(row, "onlineCount", "online_count", "onlineAccounts", "online_accounts");
   const rawSync = (value(row, "syncPolicy", "sync_policy") || {}) as Record<string, unknown>;
+  const rawRatePolicy = (value(row, "rateLimitPolicy", "rate_limit_policy") || {}) as Record<string, unknown>;
   return {
     id,
     readKey: entityRowKey(row, id, "protocol-node", `${text(row, "name", "title")}:${text(row, "createdAt", "created_at")}`),
@@ -173,6 +245,18 @@ function protocolNode(input: unknown): ProtocolNode {
         typeof rawSync[key] === "boolean" ? rawSync[key] : fallback,
       ]),
     ) as SyncPolicy,
+    rateLimitPolicy: Object.fromEntries(
+      Object.entries(DEFAULT_RATE_LIMIT_POLICY).map(([key, fallback]) => {
+        const rawRule = (rawRatePolicy[key] || {}) as Record<string, unknown>;
+        return [
+          key,
+          {
+            maxRequests: number(rawRule, "maxRequests", "max_requests") || fallback.maxRequests,
+            windowSeconds: number(rawRule, "windowSeconds", "window_seconds") || fallback.windowSeconds,
+          },
+        ];
+      }),
+    ) as RateLimitPolicy,
     createdAt: text(row, "createdAt", "created_at"),
   };
 }
@@ -233,6 +317,7 @@ export function ProtocolManagementPage() {
     idleDisconnectSeconds: "600",
     postVerifyGraceSeconds: "120",
     syncPolicy: { ...DEFAULT_SYNC_POLICY },
+    rateLimitPolicy: toRateLimitForm(DEFAULT_RATE_LIMIT_POLICY),
     remark: "",
   });
   const [saving, setSaving] = useState(false);
@@ -293,6 +378,7 @@ export function ProtocolManagementPage() {
       idleDisconnectSeconds: String(row.idleDisconnectSeconds),
       postVerifyGraceSeconds: String(row.postVerifyGraceSeconds),
       syncPolicy: { ...row.syncPolicy },
+      rateLimitPolicy: toRateLimitForm(row.rateLimitPolicy),
       remark: row.remark,
     });
   }
@@ -310,6 +396,7 @@ export function ProtocolManagementPage() {
       idleDisconnectSeconds: "600",
       postVerifyGraceSeconds: "120",
       syncPolicy: { ...DEFAULT_SYNC_POLICY },
+      rateLimitPolicy: toRateLimitForm(DEFAULT_RATE_LIMIT_POLICY),
       remark: "",
     });
   }
@@ -330,6 +417,15 @@ export function ProtocolManagementPage() {
           idleDisconnectSeconds: Number(form.idleDisconnectSeconds),
           postVerifyGraceSeconds: Number(form.postVerifyGraceSeconds),
           syncPolicy: form.syncPolicy,
+          rateLimitPolicy: Object.fromEntries(
+            Object.entries(form.rateLimitPolicy).map(([key, rule]) => [
+              key,
+              {
+                maxRequests: Number(rule.maxRequests),
+                windowSeconds: Number(rule.windowSeconds),
+              },
+            ]),
+          ),
           remark: form.remark.trim() || null,
         }),
       });
@@ -535,7 +631,7 @@ export function ProtocolManagementPage() {
         onClose={() => { if (!saving) { setEditing(null); setCreating(false); } }}
         title={creating ? "新建协议节点" : `编辑协议 · ${editing?.id || ""}`}
         description="协议节点是共享 Baileys 网关上的逻辑运营分区；容量、连接和同步设置只影响此节点。"
-        footer={<><Button variant="outline" disabled={saving} onClick={() => { setEditing(null); setCreating(false); }}>取消</Button><Button disabled={saving || !form.name.trim() || form.name.trim().length > 64 || form.remark.length > 512 || Number(form.idleDisconnectSeconds) < 60 || Number(form.postVerifyGraceSeconds) < 0} onClick={() => void save()}>{saving ? <LoaderCircleIcon className="spin" size={16} /> : null}{creating ? "创建" : "保存"}</Button></>}
+        footer={<><Button variant="outline" disabled={saving} onClick={() => { setEditing(null); setCreating(false); }}>取消</Button><Button disabled={saving || !form.name.trim() || form.name.trim().length > 64 || form.remark.length > 512 || Number(form.idleDisconnectSeconds) < 60 || Number(form.postVerifyGraceSeconds) < 0 || !validRateLimitForm(form.rateLimitPolicy)} onClick={() => void save()}>{saving ? <LoaderCircleIcon className="spin" size={16} /> : null}{creating ? "创建" : "保存"}</Button></>}
       >
         <div className="drawer-form">
           <label className="field"><span>协议名称</span><Input maxLength={64} value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="请输入协议名称，用于识别区分不同协议" /><small>{form.name.length} / 64</small></label>
@@ -558,6 +654,21 @@ export function ProtocolManagementPage() {
               <label className="field"><span>验证后保活（秒）</span><Input type="number" min={0} max={3600} value={form.postVerifyGraceSeconds} onChange={(event) => setForm((current) => ({ ...current, postVerifyGraceSeconds: event.target.value }))} /></label>
             </div>
             <p className="mt-2 text-xs text-muted-foreground">按需在线会在配对同步、发送和人工操作时持有连接租约；空闲后仅断开 Socket，不退出 WhatsApp 登录。</p>
+          </div>
+          <div className="rounded-lg border p-3">
+            <strong className="text-sm">账号绑定限速</strong>
+            <p className="mt-1 text-xs text-muted-foreground">绑定到此协议节点的渠道自动使用这些规则。限制由系统内部执行，模板和渠道不保存限速配置。</p>
+            <div className="mt-3 space-y-3">
+              {RATE_LIMIT_FIELDS.map(([key, label, description]) => (
+                <div className="rounded-md border p-3" key={key}>
+                  <div><strong className="text-sm">{label}</strong><p className="text-xs text-muted-foreground">{description}</p></div>
+                  <div className="form-grid mt-2">
+                    <label className="field"><span>窗口内最多请求</span><Input type="number" min={1} max={100000} value={form.rateLimitPolicy[key].maxRequests} onChange={(event) => setForm((current) => ({ ...current, rateLimitPolicy: { ...current.rateLimitPolicy, [key]: { ...current.rateLimitPolicy[key], maxRequests: event.target.value } } }))} /></label>
+                    <label className="field"><span>统计窗口（秒）</span><Input type="number" min={1} max={86400} value={form.rateLimitPolicy[key].windowSeconds} onChange={(event) => setForm((current) => ({ ...current, rateLimitPolicy: { ...current.rateLimitPolicy, [key]: { ...current.rateLimitPolicy[key], windowSeconds: event.target.value } } }))} /></label>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
           <div className="rounded-lg border p-3">
             <strong className="text-sm">绑定后同步范围</strong>

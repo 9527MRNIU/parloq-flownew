@@ -383,6 +383,9 @@ class ProtocolNode(Base, TimestampMixin):
         Integer, default=1, nullable=False
     )
     sync_policy_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    rate_limit_policy_json: Mapped[dict] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
     archived_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True
     )

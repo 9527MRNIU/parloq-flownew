@@ -685,7 +685,6 @@ def test_legacy_promotion_channel_gets_a_default_account_group(
             )
         )
     engine.dispose()
-
     _alembic(database_url, "head")
     engine = sa.create_engine(database_url)
     with engine.connect() as connection:
@@ -724,4 +723,34 @@ def test_legacy_promotion_channel_gets_a_default_account_group(
             sa.text("SELECT count(*) FROM account_groups WHERE id = :group_id"),
             {"group_id": group.id},
         ).scalar_one() == 1
+    engine.dispose()
+
+
+def test_protocol_pairing_rate_limit_policy_migration_is_reversible(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'protocol-rate-limits.db'}"
+    _alembic(database_url, "0034_account_admission_sync")
+    engine = sa.create_engine(database_url)
+    assert "rate_limit_policy_json" not in {
+        column["name"]
+        for column in sa.inspect(engine).get_columns("protocol_nodes")
+    }
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    columns = {
+        column["name"]: column
+        for column in sa.inspect(engine).get_columns("protocol_nodes")
+    }
+    assert columns["rate_limit_policy_json"]["nullable"] is False
+    engine.dispose()
+
+    _alembic_downgrade(database_url, "0034_account_admission_sync")
+    engine = sa.create_engine(database_url)
+    assert "rate_limit_policy_json" not in {
+        column["name"]
+        for column in sa.inspect(engine).get_columns("protocol_nodes")
+    }
     engine.dispose()

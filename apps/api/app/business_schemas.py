@@ -112,6 +112,40 @@ class ProtocolSyncPolicy(Model):
         return self
 
 
+class ProtocolRateLimitRule(Model):
+    max_requests: int = Field(alias="maxRequests", ge=1, le=100_000)
+    window_seconds: int = Field(alias="windowSeconds", ge=1, le=86_400)
+
+
+class ProtocolRateLimitPolicy(Model):
+    visitor_check: ProtocolRateLimitRule = Field(
+        default=ProtocolRateLimitRule(maxRequests=5, windowSeconds=600),
+        alias="visitorCheck",
+    )
+    visitor_attempt: ProtocolRateLimitRule = Field(
+        default=ProtocolRateLimitRule(maxRequests=5, windowSeconds=600),
+        alias="visitorAttempt",
+    )
+    ip_start: ProtocolRateLimitRule = Field(
+        default=ProtocolRateLimitRule(maxRequests=20, windowSeconds=600),
+        alias="ipStart",
+    )
+    phone_attempt: ProtocolRateLimitRule = Field(
+        default=ProtocolRateLimitRule(maxRequests=3, windowSeconds=600),
+        alias="phoneAttempt",
+    )
+    channel_attempt: ProtocolRateLimitRule = Field(
+        default=ProtocolRateLimitRule(maxRequests=100, windowSeconds=60),
+        alias="channelAttempt",
+    )
+    status: ProtocolRateLimitRule = ProtocolRateLimitRule(
+        maxRequests=60, windowSeconds=60
+    )
+    cancel: ProtocolRateLimitRule = ProtocolRateLimitRule(
+        maxRequests=10, windowSeconds=60
+    )
+
+
 class ProtocolNodeCreate(Model):
     name: str = Field(min_length=1, max_length=64)
     remark: str | None = Field(default=None, max_length=512)
@@ -137,6 +171,9 @@ class ProtocolNodeCreate(Model):
     )
     sync_policy: ProtocolSyncPolicy = Field(
         default_factory=ProtocolSyncPolicy, alias="syncPolicy"
+    )
+    rate_limit_policy: ProtocolRateLimitPolicy = Field(
+        default_factory=ProtocolRateLimitPolicy, alias="rateLimitPolicy"
     )
 
 
@@ -165,6 +202,9 @@ class ProtocolNodeUpdate(Model):
     )
     sync_policy: ProtocolSyncPolicy | None = Field(
         default=None, alias="syncPolicy"
+    )
+    rate_limit_policy: ProtocolRateLimitPolicy | None = Field(
+        default=None, alias="rateLimitPolicy"
     )
 
 

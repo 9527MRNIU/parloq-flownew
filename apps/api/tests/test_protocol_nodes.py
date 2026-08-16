@@ -112,6 +112,10 @@ def test_protocol_node_create_pool_and_template_contract(
                 "privacySettings": False,
                 "blocklist": False,
             },
+            "rateLimitPolicy": {
+                "visitorCheck": {"maxRequests": 7, "windowSeconds": 600},
+                "status": {"maxRequests": 45, "windowSeconds": 60},
+            },
         },
     )
     assert created.status_code == 201, created.text
@@ -122,6 +126,11 @@ def test_protocol_node_create_pool_and_template_contract(
     assert node["connectionPolicy"] == "on_demand"
     assert node["syncPolicy"]["avatar"] is True
     assert node["syncPolicy"]["messageHistory"] is False
+    assert node["rateLimitPolicy"]["visitorCheck"] == {
+        "maxRequests": 7,
+        "windowSeconds": 600,
+    }
+    assert node["rateLimitPolicy"]["phoneAttempt"]["maxRequests"] == 3
 
     updated = admin_client.patch(
         f"/api/protocol-nodes/{node['id']}",
@@ -129,6 +138,24 @@ def test_protocol_node_create_pool_and_template_contract(
     )
     assert updated.status_code == 200, updated.text
     assert updated.json()["data"]["protocol"]["syncPolicyVersion"] == 2
+
+    rate_updated = admin_client.patch(
+        f"/api/protocol-nodes/{node['id']}",
+        json={
+            "rateLimitPolicy": {
+                "cancel": {"maxRequests": 6, "windowSeconds": 120}
+            }
+        },
+    )
+    assert rate_updated.status_code == 200, rate_updated.text
+    updated_rate_policy = rate_updated.json()["data"]["protocol"][
+        "rateLimitPolicy"
+    ]
+    assert updated_rate_policy["cancel"] == {
+        "maxRequests": 6,
+        "windowSeconds": 120,
+    }
+    assert updated_rate_policy["visitorCheck"]["maxRequests"] == 7
 
     fallback = admin_client.get("/api/protocol-nodes").json()["data"]["rows"][0]
     pool = admin_client.post(
@@ -166,6 +193,9 @@ def test_protocol_node_create_pool_and_template_contract(
         "pairingStatus === 'verified' && verified === true"
     )
     assert "protocolId" not in contract["start"]["body"]
+    assert contract["rateLimit"]["source"] == "protocol-node"
+    assert contract["rateLimit"]["policy"]["cancel"]["maxRequests"] == 6
+    assert contract["rateLimit"]["response"]["status"] == 429
 
     referenced = admin_client.delete(f"/api/protocol-nodes/{node['id']}")
     assert referenced.status_code == 409

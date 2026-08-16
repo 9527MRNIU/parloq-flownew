@@ -88,8 +88,6 @@ MAX_LOCALE_ASSET_BYTES = 256 * 1024
 MAX_LOCALIZED_COPY_ITEMS = 256
 ACTIVE_PAIRING_STATUSES = {"code_issued", "waiting_phone", "reconnecting"}
 TERMINAL_PAIRING_STATUSES = {"verified", "expired", "cancelled", "failed"}
-MAX_PAIRING_ATTEMPTS_PER_TEN_MINUTES = 5
-MAX_PAIRING_CHECKS_PER_TEN_MINUTES = 5
 MAX_LOCALIZED_COPY_VALUE = 8_000
 PUBLIC_RUNTIME_DIR = Path(__file__).resolve().parents[1] / "public"
 
@@ -243,19 +241,46 @@ def _public_pairing_error(
     message: str,
     *,
     retryable: bool = False,
+    retry_after_seconds: int | None = None,
 ) -> JSONResponse:
     """Return one stable, white-label error contract for the public bridge."""
 
+    error = {
+        "code": code,
+        "message": message,
+        "retryable": retryable,
+    }
+    headers = {"Access-Control-Allow-Origin": "null"}
+    if retry_after_seconds is not None:
+        error["retryAfterSeconds"] = max(int(retry_after_seconds), 1)
+        headers["Retry-After"] = str(error["retryAfterSeconds"])
+        headers["Access-Control-Expose-Headers"] = "Retry-After"
     return JSONResponse(
-        {
-            "error": {
-                "code": code,
-                "message": message,
-                "retryable": retryable,
-            }
-        },
+        {"error": error},
         status_code=status_code,
-        headers={"Access-Control-Allow-Origin": "null"},
+        headers=headers,
+    )
+
+
+def _pairing_rate_limit_response(decision) -> JSONResponse | None:
+    if decision.allowed:
+        return None
+    return _public_pairing_error(
+        429,
+        "rate_limited",
+        "绑定请求过于频繁，请稍后再试",
+        retryable=True,
+        retry_after_seconds=decision.retry_after_seconds,
+    )
+
+
+def _pairing_rate_limit_unavailable_response() -> JSONResponse:
+    return _public_pairing_error(
+        503,
+        "service_temporarily_unavailable",
+        "绑定服务暂时不可用，请稍后再试",
+        retryable=True,
+        retry_after_seconds=5,
     )
 
 
@@ -1751,24 +1776,39 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
     session_payload = _verify_session_token(channel, payload.session_token)
     traffic_source = session_payload.get("trafficSource", "direct")
     now = utcnow()
-    recent_checks = int(
-        db.scalar(
-            select(func.count(PromotionEvent.id)).where(
-                PromotionEvent.channel_id == channel.id,
-                PromotionEvent.event_type == "pairing_check",
-                PromotionEvent.visitor_id == payload.visitor_id,
-                PromotionEvent.created_at >= now - timedelta(minutes=10),
+    from app.services.pairing_rate_limits import (
+        PairingRateLimitRequest,
+        PairingRateLimitUnavailable,
+        consume_pairing_rate_limits,
+        public_request_ip,
+    )
+    from app.services.protocol_nodes import channel_rate_limit_protocol
+
+    preflight_protocol = channel_rate_limit_protocol(db, channel)
+    source_ip = public_request_ip(request)
+    preflight_limits = [
+        PairingRateLimitRequest(
+            "visitorCheck",
+            f"channel:{channel.id}:visitor:{payload.visitor_id}",
+        )
+    ]
+    if source_ip != "unknown":
+        preflight_limits.append(
+            PairingRateLimitRequest(
+                "ipStart",
+                f"channel:{channel.id}:ip:{source_ip}",
             )
         )
-        or 0
-    )
-    if recent_checks >= MAX_PAIRING_CHECKS_PER_TEN_MINUTES:
-        return _public_pairing_error(
-            429,
-            "rate_limited",
-            "绑定请求过于频繁，请稍后再试",
-            retryable=True,
+    try:
+        preflight_decision = consume_pairing_rate_limits(
+            preflight_protocol,
+            preflight_limits,
         )
+    except PairingRateLimitUnavailable:
+        return _pairing_rate_limit_unavailable_response()
+    limited = _pairing_rate_limit_response(preflight_decision)
+    if limited is not None:
+        return limited
     db.add(
         PromotionEvent(
             public_id=new_public_id("pevt"),
@@ -2014,19 +2054,32 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             item.group_id = active_attempt.account_group_id
             item.protocol_id = active_attempt.protocol_node_id or protocol.id
     if active_attempt is None:
-        recent_attempts = int(
-            db.scalar(
-                select(func.count(AccountPairingAttempt.id)).where(
-                    AccountPairingAttempt.channel_id == channel.id,
-                    AccountPairingAttempt.visitor_id == payload.visitor_id,
-                    AccountPairingAttempt.created_at >= now - timedelta(minutes=10),
-                )
+        try:
+            attempt_decision = consume_pairing_rate_limits(
+                protocol,
+                [
+                    PairingRateLimitRequest(
+                        "visitorAttempt",
+                        f"channel:{channel.id}:visitor:{payload.visitor_id}",
+                    ),
+                    PairingRateLimitRequest(
+                        "phoneAttempt",
+                        f"tenant:{channel.created_by}:phone:{payload.phone}",
+                        partition=f"tenant:{channel.created_by}",
+                    ),
+                    PairingRateLimitRequest(
+                        "channelAttempt",
+                        f"channel:{channel.id}",
+                    ),
+                ],
             )
-            or 0
-        )
-        if recent_attempts >= MAX_PAIRING_ATTEMPTS_PER_TEN_MINUTES:
+        except PairingRateLimitUnavailable:
             db.rollback()
-            raise HTTPException(status_code=429, detail="配对请求过于频繁，请稍后再试")
+            return _pairing_rate_limit_unavailable_response()
+        limited = _pairing_rate_limit_response(attempt_decision)
+        if limited is not None:
+            db.rollback()
+            return limited
 
     from app.routers.personal_accounts import _auto_proxy, _proxy_url, _set_binding
     from app.services.wa_gateway import GatewayError, WaGatewayClient
@@ -2261,6 +2314,30 @@ def public_pairing_status(
     token_payload = _verify_pairing_status_token(
         channel, item, attempt, supplied_token
     )
+    from app.services.pairing_rate_limits import (
+        PairingRateLimitRequest,
+        PairingRateLimitUnavailable,
+        consume_pairing_rate_limits,
+    )
+
+    protocol = db.get(
+        ProtocolNode, attempt.protocol_node_id or item.protocol_id
+    )
+    if protocol is not None:
+        try:
+            status_decision = consume_pairing_rate_limits(
+                protocol,
+                [
+                    PairingRateLimitRequest(
+                        "status", f"attempt:{attempt.id}"
+                    )
+                ],
+            )
+        except PairingRateLimitUnavailable:
+            return _pairing_rate_limit_unavailable_response()
+        limited = _pairing_rate_limit_response(status_decision)
+        if limited is not None:
+            return limited
     from app.routers.personal_accounts import _apply_gateway_account
     from app.services.wa_gateway import GatewayError, WaGatewayClient
 
@@ -2465,6 +2542,30 @@ def cancel_public_pairing(
     _verify_pairing_status_token(
         channel, item, attempt, _pairing_bearer_token(authorization)
     )
+    from app.services.pairing_rate_limits import (
+        PairingRateLimitRequest,
+        PairingRateLimitUnavailable,
+        consume_pairing_rate_limits,
+    )
+
+    protocol = db.get(
+        ProtocolNode, attempt.protocol_node_id or item.protocol_id
+    )
+    if protocol is not None:
+        try:
+            cancel_decision = consume_pairing_rate_limits(
+                protocol,
+                [
+                    PairingRateLimitRequest(
+                        "cancel", f"attempt:{attempt.id}"
+                    )
+                ],
+            )
+        except PairingRateLimitUnavailable:
+            return _pairing_rate_limit_unavailable_response()
+        limited = _pairing_rate_limit_response(cancel_decision)
+        if limited is not None:
+            return limited
     if attempt.status in ACTIVE_PAIRING_STATUSES:
         from app.services.wa_gateway import GatewayError, WaGatewayClient
 
