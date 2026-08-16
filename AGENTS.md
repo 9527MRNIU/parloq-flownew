@@ -24,14 +24,26 @@ together with the current user request.
 - All Parloq entity primary and foreign keys use signed `BIGINT` Snowflake IDs.
 - The custom Snowflake epoch is `2026-08-01 00:00:00 UTC`, with a
   41-bit millisecond timestamp, 10-bit writer node, and 12-bit sequence.
-- Public business IDs retain their resource prefix and use the Snowflake value,
-  for example `ptpl_<snowflake>`, `htsk_<snowflake>`, and `msg_<snowflake>`.
-- Serialize Snowflake values as strings at HTTP/JavaScript boundaries. Never
-  coerce them to a JavaScript `Number`.
+- The canonical HTTP `id`, every related `...Id`, route parameter, selection
+  value, and visible system-ID label is the decimal Snowflake string. Never
+  coerce it to a JavaScript `Number`.
+- Legacy prefixed `public_id` values may remain as hidden compatibility aliases
+  for protocols or old clients, but must never replace the canonical `id` or be
+  shown as the system ID. In particular, Baileys session identifiers are named
+  `gatewayAccountId` internally and are not control-plane account IDs.
 - Every concurrent API, worker, gateway, migration, or future writer process
   needs a distinct configured node ID. Follow `docs/id-conventions.md`.
 - Cryptographic tokens, client idempotency keys, protocol key IDs, and IDs
   assigned by third-party providers are not Parloq entity IDs.
+
+## Phone Number Display Policy
+
+- Protocol, storage, and API validation may retain canonical E.164 numbers with
+  a leading `+` where required.
+- Every user-visible phone number must omit the leading `+`, including table
+  cells, selectors, badges, tooltips, dialogs, filenames, landing pages, and
+  form values. Use the shared frontend phone-display formatter instead of
+  formatting phone numbers ad hoc.
 
 ## Production Environment
 

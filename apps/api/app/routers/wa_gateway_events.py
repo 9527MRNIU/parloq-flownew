@@ -15,6 +15,7 @@ from app.models import (
     AccountLifecycleEvent,
     AccountPairingAttempt,
     HyperlinkTask,
+    HyperlinkTaskAccountSlot,
     HyperlinkTaskDelivery,
     MessageDelivery,
     PersonalAccount,
@@ -120,12 +121,26 @@ def _account_state_event(payload: dict) -> dict:
         applied = latest is None or occurred_at >= latest.occurred_at.replace(
             tzinfo=latest.occurred_at.tzinfo or UTC
         )
+        wakeup_group_id: int | None = None
+        wakeup_task_ids: set[int] = set()
         if applied:
             account.status = to_state
             if to_state in {"online_idle", "sending"}:
                 account.validation_status = "ready"
                 account.last_connected_at = occurred_at
                 account.last_error = None
+                if account.group_id is not None:
+                    from app.services.account_group_wakeups import (
+                        record_group_wakeup,
+                    )
+
+                    record_group_wakeup(
+                        db,
+                        account.group_id,
+                        reason="gateway_account_dispatchable",
+                        account_id=account.id,
+                    )
+                    wakeup_group_id = account.group_id
             elif to_state == "restricted":
                 account.last_error = "账号连接受到平台限制"
             elif to_state == "reauth_required":
@@ -143,6 +158,59 @@ def _account_state_event(payload: dict) -> dict:
                     else "账号会话已退出"
                 )
 
+            if to_state not in {"online_idle", "sending"}:
+                affected_slots = list(
+                    db.scalars(
+                        select(HyperlinkTaskAccountSlot)
+                        .join(
+                            HyperlinkTask,
+                            HyperlinkTask.id == HyperlinkTaskAccountSlot.task_id,
+                        )
+                        .where(
+                            HyperlinkTaskAccountSlot.account_id == account.id,
+                            HyperlinkTask.status.in_(
+                                ("running", "waiting_accounts")
+                            ),
+                        )
+                        .with_for_update()
+                    ).all()
+                )
+                for slot in affected_slots:
+                    for delivery_item in db.scalars(
+                        select(HyperlinkTaskDelivery).where(
+                            HyperlinkTaskDelivery.slot_id == slot.id,
+                            HyperlinkTaskDelivery.submission_status == "leased",
+                        )
+                    ).all():
+                        delivery_item.submission_status = "pending"
+                        delivery_item.status = "queued"
+                        delivery_item.account_id = None
+                        delivery_item.slot_id = None
+                        delivery_item.lease_token = None
+                        delivery_item.leased_at = None
+                        delivery_item.lease_expires_at = None
+                        delivery_item.last_error = "发送账号状态异常，等待更换账号"
+                    for delivery_item in db.scalars(
+                        select(HyperlinkTaskDelivery).where(
+                            HyperlinkTaskDelivery.slot_id == slot.id,
+                            HyperlinkTaskDelivery.submission_status == "submitting",
+                        )
+                    ).all():
+                        delivery_item.submission_status = "reconciling"
+                        delivery_item.lease_token = None
+                        delivery_item.lease_expires_at = None
+                        delivery_item.last_error = "发送账号状态异常，等待核对提交结果"
+                    wakeup_task_ids.add(slot.task_id)
+                    slot.status = "vacant"
+                    slot.account_id = None
+                    slot.lease_token = None
+                    slot.lease_expires_at = None
+                    slot.released_at = occurred_at
+                    slot.switch_count = int(slot.switch_count or 0) + 1
+                    slot.consecutive_failure_count = 0
+                    slot.last_switch_reason = f"account_state_{to_state}"[:64]
+                    slot.last_error = account.last_error
+
             attempt = db.scalar(
                 select(AccountPairingAttempt)
                 .where(AccountPairingAttempt.account_id == account.id)
@@ -159,6 +227,17 @@ def _account_state_event(payload: dict) -> dict:
                     attempt.verified_at = occurred_at
                     attempt.terminal_reason = None
                     attempt.provider_code = None
+                    account.admission_status = "active"
+                    from app.services.account_metadata_sync import (
+                        enqueue_account_metadata_sync,
+                    )
+
+                    enqueue_account_metadata_sync(
+                        db,
+                        account,
+                        sync_policy=attempt.sync_policy_json,
+                        sync_policy_version=attempt.sync_policy_version,
+                    )
                 elif to_state == "unpaired" and reason in {
                     "pairing_expired",
                     "pairing_cancelled",
@@ -171,7 +250,25 @@ def _account_state_event(payload: dict) -> dict:
                     }.get(reason, "failed")
                     attempt.terminal_reason = reason
                     attempt.provider_code = provider_code
+                    if attempt.attempt_type == "initial":
+                        account.admission_status = "abandoned"
         db.commit()
+        if wakeup_group_id is not None:
+            from app.services.account_group_wakeups import (
+                dispatch_group_wakeups_best_effort,
+            )
+
+            dispatch_group_wakeups_best_effort(wakeup_group_id)
+        if wakeup_task_ids:
+            from app.task_queue import enqueue_hyperlink_task
+
+            for wakeup_task_id in wakeup_task_ids:
+                try:
+                    enqueue_hyperlink_task(str(wakeup_task_id))
+                except Exception:
+                    # The durable 30-second recovery scan remains the fallback
+                    # when Redis is temporarily unavailable.
+                    pass
         return {
             "data": {
                 "ok": True,
@@ -270,26 +367,16 @@ async def receive_status_event(
             )
         )
         if task_delivery is not None:
+            task_delivery.submission_status = "accepted"
+            task_delivery.submitted_at = task_delivery.submitted_at or delivery.queued_at
             task_delivery.status = delivery.status
             task_delivery.last_error = delivery.last_error
             task = db.get(HyperlinkTask, task_delivery.task_id)
-            if task is not None and task.status == "running":
-                pending = int(
-                    db.scalar(
-                        select(func.count())
-                        .select_from(HyperlinkTaskDelivery)
-                        .where(
-                            HyperlinkTaskDelivery.task_id == task.id,
-                            HyperlinkTaskDelivery.status.in_(
-                                ("queued", "sending", "retry")
-                            ),
-                        )
-                    )
-                    or 0
-                )
-                if pending == 0:
-                    task.status = "completed"
-                    task.completed_at = task.completed_at or utcnow()
+            if task is not None:
+                db.flush()
+                from app.routers.hyperlink import _sync_task_counts
+
+                _sync_task_counts(db, task)
         db.commit()
         return {
             "data": {

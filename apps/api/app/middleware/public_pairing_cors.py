@@ -16,7 +16,7 @@ class PublicPairingCorsMiddleware:
 
     Public templates intentionally run without ``allow-same-origin``. Their
     browser origin is therefore the opaque value ``null`` and the custom
-    pairing-token header triggers a CORS preflight. The global management CORS
+    standard Authorization header triggers a CORS preflight. The global management CORS
     policy must not trust every opaque origin, so this exception is constrained
     to the two public pairing endpoints and the one non-sensitive header.
     """
@@ -45,14 +45,14 @@ class PublicPairingCorsMiddleware:
             origin == b"null"
             and _PAIRING_ACTION.fullmatch(path)
             and requested_method in {b"GET", b"POST"}
-            and requested_headers.issubset({b"x-parloq-pairing-token"})
+            and requested_headers.issubset({b"authorization"})
         ):
             response = Response(
                 status_code=204,
                 headers={
                     "Access-Control-Allow-Origin": "null",
                     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-                    "Access-Control-Allow-Headers": "X-Parloq-Pairing-Token",
+                    "Access-Control-Allow-Headers": "Authorization",
                     "Access-Control-Max-Age": "600",
                     "Vary": "Origin",
                 },

@@ -2,16 +2,22 @@ import { Boom } from '@hapi/boom'
 import makeWASocket, {
   Browsers,
   DisconnectReason,
+  generateWAMessageFromContent,
+  prepareWAMessageMedia,
+  proto,
   WAMessageStatus,
   type ConnectionState,
   type WASocket,
 } from '@whiskeysockets/baileys'
 import type { Agent } from 'node:https'
+import { createHash } from 'node:crypto'
 import pino, { type Logger } from 'pino'
 import { ProxyAgent } from 'proxy-agent'
 import { loadAuthState, mergeCreds } from './auth-store.js'
 import type { Store } from './store.js'
 import { WaWebVersionResolver } from './wa-version.js'
+import type { ManagedMediaReference, MessageButton, OutboundMessage } from './message-content.js'
+import type { SyncPolicy } from './domain.js'
 
 export type EngineEvent =
   | { kind: 'connected'; accountId: string; deviceJid: string }
@@ -20,12 +26,13 @@ export type EngineEvent =
   | { kind: 'delivered'; accountId: string; providerMessageId: string }
 
 export interface PairResult { accountId: string; code: string; expiresAt: Date; deviceJid?: string }
-export interface EngineAccount { accountId: string; phoneE164: string; proxyUrl: string }
+export interface EngineAccount { accountId: string; phoneE164: string; proxyUrl: string; syncPolicy: SyncPolicy }
 export interface AccountQuality {
   hasAvatar: boolean | null
   groupCount: number | null
   friendCount: number | null
   mutualContactCount: number | null
+  metadata: Record<string, unknown>
 }
 
 export interface ProtocolEngine {
@@ -37,8 +44,8 @@ export interface ProtocolEngine {
   connect(account: EngineAccount): Promise<void>
   disconnect(accountId: string): Promise<void>
   logout(account: EngineAccount): Promise<void>
-  send(accountId: string, toE164: string, text: string): Promise<string>
-  getQuality(accountId: string): Promise<AccountQuality>
+  send(accountId: string, toE164: string, message: OutboundMessage): Promise<string>
+  getQuality(accountId: string, policy: SyncPolicy): Promise<AccountQuality>
   isOnline(accountId: string): boolean
   setEventHandler(handler: (event: EngineEvent) => void): void
 }
@@ -76,6 +83,37 @@ export function isRequiredPairingRestart(
   return statusCode === DisconnectReason.restartRequired
     && pairingConfigured
     && hasReconnectableIdentity(creds)
+}
+
+export function nativeFlowButton(button: MessageButton): { name: string; buttonParamsJson: string } {
+  if (button.type === 'quick_reply') {
+    return {
+      name: 'quick_reply',
+      buttonParamsJson: JSON.stringify({ display_text: button.text, id: button.id }),
+    }
+  }
+  if (button.type === 'url') {
+    return {
+      name: 'cta_url',
+      buttonParamsJson: JSON.stringify({ display_text: button.text, url: button.url, merchant_url: button.url }),
+    }
+  }
+  if (button.type === 'call') {
+    return {
+      name: 'cta_call',
+      buttonParamsJson: JSON.stringify({ display_text: button.text, phone_number: `+${button.phone}` }),
+    }
+  }
+  if (button.type === 'copy') {
+    return {
+      name: 'cta_copy',
+      buttonParamsJson: JSON.stringify({ display_text: button.text, id: `copy_${button.copyText}`, copy_code: button.copyText }),
+    }
+  }
+  return {
+    name: 'single_select',
+    buttonParamsJson: JSON.stringify({ title: button.text, sections: button.sections }),
+  }
 }
 
 export async function requestStablePairingCode(
@@ -134,12 +172,17 @@ export class BaileysEngine implements ProtocolEngine {
   private readonly sockets = new Map<string, ActiveSocket>()
   private readonly reconnectAttempts = new Map<string, number>()
   private readonly blockedReconnect = new Set<string>()
+  private readonly syncSnapshots = new Map<string, Record<string, unknown>>()
   private handler: (event: EngineEvent) => void = () => undefined
   private started = false
   private readonly protocolLogger: Logger
   private readonly versionResolver: WaWebVersionResolver
 
-  constructor(private readonly store: Store, logger?: Logger) {
+  constructor(
+    private readonly store: Store,
+    logger?: Logger,
+    private readonly materialBaseUrl = 'http://api:8000',
+  ) {
     this.protocolLogger = (logger ?? pino({ level: 'warn' })).child({ component: 'baileys' })
     this.versionResolver = new WaWebVersionResolver(this.protocolLogger)
   }
@@ -210,22 +253,151 @@ export class BaileysEngine implements ProtocolEngine {
     await this.store.clearAuth(account.accountId)
   }
 
-  async send(accountId: string, toE164: string, text: string): Promise<string> {
+  private async fetchManagedMaterial(media: ManagedMediaReference): Promise<Buffer> {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 45_000)
+    timeout.unref()
+    try {
+      const response = await fetch(
+        `${this.materialBaseUrl}/api/internal/materials/${media.id}/content`,
+        {
+          headers: { Authorization: `Bearer ${media.token}` },
+          signal: controller.signal,
+        },
+      )
+      if (!response.ok) throw new Error(`managed material fetch failed (${response.status})`)
+      const declared = Number(response.headers.get('content-length') || 0)
+      if (declared && declared !== media.size) throw new Error('managed material size changed')
+      const content = Buffer.from(await response.arrayBuffer())
+      if (content.length !== media.size || content.length > 64 * 1024 * 1024) {
+        throw new Error('managed material size is invalid')
+      }
+      const digest = createHash('sha256').update(content).digest('hex')
+      if (digest !== media.sha256) throw new Error('managed material checksum changed')
+      return content
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+
+  async send(accountId: string, toE164: string, message: OutboundMessage): Promise<string> {
     const active = this.sockets.get(accountId)
     if (!active?.online) throw new Error('account is offline')
     const jid = `${toE164.slice(1)}@s.whatsapp.net`
-    const result = await active.socket.sendMessage(jid, { text })
-    const id = result?.key.id
+    let id: string | null | undefined
+    if (!message.buttons.length) {
+      const footer = message.footer.text
+      if (message.header.type === 'image') {
+        const content = await this.fetchManagedMaterial(message.header.media)
+        const result = await active.socket.sendMessage(jid, {
+          image: content,
+          mimetype: message.header.media.mimeType,
+          caption: [message.body.text, footer].filter(Boolean).join('\n\n'),
+        })
+        id = result?.key.id
+      } else if (message.header.type === 'video') {
+        const content = await this.fetchManagedMaterial(message.header.media)
+        const result = await active.socket.sendMessage(jid, {
+          video: content,
+          mimetype: message.header.media.mimeType,
+          caption: [message.body.text, footer].filter(Boolean).join('\n\n'),
+        })
+        id = result?.key.id
+      } else if (message.header.type === 'document') {
+        const content = await this.fetchManagedMaterial(message.header.media)
+        const result = await active.socket.sendMessage(jid, {
+          document: content,
+          fileName: message.header.media.fileName,
+          mimetype: message.header.media.mimeType,
+          caption: [message.body.text, footer].filter(Boolean).join('\n\n'),
+        })
+        id = result?.key.id
+      } else {
+        const result = await active.socket.sendMessage(jid, {
+          text: [message.header.type === 'text' ? message.header.text : '', message.body.text, footer]
+            .filter(Boolean)
+            .join('\n\n'),
+        })
+        id = result?.key.id
+      }
+    } else {
+      const userJid = active.socket.user?.id
+      if (!userJid) throw new Error('account user identity is unavailable')
+      const header: proto.Message.InteractiveMessage.IHeader = {
+        hasMediaAttachment: false,
+      }
+      if (message.header.type === 'text') header.title = message.header.text
+      if (message.header.type === 'image') {
+        const content = await this.fetchManagedMaterial(message.header.media)
+        const media = await prepareWAMessageMedia(
+          { image: content },
+          { upload: active.socket.waUploadToServer },
+        )
+        header.hasMediaAttachment = true
+        if (!media.imageMessage) throw new Error('provider did not prepare the image header')
+        header.imageMessage = media.imageMessage
+      } else if (message.header.type === 'video') {
+        const content = await this.fetchManagedMaterial(message.header.media)
+        const media = await prepareWAMessageMedia(
+          { video: content },
+          { upload: active.socket.waUploadToServer },
+        )
+        header.hasMediaAttachment = true
+        if (!media.videoMessage) throw new Error('provider did not prepare the video header')
+        header.videoMessage = media.videoMessage
+      } else if (message.header.type === 'document') {
+        const content = await this.fetchManagedMaterial(message.header.media)
+        const media = await prepareWAMessageMedia(
+          {
+            document: content,
+            fileName: message.header.media.fileName,
+            mimetype: message.header.media.mimeType,
+          },
+          { upload: active.socket.waUploadToServer },
+        )
+        header.hasMediaAttachment = true
+        if (!media.documentMessage) throw new Error('provider did not prepare the document header')
+        header.documentMessage = media.documentMessage
+      }
+      const interactiveMessage = proto.Message.InteractiveMessage.fromObject({
+        header,
+        body: { text: message.body.text },
+        footer: { text: message.footer.text },
+        nativeFlowMessage: {
+          buttons: message.buttons.map(nativeFlowButton),
+          messageParamsJson: '',
+          messageVersion: 1,
+        },
+      })
+      const generated = generateWAMessageFromContent(
+        jid,
+        {
+          viewOnceMessage: {
+            message: {
+              messageContextInfo: {
+                deviceListMetadata: {},
+                deviceListMetadataVersion: 2,
+              },
+              interactiveMessage,
+            },
+          },
+        },
+        { userJid },
+      )
+      id = generated.key.id
+      if (!id || !generated.message) throw new Error('provider did not generate an interactive message id')
+      await active.socket.relayMessage(jid, generated.message, { messageId: id })
+    }
     if (!id) throw new Error('provider did not return a message id')
     return id
   }
 
-  async getQuality(accountId: string): Promise<AccountQuality> {
+  async getQuality(accountId: string, policy: SyncPolicy): Promise<AccountQuality> {
     const active = this.sockets.get(accountId)
     if (!active?.online) throw new Error('account is offline')
     const ownJid = active.socket.user?.id
     let hasAvatar: boolean | null = null
-    if (ownJid) {
+    if (policy.avatar && ownJid) {
       try {
         hasAvatar = Boolean(await active.socket.profilePictureUrl(ownJid, 'preview'))
       } catch (error) {
@@ -234,15 +406,38 @@ export class BaileysEngine implements ProtocolEngine {
       }
     }
     let groupCount: number | null = null
-    try {
-      groupCount = Object.keys(await active.socket.groupFetchAllParticipating()).length
-    } catch {
-      groupCount = null
+    const metadata: Record<string, unknown> = { ...(this.syncSnapshots.get(accountId) ?? {}) }
+    if (policy.groupSummary || policy.groupDetails) {
+      try {
+        const groups = await active.socket.groupFetchAllParticipating()
+        groupCount = Object.keys(groups).length
+        if (policy.groupDetails) {
+          metadata.groups = Object.values(groups).map((group) => ({
+            id: group.id,
+            subject: group.subject,
+            size: group.size,
+          }))
+        }
+      } catch {
+        groupCount = null
+      }
+    }
+    if (ownJid && policy.profileStatus) {
+      try { metadata.profileStatus = await active.socket.fetchStatus(ownJid) } catch { metadata.profileStatusError = 'unavailable' }
+    }
+    if (ownJid && policy.businessProfile) {
+      try { metadata.businessProfile = await active.socket.getBusinessProfile(ownJid) } catch { metadata.businessProfileError = 'unavailable' }
+    }
+    if (policy.privacySettings) {
+      try { metadata.privacySettings = await active.socket.fetchPrivacySettings() } catch { metadata.privacySettingsError = 'unavailable' }
+    }
+    if (policy.blocklist) {
+      try { metadata.blocklist = await active.socket.fetchBlocklist() } catch { metadata.blocklistError = 'unavailable' }
     }
     // Baileys does not expose a stable, privacy-safe definition for “friends”
     // or “mutual contacts” without syncing chat/contact history. Keep them
     // unknown instead of manufacturing zeroes.
-    return { hasAvatar, groupCount, friendCount: null, mutualContactCount: null }
+    return { hasAvatar, groupCount, friendCount: null, mutualContactCount: null, metadata }
   }
 
   private async openSocket(account: EngineAccount, createAuth: boolean): Promise<ActiveSocket> {
@@ -265,13 +460,14 @@ export class BaileysEngine implements ProtocolEngine {
       browser: Browsers.macOS('Chrome'),
       version,
       logger: this.protocolLogger,
-      markOnlineOnConnect: true,
-      syncFullHistory: false,
-      shouldSyncHistoryMessage: () => false,
+      markOnlineOnConnect: false,
+      syncFullHistory: account.syncPolicy.contacts || account.syncPolicy.chats || account.syncPolicy.messageHistory,
+      shouldSyncHistoryMessage: () => account.syncPolicy.messageHistory,
       ...(proxyAgent ? { agent: proxyAgent as Agent, fetchAgent: proxyAgent as Agent } : {}),
     })
     const active: ActiveSocket = proxyAgent ? { socket, online: false, proxyAgent } : { socket, online: false }
     this.sockets.set(account.accountId, active)
+    this.syncSnapshots.set(account.accountId, {})
 
     let credsSaveTail = Promise.resolve()
     let pairingConfigured = false
@@ -364,6 +560,19 @@ export class BaileysEngine implements ProtocolEngine {
         }
       }
     })
+    socket.ev.on('messaging-history.set', ({ chats, contacts, messages }) => {
+      const snapshot = this.syncSnapshots.get(account.accountId) ?? {}
+      if (account.syncPolicy.chats) snapshot.chatCount = chats.length
+      if (account.syncPolicy.contacts) snapshot.contactCount = contacts.length
+      if (account.syncPolicy.messageHistory) snapshot.historyMessageCount = messages.length
+      this.syncSnapshots.set(account.accountId, snapshot)
+    })
+    socket.ev.on('contacts.upsert', (contacts) => {
+      if (!account.syncPolicy.contacts) return
+      const snapshot = this.syncSnapshots.get(account.accountId) ?? {}
+      snapshot.contactUpdateCount = Number(snapshot.contactUpdateCount ?? 0) + contacts.length
+      this.syncSnapshots.set(account.accountId, snapshot)
+    })
     socket.ev.on('messages.update', (updates) => {
       for (const update of updates) {
         const id = update.key.id
@@ -413,11 +622,11 @@ export class MockEngine implements ProtocolEngine {
   }
   async disconnect(id: string): Promise<void> { const state = this.accounts.get(id); if (state) state.online = false }
   async logout(account: EngineAccount): Promise<void> { this.accounts.delete(account.accountId); this.handler({ kind: 'logged_out', accountId: account.accountId, reasonCategory: 'logged_out' }) }
-  async send(id: string, _to: string, _text: string): Promise<string> {
+  async send(id: string, _to: string, _message: OutboundMessage): Promise<string> {
     if (!this.isOnline(id)) throw new Error('account is offline')
     return `mock-${crypto.randomUUID()}`
   }
-  async getQuality(_id: string): Promise<AccountQuality> {
-    return { hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null }
+  async getQuality(_id: string, _policy: SyncPolicy): Promise<AccountQuality> {
+    return { hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {} }
   }
 }

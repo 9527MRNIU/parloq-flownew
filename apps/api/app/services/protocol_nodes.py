@@ -1,14 +1,165 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.entity_ids import identifier_filter
+from app.models import (
+    AccountPairingAttempt,
+    PersonalAccount,
+    PromotionChannel,
+    ProtocolNode,
+    ProtocolPool,
+    ProtocolPoolMember,
+)
+from app.security import utcnow
 from app.snowflake import new_public_id
 
-from app.models import ProtocolNode
+
+DEFAULT_SYNC_POLICY: dict[str, bool] = {
+    "avatar": True,
+    "profileStatus": True,
+    "businessProfile": True,
+    "groupSummary": True,
+    "groupDetails": False,
+    "contacts": False,
+    "chats": False,
+    "messageHistory": False,
+    "privacySettings": False,
+    "blocklist": False,
+}
+
+ONLINE_ACCOUNT_STATES = {"warming", "online_idle", "sending", "draining"}
+ACTIVE_PAIRING_STATUSES = {
+    "code_issued",
+    "waiting_phone",
+    "reconnecting",
+}
+
+
+@dataclass(frozen=True)
+class ProtocolCapacity:
+    total_accounts: int
+    online_accounts: int
+    active_pairings: int
+
+
+def normalized_sync_policy(value: dict | None) -> dict[str, bool]:
+    source = value if isinstance(value, dict) else {}
+    result = dict(DEFAULT_SYNC_POLICY)
+    snake_aliases = {
+        "profileStatus": "profile_status",
+        "businessProfile": "business_profile",
+        "groupSummary": "group_summary",
+        "groupDetails": "group_details",
+        "messageHistory": "message_history",
+        "privacySettings": "privacy_settings",
+    }
+    for key in result:
+        raw = source.get(key, source.get(snake_aliases.get(key, "")))
+        if isinstance(raw, bool):
+            result[key] = raw
+    if result["groupDetails"]:
+        result["groupSummary"] = True
+    return result
+
+
+def protocol_capacity(db: Session, item: ProtocolNode) -> ProtocolCapacity:
+    total = int(
+        db.scalar(
+            select(func.count(PersonalAccount.id)).where(
+                PersonalAccount.protocol_id == item.id,
+                PersonalAccount.archived_at.is_(None),
+                PersonalAccount.admission_status.in_(("reserved", "active")),
+            )
+        )
+        or 0
+    )
+    online = int(
+        db.scalar(
+            select(func.count(PersonalAccount.id)).where(
+                PersonalAccount.protocol_id == item.id,
+                PersonalAccount.status.in_(ONLINE_ACCOUNT_STATES),
+                PersonalAccount.archived_at.is_(None),
+                PersonalAccount.admission_status == "active",
+            )
+        )
+        or 0
+    )
+    pairings = int(
+        db.scalar(
+            select(func.count(AccountPairingAttempt.id)).where(
+                AccountPairingAttempt.protocol_node_id == item.id,
+                AccountPairingAttempt.status.in_(ACTIVE_PAIRING_STATUSES),
+                AccountPairingAttempt.expires_at > utcnow(),
+            )
+        )
+        or 0
+    )
+    return ProtocolCapacity(total, online, pairings)
+
+
+def ingress_unavailable_reason(
+    item: ProtocolNode,
+    capacity: ProtocolCapacity,
+) -> str | None:
+    if item.archived_at is not None:
+        return "协议节点已归档"
+    if not item.online_enabled:
+        return "协议节点已下线"
+    if not item.ingress_enabled:
+        return "协议节点已关闭进号"
+    if (
+        item.max_account_count is not None
+        and capacity.total_accounts >= item.max_account_count
+    ):
+        return "协议节点账号总量已达到上限"
+    if (
+        item.max_online_accounts is not None
+        and capacity.online_accounts >= item.max_online_accounts
+    ):
+        return "协议节点在线账号已达到上限"
+    if (
+        item.max_concurrent_pairings is not None
+        and capacity.active_pairings >= item.max_concurrent_pairings
+    ):
+        return "协议节点并发配对已达到上限"
+    return None
+
+
+def protocol_health(db: Session, item: ProtocolNode) -> tuple[str, str | None]:
+    capacity = protocol_capacity(db, item)
+    reason = ingress_unavailable_reason(item, capacity)
+    if reason is None:
+        return "available", None
+    if "上限" in reason:
+        return "capacity_limited", reason
+    return "offline", reason
+
+
+def _new_default_node(owner_id: int) -> ProtocolNode:
+    return ProtocolNode(
+        public_id=new_public_id("proto"),
+        name="Baileys 默认协议",
+        protocol_type="baileys",
+        remark="系统默认 Baileys 协议节点",
+        ingress_enabled=True,
+        marketing_enabled=True,
+        online_enabled=True,
+        max_account_count=None,
+        max_online_accounts=1000,
+        max_concurrent_pairings=None,
+        connection_policy="on_demand",
+        idle_disconnect_seconds=600,
+        post_verify_grace_seconds=120,
+        sync_policy_version=1,
+        sync_policy_json=dict(DEFAULT_SYNC_POLICY),
+        created_by=owner_id,
+    )
 
 
 def select_ingress_protocol(
@@ -17,40 +168,102 @@ def select_ingress_protocol(
     statement = select(ProtocolNode).where(
         ProtocolNode.created_by == owner_id,
         ProtocolNode.protocol_type == "baileys",
-        ProtocolNode.ingress_enabled.is_(True),
-        ProtocolNode.online_enabled.is_(True),
         ProtocolNode.archived_at.is_(None),
     )
     if requested_public_id:
-        statement = statement.where(ProtocolNode.public_id == requested_public_id)
-    item = db.scalar(statement.order_by(ProtocolNode.id).limit(1))
-    existing_node = db.scalar(
-        select(ProtocolNode.id).where(
-            ProtocolNode.created_by == owner_id,
-            ProtocolNode.archived_at.is_(None),
-        ).limit(1)
-    )
-    if item is None and not requested_public_id and existing_node is None:
-        # New tenants created after the schema migration receive their default
-        # node lazily. A concurrent first ingress may race, so retry selection.
-        item = ProtocolNode(
-            public_id=new_public_id("proto"),
-            name="Baileys 默认协议",
-            protocol_type="baileys",
-            remark="系统默认 Baileys 协议节点",
-            ingress_enabled=True,
-            marketing_enabled=True,
-            online_enabled=True,
-            created_by=owner_id,
+        statement = statement.where(
+            identifier_filter(ProtocolNode, requested_public_id)
         )
-        db.add(item)
-        try:
-            db.flush()
-        except IntegrityError:
-            db.rollback()
-            item = db.scalar(statement.order_by(ProtocolNode.id).limit(1))
+    item = db.scalar(
+        statement.order_by(ProtocolNode.id).limit(1).with_for_update()
+    )
+    if item is None and not requested_public_id:
+        existing_node = db.scalar(
+            select(ProtocolNode.id).where(
+                ProtocolNode.created_by == owner_id,
+                ProtocolNode.archived_at.is_(None),
+            ).limit(1)
+        )
+        if existing_node is None:
+            item = _new_default_node(owner_id)
+            try:
+                with db.begin_nested():
+                    db.add(item)
+                    db.flush()
+            except IntegrityError:
+                item = db.scalar(
+                    statement.order_by(ProtocolNode.id).limit(1).with_for_update()
+                )
     if item is None:
-        raise HTTPException(status_code=409, detail="没有允许进号的在线 Baileys 协议")
+        raise HTTPException(status_code=409, detail="没有可用的 Baileys 协议节点")
+    reason = ingress_unavailable_reason(item, protocol_capacity(db, item))
+    if reason:
+        raise HTTPException(
+            status_code=409,
+            detail=f"没有允许进号的在线 Baileys 协议：{reason}",
+        )
+    return item
+
+
+def resolve_channel_ingress_protocol(
+    db: Session,
+    channel: PromotionChannel,
+) -> ProtocolNode:
+    """Resolve and lock a new attempt's node; direct routes never auto-fallback."""
+
+    if channel.protocol_node_id is not None:
+        item = db.scalar(
+            select(ProtocolNode)
+            .where(
+                ProtocolNode.id == channel.protocol_node_id,
+                ProtocolNode.created_by == channel.created_by,
+            )
+            .with_for_update()
+        )
+        if item is None:
+            raise HTTPException(status_code=409, detail="渠道绑定的协议节点不存在")
+        reason = ingress_unavailable_reason(item, protocol_capacity(db, item))
+        if reason:
+            raise HTTPException(status_code=409, detail=reason)
+        return item
+
+    if channel.protocol_pool_id is not None:
+        pool = db.scalar(
+            select(ProtocolPool).where(
+                ProtocolPool.id == channel.protocol_pool_id,
+                ProtocolPool.created_by == channel.created_by,
+                ProtocolPool.archived_at.is_(None),
+            )
+        )
+        if pool is None:
+            raise HTTPException(status_code=409, detail="渠道绑定的协议池不存在")
+        candidates = list(
+            db.scalars(
+                select(ProtocolNode)
+                .join(
+                    ProtocolPoolMember,
+                    ProtocolPoolMember.protocol_node_id == ProtocolNode.id,
+                )
+                .where(
+                    ProtocolPoolMember.pool_id == pool.id,
+                    ProtocolPoolMember.enabled.is_(True),
+                    ProtocolNode.created_by == channel.created_by,
+                )
+                .order_by(ProtocolPoolMember.priority, ProtocolPoolMember.id)
+                .with_for_update()
+            ).all()
+        )
+        for item in candidates:
+            if ingress_unavailable_reason(item, protocol_capacity(db, item)) is None:
+                return item
+        raise HTTPException(status_code=409, detail="协议池中没有可接入的协议节点")
+
+    # Compatibility for channels created before route fields existed. Once
+    # resolved, persist the direct route so subsequent changes are explicit.
+    item = select_ingress_protocol(db, channel.created_by)
+    channel.protocol_node_id = item.id
+    channel.protocol_pool_id = None
+    channel.route_version = max(int(channel.route_version or 1), 1)
     return item
 
 

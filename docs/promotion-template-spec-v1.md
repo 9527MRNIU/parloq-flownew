@@ -1,15 +1,17 @@
 # Parloq 推广模板规范 v1
 
-状态：当前版本（`parloq-promotion-template/v1`）
+状态：兼容版本（`promotion-template/v1`）。新模板应使用
+[`promotion-template/v2`](promotion-template-spec-v2.md)，由 v2 桥接层统一处理
+状态查询、取消和鉴权。
 
-机器可读 schema：[`schemas/parloq-promotion-template-v1.schema.json`](schemas/parloq-promotion-template-v1.schema.json)
+机器可读 schema：[`schemas/promotion-template-v1.schema.json`](schemas/promotion-template-v1.schema.json)
 
 本规范用于设计、开发、验收和导入 Parloq 推广落地页。模板只负责界面和交互表达；渠道归因、号码提交、Baileys 配对、状态查询、Pixel、访问统计和生产页交互保护均由平台注入。
 
 ## 1. 设计原则
 
 - 模板不得直接调用 Parloq 私有 API，也不得保存号码。
-- 模板通过 `parloq-browser-bridge/v1` 完成号码提交和配对。
+- 模板通过 `promotion-browser-bridge/v1` 完成号码提交和配对。
 - 模板必须同时支持真实渠道渲染和无副作用的后台预览。
 - 模板 ZIP 必须自包含。字体、图片、CSS、JavaScript 和语言包都随包提供。
 - 模板 ZIP 不得自行加入第三方统计、隐藏 iframe、指纹采集或外部脚本；平台可按租户策略统一注入设备识别与匿名关联组件。
@@ -47,12 +49,12 @@ locales/
 
 ```json
 {
-  "schema": "parloq-promotion-template/v1",
+  "schema": "promotion-template/v1",
   "version": "1.0.0",
   "entry": "index.html",
   "format": "static-bundle",
   "capabilities": ["phone-pairing"],
-  "runtime": "parloq-browser-bridge/v1",
+  "runtime": "promotion-browser-bridge/v1",
   "interactionProtection": "platform",
   "defaultLocale": "en",
   "supportedLocales": ["en", "zh-CN"],
@@ -68,12 +70,12 @@ locales/
 
 | 字段 | 规则 |
 | --- | --- |
-| `schema` | 固定为 `parloq-promotion-template/v1` |
+| `schema` | 固定为 `promotion-template/v1` |
 | `version` | 模板自己的语义版本，建议使用 `x.y.z` |
 | `entry` | 固定为 `index.html` |
 | `format` | `static-bundle` 或 `vite-dist` |
 | `capabilities` | v1 必须包含且只能包含 `phone-pairing` |
-| `runtime` | 固定为 `parloq-browser-bridge/v1`，平台会归一化 |
+| `runtime` | 固定为 `promotion-browser-bridge/v1`，平台会归一化 |
 | `interactionProtection` | 固定为 `platform`，模板不得重复引入防调试库 |
 | `defaultLocale` | BCP 47 风格语言码，例如 `en`、`zh-CN` |
 | `supportedLocales` | 包含默认语言、去重，最多 128 项 |
@@ -84,13 +86,13 @@ locales/
 平台在 `<head>` 中注入：
 
 ```html
-<script type="application/json" id="parloq-promotion-config">...</script>
+<script type="application/json" id="promotion-runtime-config">...</script>
 ```
 
 配置中可用的稳定字段：
 
 ```ts
-interface ParloqPromotionConfigV1 {
+interface PromotionRuntimeConfigV1 {
   previewMode?: boolean
   countryCode?: string
   defaultLocale: string
@@ -107,11 +109,14 @@ interface ParloqPromotionConfigV1 {
 平台同时提供：
 
 ```ts
-window.parloqSubmitPhone(
+window.PromotionBridge.submitPhone(
   phone: string,
   metadata?: Record<string, string | number | boolean | null>
 ): Promise<Response>
 ```
+
+所有号码的用户可见形式只显示国家码和号码数字，不显示前导 `+`。
+模板提交纯数字即可；平台会在协议边界规范化为 Baileys 所需的 E.164。
 
 成功响应：
 
@@ -120,17 +125,22 @@ window.parloqSubmitPhone(
   "data": {
     "pairing": {
       "pairingCode": "12345678",
+      "attemptId": "8300000000000001",
+      "pairingStatus": "waiting_phone",
       "expiresAt": "2026-08-13T10:00:00Z",
-      "statusUrl": "/api/public/promotion/channels/example/pairing/wa_x/status",
-      "cancelUrl": "/api/public/promotion/channels/example/pairing/wa_x/cancel",
+      "statusUrl": "/api/public/promotion/channels/example/pairing/8300000000000002/status",
+      "cancelUrl": "/api/public/promotion/channels/example/pairing/8300000000000002/cancel",
       "statusToken": "signed-token",
-      "statusTokenHeader": "X-Parloq-Pairing-Token"
+      "statusTokenHeader": "Authorization",
+      "statusTokenScheme": "Bearer"
     }
   }
 }
 ```
 
-模板应把 `statusToken` 放进 `X-Parloq-Pairing-Token` 请求头，使用返回的 `statusUrl` 轮询，直至成功、过期、取消或失败。用户主动更换号码时，应以同一请求头 POST `cancelUrl`。不得把令牌放入 URL，也不得自行拼接账号、渠道或配对 API。
+模板应使用 `Authorization: Bearer <statusToken>` 请求头和返回的 `statusUrl` 轮询，直至成功、过期、取消或失败。用户主动更换号码时，应以同一请求头 POST `cancelUrl`。不得把令牌放入 URL，也不得自行拼接账号、渠道或配对 API。
+
+协议管理列表的“接口规范”操作会展示同一份机器可读契约及当前绑定渠道。模板始终按渠道调用公共接口，不得保存或写死协议节点 ID；渠道切换协议只影响之后新建的接入任务。
 
 状态响应：
 
@@ -157,7 +167,7 @@ window.parloqSubmitPhone(
 推荐 HTML：
 
 ```html
-<form id="lead-form" data-parloq-manual novalidate>
+<form id="lead-form" data-promotion-manual novalidate>
   <label for="phone" data-copy="phoneLabel">WhatsApp number</label>
   <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel"
          data-copy-placeholder="phonePlaceholder" required />
@@ -169,7 +179,7 @@ window.parloqSubmitPhone(
 关键要求：
 
 - 使用 `type="tel"` 和 `autocomplete="tel"`。
-- 自己处理提交时，表单必须带 `data-parloq-manual`，避免平台自动追踪器重复提交。
+- 自己处理提交时，表单必须带 `data-promotion-manual`，避免平台自动追踪器重复提交。
 - 提交时立即禁用按钮并显示加载态；失败必须显示可理解、可重试的信息。
 - 号码至少包含 7 位数字；最终格式校验和租户冲突校验由服务端完成。
 - 不得把号码写入 URL、日志、Cookie 或本地存储。
@@ -255,7 +265,7 @@ window.parloqSubmitPhone(
 - 模板自行携带的外部 JavaScript、未知第三方 SDK、隐藏 iframe 或跨域数据回传；平台托管并声明的数据关联组件除外；
 - source map、明文密钥、访问令牌、固定渠道签名；
 - 把号码写入 URL、日志、localStorage、sessionStorage 或 analytics metadata；
-- 绕过 `parloqSubmitPhone` 直接调用账号/网关 API；
+- 绕过 `PromotionBridge.submitPhone` 直接调用账号/网关 API；
 - 阻断输入框粘贴、系统返回或屏幕阅读器；页面缩放只能由平台策略控制；
 - 虚构在线人数、账户安全结果或平台未提供的身份信息；
 - 模板自行注入 Meta Pixel；Pixel 由渠道配置和平台运行时统一注入。

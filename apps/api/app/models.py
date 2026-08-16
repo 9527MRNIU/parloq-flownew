@@ -330,6 +330,20 @@ class ProtocolNode(Base, TimestampMixin):
         CheckConstraint(
             "protocol_type IN ('baileys')", name="ck_protocol_nodes_type"
         ),
+        CheckConstraint(
+            "connection_policy IN ('on_demand', 'always_on')",
+            name="ck_protocol_nodes_connection_policy",
+        ),
+        CheckConstraint(
+            "(max_account_count IS NULL OR max_account_count >= 0) AND "
+            "(max_online_accounts IS NULL OR max_online_accounts >= 0) AND "
+            "(max_concurrent_pairings IS NULL OR max_concurrent_pairings >= 0)",
+            name="ck_protocol_nodes_capacity_nonnegative",
+        ),
+        CheckConstraint(
+            "idle_disconnect_seconds >= 60 AND post_verify_grace_seconds >= 0",
+            name="ck_protocol_nodes_connection_windows",
+        ),
         UniqueConstraint(
             "created_by", "name", name="uq_protocol_nodes_owner_name"
         ),
@@ -351,6 +365,24 @@ class ProtocolNode(Base, TimestampMixin):
     online_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False, index=True
     )
+    max_account_count: Mapped[int | None] = mapped_column(Integer)
+    max_online_accounts: Mapped[int | None] = mapped_column(
+        Integer, default=1000, nullable=True
+    )
+    max_concurrent_pairings: Mapped[int | None] = mapped_column(Integer)
+    connection_policy: Mapped[str] = mapped_column(
+        String(24), default="on_demand", nullable=False
+    )
+    idle_disconnect_seconds: Mapped[int] = mapped_column(
+        Integer, default=600, nullable=False
+    )
+    post_verify_grace_seconds: Mapped[int] = mapped_column(
+        Integer, default=120, nullable=False
+    )
+    sync_policy_version: Mapped[int] = mapped_column(
+        Integer, default=1, nullable=False
+    )
+    sync_policy_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     archived_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True
     )
@@ -358,6 +390,58 @@ class ProtocolNode(Base, TimestampMixin):
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
     )
+
+
+class ProtocolPool(Base, TimestampMixin):
+    __tablename__ = "protocol_pools"
+    __table_args__ = (
+        UniqueConstraint(
+            "created_by", "name", name="uq_protocol_pools_owner_name"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=next_snowflake_id
+    )
+    public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(64), index=True)
+    remark: Mapped[str | None] = mapped_column(String(512))
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    created_by: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("user_accounts.id", ondelete="CASCADE"),
+        index=True,
+    )
+
+
+class ProtocolPoolMember(Base, TimestampMixin):
+    __tablename__ = "protocol_pool_members"
+    __table_args__ = (
+        UniqueConstraint(
+            "pool_id", "protocol_node_id", name="uq_protocol_pool_member"
+        ),
+        CheckConstraint(
+            "priority >= 0", name="ck_protocol_pool_member_priority"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=next_snowflake_id
+    )
+    pool_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("protocol_pools.id", ondelete="CASCADE"),
+        index=True,
+    )
+    protocol_node_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("protocol_nodes.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
 class PersonalAccount(Base, TimestampMixin):
@@ -374,6 +458,10 @@ class PersonalAccount(Base, TimestampMixin):
         CheckConstraint(
             "metadata_sync_status IN ('pending', 'syncing', 'ready', 'failed', 'unsupported')",
             name="ck_personal_accounts_metadata_sync_status",
+        ),
+        CheckConstraint(
+            "admission_status IN ('reserved', 'active', 'abandoned')",
+            name="ck_personal_accounts_admission_status",
         ),
     )
 
@@ -395,6 +483,9 @@ class PersonalAccount(Base, TimestampMixin):
     metadata_sync_status: Mapped[str] = mapped_column(
         String(16), default="pending", nullable=False, index=True
     )
+    admission_status: Mapped[str] = mapped_column(
+        String(16), default="active", nullable=False, index=True
+    )
     group_id: Mapped[int | None] = mapped_column(
         BigInteger,
         ForeignKey("account_groups.id", ondelete="SET NULL"), index=True
@@ -409,10 +500,22 @@ class PersonalAccount(Base, TimestampMixin):
     mutual_contact_count: Mapped[int | None] = mapped_column(Integer)
     quality_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    marketing_eligible: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, index=True
+    )
     last_error: Mapped[str | None] = mapped_column(Text)
     last_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sending_cooldown_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(BigInteger, ForeignKey("user_accounts.id", ondelete="RESTRICT"))
+
+    @property
+    def gateway_account_id(self) -> str:
+        """Legacy Baileys identifier; never use this as the control-plane ID."""
+
+        return self.public_id
 
 
 class AccountLifecycleEvent(Base):
@@ -680,6 +783,14 @@ class PromotionChannel(Base, TimestampMixin):
             "slug",
             name="uq_promotion_channel_domain_subdomain_slug",
         ),
+        CheckConstraint(
+            "protocol_node_id IS NULL OR protocol_pool_id IS NULL",
+            name="ck_promotion_channels_protocol_route",
+        ),
+        CheckConstraint(
+            "in_app_browser_mode IN ('allow', 'guide_external')",
+            name="ck_promotion_channels_in_app_browser_mode",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
@@ -703,6 +814,37 @@ class PromotionChannel(Base, TimestampMixin):
         BigInteger,
         ForeignKey("meta_pixels.id", ondelete="SET NULL"), index=True
     )
+    account_group_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("account_groups.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    protocol_node_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("protocol_nodes.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    protocol_pool_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("protocol_pools.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    route_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    meta_browser_pixel_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
+    meta_capi_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    meta_event_mapping_json: Mapped[dict] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    in_app_browser_mode: Mapped[str] = mapped_column(
+        String(24), default="allow", nullable=False
+    )
+    new_account_marketing_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
     locale_mode: Mapped[str] = mapped_column(String(16), default="auto")
     locale: Mapped[str | None] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
@@ -721,6 +863,10 @@ class AccountPairingAttempt(Base, TimestampMixin):
             "status IN ('code_issued', 'waiting_phone', 'reconnecting', 'verified', 'expired', 'cancelled', 'failed')",
             name="ck_account_pairing_attempts_status",
         ),
+        CheckConstraint(
+            "attempt_type IN ('initial', 'reauthentication')",
+            name="ck_account_pairing_attempts_type",
+        ),
         Index(
             "ix_account_pairing_attempts_account_created",
             "account_id",
@@ -738,6 +884,9 @@ class AccountPairingAttempt(Base, TimestampMixin):
         BigInteger, primary_key=True, default=next_snowflake_id
     )
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    attempt_type: Mapped[str] = mapped_column(
+        String(24), default="initial", nullable=False, index=True
+    )
     account_id: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("personal_accounts.id", ondelete="CASCADE"),
@@ -750,6 +899,21 @@ class AccountPairingAttempt(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
+    account_group_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("account_groups.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    protocol_node_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("protocol_nodes.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    route_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    sync_policy_version: Mapped[int] = mapped_column(
+        Integer, default=1, nullable=False
+    )
+    sync_policy_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     visitor_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     status: Mapped[str] = mapped_column(
         String(24), default="code_issued", nullable=False, index=True
@@ -760,6 +924,91 @@ class AccountPairingAttempt(Base, TimestampMixin):
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     terminal_reason: Mapped[str | None] = mapped_column(String(64))
     provider_code: Mapped[str | None] = mapped_column(String(64))
+
+
+class AccountMetadataSyncJob(Base, TimestampMixin):
+    __tablename__ = "account_metadata_sync_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'succeeded', 'failed')",
+            name="ck_account_metadata_sync_jobs_status",
+        ),
+        Index(
+            "ix_account_metadata_sync_jobs_pending",
+            "status",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=next_snowflake_id
+    )
+    public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    account_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("personal_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    protocol_node_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("protocol_nodes.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    sync_policy_version: Mapped[int] = mapped_column(
+        Integer, default=1, nullable=False
+    )
+    sync_policy_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", nullable=False, index=True
+    )
+    active_key: Mapped[str | None] = mapped_column(
+        String(80), unique=True, index=True
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    result_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_by: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("user_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+
+
+class AccountGroupWakeupEvent(Base, TimestampMixin):
+    """Durable signal that a group's dispatchable account set may have changed."""
+
+    __tablename__ = "account_group_wakeup_events"
+    __table_args__ = (
+        Index(
+            "ix_account_group_wakeup_events_pending",
+            "processed_at",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=next_snowflake_id
+    )
+    group_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("account_groups.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    account_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("personal_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    processed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
 
 
 class PromotionEvent(Base, TimestampMixin):
@@ -788,6 +1037,73 @@ class PromotionEvent(Base, TimestampMixin):
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class MetaConversionDelivery(Base, TimestampMixin):
+    __tablename__ = "meta_conversion_deliveries"
+    __table_args__ = (
+        UniqueConstraint(
+            "pixel_id", "event_id", name="uq_meta_conversion_pixel_event"
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'sending', 'retry', 'delivered', 'failed', 'skipped')",
+            name="ck_meta_conversion_deliveries_status",
+        ),
+        Index(
+            "ix_meta_conversion_deliveries_due",
+            "status",
+            "next_attempt_at",
+        ),
+        Index(
+            "ix_meta_conversion_deliveries_channel_created",
+            "channel_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=next_snowflake_id
+    )
+    public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    channel_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("promotion_channels.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    pixel_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("meta_pixels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    promotion_event_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("promotion_events.id", ondelete="SET NULL"),
+        index=True,
+    )
+    event_name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    event_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    event_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    action_source: Mapped[str] = mapped_column(
+        String(32), default="website", nullable=False
+    )
+    event_source_url: Mapped[str | None] = mapped_column(Text)
+    user_data_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    custom_data_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", nullable=False, index=True
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    provider_trace_id: Mapped[str | None] = mapped_column(String(255))
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
 class PromotionLead(Base, TimestampMixin):
     __tablename__ = "promotion_leads"
     __table_args__ = (
@@ -807,14 +1123,20 @@ class PromotionLead(Base, TimestampMixin):
     submission_count: Mapped[int] = mapped_column(Integer, default=1)
 
 
-class HyperlinkMaterial(Base, TimestampMixin):
-    __tablename__ = "hyperlink_materials"
+class Material(Base, TimestampMixin):
+    __tablename__ = "materials"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
     material_type: Mapped[str] = mapped_column(String(24), index=True)
+    text_role: Mapped[str | None] = mapped_column(String(16), index=True)
     content_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    file_name: Mapped[str | None] = mapped_column(String(180))
+    content_type: Mapped[str | None] = mapped_column(String(120))
+    file_size: Mapped[int | None] = mapped_column(BigInteger)
+    file_sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    content: Mapped[bytes | None] = mapped_column(LargeBinary, deferred=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
@@ -832,7 +1154,7 @@ class HyperlinkTemplate(Base, TimestampMixin):
     content_json: Mapped[dict] = mapped_column(JSON, default=dict)
     material_id: Mapped[int | None] = mapped_column(
         BigInteger,
-        ForeignKey("hyperlink_materials.id", ondelete="SET NULL"), index=True
+        ForeignKey("materials.id", ondelete="SET NULL"), index=True
     )
     promotion_channel_id: Mapped[int | None] = mapped_column(
         BigInteger,
@@ -872,6 +1194,8 @@ class DataPackage(Base, TimestampMixin):
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
     status: Mapped[str] = mapped_column(String(16), default="ready", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    sealed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,
@@ -894,10 +1218,24 @@ class DataPackageRecipient(Base, TimestampMixin):
     phone_e164: Mapped[str] = mapped_column(String(20), index=True)
     country_code: Mapped[str | None] = mapped_column(String(2), index=True)
     variables_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    package_revision: Mapped[int] = mapped_column(
+        Integer, default=1, nullable=False, index=True
+    )
+    removed_revision: Mapped[int | None] = mapped_column(Integer, index=True)
+    validation_status: Mapped[str] = mapped_column(
+        String(16), default="valid", nullable=False, index=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text)
 
 
 class HyperlinkTask(Base, TimestampMixin):
     __tablename__ = "hyperlink_tasks"
+    __table_args__ = (
+        CheckConstraint(
+            "sender_mode IN ('legacy_fixed', 'dynamic_group')",
+            name="ck_hyperlink_tasks_sender_mode",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
@@ -914,15 +1252,34 @@ class HyperlinkTask(Base, TimestampMixin):
         BigInteger,
         ForeignKey("data_packages.id", ondelete="RESTRICT"), index=True
     )
+    data_package_revision: Mapped[int | None] = mapped_column(Integer)
+    account_group_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("account_groups.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    sender_mode: Mapped[str] = mapped_column(
+        String(16), default="legacy_fixed", nullable=False, index=True
+    )
     account_public_ids: Mapped[list] = mapped_column(JSON, default=list)
     channel: Mapped[str | None] = mapped_column(String(80), index=True)
     status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    template_name_snapshot: Mapped[str | None] = mapped_column(String(120))
+    template_snapshot_json: Mapped[dict | None] = mapped_column(JSON)
     total_count: Mapped[int] = mapped_column(Integer, default=0)
     queued_count: Mapped[int] = mapped_column(Integer, default=0)
+    submitting_count: Mapped[int] = mapped_column(Integer, default=0)
+    accepted_count: Mapped[int] = mapped_column(Integer, default=0)
+    submission_failed_count: Mapped[int] = mapped_column(Integer, default=0)
     sent_count: Mapped[int] = mapped_column(Integer, default=0)
     delivered_count: Mapped[int] = mapped_column(Integer, default=0)
     failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    reconciling_count: Mapped[int] = mapped_column(Integer, default=0)
+    cancelled_count: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_count: Mapped[int] = mapped_column(Integer, default=0)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
@@ -955,8 +1312,66 @@ class HyperlinkTaskDelivery(Base, TimestampMixin):
         BigInteger,
         ForeignKey("message_deliveries.id", ondelete="SET NULL"), index=True
     )
+    slot_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("hyperlink_task_account_slots.id", ondelete="SET NULL"),
+        index=True,
+    )
+    lease_token: Mapped[str | None] = mapped_column(String(64), index=True)
+    leased_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    submission_status: Mapped[str] = mapped_column(
+        String(16), default="pending", nullable=False, index=True
+    )
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    submission_failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class HyperlinkTaskAccountSlot(Base, TimestampMixin):
+    __tablename__ = "hyperlink_task_account_slots"
+    __table_args__ = (
+        UniqueConstraint("task_id", "slot_index", name="uq_hyperlink_task_slot_index"),
+        # An account may be held by only one live task slot. Released slots clear
+        # account_id, so completed history does not block future tasks.
+        UniqueConstraint("account_id", name="uq_hyperlink_task_slot_account"),
+        CheckConstraint(
+            "status IN ('vacant', 'active', 'replacing', 'released')",
+            name="ck_hyperlink_task_slot_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
+    task_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("hyperlink_tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    slot_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    account_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("personal_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), default="vacant", nullable=False, index=True
+    )
+    lease_token: Mapped[str | None] = mapped_column(String(64), index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    acquired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    switch_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    consecutive_failure_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    last_switch_reason: Mapped[str | None] = mapped_column(String(64))
     last_error: Mapped[str | None] = mapped_column(Text)
 
 

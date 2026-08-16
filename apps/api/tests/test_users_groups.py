@@ -116,7 +116,7 @@ def test_user_delete_soft_disables_revokes_sessions_and_keeps_owned_resources(
                 select(UserAccount).where(UserAccount.username == "lifecycle-owner")
             )
             resource = db.scalar(
-                select(DomainRecord).where(DomainRecord.public_id == domain_id)
+                select(DomainRecord).where(DomainRecord.id == int(domain_id))
             )
             assert user is not None and user.is_active is False
             assert resource is not None and resource.created_by == user.id

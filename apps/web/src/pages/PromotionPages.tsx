@@ -1,15 +1,22 @@
 import {
   ArchiveIcon,
   BookOpenIcon,
+  ChevronLeftIcon,
   CopyIcon,
+  DownloadIcon,
   EyeIcon,
   ExternalLinkIcon,
   LoaderCircleIcon,
+  MonitorIcon,
+  PauseIcon,
   PencilIcon,
+  PlayIcon,
   PlusIcon,
   RefreshCwIcon,
   RocketIcon,
   Settings2Icon,
+  SmartphoneIcon,
+  TabletIcon,
   Trash2Icon,
   UploadCloudIcon,
 } from "lucide-react";
@@ -17,10 +24,13 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
 } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
+  apiDownload,
   apiRequest,
   formatDateTime,
   formatLocalDateInput,
@@ -52,8 +62,11 @@ import {
   ListToolbar,
   StandardListPage,
 } from "../components/list-page";
+import { EntityPrimaryCell } from "../components/entity-primary-cell";
 import { useAuth } from "../auth/AuthContext";
 import { countryOptions } from "../lib/countries";
+import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
+import { formatPhoneDisplay } from "../lib/utils";
 import {
   TEMPLATE_DESIGN_SECTIONS,
   templateAiCreationPrompt,
@@ -83,6 +96,7 @@ const object = (input: unknown) =>
   input && typeof input === "object" ? (input as Record<string, unknown>) : {};
 type PromotionTemplate = {
   id: string;
+  readKey: string;
   name: string;
   version: string;
   status: string;
@@ -93,13 +107,79 @@ type PromotionTemplate = {
   supportedLocales: string[];
   updatedAt?: string;
 };
+type TemplatePreviewDevice = "desktop" | "tablet" | "mobile";
+type TemplatePreviewState =
+  | "input"
+  | "code_issued"
+  | "waiting_phone"
+  | "reconnecting"
+  | "verified_syncing"
+  | "ready"
+  | "failed"
+  | "expired"
+  | "cancelled";
+const TEMPLATE_PREVIEW_DEVICES = [
+  {
+    value: "desktop",
+    label: "桌面",
+    dimensions: "1024 × 768",
+    width: 1024,
+    height: 768,
+    Icon: MonitorIcon,
+  },
+  {
+    value: "tablet",
+    label: "平板",
+    dimensions: "768 × 1024",
+    width: 768,
+    height: 1024,
+    Icon: TabletIcon,
+  },
+  {
+    value: "mobile",
+    label: "手机",
+    dimensions: "390 × 844",
+    width: 390,
+    height: 844,
+    Icon: SmartphoneIcon,
+  },
+] as const;
+const TEMPLATE_PREVIEW_STATES: ReadonlyArray<{
+  value: TemplatePreviewState;
+  label: string;
+  description: string;
+}> = [
+  { value: "input", label: "号码输入", description: "重置并查看绑定前状态" },
+  { value: "code_issued", label: "配对码已生成", description: "生成配对码后暂停" },
+  { value: "waiting_phone", label: "等待手机", description: "等待用户在手机确认" },
+  { value: "reconnecting", label: "重新连接", description: "网关正在完成安全连接" },
+  { value: "verified_syncing", label: "成功·同步中", description: "已验证，资料仍在同步" },
+  { value: "ready", label: "同步完成", description: "账号资料初始化完成" },
+  { value: "failed", label: "绑定失败", description: "展示可重试失败状态" },
+  { value: "expired", label: "配对码过期", description: "展示过期状态" },
+  { value: "cancelled", label: "用户取消", description: "展示取消状态" },
+];
+const TEMPLATE_PREVIEW_AUTOPLAY: TemplatePreviewState[] = [
+  "code_issued",
+  "waiting_phone",
+  "reconnecting",
+  "verified_syncing",
+  "ready",
+];
 type PromotionChannel = {
   id: string;
+  readKey: string;
   name: string;
   platform: string;
   countryCode: string;
   templateId: string;
   templateName: string;
+  accountGroupId: string;
+  accountGroupName: string;
+  protocolNodeId: string;
+  protocolNodeName: string;
+  protocolPoolId: string;
+  protocolPoolName: string;
   domainId: string;
   baseHostname: string;
   subdomainPrefix: string;
@@ -108,6 +188,12 @@ type PromotionChannel = {
   publicUrl: string;
   pixelId: string;
   pixelName: string;
+  metaBrowserPixelEnabled: boolean;
+  metaCapiEnabled: boolean;
+  metaEventMapping: MetaEventMapping;
+  inAppBrowserMode: "allow" | "guide_external";
+  newAccountMarketingEnabled: boolean;
+  effectiveConfig: Record<string, unknown>;
   enabled: boolean;
   localeMode: string;
   locale: string;
@@ -118,14 +204,53 @@ type PromotionChannel = {
   updatedAt?: string;
 };
 type Option = { id: string; label: string; locales?: string[] };
+type TemplateOption = Option & {
+  schema: string;
+  runtime: string;
+  pairingContract: string;
+};
+type ProtocolOption = Option & {
+  health: string;
+  healthReason: string;
+};
 type PixelOption = Option & {
+  readKey: string;
   name: string;
   datasetId: string;
   enabled: boolean;
   tokenMasked: string;
+  tokenConfigured: boolean;
 };
+type MetaEventMapping = {
+  page_view: string;
+  phone_submit: string;
+  pairing_started: string;
+  pairing_verified: string;
+};
+const defaultMetaEventMapping: MetaEventMapping = {
+  page_view: "PageView",
+  phone_submit: "Lead",
+  pairing_started: "InitiateCheckout",
+  pairing_verified: "CompleteRegistration",
+};
+const metaEventOptions = [
+  { value: "", label: "不上报" },
+  { value: "PageView", label: "浏览页面 (PageView)" },
+  { value: "ViewContent", label: "浏览内容 (ViewContent)" },
+  { value: "Search", label: "搜索 (Search)" },
+  { value: "AddToCart", label: "加入购物车 (AddToCart)" },
+  { value: "AddToWishlist", label: "加入心愿单 (AddToWishlist)" },
+  { value: "InitiateCheckout", label: "发起结账 (InitiateCheckout)" },
+  { value: "AddPaymentInfo", label: "添加支付信息 (AddPaymentInfo)" },
+  { value: "Purchase", label: "购买 (Purchase)" },
+  { value: "Lead", label: "潜在客户 (Lead)" },
+  { value: "CompleteRegistration", label: "完成注册 (CompleteRegistration)" },
+  { value: "Contact", label: "联系 (Contact)" },
+  { value: "Subscribe", label: "订阅 (Subscribe)" },
+];
 type AdMetric = {
   id: string;
+  readKey: string;
   date: string;
   spend: number;
   impressions: number;
@@ -173,7 +298,7 @@ function templatePolicyRow(input: unknown): TemplatePolicy {
 }
 function templateRow(input: unknown): PromotionTemplate {
   const row = object(input);
-  const id = field(row, "publicId", "public_id", "id");
+  const id = snowflakeId(row, "id");
   const manifest = object(row.manifest);
   const rowLocales = row.supportedLocales || row.supported_locales;
   const locales = Array.isArray(rowLocales)
@@ -192,13 +317,14 @@ function templateRow(input: unknown): PromotionTemplate {
     field(row, "version", "versionName", "version_name") || "v1";
   return {
     id,
+    readKey: entityRowKey(row, id, "promotion-template", `${field(row, "name")}:${field(row, "updatedAt", "updated_at")}`),
     name: field(row, "name"),
     version: `${rawVersion} · ${defaultLocale} / ${locales.length} 语言`,
     status:
       field(row, "status") || (row.enabled === false ? "disabled" : "ready"),
     previewUrl:
       field(row, "previewUrl", "preview_url") ||
-      `/api/promotion/templates/${id}/preview`,
+      (id ? `/api/promotion/templates/${id}/preview` : ""),
     assetCount: Number(row.assetCount ?? row.asset_count ?? 0),
     channelCount: Number(row.channelCount ?? row.channel_count ?? 0),
     defaultLocale,
@@ -208,30 +334,27 @@ function templateRow(input: unknown): PromotionTemplate {
 }
 function channelRow(input: unknown): PromotionChannel {
   const row = object(input);
+  const id = snowflakeId(row, "id");
   const stats = object(row.stats);
   const status = field(row, "status") || "draft";
   const hostname = field(row, "hostname", "domain");
   const slug = field(row, "slug");
+  const mapping = object(row.metaEventMapping || row.meta_event_mapping);
   return {
-    id: field(row, "publicId", "public_id", "id"),
+    id,
+    readKey: entityRowKey(row, id, "promotion-channel", `${field(row, "name")}:${field(row, "slug")}`),
     name: field(row, "name"),
     platform: field(row, "type", "platform") || "facebook",
     countryCode: field(row, "countryCode", "country_code"),
-    templateId: field(
-      row,
-      "templatePublicId",
-      "template_public_id",
-      "templateId",
-      "template_id",
-    ),
+    templateId: snowflakeId(row, "templateId", "template_id"),
     templateName: field(row, "templateName", "template_name"),
-    domainId: field(
-      row,
-      "domainPublicId",
-      "domain_public_id",
-      "domainId",
-      "domain_id",
-    ),
+    accountGroupId: snowflakeId(row, "accountGroupId", "account_group_id"),
+    accountGroupName: field(row, "accountGroupName", "account_group_name"),
+    protocolNodeId: snowflakeId(row, "protocolNodeId", "protocol_node_id"),
+    protocolNodeName: field(row, "protocolNodeName", "protocol_node_name"),
+    protocolPoolId: snowflakeId(row, "protocolPoolId", "protocol_pool_id"),
+    protocolPoolName: field(row, "protocolPoolName", "protocol_pool_name"),
+    domainId: snowflakeId(row, "domainId", "domain_id"),
     baseHostname: field(row, "baseHostname", "base_hostname"),
     subdomainPrefix: field(row, "subdomainPrefix", "subdomain_prefix"),
     hostname,
@@ -239,14 +362,33 @@ function channelRow(input: unknown): PromotionChannel {
     publicUrl:
       field(row, "publicUrl", "public_url") ||
       (hostname && slug ? `https://${hostname}/${slug}` : ""),
-    pixelId: field(
-      row,
-      "pixelPublicId",
-      "pixel_public_id",
-      "pixelId",
-      "pixel_id",
-    ),
+    pixelId: snowflakeId(row, "pixelId", "pixel_id"),
     pixelName: field(row, "pixelName", "pixel_name", "datasetId", "dataset_id"),
+    metaBrowserPixelEnabled: Boolean(
+      row.metaBrowserPixelEnabled ?? row.meta_browser_pixel_enabled ?? false,
+    ),
+    metaCapiEnabled: Boolean(
+      row.metaCapiEnabled ?? row.meta_capi_enabled ?? false,
+    ),
+    metaEventMapping: {
+      page_view: String(mapping.page_view ?? defaultMetaEventMapping.page_view),
+      phone_submit: String(mapping.phone_submit ?? defaultMetaEventMapping.phone_submit),
+      pairing_started: String(
+        mapping.pairing_started ?? defaultMetaEventMapping.pairing_started,
+      ),
+      pairing_verified: String(
+        mapping.pairing_verified ?? defaultMetaEventMapping.pairing_verified,
+      ),
+    },
+    inAppBrowserMode: (field(
+      row,
+      "inAppBrowserMode",
+      "in_app_browser_mode",
+    ) || "allow") as "allow" | "guide_external",
+    newAccountMarketingEnabled: Boolean(
+      row.newAccountMarketingEnabled ?? row.new_account_marketing_enabled ?? true,
+    ),
+    effectiveConfig: object(row.effectiveConfig || row.effective_config),
     enabled: Boolean(row.enabled ?? status === "active"),
     localeMode: field(row, "localeMode", "locale_mode") || "auto",
     locale: field(row, "locale"),
@@ -264,28 +406,342 @@ function pixelRow(input: unknown): PixelOption {
     row,
     "datasetId",
     "dataset_id",
-    "pixelId",
-    "pixel_id",
   );
+  const id = snowflakeId(row, "id");
   return {
-    id: field(row, "publicId", "public_id", "id"),
+    id,
+    readKey: entityRowKey(row, id, "meta-pixel", `${name}:${datasetId}`),
     name,
     datasetId,
     label: `${name} · ${datasetId}`,
     enabled: Boolean(row.enabled ?? true),
     tokenMasked: field(row, "capiTokenMasked", "capi_token_masked"),
+    tokenConfigured: Boolean(
+      row.capiTokenConfigured ??
+        row.capi_token_configured ??
+        field(row, "capiTokenMasked", "capi_token_masked"),
+    ),
   };
 }
 function metricRow(input: unknown): AdMetric {
   const row = object(input);
+  const id = snowflakeId(row, "id");
   return {
-    id: field(row, "publicId", "public_id", "id"),
+    id,
+    readKey: entityRowKey(row, id, "promotion-ad-metric", `${field(row, "date", "metricDate", "metric_date")}:${field(row, "updatedAt", "updated_at")}`),
     date: field(row, "date", "metricDate", "metric_date"),
     spend: Number(row.spend || 0),
     impressions: Number(row.impressions || 0),
     clicks: Number(row.clicks || 0),
     updatedAt: field(row, "updatedAt", "updated_at"),
   };
+}
+
+function TemplatePreviewWorkspace({
+  template,
+  initialDevice = "mobile",
+  initialLocale,
+  standalone = false,
+}: {
+  template: PromotionTemplate;
+  initialDevice?: TemplatePreviewDevice;
+  initialLocale?: string;
+  standalone?: boolean;
+}) {
+  const [device, setDevice] =
+    useState<TemplatePreviewDevice>(initialDevice);
+  const [previewState, setPreviewState] =
+    useState<TemplatePreviewState>("input");
+  const [locale, setLocale] = useState(
+    template.supportedLocales.includes(String(initialLocale))
+      ? String(initialLocale)
+      : template.defaultLocale,
+  );
+  const [started, setStarted] = useState(false);
+  const [autoplay, setAutoplay] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const frameRef = useRef<HTMLIFrameElement>(null);
+
+  const postPreviewState = useCallback((state: TemplatePreviewState) => {
+    if (state === "input") return;
+    frameRef.current?.contentWindow?.postMessage(
+      { type: "promotion-preview:set-state", state },
+      "*",
+    );
+  }, []);
+
+  const resetPreview = useCallback(() => {
+    setAutoplay(false);
+    setStarted(false);
+    setPreviewState("input");
+    setReloadKey((current) => current + 1);
+  }, []);
+
+  const selectPreviewState = useCallback(
+    (state: TemplatePreviewState) => {
+      if (state === "input") {
+        resetPreview();
+        return;
+      }
+      if (!started) return;
+      setPreviewState(state);
+      postPreviewState(state);
+    },
+    [postPreviewState, resetPreview, started],
+  );
+
+  useEffect(() => {
+    const receivePreviewEvent = (event: MessageEvent) => {
+      if (event.source !== frameRef.current?.contentWindow) return;
+      const data = object(event.data);
+      if (data.type === "promotion-preview:pairing-started") {
+        setStarted(true);
+        setPreviewState("code_issued");
+      }
+      if (data.type === "promotion-preview:reset") {
+        setStarted(false);
+        setAutoplay(false);
+        setPreviewState("input");
+      }
+      if (data.type === "promotion-preview:locale-change") {
+        const requestedLocale = String(data.locale || "");
+        if (!template.supportedLocales.includes(requestedLocale)) return;
+        setStarted(false);
+        setAutoplay(false);
+        setPreviewState("input");
+        setLocale(requestedLocale);
+        setReloadKey((current) => current + 1);
+      }
+    };
+    window.addEventListener("message", receivePreviewEvent);
+    return () => window.removeEventListener("message", receivePreviewEvent);
+  }, [template.supportedLocales]);
+
+  useEffect(() => {
+    if (!autoplay || !started) return;
+    const currentIndex = TEMPLATE_PREVIEW_AUTOPLAY.indexOf(previewState);
+    if (currentIndex < 0) {
+      selectPreviewState("code_issued");
+      return;
+    }
+    const next = TEMPLATE_PREVIEW_AUTOPLAY[currentIndex + 1];
+    if (!next) {
+      setAutoplay(false);
+      return;
+    }
+    const timer = window.setTimeout(() => selectPreviewState(next), 2800);
+    return () => window.clearTimeout(timer);
+  }, [autoplay, previewState, selectPreviewState, started]);
+
+  const selectedDevice =
+    TEMPLATE_PREVIEW_DEVICES.find(({ value }) => value === device) ||
+    TEMPLATE_PREVIEW_DEVICES[2];
+  const previewUrl = new URL(template.previewUrl, window.location.origin);
+  previewUrl.searchParams.set("device", device);
+  previewUrl.searchParams.set("lang", locale);
+
+  return (
+    <div
+      className={`template-device-preview${standalone ? " is-standalone" : ""}`}
+    >
+      <div className="template-device-preview__toolbar">
+        <div
+          className="template-device-preview__switcher"
+          role="group"
+          aria-label="预览设备"
+        >
+          {TEMPLATE_PREVIEW_DEVICES.map(
+            ({ value, label, dimensions, Icon }) => (
+              <Button
+                key={value}
+                size="sm"
+                variant={device === value ? "default" : "outline"}
+                aria-pressed={device === value}
+                onClick={() => {
+                  setDevice(value);
+                  setAutoplay(false);
+                  setStarted(false);
+                  setPreviewState("input");
+                  setReloadKey((current) => current + 1);
+                }}
+              >
+                <Icon size={15} />
+                {label}
+                <span className="template-device-preview__dimensions">
+                  {dimensions}
+                </span>
+              </Button>
+            ),
+          )}
+        </div>
+        <div className="template-device-preview__toolbar-actions">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!started}
+            onClick={() => setAutoplay((current) => !current)}
+          >
+            {autoplay ? <PauseIcon size={15} /> : <PlayIcon size={15} />}
+            {autoplay ? "暂停演示" : "自动演示"}
+          </Button>
+          <Button size="sm" variant="outline" onClick={resetPreview}>
+            <RefreshCwIcon size={15} />
+            重置
+          </Button>
+          {!standalone ? (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                const url = new URL(
+                  `/promotion/templates/${template.id}/preview`,
+                  window.location.origin,
+                );
+                url.searchParams.set("device", device);
+                url.searchParams.set("lang", locale);
+                window.open(url.toString(), "_blank", "noopener,noreferrer");
+              }}
+            >
+              <ExternalLinkIcon size={15} />
+              新窗口打开
+            </Button>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="template-device-preview__flow-bar">
+        <div className="template-device-preview__flow-heading">
+          <strong>绑定流程</strong>
+          <span>
+            {started
+              ? "手动选择状态，页面不会自动跳到成功。"
+              : "先在预览中输入号码并点击开始绑定。"}
+          </span>
+        </div>
+        <div
+          className="template-device-preview__states"
+          role="group"
+          aria-label="绑定流程预览状态"
+        >
+          {TEMPLATE_PREVIEW_STATES.map(({ value, label, description }) => (
+            <Button
+              key={value}
+              size="xs"
+              variant={previewState === value ? "default" : "outline"}
+              aria-pressed={previewState === value}
+              aria-label={`${label}：${description}`}
+              disabled={value !== "input" && !started}
+              onClick={() => selectPreviewState(value)}
+            >
+              {label}
+            </Button>
+          ))}
+        </div>
+      </div>
+
+      <div className="template-device-preview__stage">
+        <div
+          className="template-device-preview__device"
+          data-device={device}
+          style={{ width: selectedDevice.width }}
+        >
+          <div className="template-device-preview__chrome">
+            <span>{selectedDevice.label}预览</span>
+            <span>
+              {selectedDevice.width} × {selectedDevice.height}
+            </span>
+          </div>
+          <iframe
+            ref={frameRef}
+            className="template-device-preview__frame"
+            src={previewUrl.toString()}
+            title={`${template.name} · ${selectedDevice.label}预览`}
+            width={selectedDevice.width}
+            height={selectedDevice.height}
+            key={`${template.id}:${device}:${reloadKey}`}
+            sandbox="allow-scripts allow-forms allow-top-navigation-by-user-activation"
+            referrerPolicy="no-referrer"
+            onLoad={() => {
+              setStarted(false);
+              setAutoplay(false);
+              setPreviewState("input");
+            }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function PromotionTemplatePreviewPage() {
+  const { templateId = "" } = useParams();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const requestedDevice = searchParams.get("device");
+  const requestedLocale = searchParams.get("lang") || undefined;
+  const initialDevice: TemplatePreviewDevice = [
+    "desktop",
+    "tablet",
+    "mobile",
+  ].includes(String(requestedDevice))
+    ? (requestedDevice as TemplatePreviewDevice)
+    : "mobile";
+  const [template, setTemplate] = useState<PromotionTemplate | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError("");
+    void apiRequest(`/api/promotion/templates/${templateId}`)
+      .then((payload) => {
+        if (!active) return;
+        const data = object(object(payload).data ?? payload);
+        setTemplate(templateRow(data.template || data));
+      })
+      .catch((caught) => {
+        if (!active) return;
+        setError(caught instanceof Error ? caught.message : "模板读取失败");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [templateId]);
+
+  return (
+    <main className="template-preview-page">
+      <header className="template-preview-page__header">
+        <Button variant="outline" onClick={() => navigate("/promotion/templates")}>
+          <ChevronLeftIcon size={16} />
+          返回模板管理
+        </Button>
+        <div>
+          <strong>{template?.name || "模板模拟预览"}</strong>
+          <span>手动检查设备适配及账号绑定的每个中间状态</span>
+        </div>
+        {template ? <Badge tone="primary">{template.version.split(" · ")[0]}</Badge> : null}
+      </header>
+      {loading ? (
+        <div className="loading-state min-h-64"><Spinner />正在读取模板…</div>
+      ) : error || !template ? (
+        <div className="error-state min-h-64">
+          <strong>模板预览无法打开</strong>
+          <span>{error || "模板不存在"}</span>
+        </div>
+      ) : (
+        <TemplatePreviewWorkspace
+          template={template}
+          initialDevice={initialDevice}
+          initialLocale={requestedLocale}
+          standalone
+        />
+      )}
+    </main>
+  );
 }
 
 export function PromotionTemplatesPage() {
@@ -300,6 +756,7 @@ export function PromotionTemplatesPage() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [pending, setPending] = useState(false);
+  const [previewing, setPreviewing] = useState<PromotionTemplate | null>(null);
   const [designSpecDrawer, setDesignSpecDrawer] = useState(false);
   const [policyDrawer, setPolicyDrawer] = useState(false);
   const [policy, setPolicy] = useState<TemplatePolicy>(defaultTemplatePolicy);
@@ -346,7 +803,7 @@ export function PromotionTemplatesPage() {
   }, [keyword, rows]);
   async function upload(event?: FormEvent) {
     event?.preventDefault();
-    if (!file || !name.trim()) return;
+    if (!file || !name.trim() || (replacing && !replacing.id)) return;
     setPending(true);
     try {
       const body = new FormData();
@@ -373,13 +830,19 @@ export function PromotionTemplatesPage() {
     }
   }
   function openImport(row?: PromotionTemplate) {
+    if (row && !row.id) return;
     setReplacing(row || null);
     setFile(null);
     setName(row?.name || "");
     setDescription("");
     setDrawer(true);
   }
+  function openPreview(row: PromotionTemplate) {
+    if (!row.previewUrl) return;
+    setPreviewing(row);
+  }
   async function toggle(row: PromotionTemplate) {
+    if (!row.id) return;
     try {
       await apiRequest(`/api/promotion/templates/${row.id}`, {
         method: "PATCH",
@@ -421,6 +884,24 @@ export function PromotionTemplatesPage() {
       toast.error("复制失败，请检查浏览器剪贴板权限");
     }
   }
+  async function downloadCapabilityTheme() {
+    try {
+      const result = await apiDownload(
+        "/api/promotion/template-kits/account-link-elements-v1.zip",
+      );
+      const url = URL.createObjectURL(result.blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = decodeURIComponent(
+        result.filename || "account-link-capability-theme-v1.zip",
+      );
+      anchor.click();
+      URL.revokeObjectURL(url);
+      toast.success("白标能力主题已下载");
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "下载失败");
+    }
+  }
   async function savePolicy() {
     if (!canManage || !policyLoaded || policyError) return;
     setPolicySaving(true);
@@ -442,7 +923,7 @@ export function PromotionTemplatesPage() {
     }
   }
   return (
-    <StandardListPage>
+    <StandardListPage viewport>
       <ListToolbar
         search={{
           value: keyword,
@@ -487,19 +968,40 @@ export function PromotionTemplatesPage() {
                 <TableHead>语言</TableHead>
                 <TableHead>资源</TableHead>
                 <TableHead>使用渠道</TableHead>
-                <TableHead>状态</TableHead>
                 <TableHead>更新时间</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {visible.map((row) => (
-                <TableRow key={row.id}>
+                <TableRow key={row.readKey}>
                   <TableCell>
-                    <div className="cell-main">
-                      <strong>{row.name}</strong>
-                      <span>{row.id}</span>
-                    </div>
+                    <EntityPrimaryCell
+                      title={row.name}
+                      id={row.id}
+                      status={{
+                        label: row.status === "ready" || row.status === "active"
+                          ? "可用"
+                          : row.status === "disabled"
+                            ? "已停用"
+                            : "处理中",
+                        description: row.status === "ready" || row.status === "active"
+                          ? "模板已通过校验，可以用于推广渠道。"
+                          : row.status === "disabled"
+                            ? "模板已停用，现有渠道应停止继续使用。"
+                            : "模板资源仍在校验或处理过程中。",
+                        tone: row.status === "ready" || row.status === "active"
+                          ? "success"
+                          : row.status === "disabled"
+                            ? "neutral"
+                            : "warning",
+                        details: [
+                          { label: "版本", value: row.version.split(" · ")[0] },
+                          { label: "语言", value: `${row.defaultLocale} · ${row.supportedLocales.length} 种` },
+                          { label: "渠道", value: row.channelCount },
+                        ],
+                      }}
+                    />
                   </TableCell>
                   <TableCell>
                     <Badge tone="primary">{row.version.split(" · ")[0]}</Badge>
@@ -512,23 +1014,6 @@ export function PromotionTemplatesPage() {
                   </TableCell>
                   <TableCell>{row.assetCount} 个文件</TableCell>
                   <TableCell>{row.channelCount} 个渠道</TableCell>
-                  <TableCell>
-                    <Badge
-                      tone={
-                        row.status === "ready" || row.status === "active"
-                          ? "success"
-                          : row.status === "disabled"
-                            ? "neutral"
-                            : "warning"
-                      }
-                    >
-                      {row.status === "ready" || row.status === "active"
-                        ? "可用"
-                        : row.status === "disabled"
-                          ? "已停用"
-                          : "处理中"}
-                    </Badge>
-                  </TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatDateTime(row.updatedAt)}
                   </TableCell>
@@ -536,7 +1021,8 @@ export function PromotionTemplatesPage() {
                     <div className="flex items-center justify-end gap-1">
                       <IconButton
                         label="模拟预览：不创建账号、不占用 IP"
-                        onClick={() => window.open(row.previewUrl, "_blank")}
+                        disabled={!row.previewUrl}
+                        onClick={() => openPreview(row)}
                       >
                         <EyeIcon size={16} />
                       </IconButton>
@@ -544,12 +1030,14 @@ export function PromotionTemplatesPage() {
                         <>
                           <IconButton
                             label="替换版本"
+                            disabled={!row.id}
                             onClick={() => openImport(row)}
                           >
                             <UploadCloudIcon size={16} />
                           </IconButton>
                           <IconButton
                             label={row.status === "disabled" ? "启用" : "停用"}
+                            disabled={!row.id}
                             onClick={() => void toggle(row)}
                           >
                             <ArchiveIcon size={16} />
@@ -570,10 +1058,21 @@ export function PromotionTemplatesPage() {
         )}
       </ListTableCard>
       <Drawer
+        open={Boolean(previewing)}
+        onClose={() => setPreviewing(null)}
+        title={previewing ? `模拟预览 · ${previewing.name}` : "模拟预览"}
+        description="快捷切换预览视口；只影响管理端模拟效果，不会改变模板文件或真实渠道页面。"
+        wide
+      >
+        {previewing ? (
+          <TemplatePreviewWorkspace template={previewing} />
+        ) : null}
+      </Drawer>
+      <Drawer
         open={designSpecDrawer}
         onClose={() => setDesignSpecDrawer(false)}
         title="推广模板设计规范"
-        description="面向设计、开发和 AI 生成的 v1 模板交付标准。复制后可直接作为 AI 创建模板的完整提示词。"
+        description="面向设计、开发和 AI 生成的 v2 白标组件主题标准。可下载能力主题或复制完整 AI 提示词。"
         wide
         footer={
           <>
@@ -582,6 +1081,10 @@ export function PromotionTemplatesPage() {
               onClick={() => setDesignSpecDrawer(false)}
             >
               关闭
+            </Button>
+            <Button variant="outline" onClick={() => void downloadCapabilityTheme()}>
+              <DownloadIcon size={16} />
+              下载白标能力主题
             </Button>
             <Button onClick={() => void copyDesignSpec()}>
               <CopyIcon size={16} />
@@ -594,8 +1097,8 @@ export function PromotionTemplatesPage() {
           <div className="template-design-spec__intro">
             <strong>使用方式</strong>
             <p>
-              将完整规范复制给 AI，再补充品牌名称、视觉风格、主色、目标国家和文案语气。AI
-              应输出可直接压缩为 ZIP 的完整目录与文件内容。
+              下载白标能力主题后，只改布局、CSS、品牌内容和资源；也可以复制完整规范给
+              AI，再补充品牌名称、视觉风格、主色、目标国家和文案语气。
             </p>
           </div>
           {TEMPLATE_DESIGN_SECTIONS.map((section) => (
@@ -829,7 +1332,10 @@ export function PromotionChannelsPage() {
   const canManage = can("promotion.channels.manage");
   const canManageMetrics = can("promotion.statistics.manage");
   const [rows, setRows] = useState<PromotionChannel[]>([]);
-  const [templates, setTemplates] = useState<Option[]>([]);
+  const [templates, setTemplates] = useState<TemplateOption[]>([]);
+  const [accountGroups, setAccountGroups] = useState<Option[]>([]);
+  const [protocolNodes, setProtocolNodes] = useState<ProtocolOption[]>([]);
+  const [protocolPools, setProtocolPools] = useState<ProtocolOption[]>([]);
   const [domains, setDomains] = useState<Option[]>([]);
   const [pixels, setPixels] = useState<PixelOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -848,6 +1354,9 @@ export function PromotionChannelsPage() {
   const [insightChannelId, setInsightChannelId] = useState("");
   const [insightLoading, setInsightLoading] = useState(false);
   const [insightStats, setInsightStats] = useState<Record<string, number>>({});
+  const [metaDeliverySummary, setMetaDeliverySummary] = useState<
+    Record<string, number>
+  >({});
   const [insightLeads, setInsightLeads] = useState<
     Array<Record<string, unknown>>
   >([]);
@@ -865,10 +1374,18 @@ export function PromotionChannelsPage() {
     name: "",
     countryCode: "US",
     templateId: "",
+    accountGroupId: "",
+    protocolRouteType: "node" as "node" | "pool",
+    protocolRouteId: "",
     domainId: "",
     subdomainPrefix: "",
     slug: "",
     pixelId: "",
+    metaBrowserPixelEnabled: false,
+    metaCapiEnabled: false,
+    metaEventMapping: { ...defaultMetaEventMapping },
+    inAppBrowserMode: "allow" as "allow" | "guide_external",
+    newAccountMarketingEnabled: true,
     localeMode: "auto",
     locale: "",
     goLiveAt: "",
@@ -877,11 +1394,14 @@ export function PromotionChannelsPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [c, t, d, p] = await Promise.all([
+      const [c, t, d, p, g, pn, pp] = await Promise.all([
         apiRequest("/api/promotion/channels?pageSize=100"),
         apiRequest("/api/promotion/templates?pageSize=100"),
         apiRequest("/api/domains/available-for-channels"),
         apiRequest("/api/meta-pixels?pageSize=100"),
+        apiRequest("/api/account-groups?pageSize=100"),
+        apiRequest("/api/protocol-nodes?pageSize=100"),
+        apiRequest("/api/protocol-pools?pageSize=100"),
       ]);
       setRows(unwrapList<unknown>(c).rows.map(channelRow));
       setTemplates(
@@ -895,22 +1415,60 @@ export function PromotionChannelsPage() {
               ? manifest.supportedLocales.map(String)
               : [String(row.defaultLocale || manifest.defaultLocale || "en")];
           return {
-            id: field(row, "publicId", "id"),
+            id: snowflakeId(row, "id"),
             label: `${field(row, "name")} · ${field(row, "version") || "v1"}`,
             locales,
+            schema: field(manifest, "schema") || "promotion-template/v1",
+            runtime: field(manifest, "runtime") || "promotion-browser-bridge/v1",
+            pairingContract:
+              field(object(manifest.requirements), "pairingContract") ||
+              "promotion-public-pairing/v1",
           };
-        }),
+        }).filter((row) => row.id),
       );
       setDomains(
         unwrapList<unknown>(d).rows.map((input) => {
           const row = object(input);
           return {
-            id: field(row, "publicId", "id"),
+            id: snowflakeId(row, "id"),
             label: field(row, "hostname"),
           };
-        }),
+        }).filter((row) => row.id),
       );
       setPixels(unwrapList<unknown>(p).rows.map(pixelRow));
+      setAccountGroups(
+        unwrapList<unknown>(g).rows
+          .map((input) => {
+            const row = object(input);
+            const id = snowflakeId(row, "id");
+            return { id, label: field(row, "name") || id };
+          })
+          .filter((row) => row.id),
+      );
+      setProtocolNodes(
+        unwrapList<unknown>(pn).rows.map((input) => {
+          const row = object(input); const id = snowflakeId(row, "id");
+          return {
+            id,
+            label: field(row, "name") || id,
+            health: field(row, "healthStatus", "health_status") || "offline",
+            healthReason: field(row, "healthReason", "health_reason"),
+          };
+        }).filter((row) => row.id),
+      );
+      setProtocolPools(
+        unwrapList<unknown>(pp).rows.map((input) => {
+          const row = object(input); const id = snowflakeId(row, "id");
+          const members = Array.isArray(row.members) ? row.members.map(object) : [];
+          const available = members.some((member) => Boolean(member.available));
+          return {
+            id,
+            label: field(row, "name") || id,
+            health: available ? "available" : "offline",
+            healthReason: available ? "" : "协议池中没有可接入节点",
+          };
+        }).filter((row) => row.id),
+      );
     } catch {
       setRows([]);
     } finally {
@@ -924,13 +1482,14 @@ export function PromotionChannelsPage() {
     const search = keyword.trim().toLowerCase();
     return search
       ? rows.filter((row) =>
-          `${row.name} ${row.countryCode} ${row.hostname} ${row.slug}`
+          `${row.name} ${row.countryCode} ${row.hostname} ${row.slug} ${row.accountGroupName}`
             .toLowerCase()
             .includes(search),
         )
       : rows;
   }, [keyword, rows]);
   function open(row?: PromotionChannel) {
+    if (row && !row.id) return;
     setEditing(row || null);
     setForm(
       row
@@ -938,10 +1497,18 @@ export function PromotionChannelsPage() {
             name: row.name,
             countryCode: row.countryCode,
             templateId: row.templateId,
+            accountGroupId: row.accountGroupId,
+            protocolRouteType: row.protocolPoolId ? "pool" : "node",
+            protocolRouteId: row.protocolPoolId || row.protocolNodeId,
             domainId: row.domainId,
             subdomainPrefix: row.subdomainPrefix,
             slug: row.slug,
             pixelId: row.pixelId,
+            metaBrowserPixelEnabled: row.metaBrowserPixelEnabled,
+            metaCapiEnabled: row.metaCapiEnabled,
+            metaEventMapping: { ...row.metaEventMapping },
+            inAppBrowserMode: row.inAppBrowserMode,
+            newAccountMarketingEnabled: row.newAccountMarketingEnabled,
             localeMode: row.localeMode,
             locale: row.locale,
             goLiveAt: row.goLiveAt?.slice(0, 16) || "",
@@ -951,10 +1518,18 @@ export function PromotionChannelsPage() {
             name: "",
             countryCode: "US",
             templateId: templates[0]?.id || "",
+            accountGroupId: accountGroups[0]?.id || "",
+            protocolRouteType: "node",
+            protocolRouteId: protocolNodes[0]?.id || "",
             domainId: "",
             subdomainPrefix: "",
             slug: randomChannelSlug(rows.map((item) => item.slug)),
             pixelId: "",
+            metaBrowserPixelEnabled: false,
+            metaCapiEnabled: false,
+            metaEventMapping: { ...defaultMetaEventMapping },
+            inAppBrowserMode: "allow",
+            newAccountMarketingEnabled: true,
             localeMode: "auto",
             locale: "",
             goLiveAt: "",
@@ -967,8 +1542,11 @@ export function PromotionChannelsPage() {
     if (
       !form.name.trim() ||
       !form.templateId ||
+      !form.accountGroupId ||
+      !form.protocolRouteId ||
       !form.domainId ||
-      !form.slug.trim()
+      !form.slug.trim() ||
+      (editing && !editing.id)
     )
       return;
     setPending(true);
@@ -977,11 +1555,21 @@ export function PromotionChannelsPage() {
         type: "facebook",
         name: form.name.trim(),
         countryCode: form.countryCode.toUpperCase(),
-        templatePublicId: form.templateId,
-        domainPublicId: form.domainId || undefined,
+        templateId: form.templateId,
+        accountGroupId: form.accountGroupId,
+        protocolNodeId: form.protocolRouteType === "node" ? form.protocolRouteId : null,
+        protocolPoolId: form.protocolRouteType === "pool" ? form.protocolRouteId : null,
+        domainId: form.domainId || undefined,
         subdomainPrefix: form.subdomainPrefix || undefined,
         slug: form.slug.trim(),
-        pixelPublicId: form.pixelId || undefined,
+        pixelId: form.pixelId || null,
+        metaBrowserPixelEnabled: Boolean(
+          form.pixelId && form.metaBrowserPixelEnabled,
+        ),
+        metaCapiEnabled: Boolean(form.pixelId && form.metaCapiEnabled),
+        metaEventMapping: form.metaEventMapping,
+        inAppBrowserMode: form.inAppBrowserMode,
+        newAccountMarketingEnabled: form.newAccountMarketingEnabled,
         localeMode: form.localeMode,
         locale:
           form.localeMode === "fixed" ? form.locale || undefined : undefined,
@@ -1011,6 +1599,12 @@ export function PromotionChannelsPage() {
   const previewPublicUrl = previewHostname
     ? `https://${previewHostname}/${form.slug || "短码"}`
     : "";
+  const selectedTemplate = templates.find((row) => row.id === form.templateId);
+  const selectedRoute = (form.protocolRouteType === "node"
+    ? protocolNodes
+    : protocolPools
+  ).find((row) => row.id === form.protocolRouteId);
+  const selectedPixel = pixels.find((row) => row.id === form.pixelId);
   async function copyPublicUrl(value: string) {
     try {
       await navigator.clipboard.writeText(value);
@@ -1020,6 +1614,7 @@ export function PromotionChannelsPage() {
     }
   }
   async function toggle(row: PromotionChannel) {
+    if (!row.id) return;
     try {
       await apiRequest(`/api/promotion/channels/${row.id}`, {
         method: "PATCH",
@@ -1034,7 +1629,7 @@ export function PromotionChannelsPage() {
     if (!insightChannelId) return;
     setInsightOpen(true);
     setInsightLoading(true);
-    const [statsPayload, leadsPayload, metricsPayload] = await Promise.all([
+    const [statsPayload, leadsPayload, metricsPayload, metaPayload] = await Promise.all([
       apiRequest(`/api/promotion/channels/${insightChannelId}/stats`).catch(
         () => null,
       ),
@@ -1043,6 +1638,9 @@ export function PromotionChannelsPage() {
       ).catch(() => null),
       apiRequest(
         `/api/promotion/ad-metrics?promotionChannelId=${encodeURIComponent(insightChannelId)}&pageSize=100`,
+      ).catch(() => null),
+      apiRequest(
+        `/api/promotion/channels/${insightChannelId}/meta-deliveries?pageSize=1`,
       ).catch(() => null),
     ]);
     const statsData = ((
@@ -1074,9 +1672,20 @@ export function PromotionChannelsPage() {
         ? unwrapList<unknown>(metricsPayload).rows.map(metricRow)
         : [],
     );
+    const metaData = object(
+      (metaPayload as { data?: unknown } | null)?.data || metaPayload,
+    );
+    const metaSummary = object(metaData.summary);
+    setMetaDeliverySummary({
+      pending: Number(metaSummary.pending || 0),
+      retry: Number(metaSummary.retry || 0),
+      delivered: Number(metaSummary.delivered || 0),
+      failed: Number(metaSummary.failed || 0),
+    });
     setInsightLoading(false);
   }
   function openMetric(row?: AdMetric) {
+    if (row && !row.id) return;
     setMetricEditing(row || null);
     setMetricForm(
       row
@@ -1096,7 +1705,7 @@ export function PromotionChannelsPage() {
     setMetricDrawer(true);
   }
   async function saveMetric() {
-    if (!insightChannelId || !metricForm.date) return;
+    if (!insightChannelId || !metricForm.date || (metricEditing && !metricEditing.id)) return;
     setMetricPending(true);
     try {
       const body = {
@@ -1126,6 +1735,7 @@ export function PromotionChannelsPage() {
     }
   }
   async function removeMetric(row: AdMetric) {
+    if (!row.id) return;
     if (
       !(await confirmAction({
         title: `删除 ${row.date} 的 Facebook 日投放数据？`,
@@ -1167,6 +1777,7 @@ export function PromotionChannelsPage() {
     }
   }
   async function togglePixel(row: PixelOption) {
+    if (!row.id) return;
     try {
       await apiRequest(`/api/meta-pixels/${row.id}`, {
         method: "PATCH",
@@ -1178,6 +1789,7 @@ export function PromotionChannelsPage() {
     }
   }
   async function removePixel(row: PixelOption) {
+    if (!row.id) return;
     if (
       !(await confirmAction({
         title: `归档 Pixel“${row.name}”？`,
@@ -1194,7 +1806,7 @@ export function PromotionChannelsPage() {
     }
   }
   return (
-    <StandardListPage>
+    <StandardListPage viewport>
       <ListToolbar
         search={{
           value: keyword,
@@ -1208,7 +1820,7 @@ export function PromotionChannelsPage() {
               value={insightChannelId}
               onValueChange={setInsightChannelId}
               placeholder="选择渠道查看数据和号码"
-              options={rows.map((row) => ({ value: row.id, label: row.name }))}
+              options={rows.filter((row) => row.id).map((row) => ({ value: row.id, label: row.name }))}
             />
             <Button
               variant="outline"
@@ -1254,19 +1866,36 @@ export function PromotionChannelsPage() {
                 <TableHead>渠道</TableHead>
                 <TableHead>国家 / 平台</TableHead>
                 <TableHead>模板</TableHead>
+                <TableHead>账号入库分组</TableHead>
                 <TableHead>访问地址</TableHead>
                 <TableHead>Pixel</TableHead>
                 <TableHead>语言</TableHead>
                 <TableHead>上线时间</TableHead>
-                <TableHead>状态</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {visible.map((row) => (
-                <TableRow key={row.id}>
+                <TableRow key={row.readKey}>
                   <TableCell>
-                    <strong>{row.name}</strong>
+                    <EntityPrimaryCell
+                      title={row.name}
+                      id={row.id}
+                      status={{
+                        label: row.enabled ? "启用" : "停用",
+                        description: row.enabled
+                          ? "渠道已启用，到达上线时间后可以通过访问地址对外提供页面。"
+                          : "渠道已停用，访问地址不应继续承接流量。",
+                        tone: row.enabled ? "success" : "neutral",
+                        details: [
+                          { label: "国家", value: row.countryCode || "-" },
+                          { label: "域名", value: row.hostname || "未绑定" },
+                          { label: "模板", value: row.templateName || row.templateId || "-" },
+                          { label: "入库分组", value: row.accountGroupName || "未配置" },
+                          { label: "协议路由", value: row.protocolPoolName ? `池：${row.protocolPoolName}` : row.protocolNodeName || "未配置" },
+                        ],
+                      }}
+                    />
                   </TableCell>
                   <TableCell>
                     <div className="cell-main">
@@ -1275,6 +1904,12 @@ export function PromotionChannelsPage() {
                     </div>
                   </TableCell>
                   <TableCell>{row.templateName || row.templateId}</TableCell>
+                  <TableCell>
+                    <div className="cell-main">
+                      <strong>{row.accountGroupName || "未配置"}</strong>
+                      <span>{row.accountGroupId || "-"}</span>
+                    </div>
+                  </TableCell>
                   <TableCell>
                     <div className="cell-main">
                       <strong>{row.hostname || "-"}</strong>
@@ -1303,17 +1938,21 @@ export function PromotionChannelsPage() {
                       </span>
                     </div>
                   </TableCell>
-                  <TableCell>{row.pixelName || "未绑定"}</TableCell>
+                  <TableCell>
+                    <div className="cell-main">
+                      <strong>{row.pixelName || "未绑定"}</strong>
+                      <span className="flex flex-wrap gap-1">
+                        {row.metaBrowserPixelEnabled ? <Badge tone="success">Browser</Badge> : null}
+                        {row.metaCapiEnabled ? <Badge tone="success">CAPI</Badge> : null}
+                        {!row.metaBrowserPixelEnabled && !row.metaCapiEnabled ? "未上报" : null}
+                      </span>
+                    </div>
+                  </TableCell>
                   <TableCell>
                     {row.localeMode === "fixed" ? row.locale || "固定" : "自动"}
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatDateTime(row.goLiveAt)}
-                  </TableCell>
-                  <TableCell>
-                    <Badge tone={row.enabled ? "success" : "neutral"}>
-                      {row.enabled ? "启用" : "停用"}
-                    </Badge>
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center justify-end gap-1">
@@ -1327,11 +1966,12 @@ export function PromotionChannelsPage() {
                       </IconButton>
                       {canManage ? (
                         <>
-                          <IconButton label="编辑" onClick={() => open(row)}>
+                          <IconButton label="编辑" disabled={!row.id} onClick={() => open(row)}>
                             <PencilIcon size={16} />
                           </IconButton>
                           <IconButton
                             label={row.enabled ? "停用" : "启用"}
+                            disabled={!row.id}
                             onClick={() => void toggle(row)}
                           >
                             {row.enabled ? (
@@ -1371,6 +2011,8 @@ export function PromotionChannelsPage() {
                 !form.name.trim() ||
                 !form.countryCode ||
                 !form.templateId ||
+                !form.accountGroupId ||
+                !form.protocolRouteId ||
                 !form.domainId ||
                 !form.slug.trim()
               }
@@ -1424,6 +2066,57 @@ export function PromotionChannelsPage() {
               }))}
             />
           </label>
+          <label className="field">
+            <span>账号入库分组</span>
+            <SelectField
+              className="w-full"
+              value={form.accountGroupId}
+              onValueChange={(value) =>
+                setForm({ ...form, accountGroupId: value })
+              }
+              placeholder="选择账号入库分组"
+              options={accountGroups.map((row) => ({
+                value: row.id,
+                label: row.label,
+              }))}
+            />
+            <small className="text-muted-foreground">
+              通过此渠道成功链接的账号会自动进入该分组；发送任务实时使用分组内当前可用账号。
+            </small>
+          </label>
+          <div className="rounded-lg border p-3">
+            <strong className="text-sm">新账号协议路由</strong>
+            <p className="mt-1 text-xs text-muted-foreground">切换只影响之后新建的接入任务；存量账号和进行中的配对保持原节点。直接节点不可用时默认拒绝，只有选择协议池才按优先级回退。</p>
+            <div className="form-grid mt-3">
+              <label className="field">
+                <span>路由类型</span>
+                <SelectField className="w-full" value={form.protocolRouteType} onValueChange={(value) => {
+                  const routeType = value as "node" | "pool";
+                  setForm({ ...form, protocolRouteType: routeType, protocolRouteId: routeType === "node" ? protocolNodes[0]?.id || "" : protocolPools[0]?.id || "" });
+                }} options={[{ value: "node", label: "指定协议节点（不可用即拒绝）" }, { value: "pool", label: "协议池（显式回退）" }]} />
+              </label>
+              <label className="field">
+                <span>{form.protocolRouteType === "node" ? "协议节点" : "协议池"}</span>
+                <SelectField className="w-full" value={form.protocolRouteId} onValueChange={(value) => setForm({ ...form, protocolRouteId: value })} placeholder={form.protocolRouteType === "node" ? "选择协议节点" : "选择协议池"} options={(form.protocolRouteType === "node" ? protocolNodes : protocolPools).map((row) => ({ value: row.id, label: row.label }))} />
+              </label>
+            </div>
+            <div className="mt-3 grid gap-2 rounded-md bg-muted/35 p-3 text-xs text-muted-foreground">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone={selectedTemplate?.runtime === "promotion-browser-bridge/v2" ? "success" : "warning"}>
+                  {selectedTemplate?.runtime || "未选择模板运行时"}
+                </Badge>
+                <Badge tone={selectedRoute?.health === "available" ? "success" : "warning"}>
+                  {selectedRoute?.health === "available" ? "路由可接入" : "路由当前不可接入"}
+                </Badge>
+                <Badge tone={form.protocolRouteType === "pool" ? "success" : "neutral"}>
+                  {form.protocolRouteType === "pool" ? "显式池回退" : "节点不可用即拒绝"}
+                </Badge>
+              </div>
+              <span>
+                模板声明 {selectedTemplate?.pairingContract || "-"}；保存时后端会校验协议路由兼容性。{selectedRoute?.healthReason ? ` 当前原因：${selectedRoute.healthReason}` : ""}
+              </span>
+            </div>
+          </div>
           <div className="form-grid">
             <label className="field">
               <span>语言模式</span>
@@ -1540,17 +2233,125 @@ export function PromotionChannelsPage() {
               </small>
             </label>
           </div>
+          <div className="rounded-lg border p-3">
+            <strong className="text-sm">Meta 事件与投放归因</strong>
+            <p className="mt-1 text-xs text-muted-foreground">
+              浏览器 Pixel 与服务端 CAPI 共用 eventId 去重。模板不携带 Pixel ID、Token 或事件 SDK，全部由渠道运行时注入。
+            </p>
+            <label className="field mt-3">
+              <span>Meta Pixel / Dataset（可选）</span>
+              <SelectField
+                className="w-full"
+                value={form.pixelId}
+                clearable
+                onValueChange={(value) =>
+                  setForm({
+                    ...form,
+                    pixelId: value,
+                    metaBrowserPixelEnabled: Boolean(value),
+                    metaCapiEnabled: value ? form.metaCapiEnabled : false,
+                  })
+                }
+                placeholder="不绑定"
+                options={pixels
+                  .filter((row) => row.enabled && row.id)
+                  .map((row) => ({ value: row.id, label: row.label }))}
+              />
+            </label>
+            <div className="mt-3 grid gap-2">
+              <label className="switch-row">
+                <span>
+                  <strong>浏览器 Pixel</strong>
+                  <small>在公开落地页加载 Meta Pixel，并按下方映射发送浏览器事件。</small>
+                </span>
+                <Switch
+                  checked={form.metaBrowserPixelEnabled}
+                  disabled={!form.pixelId}
+                  onCheckedChange={(checked) =>
+                    setForm({ ...form, metaBrowserPixelEnabled: checked })
+                  }
+                  aria-label="启用浏览器 Pixel"
+                />
+              </label>
+              <label className="switch-row">
+                <span>
+                  <strong>服务端 Conversions API</strong>
+                  <small>
+                    {selectedPixel?.tokenConfigured
+                      ? "异步投递、失败重试，并保留可审计账本。"
+                      : "当前 Pixel 未配置 CAPI Token，需先在 Pixel 管理中保存。"}
+                  </small>
+                </span>
+                <Switch
+                  checked={form.metaCapiEnabled}
+                  disabled={!form.pixelId || !selectedPixel?.tokenConfigured}
+                  onCheckedChange={(checked) =>
+                    setForm({ ...form, metaCapiEnabled: checked })
+                  }
+                  aria-label="启用 Meta CAPI"
+                />
+              </label>
+            </div>
+            <div className="form-grid mt-3">
+              {(
+                [
+                  ["page_view", "页面访问"],
+                  ["phone_submit", "提交号码"],
+                  ["pairing_started", "生成配对码"],
+                  ["pairing_verified", "账号链接成功"],
+                ] as Array<[keyof MetaEventMapping, string]>
+              ).map(([key, label]) => (
+                <label className="field" key={key}>
+                  <span>{label}上报事件</span>
+                  <SelectField
+                    className="w-full"
+                    value={form.metaEventMapping[key]}
+                    onValueChange={(value) =>
+                      setForm({
+                        ...form,
+                        metaEventMapping: {
+                          ...form.metaEventMapping,
+                          [key]: value,
+                        },
+                      })
+                    }
+                    options={metaEventOptions}
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
           <label className="field">
-            <span>Meta Pixel（可选）</span>
+            <span>Facebook / Instagram 内置浏览器</span>
             <SelectField
               className="w-full"
-              value={form.pixelId}
-              clearable
-              onValueChange={(value) => setForm({ ...form, pixelId: value })}
-              placeholder="不绑定"
-              options={pixels
-                .filter((row) => row.enabled)
-                .map((row) => ({ value: row.id, label: row.label }))}
+              value={form.inAppBrowserMode}
+              onValueChange={(value) =>
+                setForm({
+                  ...form,
+                  inAppBrowserMode: value as "allow" | "guide_external",
+                })
+              }
+              options={[
+                { value: "allow", label: "允许直接完成账号链接" },
+                { value: "guide_external", label: "提示使用系统浏览器" },
+              ]}
+            />
+            <small className="text-muted-foreground">
+              浏览器无法可靠强制跳出 App；“提示使用系统浏览器”只展示明确引导，不虚构强制打开能力。
+            </small>
+          </label>
+          <label className="switch-row">
+            <span>
+              <strong>新接入账号参与营销</strong>
+              <small>只在账号首次创建时固化；之后切换本项不会改变存量账号。</small>
+            </span>
+            <Switch
+              checked={form.newAccountMarketingEnabled}
+              onCheckedChange={(checked) =>
+                setForm({ ...form, newAccountMarketingEnabled: checked })
+              }
+              aria-label="新接入账号参与营销"
             />
           </label>
           <label className="field">
@@ -1579,7 +2380,7 @@ export function PromotionChannelsPage() {
         open={pixelDrawer}
         onClose={() => !pixelPending && setPixelDrawer(false)}
         title="Meta Pixel 管理"
-        description="保存 Dataset ID；CAPI Token 只加密存储，之后仅显示掩码。"
+        description="保存 Dataset ID 与加密 CAPI Token；渠道启用 CAPI 后由异步账本投递并自动重试，Token 之后仅显示掩码。"
         footer={<Button onClick={() => setPixelDrawer(false)}>完成</Button>}
       >
         <div className="drawer-form">
@@ -1634,9 +2435,10 @@ export function PromotionChannelsPage() {
           {pixels.length ? (
             <div className="pixel-list">
               {pixels.map((row) => (
-                <div key={row.id}>
+                <div key={row.readKey}>
                   <div>
                     <strong>{row.name}</strong>
+                    <span>{row.id || "等待 ID 迁移"}</span>
                     <span>
                       {row.datasetId} · {row.tokenMasked || "未配置 CAPI Token"}
                     </span>
@@ -1647,6 +2449,7 @@ export function PromotionChannelsPage() {
                   <Button
                     size="sm"
                     variant="outline"
+                    disabled={!row.id}
                     onClick={() => void togglePixel(row)}
                   >
                     {row.enabled ? "停用" : "启用"}
@@ -1654,6 +2457,7 @@ export function PromotionChannelsPage() {
                   <IconButton
                     label="归档 Pixel"
                     className="text-destructive"
+                    disabled={!row.id}
                     onClick={() => void removePixel(row)}
                   >
                     <Trash2Icon size={15} />
@@ -1703,6 +2507,16 @@ export function PromotionChannelsPage() {
               </div>
             </div>
             <div className="binding-list-header">
+              <strong>Meta CAPI 投递账本</strong>
+              <span>Browser / CAPI 使用相同 eventId 去重</span>
+            </div>
+            <div className="channel-stat-grid">
+              <div><span>已送达</span><strong>{metaDeliverySummary.delivered || 0}</strong></div>
+              <div><span>待投递</span><strong>{metaDeliverySummary.pending || 0}</strong></div>
+              <div><span>重试中</span><strong>{metaDeliverySummary.retry || 0}</strong></div>
+              <div><span>最终失败</span><strong>{metaDeliverySummary.failed || 0}</strong></div>
+            </div>
+            <div className="binding-list-header">
               <strong>Facebook 日投放数据</strong>
               {canManageMetrics ? (
                 <Button variant="outline" onClick={() => openMetric()}>
@@ -1714,8 +2528,9 @@ export function PromotionChannelsPage() {
             {metrics.length ? (
               <div className="metric-list">
                 {metrics.map((metric) => (
-                  <div key={metric.id}>
+                  <div key={metric.readKey}>
                     <strong>{metric.date}</strong>
+                    <span>{metric.id || "等待 ID 迁移"}</span>
                     <span>${metric.spend.toFixed(2)}</span>
                     <span>{metric.impressions.toLocaleString()} 展示</span>
                     <span>{metric.clicks.toLocaleString()} 点击</span>
@@ -1723,6 +2538,7 @@ export function PromotionChannelsPage() {
                       <>
                         <IconButton
                           label="编辑日投放数据"
+                          disabled={!metric.id}
                           onClick={() => openMetric(metric)}
                         >
                           <PencilIcon size={14} />
@@ -1730,6 +2546,7 @@ export function PromotionChannelsPage() {
                         <IconButton
                           label="删除日投放数据"
                           className="text-destructive"
+                          disabled={!metric.id}
                           onClick={() => void removeMetric(metric)}
                         >
                           <Trash2Icon size={14} />
@@ -1753,7 +2570,9 @@ export function PromotionChannelsPage() {
                 {insightLeads.map((lead, index) => (
                   <div key={String(lead.id || index)}>
                     <strong>
-                      {String(lead.phone || lead.phoneNumber || "-")}
+                      {formatPhoneDisplay(
+                        lead.phone || lead.phoneNumber || "-",
+                      )}
                     </strong>
                     <span>{String(lead.countryCode || "-")}</span>
                     <small>

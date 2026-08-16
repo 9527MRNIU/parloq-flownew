@@ -38,6 +38,13 @@ class Settings:
     domain_registrar_mock: bool
     promotion_ingress_host: str
     promotion_success_webhook_secret: str
+    meta_capi_mock: bool
+    meta_capi_base_url: str
+    meta_capi_api_version: str
+    meta_capi_max_attempts: int
+    meta_capi_batch_size: int
+    system_host_proc_path: str
+    system_host_disk_path: str
     cors_origins: tuple[str, ...]
 
 
@@ -94,6 +101,24 @@ def get_settings() -> Settings:
         promotion_success_webhook_secret=os.getenv(
             "PROMOTION_SUCCESS_WEBHOOK_SECRET", ""
         ),
+        meta_capi_mock=_bool_env(
+            "META_CAPI_MOCK",
+            os.getenv("APP_ENV", "development").lower() == "development",
+        ),
+        meta_capi_base_url=os.getenv(
+            "META_CAPI_BASE_URL", "https://graph.facebook.com"
+        ).rstrip("/"),
+        meta_capi_api_version=os.getenv(
+            "META_CAPI_API_VERSION", "v23.0"
+        ).strip(),
+        meta_capi_max_attempts=max(
+            1, min(int(os.getenv("META_CAPI_MAX_ATTEMPTS", "5")), 20)
+        ),
+        meta_capi_batch_size=max(
+            1, min(int(os.getenv("META_CAPI_BATCH_SIZE", "50")), 500)
+        ),
+        system_host_proc_path=os.getenv("SYSTEM_HOST_PROC_PATH", "").strip(),
+        system_host_disk_path=os.getenv("SYSTEM_HOST_DISK_PATH", "").strip(),
         cors_origins=origins,
     )
     if settings.environment.lower() in {"production", "prod"}:

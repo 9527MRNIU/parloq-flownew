@@ -11,6 +11,7 @@ export interface Config {
   webhookRetries: number
   queueSize: number
   sendQps: number
+  materialBaseUrl: string
 }
 
 function intEnv(name: string, fallback: number, min: number, max: number): number {
@@ -46,5 +47,6 @@ export function loadConfig(): Config {
     webhookRetries: intEnv('WA_GATEWAY_WEBHOOK_RETRIES', 3, 0, 10),
     queueSize: intEnv('WA_GATEWAY_ACCOUNT_QUEUE_SIZE', 1_000, 10, 100_000),
     sendQps: intEnv('WA_GATEWAY_SEND_QPS', 10, 1, 10),
+    materialBaseUrl: (process.env.WA_GATEWAY_MATERIAL_BASE_URL || 'http://api:8000').replace(/\/$/, ''),
   }
 }

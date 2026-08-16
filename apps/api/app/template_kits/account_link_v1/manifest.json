@@ -1,0 +1,20 @@
+{
+  "schema": "promotion-template/v2",
+  "version": "1.4.0",
+  "entry": "index.html",
+  "format": "static-bundle",
+  "capabilities": ["phone-pairing"],
+  "runtime": "promotion-browser-bridge/v2",
+  "requirements": {
+    "pairingContract": "promotion-public-pairing/v1",
+    "componentKit": "account-link-elements/v1"
+  },
+  "interactionProtection": "platform",
+  "defaultLocale": "en",
+  "supportedLocales": ["en", "zh-CN", "hi", "id", "pt-BR", "es", "ru", "ur", "de", "tr", "ar", "fa", "bn", "it", "fr"],
+  "i18n": {
+    "mode": "bundled",
+    "path": "locales/{locale}.json",
+    "fallbackLocale": "en"
+  }
+}

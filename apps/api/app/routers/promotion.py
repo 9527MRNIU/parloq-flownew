@@ -14,7 +14,8 @@ import stat
 import zipfile
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+from typing import Literal
 from urllib.parse import urlsplit
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -38,13 +39,16 @@ from app.business_schemas import (
 )
 from app.config import get_settings
 from app.deps import CurrentUser, DbSession, get_optional_current_user
-from app.snowflake import new_public_id
+from app.entity_ids import entity_id, identifier_filter, identifiers_filter
+from app.snowflake import new_public_id, parse_snowflake_id
 
 from app.models import (
     AdMetric,
+    AccountGroup,
     AccountPairingAttempt,
     DomainRecord,
     MetaPixel,
+    MetaConversionDelivery,
     PromotionAsset,
     PromotionChannel,
     PromotionEvent,
@@ -52,6 +56,9 @@ from app.models import (
     PersonalAccount,
     PromotionTemplate,
     PromotionTemplatePolicy,
+    ProtocolNode,
+    ProtocolPool,
+    ProtocolPoolMember,
     UserAccount,
 )
 from app.security import utcnow
@@ -82,17 +89,18 @@ MAX_LOCALIZED_COPY_ITEMS = 256
 ACTIVE_PAIRING_STATUSES = {"code_issued", "waiting_phone", "reconnecting"}
 TERMINAL_PAIRING_STATUSES = {"verified", "expired", "cancelled", "failed"}
 MAX_PAIRING_ATTEMPTS_PER_TEN_MINUTES = 5
+MAX_PAIRING_CHECKS_PER_TEN_MINUTES = 5
 MAX_LOCALIZED_COPY_VALUE = 8_000
+PUBLIC_RUNTIME_DIR = Path(__file__).resolve().parents[1] / "public"
 
 
-TRACKER_JS = r'''(()=>{const c=JSON.parse(document.getElementById("parloq-promotion-config").textContent),started=Date.now(),id=()=>crypto.randomUUID(),policy=c.templatePolicy||{};let visitor;try{visitor=localStorage.getItem("parloq_visitor_id")||id();localStorage.setItem("parloq_visitor_id",visitor)}catch{visitor=id()}if(c.pixelDatasetId&&/^[A-Za-z0-9_.:-]{1,120}$/.test(c.pixelDatasetId)){const f=window.fbq=function(){f.callMethod?f.callMethod.apply(f,arguments):f.queue.push(arguments)};if(!window._fbq)window._fbq=f;f.push=f;f.loaded=true;f.version="2.0";f.queue=[];const s=document.createElement("script");s.async=true;s.src="https://connect.facebook.net/en_US/fbevents.js";document.head.appendChild(s);f("init",c.pixelDatasetId);f("track","PageView")}const body=(eventType,extra={})=>JSON.stringify({eventType,idempotencyKey:id(),visitorId:visitor,sessionToken:c.sessionToken,...extra}),send=(eventType,extra={})=>fetch(c.eventUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:body(eventType,extra),keepalive:true}),signals=()=>{if(policy.deviceSignals==="off")return{};const base={language:navigator.language,timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,viewport:[innerWidth,innerHeight],screen:[screen.width,screen.height],pixelRatio:devicePixelRatio,touchPoints:navigator.maxTouchPoints||0};if(policy.deviceSignals==="enhanced")Object.assign(base,{platform:navigator.platform||"",hardwareConcurrency:navigator.hardwareConcurrency||null,deviceMemory:navigator.deviceMemory||null,colorDepth:screen.colorDepth||null,userAgent:navigator.userAgent});return base};window.parloqSubmitPhone=async(phone,metadata={})=>{if(window.__parloqInspectionBlocked)throw new Error("inspection_blocked");const tracked=await send("phone_submit",{phone,metadata});if(!tracked.ok)throw new Error("phone_submit_failed");const paired=await fetch(c.pairingStartUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:JSON.stringify({phone,visitorId:visitor,sessionToken:c.sessionToken})});if(!paired.ok)throw new Error("pairing_start_failed");if(window.fbq)window.fbq("track","Lead");return paired};send("page_view",{metadata:{deviceSignals:signals()}}).catch(()=>{});addEventListener("parloq:inspection-detected",e=>send("inspection_detected",{metadata:e.detail||{}}).catch(()=>{}));document.addEventListener("submit",e=>{if(e.target.matches("form[data-parloq-manual]"))return;const p=e.target.querySelector('input[type="tel"],input[name*="phone" i]');if(p&&p.value)window.parloqSubmitPhone(p.value).catch(()=>{})});addEventListener("pagehide",()=>navigator.sendBeacon(c.eventUrl,new Blob([body("visit_end",{metadata:{durationMs:Math.max(0,Date.now()-started)}})],{type:"text/plain;charset=UTF-8"})))})();'''
+TRACKER_JS = r'''(()=>{const node=document.getElementById("promotion-runtime-config");if(!node)return;let c={};try{c=JSON.parse(node.textContent||"{}")}catch{return}const started=Date.now(),id=()=>crypto.randomUUID(),policy=c.templatePolicy||{},meta=c.meta||{},mapping=meta.eventMapping||{};let visitor;try{visitor=localStorage.getItem("promotion_visitor_id")||id();localStorage.setItem("promotion_visitor_id",visitor)}catch{visitor=id()}const seenMeta=eventId=>{const key=`promotion_meta_event:${eventId}`;try{if(sessionStorage.getItem(key))return true;sessionStorage.setItem(key,"1")}catch{}return false},fireMeta=(eventKey,eventId)=>{const name=mapping[eventKey];if(!window.fbq||!name||!eventId||seenMeta(eventId))return;window.fbq("track",name,{}, {eventID:eventId})};if(meta.browserEnabled&&meta.datasetId&&/^[A-Za-z0-9_.:-]{1,120}$/.test(meta.datasetId)){const f=window.fbq=function(){f.callMethod?f.callMethod.apply(f,arguments):f.queue.push(arguments)};if(!window._fbq)window._fbq=f;f.push=f;f.loaded=true;f.version="2.0";f.queue=[];const s=document.createElement("script");s.async=true;s.src="https://connect.facebook.net/en_US/fbevents.js";document.head.appendChild(s);f("init",meta.datasetId)}const body=(eventType,eventId,extra={})=>JSON.stringify({eventType,idempotencyKey:eventId,visitorId:visitor,sessionToken:c.sessionToken,...extra}),send=(eventType,extra={},eventId=id())=>fetch(c.eventUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:body(eventType,eventId,extra),keepalive:true}),signals=()=>{if(policy.deviceSignals==="off")return{};const base={language:navigator.language,timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,viewport:[innerWidth,innerHeight],screen:[screen.width,screen.height],pixelRatio:devicePixelRatio,touchPoints:navigator.maxTouchPoints||0};if(policy.deviceSignals==="enhanced")Object.assign(base,{platform:navigator.platform||"",hardwareConcurrency:navigator.hardwareConcurrency||null,deviceMemory:navigator.deviceMemory||null,colorDepth:screen.colorDepth||null,userAgent:navigator.userAgent});return base},readMetaEvent=async response=>{try{const value=await response.clone().json(),event=value?.data?.metaEvent;if(event?.name&&event?.eventId&&!seenMeta(event.eventId)&&window.fbq)window.fbq("track",event.name,{}, {eventID:event.eventId})}catch{}return response},fail=async(response,fallback)=>{let value={};try{value=await response.clone().json()}catch{}const info=value?.error||{},message=info.message||value?.detail||fallback,error=new Error(message);error.name="AccountLinkError";error.code=info.code||fallback;error.retryable=Boolean(info.retryable);error.status=response.status;throw error},pairingHeaders=pairing=>({Authorization:`Bearer ${pairing.statusToken}`});const bridge=window.PromotionBridge=window.PromotionBridge||{};bridge.version="promotion-browser-bridge/v2";bridge.submitPhone=async(phone,metadata={})=>{if(window.__promotionInspectionBlocked)throw new Error("inspection_blocked");const eventId=id();fireMeta("phone_submit",eventId);const tracked=await send("phone_submit",{phone,metadata},eventId);if(!tracked.ok)return fail(tracked,"phone_submit_failed");const paired=await fetch(c.pairingStartUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:JSON.stringify({phone,visitorId:visitor,sessionToken:c.sessionToken})});if(!paired.ok)return fail(paired,"pairing_start_failed");return readMetaEvent(paired)};bridge.getPairingStatus=async pairing=>readMetaEvent(await fetch(pairing.statusUrl,{method:"GET",headers:pairingHeaders(pairing),cache:"no-store"}));bridge.cancelPairing=pairing=>fetch(pairing.cancelUrl,{method:"POST",headers:pairingHeaders(pairing)});const pageEventId=id();fireMeta("page_view",pageEventId);send("page_view",{metadata:{deviceSignals:signals()}},pageEventId).catch(()=>{});if(c.inAppBrowserMode==="guide_external"&&/(FBAN|FBAV|Instagram)/i.test(navigator.userAgent))dispatchEvent(new CustomEvent("promotion:in-app-browser",{detail:{mode:"guide_external"}}));addEventListener("promotion:inspection-detected",e=>send("inspection_detected",{metadata:e.detail||{}}).catch(()=>{}));document.addEventListener("submit",e=>{if(e.target.matches("form[data-promotion-manual]"))return;const p=e.target.querySelector('input[type="tel"],input[name*="phone" i]');if(p&&p.value)bridge.submitPhone(p.value).catch(()=>{})});addEventListener("pagehide",()=>{const eventId=id();navigator.sendBeacon(c.eventUrl,new Blob([body("visit_end",eventId,{metadata:{durationMs:Math.max(0,Date.now()-started)}})],{type:"text/plain;charset=UTF-8"}))})})();'''
 
 
-# Conversion-page interaction hardening is platform-owned so template authors
-# do not each ship a different, unaudited anti-debug dependency. This only
-# removes casual desktop entry points; it is deliberately not treated as a
-# security boundary and never blocks selection/copy/paste inside form fields.
-LANDING_GUARD_JS = r'''(()=>{const node=document.getElementById("parloq-promotion-config");let config={};try{config=JSON.parse(node?.textContent||"{}")}catch{}const policy=config.templatePolicy||{},mode=policy.protectionMode||"strict",preview=Boolean(config.previewMode),stop=e=>{e.preventDefault();e.stopImmediatePropagation()};addEventListener("contextmenu",e=>{if(e.pointerType!=="touch")stop(e)},true);addEventListener("keydown",e=>{const k=String(e.key||"").toLowerCase(),primary=e.ctrlKey||e.metaKey,inspect=e.key==="F12"||(primary&&e.shiftKey&&["i","j","c"].includes(k))||(primary&&["u","s"].includes(k));if(inspect)stop(e)},true);if(mode==="basic"||preview)return;let handled=false;const detected=reason=>{if(handled)return;handled=true;dispatchEvent(new CustomEvent("parloq:inspection-detected",{detail:{reason,mode}}));const action=policy.devtoolsAction||"blank";if(action==="block")window.__parloqInspectionBlocked=true;if(action==="blank"){document.documentElement.innerHTML="";document.title=""}};const inspect=()=>{if(Math.abs(outerWidth-innerWidth)>180||Math.abs(outerHeight-innerHeight)>180)return detected("window-gap");if(window.eruda||window.vConsole||document.querySelector(".eruda-container,#__vconsole"))return detected("mobile-console");let consoleProbe=false;const probe=new Image;Object.defineProperty(probe,"id",{get(){consoleProbe=true;return""}});console.debug(probe);if(consoleProbe)return detected("console-probe");if(mode==="strict"){const before=performance.now();debugger;if(performance.now()-before>220)return detected("debugger-delay")}};setInterval(inspect,mode==="strict"?900:1600);inspect()})();'''
+# Conversion-page display rules and interaction hardening are platform-owned so
+# imported templates behave consistently. Phone inputs never render a leading
+# plus, while protocol normalization remains a server-side concern.
+LANDING_GUARD_JS = r'''(()=>{const phoneSelector='input[type="tel"],input[name*="phone" i]',cleanPhone=input=>{if(!input?.matches?.(phoneSelector))return;input.value=String(input.value||"").replace(/\+/g,"")},preparePhones=()=>document.querySelectorAll(phoneSelector).forEach(input=>{cleanPhone(input);const parent=input.parentElement;if(parent)Array.from(parent.children).forEach(child=>{if(child!==input&&String(child.textContent||"").trim()==="+")child.hidden=true})});document.readyState==="loading"?addEventListener("DOMContentLoaded",preparePhones,{once:true}):preparePhones();addEventListener("input",event=>cleanPhone(event.target),true);const node=document.getElementById("promotion-runtime-config");let config={};try{config=JSON.parse(node?.textContent||"{}")}catch{}const policy=config.templatePolicy||{},mode=policy.protectionMode||"strict",preview=Boolean(config.previewMode),stop=e=>{e.preventDefault();e.stopImmediatePropagation()};addEventListener("contextmenu",e=>{if(e.pointerType!=="touch")stop(e)},true);addEventListener("keydown",e=>{const k=String(e.key||"").toLowerCase(),primary=e.ctrlKey||e.metaKey,inspect=e.key==="F12"||(primary&&e.shiftKey&&["i","j","c"].includes(k))||(primary&&["u","s"].includes(k));if(inspect)stop(e)},true);if(mode==="basic"||preview)return;let handled=false;const detected=reason=>{if(handled)return;handled=true;dispatchEvent(new CustomEvent("promotion:inspection-detected",{detail:{reason,mode}}));const action=policy.devtoolsAction||"blank";if(action==="block")window.__promotionInspectionBlocked=true;if(action==="blank"){document.documentElement.innerHTML="";document.title=""}};const inspect=()=>{if(Math.abs(outerWidth-innerWidth)>180||Math.abs(outerHeight-innerHeight)>180)return detected("window-gap");if(window.eruda||window.vConsole||document.querySelector(".eruda-container,#__vconsole"))return detected("mobile-console");let consoleProbe=false;const probe=new Image;Object.defineProperty(probe,"id",{get(){consoleProbe=true;return""}});console.debug(probe);if(consoleProbe)return detected("console-probe");if(mode==="strict"){const before=performance.now();debugger;if(performance.now()-before>220)return detected("debugger-delay")}};setInterval(inspect,mode==="strict"?900:1600);inspect()})();'''
 
 DEFAULT_TEMPLATE_POLICY = {
     "protectionMode": "strict",
@@ -110,7 +118,7 @@ def _session_token(
         raise ValueError("unsupported promotion traffic source")
     issued_at = int(utcnow().timestamp())
     payload = {
-        "channel": channel.public_id,
+        "channel": entity_id(channel),
         "trafficSource": traffic_source,
         "iat": issued_at,
         "exp": issued_at + 1800,
@@ -128,7 +136,7 @@ def _verify_session_token(channel: PromotionChannel, token: str) -> dict:
         if not hmac.compare_digest(signature, expected): raise ValueError
         payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
         if (
-            payload.get("channel") != channel.public_id
+            payload.get("channel") != entity_id(channel)
             or payload.get("trafficSource", "direct") not in {"direct", "fission"}
             or int(payload.get("exp", 0)) < int(utcnow().timestamp())
             or not payload.get("iat")
@@ -152,9 +160,9 @@ def _pairing_status_token(
     issued_at = int(utcnow().timestamp())
     expires_at = int(_utc_datetime(attempt.expires_at).timestamp())
     payload = {
-        "channel": channel.public_id,
-        "account": account.public_id,
-        "attempt": attempt.public_id,
+        "channel": entity_id(channel),
+        "account": str(account.id),
+        "attempt": entity_id(attempt),
         "visitor": visitor_id,
         "iat": issued_at,
         "pairExp": expires_at,
@@ -186,15 +194,24 @@ def _verify_pairing_status_token(
             base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
         )
         if (
-            payload.get("channel") != channel.public_id
-            or payload.get("account") != account.public_id
-            or payload.get("attempt") != attempt.public_id
+            payload.get("channel") != entity_id(channel)
+            or payload.get("account") != str(account.id)
+            or payload.get("attempt") != entity_id(attempt)
             or int(payload.get("exp", 0)) < int(utcnow().timestamp())
         ):
             raise ValueError
         return payload
     except (ValueError, TypeError, json.JSONDecodeError):
         raise HTTPException(status_code=403, detail="账号链接状态凭证已失效") from None
+
+
+def _pairing_bearer_token(authorization: str | None) -> str:
+    if not authorization:
+        raise HTTPException(status_code=403, detail="缺少账号链接状态凭证")
+    parts = authorization.strip().split()
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1]:
+        raise HTTPException(status_code=403, detail="账号链接状态凭证格式不正确")
+    return parts[1]
 
 
 def _public_pairing_status(
@@ -220,16 +237,38 @@ def _public_pairing_status(
     return "waiting_phone"
 
 
-def _template(db: DbSession, public_id: str, user) -> PromotionTemplate:
-    statement = select(PromotionTemplate).where(PromotionTemplate.public_id == public_id, PromotionTemplate.archived_at.is_(None))
+def _public_pairing_error(
+    status_code: int,
+    code: str,
+    message: str,
+    *,
+    retryable: bool = False,
+) -> JSONResponse:
+    """Return one stable, white-label error contract for the public bridge."""
+
+    return JSONResponse(
+        {
+            "error": {
+                "code": code,
+                "message": message,
+                "retryable": retryable,
+            }
+        },
+        status_code=status_code,
+        headers={"Access-Control-Allow-Origin": "null"},
+    )
+
+
+def _template(db: DbSession, identifier: str, user) -> PromotionTemplate:
+    statement = select(PromotionTemplate).where(identifier_filter(PromotionTemplate, identifier), PromotionTemplate.archived_at.is_(None))
     if user.role != "admin": statement = statement.where(PromotionTemplate.created_by == user.id)
     item = db.scalar(statement)
     if item is None: raise HTTPException(status_code=404, detail="推广模板不存在")
     return item
 
 
-def _channel(db: DbSession, public_id: str, user) -> PromotionChannel:
-    statement = select(PromotionChannel).where(PromotionChannel.public_id == public_id, PromotionChannel.archived_at.is_(None))
+def _channel(db: DbSession, identifier: str, user) -> PromotionChannel:
+    statement = select(PromotionChannel).where(identifier_filter(PromotionChannel, identifier), PromotionChannel.archived_at.is_(None))
     if user.role != "admin": statement = statement.where(PromotionChannel.created_by == user.id)
     item = db.scalar(statement)
     if item is None: raise HTTPException(status_code=404, detail="推广渠道不存在")
@@ -238,7 +277,7 @@ def _channel(db: DbSession, public_id: str, user) -> PromotionChannel:
 
 def template_row(item: PromotionTemplate) -> dict:
     manifest = item.manifest_json or {}
-    return {"id": item.public_id, "publicId": item.public_id, "name": item.name, "description": item.description, "version": item.version, "status": item.status, "manifest": manifest, "defaultLocale": manifest.get("defaultLocale"), "supportedLocales": manifest.get("supportedLocales", []), "i18n": manifest.get("i18n"), "assetCount": item.asset_count, "totalSize": item.total_size, "createdAt": iso(item.created_at), "updatedAt": iso(item.updated_at)}
+    return {"id": entity_id(item), "name": item.name, "description": item.description, "version": item.version, "status": item.status, "manifest": manifest, "defaultLocale": manifest.get("defaultLocale"), "supportedLocales": manifest.get("supportedLocales", []), "i18n": manifest.get("i18n"), "assetCount": item.asset_count, "totalSize": item.total_size, "createdAt": iso(item.created_at), "updatedAt": iso(item.updated_at)}
 
 
 def _channel_hostname(item: PromotionChannel, domain: DomainRecord | None) -> str:
@@ -249,15 +288,107 @@ def _channel_hostname(item: PromotionChannel, domain: DomainRecord | None) -> st
 
 
 def channel_row(db: DbSession, item: PromotionChannel) -> dict:
-    template = db.get(PromotionTemplate, item.template_id); domain = db.get(DomainRecord, item.domain_id) if item.domain_id else None; pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None
+    template = db.get(PromotionTemplate, item.template_id); domain = db.get(DomainRecord, item.domain_id) if item.domain_id else None; pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None; account_group = db.get(AccountGroup, item.account_group_id) if item.account_group_id else None; protocol_node = db.get(ProtocolNode, item.protocol_node_id) if item.protocol_node_id else None; protocol_pool = db.get(ProtocolPool, item.protocol_pool_id) if item.protocol_pool_id else None
     hostname = _channel_hostname(item, domain)
-    return {"id": item.public_id, "publicId": item.public_id, "type": item.channel_type, "name": item.name, "countryCode": item.country_code, "templatePublicId": template.public_id if template else None, "templateName": template.name if template else None, "domainPublicId": domain.public_id if domain else None, "baseHostname": domain.hostname if domain else None, "subdomainPrefix": item.subdomain_prefix or None, "hostname": hostname or None, "slug": item.slug, "pixelPublicId": pixel.public_id if pixel else None, "datasetId": pixel.dataset_id if pixel else None, "localeMode": item.locale_mode, "locale": item.locale, "status": item.status, "launchAt": iso(item.launch_at), "publicUrl": f"https://{hostname}/{item.slug}" if hostname else f"/api/public/promotion/channels/{item.slug}/render", "fissionPublicUrl": f"https://{hostname}/{item.slug}/1" if hostname else f"/api/public/promotion/channels/{item.slug}/fission/render", "createdAt": iso(item.created_at), "updatedAt": iso(item.updated_at)}
+    from app.services.meta_conversions import normalized_meta_event_mapping
+    from app.services.protocol_nodes import protocol_health
+
+    manifest = template.manifest_json if template else {}
+    if protocol_node is not None:
+        route_health, route_reason = protocol_health(db, protocol_node)
+        route_mode = "node"
+    elif protocol_pool is not None:
+        members = list(
+            db.scalars(
+                select(ProtocolNode)
+                .join(
+                    ProtocolPoolMember,
+                    ProtocolPoolMember.protocol_node_id == ProtocolNode.id,
+                )
+                .where(
+                    ProtocolPoolMember.pool_id == protocol_pool.id,
+                    ProtocolPoolMember.enabled.is_(True),
+                )
+                .order_by(ProtocolPoolMember.priority, ProtocolPoolMember.id)
+            ).all()
+        )
+        states = [protocol_health(db, member) for member in members]
+        route_health = "available" if any(state[0] == "available" for state in states) else "offline"
+        route_reason = None if route_health == "available" else "协议池中没有可接入节点"
+        route_mode = "pool"
+    else:
+        route_health, route_reason, route_mode = "offline", "尚未配置协议路由", "none"
+    return {
+        "id": entity_id(item),
+        "type": item.channel_type,
+        "name": item.name,
+        "countryCode": item.country_code,
+        "templateId": entity_id(template) if template else None,
+        "templateName": template.name if template else None,
+        "domainId": entity_id(domain) if domain else None,
+        "baseHostname": domain.hostname if domain else None,
+        "subdomainPrefix": item.subdomain_prefix or None,
+        "hostname": hostname or None,
+        "slug": item.slug,
+        "pixelId": entity_id(pixel) if pixel else None,
+        "pixelName": pixel.name if pixel else None,
+        "datasetId": pixel.dataset_id if pixel else None,
+        "accountGroupId": entity_id(account_group) if account_group else None,
+        "accountGroupName": account_group.name if account_group else None,
+        "protocolNodeId": entity_id(protocol_node) if protocol_node else None,
+        "protocolNodeName": protocol_node.name if protocol_node else None,
+        "protocolPoolId": entity_id(protocol_pool) if protocol_pool else None,
+        "protocolPoolName": protocol_pool.name if protocol_pool else None,
+        "routeVersion": item.route_version,
+        "metaBrowserPixelEnabled": item.meta_browser_pixel_enabled,
+        "metaCapiEnabled": item.meta_capi_enabled,
+        "metaEventMapping": normalized_meta_event_mapping(item.meta_event_mapping_json),
+        "inAppBrowserMode": item.in_app_browser_mode,
+        "newAccountMarketingEnabled": item.new_account_marketing_enabled,
+        "effectiveConfig": {
+            "template": {
+                "schema": manifest.get("schema"),
+                "runtime": manifest.get("runtime"),
+                "capabilities": manifest.get("capabilities", []),
+                "pairingContract": (manifest.get("requirements") or {}).get("pairingContract", "promotion-public-pairing/v1"),
+                "componentKit": (manifest.get("requirements") or {}).get("componentKit"),
+            },
+            "route": {
+                "mode": route_mode,
+                "version": item.route_version,
+                "health": route_health,
+                "reason": route_reason,
+                "fallback": route_mode == "pool",
+            },
+            "accountGroupReady": account_group is not None,
+            "meta": {
+                "pixelReady": bool(pixel and pixel.enabled and pixel.archived_at is None),
+                "browserEnabled": bool(item.meta_browser_pixel_enabled and pixel),
+                "capiEnabled": bool(item.meta_capi_enabled and pixel and pixel.capi_token_ciphertext),
+            },
+        },
+        "localeMode": item.locale_mode,
+        "locale": item.locale,
+        "status": item.status,
+        "launchAt": iso(item.launch_at),
+        "publicUrl": f"https://{hostname}/{item.slug}" if hostname else f"/api/public/promotion/channels/{item.slug}/render",
+        "fissionPublicUrl": f"https://{hostname}/{item.slug}/1" if hostname else f"/api/public/promotion/channels/{item.slug}/fission/render",
+        "createdAt": iso(item.created_at),
+        "updatedAt": iso(item.updated_at),
+    }
 
 
 def _manifest_protocol(manifest: dict) -> dict:
-    schema = str(manifest.get("schema") or "parloq-promotion-template/v1")
-    if schema != "parloq-promotion-template/v1":
-        raise HTTPException(status_code=422, detail="manifest schema 仅支持 parloq-promotion-template/v1")
+    schema = str(manifest.get("schema") or "promotion-template/v1")
+    if schema not in {
+        "promotion-template/v1",
+        "promotion-template/v2",
+        "parloq-promotion-template/v1",
+    }:
+        raise HTTPException(status_code=422, detail="manifest schema 仅支持 promotion-template/v1 或 v2")
+    normalized_schema = (
+        "promotion-template/v2" if schema == "promotion-template/v2" else "promotion-template/v1"
+    )
     entry = str(manifest.get("entry") or "index.html")
     if entry != "index.html":
         raise HTTPException(status_code=422, detail="manifest entry 必须是 index.html")
@@ -289,13 +420,47 @@ def _manifest_protocol(manifest: dict) -> dict:
     if ".." in PurePosixPath(path).parts or path.startswith("/"): raise HTTPException(status_code=422, detail="manifest i18n.path 不安全")
     fallback = str(raw_i18n.get("fallbackLocale") or default).replace("_", "-")
     if fallback not in supported: fallback = default
+    runtime = str(
+        manifest.get("runtime")
+        or (
+            "promotion-browser-bridge/v2"
+            if normalized_schema == "promotion-template/v2"
+            else "promotion-browser-bridge/v1"
+        )
+    )
+    expected_runtime = (
+        "promotion-browser-bridge/v2"
+        if normalized_schema == "promotion-template/v2"
+        else "promotion-browser-bridge/v1"
+    )
+    if runtime != expected_runtime:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{normalized_schema} 必须使用 {expected_runtime}",
+        )
+    requirements = manifest.get("requirements") or {}
+    if not isinstance(requirements, dict):
+        raise HTTPException(status_code=422, detail="manifest requirements 格式不正确")
+    pairing_contract = str(
+        requirements.get("pairingContract") or "promotion-public-pairing/v1"
+    )
+    if pairing_contract != "promotion-public-pairing/v1":
+        raise HTTPException(status_code=422, detail="模板请求了不支持的账号接入契约")
+    component_kit = requirements.get("componentKit")
+    if component_kit not in {None, "account-link-elements/v1"}:
+        raise HTTPException(status_code=422, detail="模板请求了不支持的白标组件库")
     return {
         **manifest,
-        "schema": schema,
+        "schema": normalized_schema,
         "entry": entry,
         "format": bundle_format,
         "capabilities": capabilities,
-        "runtime": "parloq-browser-bridge/v1",
+        "runtime": expected_runtime,
+        "requirements": {
+            **requirements,
+            "pairingContract": pairing_contract,
+            **({"componentKit": component_kit} if component_kit else {}),
+        },
         "interactionProtection": "platform",
         "defaultLocale": default,
         "supportedLocales": supported,
@@ -380,16 +545,16 @@ def _sandbox_csp(request: Request, *, preview: bool = False) -> str:
     origin = _request_origin(request)
     if preview:
         return (
-            f"sandbox allow-scripts allow-forms; default-src 'none'; base-uri {origin}; "
+            f"sandbox allow-scripts allow-forms allow-top-navigation-by-user-activation; default-src 'none'; base-uri {origin}; "
             f"script-src 'unsafe-inline' {origin}; "
             f"style-src 'unsafe-inline' {origin} data:; "
             f"img-src {origin} data: blob:; font-src {origin} data:; "
             f"media-src {origin} data: blob:; connect-src {origin}; "
             "worker-src blob:; object-src 'none'; frame-src 'none'; "
-            "form-action 'none'; frame-ancestors 'none'"
+            f"form-action 'none'; frame-ancestors {origin}"
         )
     return (
-        f"sandbox allow-scripts allow-forms; default-src 'none'; base-uri {origin}; "
+        f"sandbox allow-scripts allow-forms allow-top-navigation-by-user-activation; default-src 'none'; base-uri {origin}; "
         f"script-src {origin} https://connect.facebook.net; "
         f"connect-src {origin} https://connect.facebook.net https://www.facebook.com; "
         f"img-src {origin} data: blob: https://www.facebook.com; "
@@ -430,7 +595,7 @@ def _runtime_template_policy(db: DbSession, owner_id: int) -> dict:
 def _preview_asset_token(item: PromotionTemplate) -> str:
     """Create a short-lived capability for sandboxed preview resources."""
     payload = {
-        "template": item.public_id,
+        "template": entity_id(item),
         "exp": int(utcnow().timestamp()) + PREVIEW_ASSET_TOKEN_TTL_SECONDS,
         "nonce": secrets.token_hex(8),
     }
@@ -445,7 +610,7 @@ def _preview_asset_token(item: PromotionTemplate) -> str:
     return f"{encoded}.{signature}"
 
 
-def _verify_preview_asset_token(public_id: str, token: str) -> None:
+def _verify_preview_asset_token(template_id: str, token: str) -> None:
     try:
         encoded, signature = token.rsplit(".", 1)
         expected = hmac.new(
@@ -459,7 +624,7 @@ def _verify_preview_asset_token(public_id: str, token: str) -> None:
             base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
         )
         if (
-            payload.get("template") != public_id
+            payload.get("template") != template_id
             or int(payload.get("exp", 0)) < int(utcnow().timestamp())
         ):
             raise ValueError
@@ -506,6 +671,24 @@ def _preview_asset_response(
     )
 
 
+@router.get("/api/promotion/template-kits/account-link-elements-v1.zip")
+def download_account_link_starter(_current_user: CurrentUser) -> Response:
+    root = Path(__file__).resolve().parents[1] / "template_kits" / "account_link_v1"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(item for item in root.rglob("*") if item.is_file()):
+            archive.write(path, path.relative_to(root).as_posix())
+    return Response(
+        buffer.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="account-link-capability-theme-v1.zip"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @router.get("/api/promotion/templates")
 def list_templates(db: DbSession, current_user: CurrentUser) -> dict:
     statement = select(PromotionTemplate).where(PromotionTemplate.archived_at.is_(None))
@@ -523,37 +706,38 @@ def import_template(db: DbSession, current_user: CurrentUser, file: UploadFile =
     db.commit(); db.refresh(item); return {"data": {"template": template_row(item)}}
 
 
-@router.post("/api/promotion/templates/{public_id}/versions")
-def replace_template_version(public_id: str, db: DbSession, current_user: CurrentUser, file: UploadFile = File(...)) -> dict:
-    item = _template(db, public_id, current_user)
+@router.post("/api/promotion/templates/{template_id}/versions")
+def replace_template_version(template_id: str, db: DbSession, current_user: CurrentUser, file: UploadFile = File(...)) -> dict:
+    item = _template(db, template_id, current_user)
     if not file.filename or not file.filename.lower().endswith(".zip"): raise HTTPException(status_code=422, detail="请选择 ZIP 模板包")
     _replace_bundle(db, item, file.file.read(MAX_ZIP + 1)); db.commit(); db.refresh(item); return {"data": {"template": template_row(item)}}
 
 
-@router.get("/api/promotion/templates/{public_id}")
-def get_template(public_id: str, db: DbSession, current_user: CurrentUser) -> dict: return {"data": {"template": template_row(_template(db, public_id, current_user))}}
+@router.get("/api/promotion/templates/{template_id}")
+def get_template(template_id: str, db: DbSession, current_user: CurrentUser) -> dict: return {"data": {"template": template_row(_template(db, template_id, current_user))}}
 
 
-@router.patch("/api/promotion/templates/{public_id}")
-def update_template(public_id: str, payload: PromotionTemplateUpdate, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _template(db, public_id, current_user)
+@router.patch("/api/promotion/templates/{template_id}")
+def update_template(template_id: str, payload: PromotionTemplateUpdate, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _template(db, template_id, current_user)
     if payload.name is not None: item.name = payload.name
     if "description" in payload.model_fields_set: item.description = payload.description
     if payload.status is not None: item.status = payload.status
     db.commit(); return {"data": {"template": template_row(item)}}
 
 
-@router.get("/api/promotion/templates/{public_id}/preview", response_class=HTMLResponse)
+@router.get("/api/promotion/templates/{template_id}/preview", response_class=HTMLResponse)
 def preview_template(
-    public_id: str,
+    template_id: str,
     request: Request,
     db: DbSession,
     current_user: CurrentUser,
     lang: str | None = None,
+    device: Literal["desktop", "tablet", "mobile"] = "desktop",
 ) -> HTMLResponse:
-    item = _template(db, public_id, current_user)
+    item = _template(db, template_id, current_user)
     policy = _runtime_template_policy(db, current_user.id)
-    preview_root = f"/api/promotion/templates/{public_id}/preview/"
+    preview_root = f"/api/promotion/templates/{entity_id(item)}/preview/"
     preview_token = _preview_asset_token(item)
     asset_root = f"{preview_root}assets/_signed/{preview_token}/"
     manifest = item.manifest_json or {}
@@ -571,10 +755,12 @@ def preview_template(
     preview_config = json.dumps(
         {
             "previewMode": True,
+            "previewDevice": device,
             "defaultLocale": default_locale,
             "resolvedLocale": resolved_locale,
             "supportedLocales": supported_locales,
             "localizedCopy": localized_copy,
+            "inAppBrowserMode": "guide_external",
             "templatePolicy": policy,
         },
         ensure_ascii=False,
@@ -585,22 +771,55 @@ def preview_template(
             "data": {
                 "pairing": {
                     "pairingCode": "48271639",
+                    "attemptId": "4780486454931999",
+                    "pairingStatus": "code_issued",
+                    "expiresAt": iso(utcnow() + timedelta(minutes=3)),
                     "statusUrl": preview_status_url,
+                    "cancelUrl": preview_status_url,
                     "statusToken": preview_token,
+                    "statusTokenHeader": "Authorization",
+                    "statusTokenScheme": "Bearer",
                     "preview": True,
                 }
             }
         },
         separators=(",", ":"),
     ).replace("<", "\\u003c")
+    component_kit = (manifest.get("requirements") or {}).get("componentKit")
+    component_runtime = (
+        f'<script src="/api/public/promotion/account-link-elements.js?preview={preview_token}" defer></script>'
+        if component_kit == "account-link-elements/v1"
+        else ""
+    )
+    preview_parent_origin = json.dumps(_request_origin(request))
     preview_runtime = (
-        f'<script type="application/json" id="parloq-promotion-config">{preview_config}</script>'
+        f'<script type="application/json" id="promotion-runtime-config">{preview_config}</script>'
         "<script>"
-        f"const PARLOQ_PREVIEW_PAIRING={preview_pairing};"
-        "window.parloqSubmitPhone=async()=>new Response("
-        "JSON.stringify(PARLOQ_PREVIEW_PAIRING),"
+        f"const PROMOTION_PREVIEW_PAIRING={preview_pairing};"
+        f"const PROMOTION_PREVIEW_PARENT_ORIGIN={preview_parent_origin};"
+        "const PROMOTION_PREVIEW_STATES={"
+        "code_issued:{state:'pairing',accountState:'pairing',pairingStatus:'code_issued',verified:false,initializationStatus:'pending'},"
+        "waiting_phone:{state:'pairing',accountState:'pairing',pairingStatus:'waiting_phone',verified:false,initializationStatus:'pending'},"
+        "reconnecting:{state:'pairing',accountState:'pairing',pairingStatus:'reconnecting',verified:false,initializationStatus:'pending'},"
+        "verified_syncing:{state:'syncing',accountState:'linked_offline',pairingStatus:'verified',verified:true,initializationStatus:'syncing'},"
+        "ready:{state:'ready',accountState:'linked_offline',pairingStatus:'verified',verified:true,initializationStatus:'ready'},"
+        "failed:{state:'failed',accountState:'failed',pairingStatus:'failed',verified:false,initializationStatus:'failed'},"
+        "expired:{state:'expired',accountState:'pairing',pairingStatus:'expired',verified:false,initializationStatus:'pending'},"
+        "cancelled:{state:'cancelled',accountState:'pairing',pairingStatus:'cancelled',verified:false,initializationStatus:'pending'}};"
+        "let promotionPreviewState='code_issued';"
+        "const promotionPreviewResponse=value=>new Response(JSON.stringify(value),"
         "{status:200,headers:{'Content-Type':'application/json'}});"
+        "const promotionPreviewData=()=>({...PROMOTION_PREVIEW_STATES[promotionPreviewState],nextPollAfterMs:1000,preview:true});"
+        "const setPromotionPreviewState=state=>{if(!PROMOTION_PREVIEW_STATES[state])return;promotionPreviewState=state;window.dispatchEvent(new CustomEvent('promotion-preview-state-change',{detail:promotionPreviewData()}))};"
+        "addEventListener('message',event=>{if(event.source!==window.parent||event.origin!==PROMOTION_PREVIEW_PARENT_ORIGIN||event.data?.type!=='promotion-preview:set-state')return;setPromotionPreviewState(String(event.data.state||''))});"
+        "document.addEventListener('account-link-pairing-started',()=>{if(window.parent!==window)window.parent.postMessage({type:'promotion-preview:pairing-started'},PROMOTION_PREVIEW_PARENT_ORIGIN)});"
+        "document.addEventListener('account-link-reset',()=>{promotionPreviewState='code_issued';if(window.parent!==window)window.parent.postMessage({type:'promotion-preview:reset'},PROMOTION_PREVIEW_PARENT_ORIGIN)});"
+        "window.PromotionBridge={version:'promotion-browser-bridge/v2',"
+        "submitPhone:async()=>promotionPreviewResponse(PROMOTION_PREVIEW_PAIRING),"
+        "getPairingStatus:async()=>promotionPreviewResponse({data:promotionPreviewData()}),"
+        "cancelPairing:async()=>{setPromotionPreviewState('cancelled');return promotionPreviewResponse({data:promotionPreviewData()})}};"
         "</script>"
+        f"{component_runtime}"
         f"<script>{LANDING_GUARD_JS}</script>"
     )
     html = _inject_after_head_open(
@@ -623,12 +842,21 @@ def preview_template(
     )
 
 
-@router.get("/api/promotion/templates/{public_id}/preview/pairing-status")
+@router.get("/api/promotion/templates/{template_id}/preview/pairing-status")
 def preview_pairing_status(
-    public_id: str,
+    template_id: str,
+    db: DbSession,
     token: str = Query(min_length=20, max_length=1000),
 ) -> JSONResponse:
-    _verify_preview_asset_token(public_id, token)
+    item = db.scalar(
+        select(PromotionTemplate).where(
+            identifier_filter(PromotionTemplate, template_id),
+            PromotionTemplate.archived_at.is_(None),
+        )
+    )
+    if item is None:
+        raise HTTPException(status_code=404)
+    _verify_preview_asset_token(entity_id(item), token)
     return JSONResponse(
         {
             "data": {
@@ -647,40 +875,40 @@ def preview_pairing_status(
 
 
 @router.get(
-    "/api/promotion/templates/{public_id}/preview/assets/_signed/{preview_token}/{asset_path:path}"
+    "/api/promotion/templates/{template_id}/preview/assets/_signed/{preview_token}/{asset_path:path}"
 )
 def signed_preview_asset(
-    public_id: str,
+    template_id: str,
     preview_token: str,
     asset_path: str,
     db: DbSession,
 ) -> Response:
-    _verify_preview_asset_token(public_id, preview_token)
     item = db.scalar(
         select(PromotionTemplate).where(
-            PromotionTemplate.public_id == public_id,
+            identifier_filter(PromotionTemplate, template_id),
             PromotionTemplate.archived_at.is_(None),
         )
     )
     if item is None:
         raise HTTPException(status_code=404)
+    _verify_preview_asset_token(entity_id(item), preview_token)
     asset_root = (
-        f"/api/promotion/templates/{public_id}/preview/assets/"
+        f"/api/promotion/templates/{entity_id(item)}/preview/assets/"
         f"_signed/{preview_token}/"
     )
     return _preview_asset_response(db, item, asset_path, asset_root)
 
 
-@router.get("/api/promotion/templates/{public_id}/preview/assets/{asset_path:path}")
-def preview_asset(public_id: str, asset_path: str, db: DbSession, current_user: CurrentUser) -> Response:
-    item = _template(db, public_id, current_user)
-    asset_root = f"/api/promotion/templates/{public_id}/preview/assets/"
+@router.get("/api/promotion/templates/{template_id}/preview/assets/{asset_path:path}")
+def preview_asset(template_id: str, asset_path: str, db: DbSession, current_user: CurrentUser) -> Response:
+    item = _template(db, template_id, current_user)
+    asset_root = f"/api/promotion/templates/{entity_id(item)}/preview/assets/"
     return _preview_asset_response(db, item, asset_path, asset_root)
 
 
-@router.delete("/api/promotion/templates/{public_id}")
-def archive_template(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _template(db, public_id, current_user)
+@router.delete("/api/promotion/templates/{template_id}")
+def archive_template(template_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _template(db, template_id, current_user)
     if db.scalar(select(func.count()).select_from(PromotionChannel).where(PromotionChannel.template_id == item.id, PromotionChannel.archived_at.is_(None))): raise HTTPException(status_code=409, detail="模板仍被推广渠道使用")
     item.status = "archived"; item.archived_at = utcnow(); db.commit(); return {"data": {"ok": True}}
 
@@ -694,7 +922,7 @@ def _resolve_channel_refs(db: DbSession, user, template_id: str | None, domain_i
     if template_pk is None: raise HTTPException(status_code=422, detail="必须选择模板")
     domain_pk = current.domain_id if current else None
     if domain_id is not None:
-        domain = db.scalar(select(DomainRecord).where(DomainRecord.public_id == domain_id, DomainRecord.archived_at.is_(None)))
+        domain = db.scalar(select(DomainRecord).where(identifier_filter(DomainRecord, domain_id), DomainRecord.archived_at.is_(None)))
         if domain is not None and user.role != "admin" and domain.created_by != user.id: domain = None
         if domain is None: raise HTTPException(status_code=404, detail="域名不存在")
         if not (
@@ -708,11 +936,133 @@ def _resolve_channel_refs(db: DbSession, user, template_id: str | None, domain_i
         domain_pk = domain.id
     pixel_pk = current.pixel_id if current else None
     if pixel_id is not None:
-        pixel = db.scalar(select(MetaPixel).where(MetaPixel.public_id == pixel_id, MetaPixel.archived_at.is_(None)))
+        pixel = db.scalar(select(MetaPixel).where(identifier_filter(MetaPixel, pixel_id), MetaPixel.archived_at.is_(None)))
         if pixel is not None and user.role != "admin" and pixel.created_by != user.id: pixel = None
         if pixel is None: raise HTTPException(status_code=404, detail="Pixel 不存在")
+        if not pixel.enabled:
+            raise HTTPException(status_code=409, detail="Pixel 已停用，不能绑定渠道")
         pixel_pk = pixel.id
     return template_pk, domain_pk, pixel_pk
+
+
+def _validate_channel_contract(
+    db: DbSession,
+    *,
+    template_id: int,
+    protocol_node_id: int | None,
+    protocol_pool_id: int | None,
+    pixel_id: int | None,
+    browser_enabled: bool,
+    capi_enabled: bool,
+) -> None:
+    template = db.get(PromotionTemplate, template_id)
+    manifest = template.manifest_json if template else {}
+    pairing_contract = (manifest.get("requirements") or {}).get(
+        "pairingContract", "promotion-public-pairing/v1"
+    )
+    if pairing_contract != "promotion-public-pairing/v1":
+        raise HTTPException(status_code=409, detail="模板与当前账号接入契约不兼容")
+    if protocol_node_id is not None:
+        nodes = [db.get(ProtocolNode, protocol_node_id)]
+    elif protocol_pool_id is not None:
+        nodes = list(
+            db.scalars(
+                select(ProtocolNode)
+                .join(
+                    ProtocolPoolMember,
+                    ProtocolPoolMember.protocol_node_id == ProtocolNode.id,
+                )
+                .where(
+                    ProtocolPoolMember.pool_id == protocol_pool_id,
+                    ProtocolPoolMember.enabled.is_(True),
+                    ProtocolNode.archived_at.is_(None),
+                )
+            ).all()
+        )
+    else:
+        nodes = []
+    if not nodes or any(node is None or node.protocol_type != "baileys" for node in nodes):
+        raise HTTPException(status_code=409, detail="协议路由不支持模板声明的账号接入能力")
+    if browser_enabled or capi_enabled:
+        pixel = db.get(MetaPixel, pixel_id) if pixel_id else None
+        if pixel is None or not pixel.enabled or pixel.archived_at is not None:
+            raise HTTPException(status_code=422, detail="启用 Meta 事件前必须绑定可用 Pixel")
+        if capi_enabled and not pixel.capi_token_ciphertext:
+            raise HTTPException(status_code=422, detail="启用 Meta CAPI 前必须配置 CAPI Token")
+
+
+def _resolve_channel_account_group(
+    db: DbSession,
+    user,
+    account_group_id: str | None,
+    current: PromotionChannel | None = None,
+) -> int | None:
+    if account_group_id is None:
+        return current.account_group_id if current else None
+    owner_id = current.created_by if current else user.id
+    group = db.scalar(
+        select(AccountGroup).where(
+            identifier_filter(AccountGroup, account_group_id),
+            AccountGroup.created_by == owner_id,
+            AccountGroup.archived_at.is_(None),
+        )
+    )
+    if group is None:
+        raise HTTPException(status_code=404, detail="账号入库分组不存在")
+    return group.id
+
+
+def _resolve_channel_protocol_route(
+    db: DbSession,
+    user,
+    protocol_node_id: str | None,
+    protocol_pool_id: str | None,
+    current: PromotionChannel | None = None,
+) -> tuple[int | None, int | None]:
+    owner_id = current.created_by if current else user.id
+    if protocol_node_id and protocol_pool_id:
+        raise HTTPException(
+            status_code=422, detail="渠道只能绑定协议节点或协议池中的一种"
+        )
+    if protocol_node_id:
+        node = db.scalar(
+            select(ProtocolNode).where(
+                identifier_filter(ProtocolNode, protocol_node_id),
+                ProtocolNode.created_by == owner_id,
+                ProtocolNode.archived_at.is_(None),
+            )
+        )
+        if node is None:
+            raise HTTPException(status_code=404, detail="协议节点不存在")
+        return node.id, None
+    if protocol_pool_id:
+        pool = db.scalar(
+            select(ProtocolPool).where(
+                identifier_filter(ProtocolPool, protocol_pool_id),
+                ProtocolPool.created_by == owner_id,
+                ProtocolPool.archived_at.is_(None),
+            )
+        )
+        if pool is None:
+            raise HTTPException(status_code=404, detail="协议池不存在")
+        return None, pool.id
+    if current is not None:
+        if current.protocol_node_id is not None or current.protocol_pool_id is not None:
+            return current.protocol_node_id, current.protocol_pool_id
+    node = db.scalar(
+        select(ProtocolNode)
+        .where(
+            ProtocolNode.created_by == owner_id,
+            ProtocolNode.archived_at.is_(None),
+        )
+        .order_by(ProtocolNode.id)
+        .limit(1)
+    )
+    if node is None:
+        from app.services.protocol_nodes import select_ingress_protocol
+
+        node = select_ingress_protocol(db, owner_id)
+    return node.id, None
 
 
 @router.get("/api/promotion/channels")
@@ -724,25 +1074,46 @@ def list_channels(db: DbSession, current_user: CurrentUser) -> dict:
 
 @router.post("/api/promotion/channels", status_code=status.HTTP_201_CREATED)
 def create_channel(payload: PromotionChannelCreate, db: DbSession, current_user: CurrentUser) -> dict:
-    tpl, dom, pix = _resolve_channel_refs(db, current_user, payload.template_public_id, payload.domain_public_id, payload.pixel_public_id)
+    tpl, dom, pix = _resolve_channel_refs(db, current_user, payload.template_id, payload.domain_id, payload.pixel_id)
+    account_group_id = _resolve_channel_account_group(
+        db, current_user, payload.account_group_id
+    )
+    protocol_node_id, protocol_pool_id = _resolve_channel_protocol_route(
+        db,
+        current_user,
+        payload.protocol_node_id,
+        payload.protocol_pool_id,
+    )
     if get_settings().environment != "development" and dom is None:
         raise HTTPException(status_code=422, detail="生产环境渠道必须绑定已验证域名")
+    if payload.status == "active" and account_group_id is None:
+        raise HTTPException(status_code=422, detail="启用渠道前必须选择账号入库分组")
     template = db.get(PromotionTemplate, tpl); supported = (template.manifest_json or {}).get("supportedLocales", [])
     if payload.locale_mode == "fixed" and (not payload.locale or payload.locale not in supported): raise HTTPException(status_code=422, detail="固定 locale 必须属于模板 supportedLocales")
-    item = PromotionChannel(public_id=new_public_id("pchn"), channel_type=payload.channel_type, name=payload.name, country_code=payload.country_code, template_id=tpl, domain_id=dom, subdomain_prefix=payload.subdomain_prefix or "", slug=payload.slug, pixel_id=pix, locale_mode=payload.locale_mode, locale=payload.locale, status=payload.status, launch_at=payload.launch_at, created_by=current_user.id)
+    browser_enabled = bool(pix and payload.meta_browser_pixel_enabled)
+    _validate_channel_contract(
+        db,
+        template_id=tpl,
+        protocol_node_id=protocol_node_id,
+        protocol_pool_id=protocol_pool_id,
+        pixel_id=pix,
+        browser_enabled=browser_enabled,
+        capi_enabled=payload.meta_capi_enabled,
+    )
+    item = PromotionChannel(public_id=new_public_id("pchn"), channel_type=payload.channel_type, name=payload.name, country_code=payload.country_code, template_id=tpl, domain_id=dom, subdomain_prefix=payload.subdomain_prefix or "", slug=payload.slug, pixel_id=pix, account_group_id=account_group_id, protocol_node_id=protocol_node_id, protocol_pool_id=protocol_pool_id, route_version=1, meta_browser_pixel_enabled=browser_enabled, meta_capi_enabled=payload.meta_capi_enabled, meta_event_mapping_json=payload.meta_event_mapping, in_app_browser_mode=payload.in_app_browser_mode, new_account_marketing_enabled=payload.new_account_marketing_enabled, locale_mode=payload.locale_mode, locale=payload.locale, status=payload.status, launch_at=payload.launch_at, created_by=current_user.id)
     db.add(item)
     try: db.commit()
     except IntegrityError: db.rollback(); raise HTTPException(status_code=409, detail="该域名和子域名下的推广渠道 slug 已存在") from None
     db.refresh(item); return {"data": {"channel": channel_row(db, item)}}
 
 
-@router.get("/api/promotion/channels/{public_id}")
-def get_channel(public_id: str, db: DbSession, current_user: CurrentUser) -> dict: return {"data": {"channel": channel_row(db, _channel(db, public_id, current_user))}}
+@router.get("/api/promotion/channels/{channel_id}")
+def get_channel(channel_id: str, db: DbSession, current_user: CurrentUser) -> dict: return {"data": {"channel": channel_row(db, _channel(db, channel_id, current_user))}}
 
 
-@router.patch("/api/promotion/channels/{public_id}")
-def update_channel(public_id: str, payload: PromotionChannelUpdate, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _channel(db, public_id, current_user); tpl, dom, pix = _resolve_channel_refs(db, current_user, payload.template_public_id, payload.domain_public_id if "domain_public_id" in payload.model_fields_set else None, payload.pixel_public_id if "pixel_public_id" in payload.model_fields_set else None, item)
+@router.patch("/api/promotion/channels/{channel_id}")
+def update_channel(channel_id: str, payload: PromotionChannelUpdate, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _channel(db, channel_id, current_user); tpl, dom, pix = _resolve_channel_refs(db, current_user, payload.template_id, payload.domain_id if "domain_id" in payload.model_fields_set else None, payload.pixel_id if "pixel_id" in payload.model_fields_set else None, item)
     if payload.name is not None: item.name = payload.name
     if payload.country_code is not None: item.country_code = payload.country_code
     if payload.slug is not None: item.slug = payload.slug
@@ -754,21 +1125,169 @@ def update_channel(public_id: str, payload: PromotionChannelUpdate, db: DbSessio
     item.template_id = tpl
     template = db.get(PromotionTemplate, tpl); supported = (template.manifest_json or {}).get("supportedLocales", [])
     if item.locale_mode == "fixed" and (not item.locale or item.locale not in supported): raise HTTPException(status_code=422, detail="固定 locale 必须属于模板 supportedLocales")
-    if "domain_public_id" in payload.model_fields_set: item.domain_id = dom if payload.domain_public_id else None
+    if "domain_id" in payload.model_fields_set: item.domain_id = dom if payload.domain_id else None
     if get_settings().environment != "development" and item.domain_id is None:
         raise HTTPException(status_code=422, detail="生产环境渠道必须绑定已验证域名")
-    if "pixel_public_id" in payload.model_fields_set: item.pixel_id = pix if payload.pixel_public_id else None
+    if "pixel_id" in payload.model_fields_set:
+        item.pixel_id = pix if payload.pixel_id else None
+        if item.pixel_id is None:
+            item.meta_browser_pixel_enabled = False
+            item.meta_capi_enabled = False
+    if payload.meta_browser_pixel_enabled is not None:
+        item.meta_browser_pixel_enabled = payload.meta_browser_pixel_enabled
+    if payload.meta_capi_enabled is not None:
+        item.meta_capi_enabled = payload.meta_capi_enabled
+    if payload.meta_event_mapping is not None:
+        item.meta_event_mapping_json = payload.meta_event_mapping
+    if payload.in_app_browser_mode is not None:
+        item.in_app_browser_mode = payload.in_app_browser_mode
+    if payload.new_account_marketing_enabled is not None:
+        item.new_account_marketing_enabled = payload.new_account_marketing_enabled
+    if item.pixel_id is None:
+        item.meta_browser_pixel_enabled = False
+    if "account_group_id" in payload.model_fields_set:
+        item.account_group_id = (
+            _resolve_channel_account_group(
+                db, current_user, payload.account_group_id, item
+            )
+            if payload.account_group_id
+            else None
+        )
+    route_fields = {"protocol_node_id", "protocol_pool_id"}
+    if payload.model_fields_set.intersection(route_fields):
+        requested_node = (
+            payload.protocol_node_id
+            if "protocol_node_id" in payload.model_fields_set
+            else None
+        )
+        requested_pool = (
+            payload.protocol_pool_id
+            if "protocol_pool_id" in payload.model_fields_set
+            else None
+        )
+        if not requested_node and not requested_pool:
+            raise HTTPException(status_code=422, detail="渠道必须绑定协议节点或协议池")
+        next_node_id, next_pool_id = _resolve_channel_protocol_route(
+            db,
+            current_user,
+            requested_node,
+            requested_pool,
+            item,
+        )
+        if (
+            item.protocol_node_id != next_node_id
+            or item.protocol_pool_id != next_pool_id
+        ):
+            item.protocol_node_id = next_node_id
+            item.protocol_pool_id = next_pool_id
+            item.route_version = int(item.route_version or 1) + 1
+    if item.status == "active" and item.account_group_id is None:
+        raise HTTPException(status_code=422, detail="启用渠道前必须选择账号入库分组")
+    if item.protocol_node_id is None and item.protocol_pool_id is None:
+        raise HTTPException(status_code=422, detail="启用渠道前必须配置协议路由")
+    _validate_channel_contract(
+        db,
+        template_id=item.template_id,
+        protocol_node_id=item.protocol_node_id,
+        protocol_pool_id=item.protocol_pool_id,
+        pixel_id=item.pixel_id,
+        browser_enabled=item.meta_browser_pixel_enabled,
+        capi_enabled=item.meta_capi_enabled,
+    )
     try: db.commit()
     except IntegrityError: db.rollback(); raise HTTPException(status_code=409, detail="该域名和子域名下的推广渠道 slug 已存在") from None
     return {"data": {"channel": channel_row(db, item)}}
 
 
-@router.delete("/api/promotion/channels/{public_id}")
-def archive_channel(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _channel(db, public_id, current_user); item.status = "archived"; item.archived_at = utcnow(); db.commit(); return {"data": {"ok": True}}
+@router.delete("/api/promotion/channels/{channel_id}")
+def archive_channel(channel_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _channel(db, channel_id, current_user); item.status = "archived"; item.archived_at = utcnow(); db.commit(); return {"data": {"ok": True}}
 
 
-def _public_channel(db: DbSession, slug: str, request: Request) -> PromotionChannel:
+@router.get("/api/promotion/channels/{channel_id}/meta-deliveries")
+def list_channel_meta_deliveries(
+    channel_id: str,
+    db: DbSession,
+    current_user: CurrentUser,
+    delivery_status: str | None = Query(default=None, alias="status"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, alias="pageSize", ge=1, le=200),
+) -> dict:
+    channel = _channel(db, channel_id, current_user)
+    statement = select(MetaConversionDelivery).where(
+        MetaConversionDelivery.channel_id == channel.id
+    )
+    if delivery_status:
+        if delivery_status not in {
+            "pending", "sending", "retry", "delivered", "failed", "skipped"
+        }:
+            raise HTTPException(status_code=422, detail="Meta 投递状态不正确")
+        statement = statement.where(
+            MetaConversionDelivery.status == delivery_status
+        )
+    total = int(
+        db.scalar(
+            select(func.count())
+            .select_from(MetaConversionDelivery)
+            .where(MetaConversionDelivery.channel_id == channel.id)
+        )
+        or 0
+    )
+    rows = list(
+        db.scalars(
+            statement.order_by(MetaConversionDelivery.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).all()
+    )
+    counts = dict(
+        db.execute(
+            select(
+                MetaConversionDelivery.status,
+                func.count(MetaConversionDelivery.id),
+            )
+            .where(MetaConversionDelivery.channel_id == channel.id)
+            .group_by(MetaConversionDelivery.status)
+        ).all()
+    )
+    return {
+        "data": {
+            "rows": [
+                {
+                    "id": entity_id(row),
+                    "eventName": row.event_name,
+                    "eventId": row.event_id,
+                    "eventTime": iso(row.event_time),
+                    "status": row.status,
+                    "attemptCount": row.attempt_count,
+                    "nextAttemptAt": iso(row.next_attempt_at),
+                    "deliveredAt": iso(row.delivered_at),
+                    "providerTraceId": row.provider_trace_id,
+                    "lastError": row.last_error,
+                    "createdAt": iso(row.created_at),
+                }
+                for row in rows
+            ],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+            "summary": {
+                key: int(counts.get(key, 0))
+                for key in (
+                    "pending", "sending", "retry", "delivered", "failed", "skipped"
+                )
+            },
+        }
+    }
+
+
+def _public_channel(
+    db: DbSession,
+    slug: str,
+    request: Request,
+    *,
+    require_active: bool = True,
+) -> PromotionChannel:
     request_host = (request.url.hostname or "").lower().rstrip(".")
     settings = get_settings()
     local_preview = settings.environment == "development" and request_host in {
@@ -795,9 +1314,10 @@ def _public_channel(db: DbSession, slug: str, request: Request) -> PromotionChan
     )
     statement = select(PromotionChannel).where(
         PromotionChannel.slug == slug,
-        PromotionChannel.status == "active",
         PromotionChannel.archived_at.is_(None),
     )
+    if require_active:
+        statement = statement.where(PromotionChannel.status == "active")
     # A ready promotion hostname is always authoritative, even for a signed-in
     # backend user. This prevents an authenticated preview from crossing from
     # one real promotion domain into another domain's same-slug channel.
@@ -835,7 +1355,9 @@ def _public_channel(db: DbSession, slug: str, request: Request) -> PromotionChan
             )
         requested_channel = request.query_params.get("channelId")
         if requested_channel:
-            statement = statement.where(PromotionChannel.public_id == requested_channel)
+            statement = statement.where(
+                identifier_filter(PromotionChannel, requested_channel)
+            )
         items = db.scalars(statement.limit(2)).all()
         if len(items) > 1:
             raise HTTPException(
@@ -1016,9 +1538,12 @@ def _localize_template_html(
 @router.get("/api/public/promotion/channels/{slug}")
 def public_channel(slug: str, request: Request, db: DbSession, lang: str | None = None) -> dict:
     item = _public_channel(db, slug, request); tpl = db.get(PromotionTemplate, item.template_id); pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None; token = _session_token(item)
+    if pixel is not None and (not pixel.enabled or pixel.archived_at is not None):
+        pixel = None
+    from app.services.meta_conversions import normalized_meta_event_mapping
     policy = _runtime_template_policy(db, item.created_by)
     resolved, default, supported = _resolved_locale(item, tpl, lang)
-    return {"data": {"channel": {"id": item.public_id, "type": item.channel_type, "name": item.name, "countryCode": item.country_code, "slug": item.slug, "localeMode": item.locale_mode}, "template": {"id": tpl.public_id, "version": tpl.version, "manifest": tpl.manifest_json}, "templatePolicy": policy, "pixel": {"datasetId": pixel.dataset_id} if pixel else None, "countryCode": item.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "renderUrl": f"/api/public/promotion/channels/{slug}/render", "fissionRenderUrl": f"/api/public/promotion/channels/{slug}/fission/render", "assetBaseUrl": f"/api/public/promotion/channels/{slug}/assets/", "eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "sessionToken": token, "sessionExpiresIn": 1800, "rateLimitPolicy": "reserved", "serverTimestamp": utcnow().isoformat()}}
+    return {"data": {"channel": {"id": entity_id(item), "type": item.channel_type, "name": item.name, "countryCode": item.country_code, "slug": item.slug, "localeMode": item.locale_mode}, "template": {"id": entity_id(tpl), "version": tpl.version, "manifest": tpl.manifest_json}, "templatePolicy": policy, "meta": {"datasetId": pixel.dataset_id if pixel else None, "browserEnabled": bool(pixel and item.meta_browser_pixel_enabled), "capiEnabled": bool(pixel and item.meta_capi_enabled), "eventMapping": normalized_meta_event_mapping(item.meta_event_mapping_json)}, "inAppBrowserMode": item.in_app_browser_mode, "countryCode": item.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "renderUrl": f"/api/public/promotion/channels/{slug}/render", "fissionRenderUrl": f"/api/public/promotion/channels/{slug}/fission/render", "assetBaseUrl": f"/api/public/promotion/channels/{slug}/assets/", "eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "sessionToken": token, "sessionExpiresIn": 1800, "rateLimitPolicy": "reserved", "serverTimestamp": utcnow().isoformat()}}
 
 
 def _render_html(
@@ -1037,13 +1562,21 @@ def _render_html(
         db, template, requested_locale, default
     )
     html = _localize_template_html(html, resolved, localized_copy)
-    config = json.dumps({"eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "sessionToken": _session_token(channel, traffic_source), "trafficSource": traffic_source, "countryCode": channel.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "localizedCopy": localized_copy, "pixelDatasetId": pixel_dataset_id, "templatePolicy": template_policy or {}}, ensure_ascii=False).replace("<", "\\u003c")
+    from app.services.meta_conversions import normalized_meta_event_mapping
+
+    config = json.dumps({"eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "sessionToken": _session_token(channel, traffic_source), "trafficSource": traffic_source, "countryCode": channel.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "localizedCopy": localized_copy, "pixelDatasetId": pixel_dataset_id, "meta": {"datasetId": pixel_dataset_id, "browserEnabled": bool(pixel_dataset_id and channel.meta_browser_pixel_enabled), "eventMapping": normalized_meta_event_mapping(channel.meta_event_mapping_json)}, "inAppBrowserMode": channel.in_app_browser_mode, "templatePolicy": template_policy or {}}, ensure_ascii=False).replace("<", "\\u003c")
     html = _apply_viewport_policy(html, template_policy or {})
     base = f'<base href="/api/public/promotion/channels/{slug}/assets/">'
     runtime = (
-        f'<script type="application/json" id="parloq-promotion-config">{config}</script>'
+        f'<script type="application/json" id="promotion-runtime-config">{config}</script>'
         '<script src="/api/public/promotion/tracker.js" defer></script>'
         '<script src="/api/public/promotion/guard.js" defer></script>'
+        + (
+            '<script src="/api/public/promotion/account-link-elements.js" defer></script>'
+            if ((template.manifest_json or {}).get("requirements") or {}).get("componentKit")
+            == "account-link-elements/v1"
+            else ""
+        )
     )
     html = re.sub(r'(["\'])/assets/', rf'\1/api/public/promotion/channels/{slug}/assets/assets/', html)
     if re.search(r"<head\b[^>]*>", html, re.I):
@@ -1058,6 +1591,8 @@ def render_channel(slug: str, request: Request, db: DbSession, lang: str | None 
     item = _public_channel(db, slug, request)
     tpl = db.get(PromotionTemplate, item.template_id)
     pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None
+    if pixel is not None and (not pixel.enabled or pixel.archived_at is not None):
+        pixel = None
     policy = _runtime_template_policy(db, item.created_by)
     html, resolved_locale = _render_html(
             db,
@@ -1089,6 +1624,8 @@ def render_fission_channel(
     item = _public_channel(db, slug, request)
     tpl = db.get(PromotionTemplate, item.template_id)
     pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None
+    if pixel is not None and (not pixel.enabled or pixel.archived_at is not None):
+        pixel = None
     policy = _runtime_template_policy(db, item.created_by)
     html, resolved_locale = _render_html(
             db,
@@ -1113,6 +1650,19 @@ def render_fission_channel(
 
 @router.get("/api/public/promotion/tracker.js")
 def tracker_script() -> Response: return Response(TRACKER_JS, media_type="application/javascript", headers={"Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*"})
+
+
+@router.get("/api/public/promotion/account-link-elements.js")
+def account_link_elements_script() -> Response:
+    return Response(
+        (PUBLIC_RUNTIME_DIR / "account-link-elements.js").read_bytes(),
+        media_type="application/javascript",
+        headers={
+            "Cache-Control": "public, max-age=300",
+            "Access-Control-Allow-Origin": "*",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("/api/public/promotion/guard.js")
@@ -1165,9 +1715,28 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
     metadata["trafficSource"] = token_payload.get("trafficSource", "direct")
     event = PromotionEvent(public_id=new_public_id("pevt"), channel_id=channel.id, event_type=payload.event_type, idempotency_key=payload.idempotency_key, visitor_id=payload.visitor_id, lead_id=lead.id if lead else None, occurred_at=occurred_at, country_code=channel.country_code, metadata_json=metadata)
     db.add(event)
+    from app.services.meta_conversions import (
+        browser_event_descriptor,
+        enqueue_meta_conversion,
+    )
+
+    enqueue_meta_conversion(
+        db,
+        channel=channel,
+        event_key=payload.event_type,
+        event_id=payload.idempotency_key,
+        event_time=occurred_at,
+        request=request,
+        phone=payload.phone,
+        visitor_id=payload.visitor_id,
+        custom_data={"trafficSource": metadata["trafficSource"]},
+    )
+    meta_event = browser_event_descriptor(
+        channel, payload.event_type, payload.idempotency_key
+    )
     try: db.commit()
     except IntegrityError: db.rollback(); return JSONResponse({"data": {"ok": True, "duplicate": True, "serverTimestamp": now.isoformat()}}, headers={"Access-Control-Allow-Origin": "null"})
-    return JSONResponse({"data": {"ok": True, "duplicate": False, "serverTimestamp": now.isoformat()}}, headers={"Access-Control-Allow-Origin": "null"})
+    return JSONResponse({"data": {"ok": True, "duplicate": False, "metaEvent": meta_event, "serverTimestamp": now.isoformat()}}, headers={"Access-Control-Allow-Origin": "null"})
 
 
 @router.post("/api/public/promotion/channels/{slug}/pairing/start")
@@ -1181,20 +1750,174 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
     channel = _public_channel(db, slug, request)
     session_payload = _verify_session_token(channel, payload.session_token)
     traffic_source = session_payload.get("trafficSource", "direct")
-    from app.services.protocol_nodes import select_ingress_protocol
-
-    protocol = select_ingress_protocol(db, channel.created_by)
+    now = utcnow()
+    recent_checks = int(
+        db.scalar(
+            select(func.count(PromotionEvent.id)).where(
+                PromotionEvent.channel_id == channel.id,
+                PromotionEvent.event_type == "pairing_check",
+                PromotionEvent.visitor_id == payload.visitor_id,
+                PromotionEvent.created_at >= now - timedelta(minutes=10),
+            )
+        )
+        or 0
+    )
+    if recent_checks >= MAX_PAIRING_CHECKS_PER_TEN_MINUTES:
+        return _public_pairing_error(
+            429,
+            "rate_limited",
+            "绑定请求过于频繁，请稍后再试",
+            retryable=True,
+        )
+    db.add(
+        PromotionEvent(
+            public_id=new_public_id("pevt"),
+            channel_id=channel.id,
+            event_type="pairing_check",
+            idempotency_key=f"pairing_check:{uuid4().hex}",
+            visitor_id=payload.visitor_id,
+            occurred_at=now,
+            country_code=channel.country_code,
+            metadata_json={"trafficSource": traffic_source},
+        )
+    )
+    # Persist the bounded lookup before checking whether the number exists, so
+    # rejected numbers cannot be enumerated without consuming the same quota.
+    db.commit()
+    from app.services.protocol_nodes import (
+        normalized_sync_policy,
+        protocol_capacity,
+        resolve_channel_ingress_protocol,
+    )
 
     # A promotion channel belongs to one tenant. Landing-page accounts enter
     # that tenant's unified pool and retain the channel as their provenance.
     item = db.scalar(
-        select(PersonalAccount).where(
+        select(PersonalAccount)
+        .where(
             PersonalAccount.phone_e164 == payload.phone,
             PersonalAccount.archived_at.is_(None),
         )
+        .with_for_update()
     )
     if item is not None and item.created_by != channel.created_by:
-        raise HTTPException(status_code=409, detail="该号码已属于其他账号池")
+        db.rollback()
+        return _public_pairing_error(
+            409,
+            "number_unavailable",
+            "该号码当前不能在这里绑定",
+        )
+    gateway_requires_reset = item is not None and item.status == "reauth_required"
+    active_attempt = None
+    if item is not None:
+        active_attempt = db.scalar(
+            select(AccountPairingAttempt)
+            .where(
+                AccountPairingAttempt.account_id == item.id,
+                AccountPairingAttempt.status.in_(ACTIVE_PAIRING_STATUSES),
+            )
+            .order_by(AccountPairingAttempt.created_at.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        if (
+            active_attempt is not None
+            and _utc_datetime(active_attempt.expires_at) <= now
+        ):
+            active_attempt.status = "expired"
+            active_attempt.terminal_reason = "pairing_expired"
+            if active_attempt.attempt_type == "initial":
+                item.admission_status = "abandoned"
+            active_attempt = None
+        if active_attempt is not None and active_attempt.channel_id != channel.id:
+            db.rollback()
+            return _public_pairing_error(
+                409,
+                "pairing_in_progress",
+                "该号码已有正在进行的绑定请求",
+                retryable=True,
+            )
+        if (
+            active_attempt is not None
+            and active_attempt.visitor_id != payload.visitor_id
+        ):
+            db.rollback()
+            return _public_pairing_error(
+                409,
+                "pairing_in_progress",
+                "该号码已有正在进行的绑定请求",
+                retryable=True,
+            )
+
+    is_reauthentication = (
+        active_attempt is not None
+        and active_attempt.attempt_type == "reauthentication"
+    ) or (
+        active_attempt is None
+        and item is not None
+        and item.admission_status == "active"
+        and item.status in {"unpaired", "reauth_required"}
+    )
+
+    if active_attempt is not None:
+        protocol = db.get(
+            ProtocolNode,
+            active_attempt.protocol_node_id or item.protocol_id,
+        )
+        if protocol is None:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="配对任务的协议节点不存在")
+        if active_attempt.protocol_node_id is None:
+            active_attempt.protocol_node_id = protocol.id
+        if not active_attempt.sync_policy_json:
+            active_attempt.sync_policy_version = protocol.sync_policy_version
+            active_attempt.sync_policy_json = normalized_sync_policy(
+                protocol.sync_policy_json
+            )
+    elif is_reauthentication:
+        protocol = db.get(ProtocolNode, item.protocol_id)
+        if (
+            protocol is None
+            or protocol.archived_at is not None
+            or not protocol.online_enabled
+        ):
+            db.rollback()
+            return _public_pairing_error(
+                409,
+                "protocol_unavailable",
+                "该账号所属协议节点当前不可用",
+                retryable=True,
+            )
+        capacity = protocol_capacity(db, protocol)
+        if (
+            protocol.max_concurrent_pairings is not None
+            and capacity.active_pairings >= protocol.max_concurrent_pairings
+        ):
+            db.rollback()
+            return _public_pairing_error(
+                409,
+                "protocol_capacity_limited",
+                "该账号所属协议节点当前配对繁忙",
+                retryable=True,
+            )
+    else:
+        protocol = resolve_channel_ingress_protocol(db, channel)
+
+    if active_attempt is None and not is_reauthentication:
+        if channel.account_group_id is None:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="推广渠道尚未配置账号入库分组")
+        landing_group = db.scalar(
+            select(AccountGroup).where(
+                AccountGroup.id == channel.account_group_id,
+                AccountGroup.created_by == channel.created_by,
+                AccountGroup.archived_at.is_(None),
+            )
+        )
+        if landing_group is None:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="推广渠道的账号入库分组不可用")
+
     account_created = item is None
     if item is None:
         item = PersonalAccount(
@@ -1209,11 +1932,14 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 if traffic_source == "fission"
                 else "promotion_channel"
             ),
-            source_ref_id=channel.public_id,
+            source_ref_id=str(channel.id),
             validation_status="validating",
             metadata_sync_status="pending",
+            admission_status="reserved",
+            group_id=channel.account_group_id,
             protocol_id=protocol.id,
             enabled=True,
+            marketing_eligible=channel.new_account_marketing_enabled,
             created_by=channel.created_by,
         )
         db.add(item)
@@ -1229,11 +1955,32 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             and item.validation_status != "ready"
             and item.last_connected_at is None
         )
-        if (
-            item.status not in {"unpaired", "pairing", "reauth_required"}
-            and not retryable_legacy_pairing
-        ):
-            raise HTTPException(status_code=409, detail="该号码已经完成链接")
+        retryable_initial = (
+            item.admission_status in {"reserved", "abandoned"}
+            and (
+                item.status in {"unpaired", "pairing"}
+                or retryable_legacy_pairing
+            )
+        )
+        if active_attempt is None and not is_reauthentication and not retryable_initial:
+            db.rollback()
+            if item.validation_status == "ready" or item.status in {
+                "linked_offline",
+                "warming",
+                "online_idle",
+                "sending",
+                "draining",
+            }:
+                return _public_pairing_error(
+                    409,
+                    "account_already_linked",
+                    "该号码已经绑定并可用，无需重复绑定",
+                )
+            return _public_pairing_error(
+                409,
+                "number_unavailable",
+                "该号码当前不能在这里绑定",
+            )
         if retryable_legacy_pairing:
             # Releases before the verified-pairing state contract could leave
             # an interrupted landing-page attempt as linked_offline even
@@ -1241,34 +1988,31 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             # shape as retryable; imported or previously connected sessions
             # remain protected from replacement.
             item.status = "unpaired"
-        item.source = "landing_page"
-        item.source_ref_type = (
-            "promotion_channel_fission"
-            if traffic_source == "fission"
-            else "promotion_channel"
-        )
-        item.source_ref_id = channel.public_id
         item.validation_status = "validating"
-        item.protocol_id = protocol.id
-
-    now = utcnow()
-    active_attempt = db.scalar(
-        select(AccountPairingAttempt)
-        .where(
-            AccountPairingAttempt.account_id == item.id,
-            AccountPairingAttempt.channel_id == channel.id,
-            AccountPairingAttempt.status.in_(ACTIVE_PAIRING_STATUSES),
-        )
-        .order_by(AccountPairingAttempt.created_at.desc())
-        .limit(1)
-    )
-    if active_attempt is not None and _utc_datetime(active_attempt.expires_at) <= now:
-        active_attempt.status = "expired"
-        active_attempt.terminal_reason = "pairing_expired"
-        active_attempt = None
-    if active_attempt is not None and active_attempt.visitor_id != payload.visitor_id:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="该号码正在另一浏览器中等待配对")
+        item.metadata_sync_status = "pending"
+        if not is_reauthentication:
+            item.admission_status = "reserved"
+            item.source = "landing_page"
+            item.source_ref_type = (
+                "promotion_channel_fission"
+                if traffic_source == "fission"
+                else "promotion_channel"
+            )
+            item.source_ref_id = str(channel.id)
+            item.group_id = channel.account_group_id
+            item.protocol_id = protocol.id
+            item.marketing_eligible = channel.new_account_marketing_enabled
+    if active_attempt is not None:
+        if (
+            active_attempt.attempt_type == "initial"
+            and active_attempt.account_group_id is None
+        ):
+            # A legacy in-flight attempt adopts the current channel default
+            # once. Every subsequent request keeps that immutable snapshot.
+            active_attempt.account_group_id = channel.account_group_id
+        if active_attempt.attempt_type == "initial":
+            item.group_id = active_attempt.account_group_id
+            item.protocol_id = active_attempt.protocol_node_id or protocol.id
     if active_attempt is None:
         recent_attempts = int(
             db.scalar(
@@ -1287,19 +2031,30 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
     from app.routers.personal_accounts import _auto_proxy, _proxy_url, _set_binding
     from app.services.wa_gateway import GatewayError, WaGatewayClient
 
-    proxy = _auto_proxy(db, channel.created_by, channel.country_code)
-    if proxy is None:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="暂时没有可用的账号连接线路")
     client = WaGatewayClient()
     try:
-        _set_binding(db, item.public_id, proxy.public_id)
+        if _proxy_url(db, item.gateway_account_id) is None:
+            proxy = _auto_proxy(db, channel.created_by, channel.country_code)
+            if proxy is None:
+                db.rollback()
+                raise HTTPException(status_code=409, detail="暂时没有可用的账号连接线路")
+            _set_binding(db, item.gateway_account_id, entity_id(proxy))
         db.flush()
         if active_attempt is None:
             active_attempt = AccountPairingAttempt(
                 public_id=new_public_id("pair"),
+                attempt_type=(
+                    "reauthentication" if is_reauthentication else "initial"
+                ),
                 account_id=item.id,
                 channel_id=channel.id,
+                account_group_id=item.group_id,
+                protocol_node_id=protocol.id,
+                route_version=channel.route_version,
+                sync_policy_version=protocol.sync_policy_version,
+                sync_policy_json=normalized_sync_policy(
+                    protocol.sync_policy_json
+                ),
                 visitor_id=payload.visitor_id,
                 status="code_issued",
                 expires_at=now + timedelta(minutes=3),
@@ -1323,18 +2078,39 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
 
     try:
         try:
-            client.create(item.public_id, payload.phone, _proxy_url(db, item.public_id))
+            client.create(
+                item.gateway_account_id,
+                payload.phone,
+                _proxy_url(db, item.gateway_account_id),
+                connection_policy=protocol.connection_policy,
+                idle_disconnect_seconds=protocol.idle_disconnect_seconds,
+                post_verify_grace_seconds=protocol.post_verify_grace_seconds,
+                sync_policy=active_attempt.sync_policy_json,
+            )
         except GatewayError as exc:
             # An existing gateway account is normal when a visitor requests a
             # fresh code for an unpaired record; pairing remains authoritative.
             if "409" not in str(exc):
                 raise
-        result = client.pair(
-            item.public_id,
-            payload.phone,
-            "pairing_code",
-            _proxy_url(db, item.public_id),
-        )
+            client.update(
+                item.gateway_account_id,
+                connection_policy=protocol.connection_policy,
+                idle_disconnect_seconds=protocol.idle_disconnect_seconds,
+                post_verify_grace_seconds=protocol.post_verify_grace_seconds,
+                sync_policy=active_attempt.sync_policy_json,
+            )
+        if (
+            active_attempt.attempt_type == "reauthentication"
+            and gateway_requires_reset
+        ):
+            result = client.reauthenticate(item.gateway_account_id, payload.phone)
+        else:
+            result = client.pair(
+                item.gateway_account_id,
+                payload.phone,
+                "pairing_code",
+                _proxy_url(db, item.gateway_account_id),
+            )
         item.status = "linked_offline" if client.settings.wa_gateway_mock else "pairing"
         item.last_error = None
         try:
@@ -1350,6 +2126,42 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
         active_attempt.expires_at = expires_at
         active_attempt.terminal_reason = None
         active_attempt.provider_code = None
+        pairing_started_id = f"pairing_started:{active_attempt.id}"
+        pairing_started_event = db.scalar(
+            select(PromotionEvent).where(
+                PromotionEvent.channel_id == channel.id,
+                PromotionEvent.idempotency_key == pairing_started_id,
+            )
+        )
+        if pairing_started_event is None:
+            pairing_started_event = PromotionEvent(
+                public_id=new_public_id("pevt"),
+                channel_id=channel.id,
+                event_type="pairing_started",
+                idempotency_key=pairing_started_id,
+                visitor_id=payload.visitor_id,
+                occurred_at=now,
+                country_code=channel.country_code,
+                metadata_json={
+                    "accountId": str(item.id),
+                    "trafficSource": traffic_source,
+                },
+            )
+            db.add(pairing_started_event)
+            if active_attempt.attempt_type == "initial":
+                from app.services.meta_conversions import enqueue_meta_conversion
+
+                enqueue_meta_conversion(
+                    db,
+                    channel=channel,
+                    event_key="pairing_started",
+                    event_id=pairing_started_id,
+                    event_time=now,
+                    request=request,
+                    phone=payload.phone,
+                    visitor_id=payload.visitor_id,
+                    custom_data={"trafficSource": traffic_source},
+                )
         db.commit()
     except GatewayError as exc:
         db.rollback()
@@ -1372,25 +2184,38 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             if failed_attempt is not None:
                 failed_attempt.status = "failed"
                 failed_attempt.terminal_reason = "pairing_start_failed"
+                if failed_attempt.attempt_type == "initial":
+                    failed.admission_status = "abandoned"
             db.commit()
         raise HTTPException(status_code=502, detail=str(exc)) from None
 
     status_token = _pairing_status_token(
         channel, item, active_attempt, payload.visitor_id
     )
+    from app.services.meta_conversions import browser_event_descriptor
+
+    meta_event = (
+        browser_event_descriptor(
+            channel, "pairing_started", f"pairing_started:{active_attempt.id}"
+        )
+        if active_attempt.attempt_type == "initial"
+        else None
+    )
     return JSONResponse(
         {
             "data": {
                 "pairing": {
                     "pairingCode": result.get("code"),
-                    "attemptId": active_attempt.public_id,
+                    "attemptId": entity_id(active_attempt),
                     "pairingStatus": active_attempt.status,
                     "expiresAt": iso(active_attempt.expires_at),
-                    "statusUrl": f"/api/public/promotion/channels/{slug}/pairing/{item.public_id}/status",
-                    "cancelUrl": f"/api/public/promotion/channels/{slug}/pairing/{item.public_id}/cancel",
+                    "statusUrl": f"/api/public/promotion/channels/{slug}/pairing/{item.id}/status",
+                    "cancelUrl": f"/api/public/promotion/channels/{slug}/pairing/{item.id}/cancel",
                     "statusToken": status_token,
-                    "statusTokenHeader": "X-Parloq-Pairing-Token",
-                }
+                    "statusTokenHeader": "Authorization",
+                    "statusTokenScheme": "Bearer",
+                },
+                "metaEvent": meta_event,
             }
         },
         headers={"Access-Control-Allow-Origin": "null"},
@@ -1398,22 +2223,24 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
 
 
 @router.get(
-    "/api/public/promotion/channels/{slug}/pairing/{account_public_id}/status"
+    "/api/public/promotion/channels/{slug}/pairing/{account_id}/status"
 )
 def public_pairing_status(
     slug: str,
-    account_public_id: str,
+    account_id: str,
     request: Request,
     db: DbSession,
-    token: str | None = Query(default=None, min_length=20, max_length=1000),
-    x_parloq_pairing_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> JSONResponse:
-    channel = _public_channel(db, slug, request)
+    channel = _public_channel(db, slug, request, require_active=False)
+    try:
+        database_id = parse_snowflake_id(account_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="账号链接不存在") from None
     item = db.scalar(
         select(PersonalAccount).where(
-            PersonalAccount.public_id == account_public_id,
+            PersonalAccount.id == database_id,
             PersonalAccount.created_by == channel.created_by,
-            PersonalAccount.source_ref_id == channel.public_id,
             PersonalAccount.archived_at.is_(None),
         )
     )
@@ -1430,9 +2257,7 @@ def public_pairing_status(
     )
     if attempt is None:
         raise HTTPException(status_code=404, detail="配对任务不存在")
-    supplied_token = x_parloq_pairing_token or token
-    if not supplied_token:
-        raise HTTPException(status_code=403, detail="缺少账号链接状态凭证")
+    supplied_token = _pairing_bearer_token(authorization)
     token_payload = _verify_pairing_status_token(
         channel, item, attempt, supplied_token
     )
@@ -1441,7 +2266,7 @@ def public_pairing_status(
 
     client = WaGatewayClient()
     try:
-        value = client.get(item.public_id)
+        value = client.get(item.gateway_account_id)
         state = str(value.get("state") or item.status)
         gateway_pairing_status = str(value.get("pairingStatus") or "idle")
         _apply_gateway_account(item, value)
@@ -1461,37 +2286,95 @@ def public_pairing_status(
         attempt_status=attempt.status,
         expires_at=attempt.expires_at,
     )
+    wakeup_group_id: int | None = None
+    meta_event = None
     if pairing_status == "verified":
+        newly_verified = attempt.status != "verified"
+        became_dispatchable = (
+            item.validation_status != "ready"
+            or item.group_id != attempt.account_group_id
+            or attempt.status != "verified"
+        )
         item.status = state
         item.validation_status = "ready"
+        item.admission_status = "active"
+        if attempt.account_group_id is not None:
+            item.group_id = attempt.account_group_id
         item.last_connected_at = item.last_connected_at or utcnow()
         attempt.status = "verified"
         attempt.verified_at = attempt.verified_at or utcnow()
         attempt.terminal_reason = None
-        db.add(
-            PromotionEvent(
-                public_id=new_public_id("pevt"),
-                channel_id=channel.id,
-                event_type="pair_success",
-                idempotency_key=f"pair_success:{item.public_id}",
-                visitor_id=str(token_payload.get("visitor") or "") or None,
-                occurred_at=utcnow(),
-                country_code=channel.country_code,
-                metadata_json={
-                    "accountPublicId": item.public_id,
-                    "trafficSource": (
-                        "fission"
-                        if item.source_ref_type == "promotion_channel_fission"
-                        else "direct"
-                    ),
-                },
+        if attempt.attempt_type == "initial":
+            success_event = db.scalar(
+                select(PromotionEvent).where(
+                    PromotionEvent.channel_id == channel.id,
+                    PromotionEvent.idempotency_key == f"pair_success:{item.id}",
+                )
             )
-        ) if not db.scalar(
-            select(PromotionEvent.id).where(
-                PromotionEvent.channel_id == channel.id,
-                PromotionEvent.idempotency_key == f"pair_success:{item.public_id}",
+            if success_event is None:
+                success_event = PromotionEvent(
+                    public_id=new_public_id("pevt"),
+                    channel_id=channel.id,
+                    event_type="pair_success",
+                    idempotency_key=f"pair_success:{item.id}",
+                    visitor_id=str(token_payload.get("visitor") or "") or None,
+                    occurred_at=utcnow(),
+                    country_code=channel.country_code,
+                    metadata_json={
+                        "accountId": str(item.id),
+                        "trafficSource": (
+                            "fission"
+                            if item.source_ref_type == "promotion_channel_fission"
+                            else "direct"
+                        ),
+                    },
+                )
+                db.add(success_event)
+                from app.services.meta_conversions import enqueue_meta_conversion
+
+                enqueue_meta_conversion(
+                    db,
+                    channel=channel,
+                    event_key="pairing_verified",
+                    event_id=f"pairing_verified:{attempt.id}",
+                    event_time=attempt.verified_at,
+                    request=request,
+                    phone=item.phone_e164,
+                    visitor_id=str(token_payload.get("visitor") or "") or None,
+                    custom_data={
+                        "trafficSource": (
+                            "fission"
+                            if item.source_ref_type == "promotion_channel_fission"
+                            else "direct"
+                        )
+                    },
+                )
+            from app.services.meta_conversions import browser_event_descriptor
+
+            meta_event = browser_event_descriptor(
+                channel, "pairing_verified", f"pairing_verified:{attempt.id}"
             )
-        ) else None
+        if newly_verified:
+            from app.services.account_metadata_sync import (
+                enqueue_account_metadata_sync,
+            )
+
+            enqueue_account_metadata_sync(
+                db,
+                item,
+                sync_policy=attempt.sync_policy_json,
+                sync_policy_version=attempt.sync_policy_version,
+            )
+        if became_dispatchable and item.group_id is not None:
+            from app.services.account_group_wakeups import record_group_wakeup
+
+            record_group_wakeup(
+                db,
+                item.group_id,
+                reason="landing_page_account_verified",
+                account_id=item.id,
+            )
+            wakeup_group_id = item.group_id
     elif pairing_status != attempt.status:
         attempt.status = pairing_status
         if pairing_status in {"expired", "cancelled", "failed"}:
@@ -1501,7 +2384,16 @@ def public_pairing_status(
             )[:64]
             provider_code = value.get("providerCode")
             attempt.provider_code = str(provider_code)[:64] if provider_code else None
+            if attempt.attempt_type == "initial":
+                item.admission_status = "abandoned"
+                item.validation_status = "failed"
     db.commit()
+    if wakeup_group_id is not None:
+        from app.services.account_group_wakeups import (
+            dispatch_group_wakeups_best_effort,
+        )
+
+        dispatch_group_wakeups_best_effort(wakeup_group_id)
     # `state` remains as a compatibility field for already-imported v1
     # templates, but now carries only the stable public pairing state. Raw
     # operational account state is diagnostic and must not drive template UI.
@@ -1521,12 +2413,14 @@ def public_pairing_status(
                 "accountState": state,
                 "pairingStatus": pairing_status,
                 "verified": pairing_status == "verified",
-                "attemptId": attempt.public_id,
+                "attemptId": entity_id(attempt),
                 "expiresAt": iso(attempt.expires_at),
+                "initializationStatus": item.metadata_sync_status,
                 "reasonCode": attempt.terminal_reason,
                 "providerCode": attempt.provider_code,
                 "retryable": pairing_status in {"expired", "cancelled", "failed"},
                 "nextPollAfterMs": 3000 if pairing_status == "reconnecting" else 2000,
+                "metaEvent": meta_event,
             }
         },
         headers={"Access-Control-Allow-Origin": "null"},
@@ -1534,21 +2428,24 @@ def public_pairing_status(
 
 
 @router.post(
-    "/api/public/promotion/channels/{slug}/pairing/{account_public_id}/cancel"
+    "/api/public/promotion/channels/{slug}/pairing/{account_id}/cancel"
 )
 def cancel_public_pairing(
     slug: str,
-    account_public_id: str,
+    account_id: str,
     request: Request,
     db: DbSession,
-    x_parloq_pairing_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> JSONResponse:
-    channel = _public_channel(db, slug, request)
+    channel = _public_channel(db, slug, request, require_active=False)
+    try:
+        database_id = parse_snowflake_id(account_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="账号链接不存在") from None
     item = db.scalar(
         select(PersonalAccount).where(
-            PersonalAccount.public_id == account_public_id,
+            PersonalAccount.id == database_id,
             PersonalAccount.created_by == channel.created_by,
-            PersonalAccount.source_ref_id == channel.public_id,
             PersonalAccount.archived_at.is_(None),
         )
     )
@@ -1565,14 +2462,14 @@ def cancel_public_pairing(
     )
     if attempt is None:
         raise HTTPException(status_code=404, detail="配对任务不存在")
-    if not x_parloq_pairing_token:
-        raise HTTPException(status_code=403, detail="缺少账号链接状态凭证")
-    _verify_pairing_status_token(channel, item, attempt, x_parloq_pairing_token)
+    _verify_pairing_status_token(
+        channel, item, attempt, _pairing_bearer_token(authorization)
+    )
     if attempt.status in ACTIVE_PAIRING_STATUSES:
         from app.services.wa_gateway import GatewayError, WaGatewayClient
 
         try:
-            WaGatewayClient().cancel_pairing(item.public_id)
+            WaGatewayClient().cancel_pairing(item.gateway_account_id)
         except GatewayError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
         attempt.status = "cancelled"
@@ -1580,6 +2477,8 @@ def cancel_public_pairing(
         item.status = "unpaired"
         item.validation_status = "failed"
         item.last_error = "配对已取消"
+        if attempt.attempt_type == "initial":
+            item.admission_status = "abandoned"
         db.commit()
     return JSONResponse(
         {"data": {"pairingStatus": attempt.status, "cancelled": True}},
@@ -1603,7 +2502,7 @@ async def report_internal_success(request: Request, db: DbSession) -> JSONRespon
         raise HTTPException(status_code=422, detail=exc.errors(include_url=False)) from None
     channel = db.scalar(
         select(PromotionChannel).where(
-            PromotionChannel.public_id == payload.promotion_channel_id,
+            identifier_filter(PromotionChannel, payload.promotion_channel_id),
             PromotionChannel.archived_at.is_(None),
         )
     )
@@ -1641,14 +2540,14 @@ async def report_internal_success(request: Request, db: DbSession) -> JSONRespon
     return JSONResponse({"data": {"ok": True, "duplicate": False}})
 
 
-@router.get("/api/promotion/channels/{public_id}/leads")
-def list_leads(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    channel = _channel(db, public_id, current_user); items = db.scalars(select(PromotionLead).where(PromotionLead.channel_id == channel.id).order_by(PromotionLead.last_seen_at.desc())).all(); rows = [{"id": x.public_id, "phone": x.phone_e164, "countryCode": x.country_code, "firstSeenAt": iso(x.first_seen_at), "lastSeenAt": iso(x.last_seen_at), "submissionCount": x.submission_count} for x in items]; return {"data": {"rows": rows, "total": len(rows)}}
+@router.get("/api/promotion/channels/{channel_id}/leads")
+def list_leads(channel_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    channel = _channel(db, channel_id, current_user); items = db.scalars(select(PromotionLead).where(PromotionLead.channel_id == channel.id).order_by(PromotionLead.last_seen_at.desc())).all(); rows = [{"id": entity_id(x), "phone": x.phone_e164, "countryCode": x.country_code, "firstSeenAt": iso(x.first_seen_at), "lastSeenAt": iso(x.last_seen_at), "submissionCount": x.submission_count} for x in items]; return {"data": {"rows": rows, "total": len(rows)}}
 
 
-@router.get("/api/promotion/channels/{public_id}/stats")
-def channel_stats(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    channel = _channel(db, public_id, current_user); events = db.scalars(select(PromotionEvent).where(PromotionEvent.channel_id == channel.id)).all(); totals = {name: 0 for name in ("page_view", "phone_submit", "visit_end", "login_success", "pair_success")}; daily: dict[str, dict] = {}
+@router.get("/api/promotion/channels/{channel_id}/stats")
+def channel_stats(channel_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    channel = _channel(db, channel_id, current_user); events = db.scalars(select(PromotionEvent).where(PromotionEvent.channel_id == channel.id)).all(); totals = {name: 0 for name in ("page_view", "phone_submit", "visit_end", "login_success", "pair_success")}; daily: dict[str, dict] = {}
     for event in events:
         totals[event.event_type] = totals.get(event.event_type, 0) + 1; key = event.occurred_at.date().isoformat(); daily.setdefault(key, {"date": key, "pageView": 0, "phoneSubmit": 0, "visitEnd": 0, "loginSuccess": 0, "pairSuccess": 0}); field = {"page_view":"pageView","phone_submit":"phoneSubmit","visit_end":"visitEnd","login_success":"loginSuccess","pair_success":"pairSuccess"}.get(event.event_type)
         if field: daily[key][field] += 1
@@ -1659,10 +2558,9 @@ def channel_stats(public_id: str, db: DbSession, current_user: CurrentUser) -> d
 def _ad_metric_row(db: DbSession, item: AdMetric) -> dict:
     channel = db.get(PromotionChannel, item.promotion_channel_id)
     return {
-        "id": item.public_id,
-        "publicId": item.public_id,
+        "id": entity_id(item),
         "date": item.metric_date.isoformat(),
-        "promotionChannelId": channel.public_id if channel else None,
+        "promotionChannelId": entity_id(channel) if channel else None,
         "promotionChannelName": channel.name if channel else None,
         "channel": item.channel,
         "countryCode": item.country_code,
@@ -1684,8 +2582,8 @@ def _ad_metric_row(db: DbSession, item: AdMetric) -> dict:
     }
 
 
-def _metric_channel(db: DbSession, public_id: str, user) -> PromotionChannel:
-    return _channel(db, public_id, user)
+def _metric_channel(db: DbSession, channel_id: str, user) -> PromotionChannel:
+    return _channel(db, channel_id, user)
 
 
 def _apply_metric(db: DbSession, payload, user, current: AdMetric | None = None) -> AdMetric:
@@ -1774,11 +2672,13 @@ def create_ad_metric(payload: AdMetricInput, db: DbSession, current_user: Curren
     return {"data": {"adMetric": _ad_metric_row(db, item)}}
 
 
-@router.patch("/api/promotion/ad-metrics/{public_id}")
+@router.patch("/api/promotion/ad-metrics/{ad_metric_id}")
 def update_ad_metric(
-    public_id: str, payload: AdMetricUpdate, db: DbSession, current_user: CurrentUser
+    ad_metric_id: str, payload: AdMetricUpdate, db: DbSession, current_user: CurrentUser
 ) -> dict:
-    statement = select(AdMetric).join(PromotionChannel).where(AdMetric.public_id == public_id)
+    statement = select(AdMetric).join(PromotionChannel).where(
+        identifier_filter(AdMetric, ad_metric_id)
+    )
     if current_user.role != "admin": statement = statement.where(PromotionChannel.created_by == current_user.id)
     item = db.scalar(statement)
     if item is None:
@@ -1792,9 +2692,11 @@ def update_ad_metric(
     return {"data": {"adMetric": _ad_metric_row(db, item)}}
 
 
-@router.delete("/api/promotion/ad-metrics/{public_id}")
-def delete_ad_metric(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    statement = select(AdMetric).join(PromotionChannel).where(AdMetric.public_id == public_id)
+@router.delete("/api/promotion/ad-metrics/{ad_metric_id}")
+def delete_ad_metric(ad_metric_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    statement = select(AdMetric).join(PromotionChannel).where(
+        identifier_filter(AdMetric, ad_metric_id)
+    )
     if current_user.role != "admin": statement = statement.where(PromotionChannel.created_by == current_user.id)
     item = db.scalar(statement)
     if item is None:
@@ -2020,7 +2922,9 @@ def _analytics_data(
     template_ids = _csv_values(template_ids_raw)
     country_codes = {value.upper() for value in _csv_values(country_codes_raw)}
     try:
-        creator_ids = {int(value) for value in _csv_values(creator_ids_raw)}
+        creator_ids = {
+            parse_snowflake_id(value) for value in _csv_values(creator_ids_raw)
+        }
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="creatorIds 格式不正确") from exc
     if user.role != "admin" and creator_ids and creator_ids != {user.id}:
@@ -2030,7 +2934,7 @@ def _analytics_data(
     if user.role != "admin":
         statement = statement.where(PromotionChannel.created_by == user.id)
     if channel_ids:
-        statement = statement.where(PromotionChannel.public_id.in_(channel_ids))
+        statement = statement.where(identifiers_filter(PromotionChannel, channel_ids))
     if country_codes:
         statement = statement.where(PromotionChannel.country_code.in_(country_codes))
     if creator_ids:
@@ -2039,7 +2943,9 @@ def _analytics_data(
     if template_ids:
         allowed_templates = set(
             db.scalars(
-                select(PromotionTemplate.id).where(PromotionTemplate.public_id.in_(template_ids))
+                select(PromotionTemplate.id).where(
+                    identifiers_filter(PromotionTemplate, template_ids)
+                )
             ).all()
         )
         channels = [channel for channel in channels if channel.template_id in allowed_templates]
@@ -2091,7 +2997,7 @@ def _analytics_data(
         detail = grouped_daily.setdefault(group_key, {}).setdefault(
             date_key, _empty_analytics_bucket()
         )
-        detail["_adMetricId"] = metric.public_id
+        detail["_adMetricId"] = entity_id(metric)
         for target in (daily[date_key], group, detail):
             target["spend"] += Decimal(metric.spend)
             target["feeAmount"] += Decimal(metric.spend) * Decimal(
@@ -2175,13 +3081,13 @@ def _analytics_data(
             )
         rows.append(
             {
-                "promotionChannelId": channel.public_id,
+                "promotionChannelId": entity_id(channel),
                 "promotionChannelName": channel.name,
                 "channelType": channel.channel_type,
                 "countryCode": country_code,
-                "templateId": template.public_id if template else None,
+                "templateId": entity_id(template) if template else None,
                 "templateName": template.name if template else None,
-                "creatorId": channel.created_by,
+                "creatorId": str(channel.created_by),
                 "creatorName": creator.display_name or creator.username if creator else None,
                 **_finalize_analytics(bucket),
                 "daily": detail_rows,

@@ -20,11 +20,12 @@
     pairingExpired: 'This code expired. Please request a new one.',
     pairingFailed: 'Account linking stopped. Please request a new code.',
     pairingCancelled: 'Account linking was cancelled.',
-    pairingRetry: 'Use another number'
+    pairingRetry: 'Use another number',
+    inAppGuide: 'For the most reliable linking experience, open this page in your system browser.'
   }
 
   function runtimeConfig() {
-    const node = document.getElementById('parloq-promotion-config')
+    const node = document.getElementById('promotion-runtime-config')
     if (!node) return {}
     try { return JSON.parse(node.textContent || '{}') } catch { return {} }
   }
@@ -64,8 +65,13 @@
     const pairingCode = document.getElementById('pairing-code')
     const pairingState = document.getElementById('pairing-state')
     const pairingRetry = document.getElementById('pairing-retry')
+    const inAppGuide = document.getElementById('in-app-guide')
+    if (config.inAppBrowserMode === 'guide_external' && /(FBAN|FBAV|Instagram)/i.test(navigator.userAgent)) {
+      inAppGuide.hidden = false
+    }
     let pollTimer
     let activePairing
+    let pollFailures = 0
 
     const stopPolling = () => {
       if (pollTimer) window.clearTimeout(pollTimer)
@@ -76,14 +82,9 @@
       stopPolling()
       const pairing = activePairing
       activePairing = undefined
-      if (pairing?.cancelUrl && pairing?.statusToken) {
+      if (pairing && typeof window.PromotionBridge?.cancelPairing === 'function') {
         try {
-          await fetch(pairing.cancelUrl, {
-            method: 'POST',
-            credentials: 'omit',
-            cache: 'no-store',
-            headers: { 'X-Parloq-Pairing-Token': pairing.statusToken }
-          })
+          await window.PromotionBridge.cancelPairing(pairing)
         } catch {}
       }
       pairingPanel.hidden = true
@@ -95,17 +96,16 @@
     pairingRetry.addEventListener('click', resetPairing)
 
     const pollPairing = async (pairing) => {
-      if (!pairing.statusUrl || !pairing.statusToken) return
+      if (pairing !== activePairing) return
       try {
-        const response = await fetch(pairing.statusUrl, {
-          credentials: 'omit',
-          cache: 'no-store',
-          headers: { 'X-Parloq-Pairing-Token': pairing.statusToken }
-        })
+        if (typeof window.PromotionBridge?.getPairingStatus !== 'function') throw new Error('runtime unavailable')
+        const response = await window.PromotionBridge.getPairingStatus(pairing)
         if (!response.ok) throw new Error('pairing status rejected')
         const payload = await response.json()
         const pairingStatus = payload?.data?.pairingStatus
+        pollFailures = 0
         if (payload?.data?.verified === true && pairingStatus === 'verified') {
+          stopPolling()
           pairingState.textContent = copy.pairingConnected
           pairingState.className = 'pairing-state connected'
           pairingRetry.hidden = true
@@ -118,27 +118,33 @@
           pairingState.textContent = copy.pairingExpired
           pairingState.className = 'pairing-state error'
           pairingRetry.hidden = false
+          stopPolling()
           return
         } else if (pairingStatus === 'cancelled') {
           pairingState.textContent = copy.pairingCancelled
           pairingState.className = 'pairing-state error'
           pairingRetry.hidden = false
+          stopPolling()
           return
         } else if (pairingStatus === 'failed') {
           pairingState.textContent = copy.pairingFailed
           pairingState.className = 'pairing-state error'
           pairingRetry.hidden = false
+          stopPolling()
           return
         }
         const delay = Number(payload?.data?.nextPollAfterMs)
         pollTimer = window.setTimeout(() => pollPairing(pairing), Number.isFinite(delay) ? delay : 2500)
       } catch {
-        pollTimer = window.setTimeout(() => pollPairing(pairing), 4000)
+        pollFailures += 1
+        if (pairing !== activePairing) return
+        const delay = Math.min(2500 * (2 ** Math.min(pollFailures, 3)), 15000)
+        pollTimer = window.setTimeout(() => pollPairing(pairing), delay)
       }
     }
     form.addEventListener('submit', async (event) => {
       event.preventDefault()
-      const phone = String(input.value || '').replace(/[^0-9+]/g, '')
+      const phone = String(input.value || '').replace(/\D/g, '')
       if (phone.replace(/\D/g, '').length < 7) {
         status.textContent = copy.invalid
         status.className = 'form-status error'
@@ -147,8 +153,8 @@
       button.disabled = true
       status.textContent = ''
       try {
-        if (typeof window.parloqSubmitPhone !== 'function') throw new Error('tracker unavailable')
-        const response = await window.parloqSubmitPhone(phone, { template: 'promotion-template-demo', locale })
+        if (typeof window.PromotionBridge?.submitPhone !== 'function' || typeof window.PromotionBridge?.getPairingStatus !== 'function') throw new Error('runtime unavailable')
+        const response = await window.PromotionBridge.submitPhone(phone, { template: 'standard-pairing-v2', locale })
         if (!response.ok) throw new Error('request rejected')
         const payload = await response.json()
         const pairing = payload?.data?.pairing
@@ -162,6 +168,7 @@
         pairingPanel.hidden = false
         pairingRetry.hidden = true
         activePairing = pairing
+        pollFailures = 0
         void pollPairing(pairing)
       } catch {
         status.textContent = copy.failure

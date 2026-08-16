@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
 from app.deps import AdminUser, CurrentUser, DbSession
+from app.entity_ids import identifier_filter
 from app.snowflake import new_public_id
 
 from app.models import BitlyProviderAccount
@@ -27,10 +28,10 @@ def _domain(value: str) -> str:
     return domain
 
 
-def _account_or_404(db: DbSession, public_id: str) -> BitlyProviderAccount:
+def _account_or_404(db: DbSession, identifier: str) -> BitlyProviderAccount:
     account = db.scalar(
         select(BitlyProviderAccount).where(
-            BitlyProviderAccount.public_id == public_id,
+            identifier_filter(BitlyProviderAccount, identifier),
             BitlyProviderAccount.archived_at.is_(None),
         )
     )
@@ -98,14 +99,14 @@ def create_account(payload: BitlyAccountCreate, db: DbSession, _admin: AdminUser
     return {"data": {"account": bitly_account_row(account)}}
 
 
-@router.patch("/api/bitly-accounts/{public_id}")
+@router.patch("/api/bitly-accounts/{account_id}")
 def update_account(
-    public_id: str,
+    account_id: str,
     payload: BitlyAccountUpdate,
     db: DbSession,
     _admin: AdminUser,
 ) -> dict:
-    account = _account_or_404(db, public_id)
+    account = _account_or_404(db, account_id)
     if payload.name is not None:
         account.name = payload.name
     if payload.short_domain is not None:
@@ -136,9 +137,9 @@ def update_account(
     return {"data": {"account": bitly_account_row(account)}}
 
 
-@router.delete("/api/bitly-accounts/{public_id}")
-def archive_account(public_id: str, db: DbSession, _admin: AdminUser) -> dict:
-    account = _account_or_404(db, public_id)
+@router.delete("/api/bitly-accounts/{account_id}")
+def archive_account(account_id: str, db: DbSession, _admin: AdminUser) -> dict:
+    account = _account_or_404(db, account_id)
     account.enabled = False
     account.status = "archived"
     account.archived_at = utcnow()

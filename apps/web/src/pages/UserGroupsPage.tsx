@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
+import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
 import {
   Badge,
   Button,
@@ -32,9 +33,11 @@ import {
   ListToolbar,
   StandardListPage,
 } from "../components/list-page";
+import { EntityPrimaryCell } from "../components/entity-primary-cell";
 
 type GroupRow = {
-  id: string | number;
+  id: string;
+  readKey: string;
   name: string;
   description: string;
   builtin: boolean;
@@ -47,15 +50,19 @@ type GroupRow = {
 };
 function normalize(input: unknown): GroupRow {
   const row = input as Record<string, unknown>;
+  const id = snowflakeId(row, "id");
   return {
-    id: (row.id || row.publicId || row.public_id) as string | number,
+    id,
+    readKey: entityRowKey(row, id, "role", `${String(row.name || "")}:${String(row.createdAt || row.created_at || "")}`),
     name: String(row.name || ""),
     description: String(row.description || ""),
     builtin: Boolean(row.builtin ?? row.isBuiltin ?? row.is_builtin),
     userCount: Number(row.userCount ?? row.user_count ?? 0),
     enabled: Boolean(row.enabled ?? true),
     menuIds: Array.isArray(row.menuIds ?? row.menu_ids)
-      ? ((row.menuIds ?? row.menu_ids) as unknown[]).map(String)
+      ? ((row.menuIds ?? row.menu_ids) as unknown[])
+          .map((value) => snowflakeId({ id: value }, "id"))
+          .filter(Boolean)
       : [],
     permissionKeys: Array.isArray(row.permissionKeys ?? row.permission_keys)
       ? ((row.permissionKeys ?? row.permission_keys) as unknown[]).map(String)
@@ -79,7 +86,7 @@ const actionPermissionOptions = [
   { value: "marketing.data_packages.manage", label: "管理数据包" },
   { value: "marketing.hyperlink_templates.manage", label: "管理超链模板" },
   { value: "marketing.hyperlink_strategies.manage", label: "管理超链策略" },
-  { value: "marketing.materials.manage", label: "管理营销素材" },
+  { value: "resources.materials.manage", label: "管理素材库" },
   { value: "marketing.direct_short_links.manage", label: "管理直接短链" },
   { value: "resources.ip.manage", label: "管理 IP 资源" },
 ];
@@ -109,10 +116,12 @@ export function UserGroupsPage() {
       ]);
       setRows(unwrapList<unknown>(payload).rows.map(normalize));
       setMenus(
-        unwrapList<Record<string, unknown>>(menuPayload).rows.map((row) => ({
-          value: String(row.publicId || row.id),
-          label: String(row.name || row.routePath || row.publicId || row.id),
-        })),
+        unwrapList<Record<string, unknown>>(menuPayload).rows
+          .map((row) => ({
+            value: snowflakeId(row, "id"),
+            label: String(row.name || row.routePath || "未命名菜单"),
+          }))
+          .filter((row) => row.value),
       );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "加载角色失败");
@@ -141,6 +150,7 @@ export function UserGroupsPage() {
     setOpen(true);
   }
   function edit(row: GroupRow) {
+    if (!row.id) return;
     setEditing(row);
     setName(row.name);
     setDescription(row.description);
@@ -150,7 +160,7 @@ export function UserGroupsPage() {
     setOpen(true);
   }
   async function save() {
-    if (!name.trim()) return;
+    if (!name.trim() || (editing && !editing.id)) return;
     setPending(true);
     try {
       await apiRequest(
@@ -180,6 +190,7 @@ export function UserGroupsPage() {
     }
   }
   async function remove(row: GroupRow) {
+    if (!row.id) return;
     if (
       !(await confirmAction({
         title: `删除角色“${row.name}”？`,
@@ -198,7 +209,7 @@ export function UserGroupsPage() {
   }
 
   return (
-    <StandardListPage>
+    <StandardListPage viewport>
       <ListToolbar
         search={{
           value: keyword,
@@ -246,19 +257,30 @@ export function UserGroupsPage() {
                   <TableHead>类型</TableHead>
                   <TableHead>成员数</TableHead>
                   <TableHead>菜单 / 操作权限</TableHead>
-                  <TableHead>状态</TableHead>
                   <TableHead>更新时间</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {visibleRows.map((row) => (
-                  <TableRow key={row.id}>
+                  <TableRow key={row.readKey}>
                     <TableCell>
-                      <div className="cell-main">
-                        <strong>{row.name}</strong>
-                        <span>{row.description || "未填写说明"}</span>
-                      </div>
+                      <EntityPrimaryCell
+                        title={row.name}
+                        id={row.id}
+                        description={row.description || "未填写说明"}
+                        status={{
+                          label: row.enabled ? "启用" : "停用",
+                          description: row.enabled
+                            ? "角色当前可分配给用户并应用权限。"
+                            : "角色已停用，不应继续分配给用户。",
+                          tone: row.enabled ? "success" : "neutral",
+                          details: [
+                            { label: "类型", value: row.builtin ? "系统内置" : "自定义" },
+                            { label: "成员数", value: row.userCount },
+                          ],
+                        }}
+                      />
                     </TableCell>
                     <TableCell>
                       <Badge tone={row.builtin ? "primary" : "neutral"}>
@@ -269,24 +291,19 @@ export function UserGroupsPage() {
                     <TableCell className="tabular-nums">
                       {row.menuIds.length} / {row.permissionKeys.length}
                     </TableCell>
-                    <TableCell>
-                      <Badge tone={row.enabled ? "success" : "neutral"}>
-                        {row.enabled ? "启用" : "停用"}
-                      </Badge>
-                    </TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatDateTime(row.updatedAt || row.createdAt)}
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center justify-end gap-1">
-                        <IconButton label="编辑" onClick={() => edit(row)}>
+                        <IconButton label="编辑" disabled={!row.id} onClick={() => edit(row)}>
                           <PencilIcon size={16} />
                         </IconButton>
                         <IconButton
                           label="删除"
                           variant="ghost"
                           className="danger"
-                          disabled={row.builtin}
+                          disabled={!row.id || row.builtin}
                           onClick={() => void remove(row)}
                         >
                           <Trash2Icon size={16} />

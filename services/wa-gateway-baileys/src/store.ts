@@ -1,6 +1,6 @@
 import pg from 'pg'
 import type { Account, AccountState, AccountStateTransition, Message, PairingStatus, SessionCompleteness, SessionStatus, StoredAuth, StoredKey } from './domain.js'
-import { GatewayError } from './domain.js'
+import { GatewayError, normalizeSyncPolicy } from './domain.js'
 import { nextSnowflakeId } from './snowflake.js'
 
 const { Pool } = pg
@@ -9,12 +9,12 @@ export interface Store {
   migrate(): Promise<void>
   ready(): Promise<void>
   close(): Promise<void>
-  createAccount(account: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state'>): Promise<Account>
-  claimUnpairedAccount(account: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl'>): Promise<Account | null>
-  createImportedAccount(account: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness'>, auth: StoredAuth): Promise<Account>
+  createAccount(account: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>): Promise<Account>
+  claimUnpairedAccount(account: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>): Promise<Account | null>
+  createImportedAccount(account: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>, auth: StoredAuth): Promise<Account>
   listAccounts(): Promise<Account[]>
   getAccount(id: string): Promise<Account>
-  updateAccount(id: string, changes: Partial<Pick<Account, 'phoneE164' | 'proxyUrl' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'pairingStatus' | 'pairingExpiresAt' | 'metadataSyncStatus' | 'hasAvatar' | 'groupCount' | 'friendCount' | 'mutualContactCount'>>): Promise<Account>
+  updateAccount(id: string, changes: Partial<Pick<Account, 'phoneE164' | 'proxyUrl' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'pairingStatus' | 'pairingExpiresAt' | 'metadataSyncStatus' | 'hasAvatar' | 'groupCount' | 'friendCount' | 'mutualContactCount' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy' | 'metadata'>>): Promise<Account>
   transitionAccount(id: string, state: AccountState, changes: Partial<Pick<Account, 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'pairingStatus' | 'pairingExpiresAt' | 'metadataSyncStatus'>>, reasonCategory: string, providerCode?: string): Promise<AccountStateTransition>
   createMessage(message: Message): Promise<{ message: Message; created: boolean }>
   getMessage(id: string): Promise<Message>
@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS wa_gateway_baileys.accounts (
   state TEXT NOT NULL DEFAULT 'unpaired',
   device_jid TEXT NOT NULL DEFAULT '',
   auto_connect BOOLEAN NOT NULL DEFAULT FALSE,
+  connection_policy TEXT NOT NULL DEFAULT 'on_demand',
+  idle_disconnect_seconds INTEGER NOT NULL DEFAULT 600,
+  post_verify_grace_seconds INTEGER NOT NULL DEFAULT 120,
+  sync_policy JSONB NOT NULL DEFAULT '{}'::jsonb,
   session_status TEXT NOT NULL DEFAULT 'none',
   session_completeness TEXT NOT NULL DEFAULT 'none',
   pairing_status TEXT NOT NULL DEFAULT 'idle',
@@ -47,6 +51,7 @@ CREATE TABLE IF NOT EXISTS wa_gateway_baileys.accounts (
   group_count INTEGER,
   friend_count INTEGER,
   mutual_contact_count INTEGER,
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   state_changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   invalidated_at TIMESTAMPTZ,
   reason_category TEXT NOT NULL DEFAULT 'created',
@@ -66,6 +71,11 @@ ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS reason_category
 ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS provider_code TEXT;
 ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS pairing_status TEXT NOT NULL DEFAULT 'idle';
 ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS pairing_expires_at TIMESTAMPTZ;
+ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS connection_policy TEXT NOT NULL DEFAULT 'on_demand';
+ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS idle_disconnect_seconds INTEGER NOT NULL DEFAULT 600;
+ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS post_verify_grace_seconds INTEGER NOT NULL DEFAULT 120;
+ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS sync_policy JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb;
 UPDATE wa_gateway_baileys.accounts
   SET invalidated_at=COALESCE(invalidated_at,state_changed_at), reason_category='restricted'
   WHERE state='restricted' AND invalidated_at IS NULL;
@@ -244,6 +254,10 @@ interface AccountRow {
   state: AccountState
   device_jid: string
   auto_connect: boolean
+  connection_policy: Account['connectionPolicy']
+  idle_disconnect_seconds: number
+  post_verify_grace_seconds: number
+  sync_policy: Account['syncPolicy']
   session_status: SessionStatus
   session_completeness: SessionCompleteness
   pairing_status: PairingStatus
@@ -253,6 +267,7 @@ interface AccountRow {
   group_count: number | null
   friend_count: number | null
   mutual_contact_count: number | null
+  metadata_json: Record<string, unknown>
   state_changed_at: Date
   invalidated_at: Date | null
   reason_category: string
@@ -282,6 +297,10 @@ function accountFromRow(row: AccountRow): Account {
     state: row.state,
     deviceJid: row.device_jid,
     autoConnect: row.auto_connect,
+    connectionPolicy: row.connection_policy,
+    idleDisconnectSeconds: row.idle_disconnect_seconds,
+    postVerifyGraceSeconds: row.post_verify_grace_seconds,
+    syncPolicy: normalizeSyncPolicy(row.sync_policy),
     sessionStatus: row.session_status,
     sessionCompleteness: row.session_completeness,
     pairingStatus: row.pairing_status,
@@ -291,6 +310,7 @@ function accountFromRow(row: AccountRow): Account {
     groupCount: row.group_count,
     friendCount: row.friend_count,
     mutualContactCount: row.mutual_contact_count,
+    metadata: row.metadata_json,
     stateChangedAt: row.state_changed_at,
     invalidatedAt: row.invalidated_at,
     reasonCategory: row.reason_category,
@@ -326,11 +346,11 @@ export class PostgresStore implements Store {
   async ready(): Promise<void> { await this.pool.query('SELECT 1') }
   async close(): Promise<void> { await this.pool.end() }
 
-  async createAccount(input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state'>): Promise<Account> {
+  async createAccount(input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>): Promise<Account> {
     try {
       const result = await this.pool.query<AccountRow>(`
-        INSERT INTO wa_gateway_baileys.accounts(internal_id,id, phone_e164, proxy_url, state)
-        VALUES($1,$2,$3,$4,$5) RETURNING *`, [nextSnowflakeId(), input.id, input.phoneE164, input.proxyUrl, input.state])
+        INSERT INTO wa_gateway_baileys.accounts(internal_id,id, phone_e164, proxy_url, state, connection_policy, idle_disconnect_seconds, post_verify_grace_seconds, sync_policy)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`, [nextSnowflakeId(), input.id, input.phoneE164, input.proxyUrl, input.state, input.connectionPolicy, input.idleDisconnectSeconds, input.postVerifyGraceSeconds, input.syncPolicy])
       return accountFromRow(result.rows[0]!)
     } catch (error) {
       if ((error as { code?: string }).code === '23505') throw new GatewayError('conflict', 'account id or phone already exists')
@@ -338,10 +358,12 @@ export class PostgresStore implements Store {
     }
   }
 
-  async claimUnpairedAccount(input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl'>): Promise<Account | null> {
+  async claimUnpairedAccount(input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>): Promise<Account | null> {
     const result = await this.pool.query<AccountRow>(`
       UPDATE wa_gateway_baileys.accounts AS account
-      SET id=$1, proxy_url=$3, updated_at=NOW(), reason_category='orphan_reclaimed', provider_code=NULL
+      SET id=$1, proxy_url=$3, connection_policy=$4, idle_disconnect_seconds=$5,
+          post_verify_grace_seconds=$6, sync_policy=$7, updated_at=NOW(),
+          reason_category='orphan_reclaimed', provider_code=NULL
       WHERE account.phone_e164=$2
         AND account.id<>$1
         AND account.state='unpaired'
@@ -351,12 +373,12 @@ export class PostgresStore implements Store {
         AND NOT EXISTS (SELECT 1 FROM wa_gateway_baileys.auth_creds creds WHERE creds.account_id=account.id)
         AND NOT EXISTS (SELECT 1 FROM wa_gateway_baileys.auth_keys keys WHERE keys.account_id=account.id)
         AND NOT EXISTS (SELECT 1 FROM wa_gateway_baileys.messages messages WHERE messages.account_id=account.id)
-      RETURNING account.*`, [input.id, input.phoneE164, input.proxyUrl])
+      RETURNING account.*`, [input.id, input.phoneE164, input.proxyUrl, input.connectionPolicy, input.idleDisconnectSeconds, input.postVerifyGraceSeconds, input.syncPolicy])
     return result.rows[0] ? accountFromRow(result.rows[0]) : null
   }
 
   async createImportedAccount(
-    input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness'>,
+    input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>,
     auth: StoredAuth,
   ): Promise<Account> {
     const client = await this.pool.connect()
@@ -364,9 +386,9 @@ export class PostgresStore implements Store {
       await client.query('BEGIN')
       const result = await client.query<AccountRow>(`
         INSERT INTO wa_gateway_baileys.accounts
-          (internal_id,id,phone_e164,proxy_url,state,device_jid,auto_connect,session_status,session_completeness,reason_category)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'session_imported') RETURNING *`,
-      [nextSnowflakeId(), input.id, input.phoneE164, input.proxyUrl, input.state, input.deviceJid, input.autoConnect, input.sessionStatus, input.sessionCompleteness])
+          (internal_id,id,phone_e164,proxy_url,state,device_jid,auto_connect,session_status,session_completeness,connection_policy,idle_disconnect_seconds,post_verify_grace_seconds,sync_policy,reason_category)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'session_imported') RETURNING *`,
+      [nextSnowflakeId(), input.id, input.phoneE164, input.proxyUrl, input.state, input.deviceJid, input.autoConnect, input.sessionStatus, input.sessionCompleteness, input.connectionPolicy, input.idleDisconnectSeconds, input.postVerifyGraceSeconds, input.syncPolicy])
       await client.query(`INSERT INTO wa_gateway_baileys.auth_creds(internal_id,account_internal_id,account_id,value)
         SELECT $1,internal_id,id,$3 FROM wa_gateway_baileys.accounts WHERE id=$2`, [nextSnowflakeId(), input.id, auth.creds])
       for (const key of auth.keys) {
@@ -393,10 +415,10 @@ export class PostgresStore implements Store {
     return accountFromRow(result.rows[0])
   }
 
-  async updateAccount(id: string, changes: Partial<Pick<Account, 'phoneE164' | 'proxyUrl' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'pairingStatus' | 'pairingExpiresAt' | 'metadataSyncStatus' | 'hasAvatar' | 'groupCount' | 'friendCount' | 'mutualContactCount'>>): Promise<Account> {
+  async updateAccount(id: string, changes: Partial<Pick<Account, 'phoneE164' | 'proxyUrl' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'pairingStatus' | 'pairingExpiresAt' | 'metadataSyncStatus' | 'hasAvatar' | 'groupCount' | 'friendCount' | 'mutualContactCount' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy' | 'metadata'>>): Promise<Account> {
     const entries = Object.entries(changes)
     if (!entries.length) return this.getAccount(id)
-    const columns: Record<string, string> = { phoneE164: 'phone_e164', proxyUrl: 'proxy_url', deviceJid: 'device_jid', autoConnect: 'auto_connect', sessionStatus: 'session_status', sessionCompleteness: 'session_completeness', pairingStatus: 'pairing_status', pairingExpiresAt: 'pairing_expires_at', metadataSyncStatus: 'metadata_sync_status', hasAvatar: 'has_avatar', groupCount: 'group_count', friendCount: 'friend_count', mutualContactCount: 'mutual_contact_count' }
+    const columns: Record<string, string> = { phoneE164: 'phone_e164', proxyUrl: 'proxy_url', deviceJid: 'device_jid', autoConnect: 'auto_connect', sessionStatus: 'session_status', sessionCompleteness: 'session_completeness', pairingStatus: 'pairing_status', pairingExpiresAt: 'pairing_expires_at', metadataSyncStatus: 'metadata_sync_status', hasAvatar: 'has_avatar', groupCount: 'group_count', friendCount: 'friend_count', mutualContactCount: 'mutual_contact_count', connectionPolicy: 'connection_policy', idleDisconnectSeconds: 'idle_disconnect_seconds', postVerifyGraceSeconds: 'post_verify_grace_seconds', syncPolicy: 'sync_policy', metadata: 'metadata_json' }
     const values = entries.map(([, value]) => value)
     const setters = entries.map(([key], index) => `${columns[key]}=$${index + 2}`).join(', ')
     try {

@@ -8,10 +8,11 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { apiRequest, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import { snowflakeId } from "../lib/account-identifiers";
 import { Button, Drawer, Input, SelectField, Spinner, toast } from "./ui";
 
 type PairingState = {
-  accountPublicId: string;
+  accountId: string;
   code: string;
   status: string;
   expiresAt?: string;
@@ -27,14 +28,9 @@ function unpackPairing(payload: unknown): PairingState {
   const data = root as Record<string, unknown>;
   const account = (data.account || {}) as Record<string, unknown>;
   return {
-    accountPublicId: String(
-      data.accountPublicId ||
-        data.account_public_id ||
-        account.publicId ||
-        account.public_id ||
-        account.id ||
-        "",
-    ),
+    accountId:
+      snowflakeId(data, "accountId", "account_id", "id") ||
+      snowflakeId(account, "id", "accountId", "account_id"),
     code: String(data.pairingCode || data.pairing_code || data.code || ""),
     status: String(data.status || account.status || "pairing"),
     expiresAt: String(data.expiresAt || data.expires_at || ""),
@@ -104,7 +100,7 @@ export function PhonePairingModal({
   const [phoneNumber, setPhoneNumber] = useState("");
   const [pairing, setPairing] = useState<PairingState | null>(null);
   const [proxies, setProxies] = useState<ProxyOption[]>([]);
-  const [proxyPublicId, setProxyPublicId] = useState("");
+  const [proxyId, setProxyId] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
 
@@ -112,7 +108,7 @@ export function PhonePairingModal({
     if (!open) {
       setPairing(null);
       setPhoneNumber("");
-      setProxyPublicId("");
+      setProxyId("");
       setError("");
       setPending(false);
     }
@@ -121,7 +117,7 @@ export function PhonePairingModal({
   useEffect(() => {
     if (!open || !user?.isAdmin) {
       setProxies([]);
-      setProxyPublicId("");
+      setProxyId("");
       return;
     }
     void apiRequest("/api/ip-proxies?enabled=true&pageSize=100")
@@ -129,11 +125,12 @@ export function PhonePairingModal({
         const options = unwrapList<Record<string, unknown>>(payload)
           .rows.filter((row) => row.enabled !== false)
           .map((row) => ({
-            id: String(row.publicId || row.id || ""),
+            id: snowflakeId(row, "id", "proxyId", "proxy_id"),
             label: `${String(row.name || "IP 代理")}${row.countryCode ? ` · ${String(row.countryCode)}` : ""}`,
-          }));
+          }))
+          .filter((option) => option.id);
         setProxies(options);
-        setProxyPublicId((current) =>
+        setProxyId((current) =>
           options.some((option) => option.id === current) ? current : "",
         );
       })
@@ -141,9 +138,9 @@ export function PhonePairingModal({
   }, [open, user?.isAdmin]);
 
   useEffect(() => {
-    if (!open || !pairing?.accountPublicId || isPaired(pairing.status)) return;
+    if (!open || !pairing?.accountId || isPaired(pairing.status)) return;
     const timer = window.setInterval(() => {
-      void apiRequest(`/api/personal-accounts/${pairing.accountPublicId}`)
+      void apiRequest(`/api/personal-accounts/${pairing.accountId}`)
         .then((payload) => {
           const next = unpackPairing(payload);
           setPairing((current) => ({
@@ -156,7 +153,7 @@ export function PhonePairingModal({
         .catch(() => undefined);
     }, 2500);
     return () => window.clearInterval(timer);
-  }, [onPaired, open, pairing?.accountPublicId, pairing?.status]);
+  }, [onPaired, open, pairing?.accountId, pairing?.status]);
 
   async function requestCode() {
     const prefix = countryCode.replace(/\D/g, "");
@@ -165,15 +162,15 @@ export function PhonePairingModal({
     setPending(true);
     setError("");
     try {
-      let accountId = pairing?.accountPublicId || "";
+      let accountId = pairing?.accountId || "";
       if (!accountId) {
         const created = await apiRequest("/api/personal-accounts", {
           method: "POST",
           body: JSON.stringify({
-            name: `+${prefix}${number}`,
+            name: `${prefix}${number}`,
             phone: `+${prefix}${number}`,
-            proxyPublicId: user?.isAdmin
-              ? proxyPublicId || undefined
+            proxyId: user?.isAdmin
+              ? proxyId || undefined
               : undefined,
           }),
         });
@@ -183,12 +180,10 @@ export function PhonePairingModal({
           string,
           unknown
         >;
-        accountId = String(
-          account.publicId || account.public_id || account.id || "",
-        );
+        accountId = snowflakeId(account, "id", "accountId", "account_id");
       }
       if (!accountId)
-        throw new Error("账号创建成功，但未返回 Account Public ID");
+        throw new Error("账号创建成功，但未返回账号 ID");
       const payload = await apiRequest(
         `/api/personal-accounts/${accountId}/pairing-code`,
         {
@@ -196,9 +191,9 @@ export function PhonePairingModal({
           body: JSON.stringify({ phone: `+${prefix}${number}` }),
         },
       );
-      const next = { ...unpackPairing(payload), accountPublicId: accountId };
+      const next = { ...unpackPairing(payload), accountId };
       if (!next.code && !isPaired(next.status))
-        throw new Error("网关暂未返回配对码，请稍后重试");
+        throw new Error("暂未获取到配对码，请稍后重试");
       setPairing(next);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "生成配对码失败");
@@ -237,22 +232,23 @@ export function PhonePairingModal({
           <div className="phone-fields">
             <label className="field country-code-field">
               <span>国家区号</span>
-              <div className="prefix-input">
-                <span>+</span>
-                <Input
-                  value={countryCode}
-                  inputMode="numeric"
-                  onChange={(event) => setCountryCode(event.target.value)}
-                  placeholder="86"
-                />
-              </div>
+              <Input
+                value={countryCode}
+                inputMode="numeric"
+                onChange={(event) =>
+                  setCountryCode(event.target.value.replace(/\D/g, ""))
+                }
+                placeholder="86"
+              />
             </label>
             <label className="field">
               <span>手机号码</span>
               <Input
                 value={phoneNumber}
                 inputMode="tel"
-                onChange={(event) => setPhoneNumber(event.target.value)}
+                onChange={(event) =>
+                  setPhoneNumber(event.target.value.replace(/\D/g, ""))
+                }
                 placeholder="请输入不含区号的号码"
               />
             </label>
@@ -263,8 +259,8 @@ export function PhonePairingModal({
               <SelectField
                 ariaLabel="账号隔离代理"
                 className="w-full"
-                value={proxyPublicId}
-                onValueChange={setProxyPublicId}
+                value={proxyId}
+                onValueChange={setProxyId}
                 placeholder="系统自动分配隔离 IP"
                 clearable
                 options={proxies.map((proxy) => ({

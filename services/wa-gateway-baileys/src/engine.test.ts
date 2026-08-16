@@ -1,11 +1,16 @@
 import { EventEmitter } from 'node:events'
 import type { ConnectionState } from '@whiskeysockets/baileys'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  BaileysEngine,
   hasReconnectableIdentity,
   isRequiredPairingRestart,
   requestStablePairingCode,
 } from './engine.js'
+import type { ManagedMediaReference } from './message-content.js'
+import type { Store } from './store.js'
+
+afterEach(() => vi.unstubAllGlobals())
 
 describe('Baileys pairing restart classification', () => {
   it('accepts pair-success identity credentials even before registered is true', () => {
@@ -112,5 +117,45 @@ describe('Baileys pairing socket readiness', () => {
     ev.emit('connection.update', { qr: 'pair-device-ref' })
     await expect(pending)
       .resolves.toBe('1234-5678')
+  })
+})
+
+describe('managed material delivery', () => {
+  const reference = (sha256: string): ManagedMediaReference => ({
+    id: '4780486454931715',
+    token: 'signed-material-token',
+    fileName: 'banner.png',
+    mimeType: 'image/png',
+    size: 4,
+    sha256,
+  })
+
+  const fetchMaterial = (engine: BaileysEngine, media: ManagedMediaReference) =>
+    (engine as unknown as {
+      fetchManagedMaterial(value: ManagedMediaReference): Promise<Buffer>
+    }).fetchManagedMaterial(media)
+
+  it('downloads a signed managed material and verifies its bytes', async () => {
+    const bytes = Buffer.from('test')
+    const digest = '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08'
+    const request = vi.fn(async () => new Response(bytes))
+    vi.stubGlobal('fetch', request)
+    const engine = new BaileysEngine({} as Store, undefined, 'http://api:8000')
+
+    await expect(fetchMaterial(engine, reference(digest))).resolves.toEqual(bytes)
+    expect(request).toHaveBeenCalledWith(
+      'http://api:8000/api/internal/materials/4780486454931715/content',
+      expect.objectContaining({
+        headers: { Authorization: 'Bearer signed-material-token' },
+      }),
+    )
+  })
+
+  it('rejects managed material bytes when the checksum changes', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(Buffer.from('test'))))
+    const engine = new BaileysEngine({} as Store, undefined, 'http://api:8000')
+
+    await expect(fetchMaterial(engine, reference('a'.repeat(64))))
+      .rejects.toThrow('checksum changed')
   })
 })

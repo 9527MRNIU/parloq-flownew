@@ -26,6 +26,10 @@ def test_gateway_client_uses_canonical_contract_and_bearer(monkeypatch) -> None:
             return _Response([{"id": "wa_contract", "state": "unpaired"}])
         if url.endswith("/pairing-code"):
             return _Response({"code": "1234-5678"})
+        if url.endswith("/reauthentication-code"):
+            return _Response({"code": "8765-4321"})
+        if url.endswith("/metadata-sync"):
+            return _Response({"metadataSyncStatus": "ready", "quality": {}})
         if url.endswith("/messages"):
             return _Response({"messageId": "idem-12345678", "status": "queued"})
         if url.endswith("/export-session"):
@@ -51,6 +55,20 @@ def test_gateway_client_uses_canonical_contract_and_bearer(monkeypatch) -> None:
     assert client.pair("wa_contract", "+12025550199", "pairing_code", None)["code"] == "1234-5678"
     assert client.cancel_pairing("wa_contract")["state"] == "unpaired"
     assert client.send("wa_contract", "idem-12345678", "+12025550200", "hello")["status"] == "queued"
+    structured_message = {
+        "version": 1,
+        "header": {"type": "none"},
+        "body": {"text": "hello"},
+        "footer": {"text": ""},
+        "buttons": [{"type": "quick_reply", "text": "Reply", "id": "reply"}],
+    }
+    assert client.send(
+        "wa_contract", "idem-structured", "+12025550200", structured_message
+    )["status"] == "queued"
+    assert client.reauthenticate("wa_contract", "+12025550199")["code"] == "8765-4321"
+    assert client.sync_metadata("wa_contract", {"avatar": True})[
+        "metadataSyncStatus"
+    ] == "ready"
 
     assert calls[0][2]["json"] == {
         "id": "wa_contract",
@@ -76,6 +94,17 @@ def test_gateway_client_uses_canonical_contract_and_bearer(monkeypatch) -> None:
         "toE164": "+12025550200",
         "text": "hello",
     }
+    assert calls[9][2]["json"] == {
+        "messageId": "idem-structured",
+        "toE164": "+12025550200",
+        "message": structured_message,
+    }
+    assert calls[10][1].endswith(
+        "/v1/accounts/wa_contract/reauthentication-code"
+    )
+    assert calls[10][2]["json"] == {"phoneE164": "+12025550199"}
+    assert calls[11][1].endswith("/v1/accounts/wa_contract/metadata-sync")
+    assert calls[11][2]["json"] == {"syncPolicy": {"avatar": True}}
     assert all(
         call[2]["headers"]["Authorization"] == "Bearer gateway-token"
         for call in calls

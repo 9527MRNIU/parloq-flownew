@@ -6,10 +6,26 @@ import {
   ChevronsRightIcon,
   SearchIcon,
 } from "lucide-react";
+import { cn } from "../lib/utils";
 import { Button, Input, SelectField } from "./ui";
 
-export function StandardListPage({ children }: { children: ReactNode }) {
-  return <div className="flex min-w-0 flex-1 flex-col gap-4">{children}</div>;
+export function StandardListPage({
+  children,
+  viewport = false,
+}: {
+  children: ReactNode;
+  viewport?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "standard-list-page flex min-w-0 flex-1 flex-col gap-4",
+        viewport && "standard-list-page--viewport",
+      )}
+    >
+      {children}
+    </div>
+  );
 }
 
 export function ListToolbar({
@@ -29,7 +45,7 @@ export function ListToolbar({
   actions?: ReactNode;
 }) {
   const searchControl = search ? (
-    <div className="relative w-full max-w-xl">
+    <div className="relative w-full max-w-80">
       <SearchIcon className="pointer-events-none absolute top-1/2 left-3 z-10 size-4 -translate-y-1/2 text-muted-foreground" />
       <Input
         className="pl-9"
@@ -42,7 +58,7 @@ export function ListToolbar({
 
   return (
     <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-      <div className="flex min-w-0 flex-1 flex-col gap-3 lg:flex-row lg:items-center [&>form]:w-full [&>form]:max-w-xl">
+      <div className="flex min-w-0 flex-1 flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-center [&>form]:w-full [&>form]:max-w-80">
         {search?.onSubmit ? (
           <form
             onSubmit={(event) => {
@@ -71,7 +87,7 @@ export function ListToolbar({
 
 export function ListTableCard({ children }: { children: ReactNode }) {
   return (
-    <section className="min-h-[420px] overflow-hidden rounded-lg border bg-background">
+    <section className="list-table-card min-h-60 overflow-auto rounded-lg border bg-background">
       {children}
     </section>
   );

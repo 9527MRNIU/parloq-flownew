@@ -9,13 +9,18 @@ from app.models import AuthSession, UserAccount, UserGroup
 from app.schemas import UserCreate, UserUpdate
 from app.security import hash_password, utcnow
 from app.serializers import user_row
+from app.snowflake import parse_snowflake_id
 
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
 
-def _group_or_404(db: DbSession, group_id: int) -> UserGroup:
-    group = db.get(UserGroup, group_id)
+def _group_or_404(db: DbSession, group_id: str) -> UserGroup:
+    try:
+        database_id = parse_snowflake_id(group_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="用户组不存在") from None
+    group = db.get(UserGroup, database_id)
     if group is None or not group.enabled:
         raise HTTPException(status_code=404, detail="用户组不存在")
     return group
@@ -78,12 +83,16 @@ def create_user(payload: UserCreate, db: DbSession, _admin: AdminUser) -> dict:
 
 @router.patch("/{user_id}")
 def update_user(
-    user_id: int,
+    user_id: str,
     payload: UserUpdate,
     db: DbSession,
     current_admin: AdminUser,
 ) -> dict:
-    user = db.get(UserAccount, user_id)
+    try:
+        database_id = parse_snowflake_id(user_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="用户不存在") from None
+    user = db.get(UserAccount, database_id)
     if user is None:
         raise HTTPException(status_code=404, detail="用户不存在")
     group = user.group
@@ -122,8 +131,12 @@ def update_user(
 
 
 @router.delete("/{user_id}")
-def delete_user(user_id: int, db: DbSession, current_admin: AdminUser) -> dict:
-    user = db.get(UserAccount, user_id)
+def delete_user(user_id: str, db: DbSession, current_admin: AdminUser) -> dict:
+    try:
+        database_id = parse_snowflake_id(user_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="用户不存在") from None
+    user = db.get(UserAccount, database_id)
     if user is None:
         raise HTTPException(status_code=404, detail="用户不存在")
     if user.id == current_admin.id:

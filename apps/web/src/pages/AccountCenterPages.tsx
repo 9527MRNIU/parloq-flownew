@@ -1,25 +1,11 @@
 import {
-  BarChart3Icon,
-  CheckCircle2Icon,
   DownloadIcon,
-  FileJsonIcon,
-  LoaderCircleIcon,
   PencilIcon,
   PlusIcon,
   RefreshCwIcon,
-  ShieldCheckIcon,
   Trash2Icon,
-  UploadCloudIcon,
-  UsersIcon,
-  WifiIcon,
 } from "lucide-react";
-import {
-  type FormEvent,
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   apiDownload,
   apiRequest,
@@ -27,7 +13,10 @@ import {
   unwrapList,
 } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import { AccountStatusIndicator } from "../components/account-status-indicator";
+import { EntityPrimaryCell } from "../components/entity-primary-cell";
 import {
+  ListPagination,
   ListTableCard,
   ListToolbar,
   StandardListPage,
@@ -35,6 +24,7 @@ import {
 import {
   Badge,
   Button,
+  Checkbox,
   confirmAction,
   Drawer,
   EmptyState,
@@ -51,6 +41,12 @@ import {
   Textarea,
   toast,
 } from "../components/ui";
+import {
+  accountRowKey,
+  groupRowKey,
+  snowflakeId,
+} from "../lib/account-identifiers";
+import { formatPhoneDisplay } from "../lib/utils";
 
 const field = (row: Record<string, unknown>, ...keys: string[]) => {
   for (const key of keys) if (row[key] != null) return String(row[key]);
@@ -69,199 +65,74 @@ const optionalNumber = (row: Record<string, unknown>, ...keys: string[]) => {
 
 type ExportAccount = {
   id: string;
+  readKey: string;
   phone: string;
   name: string;
+  countryCode: string;
   status: string;
   source: string;
   connected: boolean;
+  validationStatus: string;
+  metadataSyncStatus: string;
+  lastError: string;
+  groupId: string;
+  groupName: string;
   createdAt: string;
 };
 
 function exportAccount(input: unknown): ExportAccount {
   const row = input as Record<string, unknown>;
   const status = field(row, "connectionStatus", "connection_status", "status");
+  const group = (row.group || {}) as Record<string, unknown>;
+  const id = snowflakeId(
+    row,
+    "id",
+    "accountId",
+    "account_id",
+    "snowflakeId",
+    "snowflake_id",
+  );
+  const rawName = field(row, "displayName", "display_name", "name");
   return {
-    id: field(row, "publicId", "public_id", "id"),
-    phone: field(row, "phoneNumber", "phone_number", "phone"),
-    name: field(row, "displayName", "display_name", "name"),
+    id,
+    readKey: accountRowKey(row, id),
+    phone: formatPhoneDisplay(
+      field(row, "phoneNumber", "phone_number", "phone"),
+    ),
+    name: /^\+\d+$/.test(rawName)
+      ? formatPhoneDisplay(rawName)
+      : rawName,
+    countryCode: field(row, "countryCode", "country_code"),
     status: status || "offline",
     source: field(row, "source", "credentialSource", "credential_source"),
     connected: Boolean(
-      row.connected ?? ["connected", "online", "online_idle"].includes(status),
+      row.connected ?? ["connected", "online", "online_idle", "sending"].includes(status),
     ),
+    validationStatus: field(row, "validationStatus", "validation_status"),
+    metadataSyncStatus: field(row, "metadataSyncStatus", "metadata_sync_status"),
+    lastError: field(row, "lastError", "last_error"),
+    groupId:
+      snowflakeId(group, "id", "groupId", "group_id") ||
+      snowflakeId(row, "groupId", "group_id"),
+    groupName:
+      field(group, "name") || field(row, "groupName", "group_name"),
     createdAt: field(row, "createdAt", "created_at"),
   };
 }
 
+const exportable = (row: ExportAccount) =>
+  Boolean(row.id) &&
+  row.validationStatus === "ready" &&
+  !["pairing", "warming", "online_idle", "sending", "draining"].includes(
+    row.status,
+  );
+
 function sourceBadge(source: string) {
   if (["landing_page", "landing", "pairing"].includes(source))
-    return <Badge tone="primary">落地页链接</Badge>;
+    return <Badge tone="info">落地页链接</Badge>;
   if (["json", "json_import", "import"].includes(source))
     return <Badge tone="neutral">JSON 导入</Badge>;
   return <Badge tone="neutral">待识别</Badge>;
-}
-
-export function AccountImportPage() {
-  const { can, user } = useAuth();
-  const canManage =
-    can("resources.accounts.import") ||
-    can("resources.accounts.manage") ||
-    can("business.personal_accounts.manage");
-  const [file, setFile] = useState<File | null>(null);
-  const [validating, setValidating] = useState(false);
-  const [pending, setPending] = useState(false);
-  const [validation, setValidation] = useState<{
-    valid: boolean;
-    message: string;
-  } | null>(null);
-  const [result, setResult] = useState<Record<string, unknown> | null>(null);
-  const [proxyId, setProxyId] = useState("");
-  const [proxyOptions, setProxyOptions] = useState<Array<{ value: string; label: string }>>([]);
-
-  useEffect(() => {
-    if (!user?.isAdmin) return;
-    void apiRequest("/api/ip-proxies?pageSize=100")
-      .then((payload) => {
-        setProxyOptions(
-          unwrapList<Record<string, unknown>>(payload).rows.map((row) => ({
-            value: field(row, "publicId", "public_id", "id"),
-            label: [
-              field(row, "name"),
-              field(row, "countryCode", "country_code"),
-              field(row, "host"),
-            ].filter(Boolean).join(" · "),
-          })).filter((option) => option.value),
-        );
-      })
-      .catch(() => setProxyOptions([]));
-  }, [user?.isAdmin]);
-
-  async function choose(next: File | null) {
-    setFile(next);
-    setResult(null);
-    setValidation(null);
-    if (!next) return;
-    setValidating(true);
-    try {
-      if (!next.name.toLowerCase().endsWith(".json"))
-        throw new Error("请选择 .json 文件");
-      if (next.size > 10 * 1024 * 1024)
-        throw new Error("JSON 文件不能超过 10 MB");
-      const parsed = JSON.parse(await next.text()) as unknown;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-        throw new Error("JSON 顶层必须是对象");
-      setValidation({
-        valid: true,
-        message: "文件结构可解析；服务器将在入库前校验 Baileys 凭据完整性。",
-      });
-    } catch (caught) {
-      setValidation({
-        valid: false,
-        message: caught instanceof Error ? caught.message : "JSON 无法解析",
-      });
-    } finally {
-      setValidating(false);
-    }
-  }
-
-  async function submit(event?: FormEvent) {
-    event?.preventDefault();
-    if (!file || !validation?.valid || !canManage) return;
-    setPending(true);
-    setResult(null);
-    try {
-      const body = new FormData();
-      body.set("file", file);
-      if (proxyId) body.set("proxyPublicId", proxyId);
-      const payload = await apiRequest("/api/personal-accounts/import", {
-        method: "POST",
-        body,
-      });
-      const data = (payload as { data?: Record<string, unknown> }).data;
-      const account = data?.account;
-      setResult(
-        account && typeof account === "object" && !Array.isArray(account)
-          ? (account as Record<string, unknown>)
-          : data || (payload as Record<string, unknown>),
-      );
-      toast.success("账号 JSON 已导入统一账号池");
-    } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "导入失败");
-    } finally {
-      setPending(false);
-    }
-  }
-
-  return (
-    <StandardListPage>
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-        <form className="card flex min-h-[420px] flex-col gap-5" onSubmit={submit}>
-          <div className="flex items-start gap-3">
-            <span className="summary-icon"><FileJsonIcon size={19} /></span>
-            <div className="cell-main">
-              <strong>导入 Baileys 账号 JSON</strong>
-              <span>导入后先校验凭据并尝试恢复连接，验证成功才进入可用账号池。</span>
-            </div>
-          </div>
-          <label className="upload-zone min-h-56">
-            <Input
-              type="file"
-              accept=".json,application/json"
-              disabled={pending || !canManage}
-              onChange={(event) => void choose(event.target.files?.[0] || null)}
-            />
-            {validating ? <Spinner /> : <UploadCloudIcon size={30} />}
-            <strong>{file?.name || "选择账号 JSON 文件"}</strong>
-            <span>支持 Baileys creds JSON 与本系统完整备份 JSON；最大 10 MB</span>
-          </label>
-          {validation ? (
-            <div className={`rounded-lg border p-3 text-sm ${validation.valid ? "border-emerald-600/20 bg-emerald-600/5" : "border-destructive/20 bg-destructive/5 text-destructive"}`}>
-              {validation.message}
-            </div>
-          ) : null}
-          {user?.isAdmin ? (
-            <label className="field">
-              <span>固定 IP（可选）</span>
-              <SelectField
-                value={proxyId}
-                onValueChange={setProxyId}
-                options={proxyOptions}
-                placeholder="按当前 IP 策略自动分配"
-                clearable
-                disabled={pending}
-              />
-              <small>“仅手动分配”模式必须选择；其他模式留空会按策略自动选择。</small>
-            </label>
-          ) : null}
-          {result ? (
-            <div className="rounded-lg border border-emerald-600/20 bg-emerald-600/5 p-4">
-              <div className="flex items-center gap-2 font-medium text-emerald-700 dark:text-emerald-400">
-                <CheckCircle2Icon size={17} />导入请求已完成
-              </div>
-              <p className="mt-2 text-sm text-muted-foreground">
-                账号：{field(result, "phoneNumber", "phone_number", "phone", "accountPublicId", "publicId") || "已入库"}
-                {field(result, "status", "connectionStatus") ? ` · ${field(result, "status", "connectionStatus")}` : ""}
-              </p>
-            </div>
-          ) : null}
-          <div className="flex justify-end">
-            <Button disabled={!canManage || pending || !file || !validation?.valid}>
-              {pending ? <LoaderCircleIcon className="spin" size={16} /> : <UploadCloudIcon size={16} />}
-              校验并导入
-            </Button>
-          </div>
-        </form>
-        <aside className="card h-fit">
-          <h3>导入规则</h3>
-          <div className="mt-4 grid gap-4 text-sm text-muted-foreground">
-            <p><strong className="text-foreground">统一协议：</strong>账号池统一使用 Baileys，不接受仅以“五段字符串”表示的不完整凭据。</p>
-            <p><strong className="text-foreground">安全校验：</strong>系统会校验号码、身份密钥、设备签名与必要会话数据，不会把解析成功误判为连接成功。</p>
-            <p><strong className="text-foreground">入池条件：</strong>恢复连接并完成基础资料同步后才可用于营销；资料未知期间显示“待同步”。</p>
-          </div>
-        </aside>
-      </section>
-    </StandardListPage>
-  );
 }
 
 export function AccountExportPage() {
@@ -273,12 +144,23 @@ export function AccountExportPage() {
   const [rows, setRows] = useState<ExportAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
+  const [connectionFilter, setConnectionFilter] = useState("all");
+  const [validationFilter, setValidationFilter] = useState("all");
+  const [sourceFilter, setSourceFilter] = useState("all");
+  const [groupFilter, setGroupFilter] = useState("all");
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [exporting, setExporting] = useState("");
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const payload = await apiRequest("/api/personal-accounts?pageSize=100");
-      setRows(unwrapList<unknown>(payload).rows.map(exportAccount));
+      const nextRows = unwrapList<unknown>(payload).rows.map(exportAccount);
+      setRows(nextRows);
+      setSelectedIds((current) =>
+        current.filter((id) =>
+          nextRows.some((row) => row.id === id && exportable(row)),
+        ),
+      );
     } catch (caught) {
       setRows([]);
       toast.error(caught instanceof Error ? caught.message : "账号加载失败");
@@ -289,24 +171,69 @@ export function AccountExportPage() {
   useEffect(() => void load(), [load]);
   const visible = useMemo(() => {
     const search = keyword.trim().toLowerCase();
-    return search
-      ? rows.filter((row) => `${row.phone} ${row.name} ${row.id}`.toLowerCase().includes(search))
-      : rows;
-  }, [keyword, rows]);
+    return rows.filter(
+      (row) =>
+        (!search ||
+          `${row.phone} ${row.name} ${row.id} ${row.countryCode} ${row.groupName}`
+            .toLowerCase()
+            .includes(search)) &&
+        (connectionFilter === "all" ||
+          (connectionFilter === "online" ? row.connected : !row.connected)) &&
+        (validationFilter === "all" ||
+          (validationFilter === "exportable"
+            ? exportable(row)
+            : row.validationStatus === validationFilter)) &&
+        (sourceFilter === "all" || row.source === sourceFilter) &&
+        (groupFilter === "all" ||
+          (groupFilter === "__ungrouped__"
+            ? !row.groupId
+            : row.groupId === groupFilter)),
+    );
+  }, [
+    connectionFilter,
+    groupFilter,
+    keyword,
+    rows,
+    sourceFilter,
+    validationFilter,
+  ]);
+  const groupOptions = useMemo(
+    () =>
+      Array.from(
+        new Map(
+          rows
+            .filter((row) => row.groupId)
+            .map((row) => [row.groupId, row.groupName || row.groupId]),
+        ),
+      ).map(([value, label]) => ({ value, label })),
+    [rows],
+  );
+  const selectableIds = visible.filter(exportable).map((row) => row.id);
+  const allVisibleSelected =
+    Boolean(selectableIds.length) &&
+    selectableIds.every((id) => selectedIds.includes(id));
+
+  function saveDownload(blob: Blob, filename: string) {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
 
   async function download(row: ExportAccount, format: "baileys_creds" | "native") {
+    if (!row.id) return;
     const operation = `${row.id}:${format}`;
     setExporting(operation);
     try {
       const response = await apiDownload(`/api/personal-accounts/${row.id}/export?format=${format}`);
-      const url = URL.createObjectURL(response.blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = response.filename
-        ? decodeURIComponent(response.filename)
-        : `${row.phone || row.id}${format === "native" ? "-parloq-full" : ""}.json`;
-      anchor.click();
-      URL.revokeObjectURL(url);
+      saveDownload(
+        response.blob,
+        response.filename
+          ? decodeURIComponent(response.filename)
+          : `${row.phone || row.id}${format === "native" ? "-parloq-full" : ""}.json`,
+      );
       toast.success("账号 JSON 已生成，请妥善保管凭据文件");
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "导出失败");
@@ -315,27 +242,212 @@ export function AccountExportPage() {
     }
   }
 
+  async function downloadBatch(format: "baileys_creds" | "native") {
+    if (!selectedIds.length) return;
+    if (
+      !(await confirmAction({
+        title: `导出所选 ${selectedIds.length} 个账号？`,
+        description:
+          "系统会生成一个 ZIP，包内每个 JSON 都包含敏感登录凭据，请仅保存到受控设备。",
+        confirmText: "确认导出",
+      }))
+    )
+      return;
+    const operation = `batch:${format}`;
+    setExporting(operation);
+    try {
+      const response = await apiDownload("/api/personal-accounts/export/batch", {
+        method: "POST",
+        body: JSON.stringify({ accountIds: selectedIds, format }),
+      });
+      saveDownload(
+        response.blob,
+        response.filename
+          ? decodeURIComponent(response.filename)
+          : `parloq-accounts-${format}.zip`,
+      );
+      toast.success(`已生成 ${selectedIds.length} 个账号的导出包`);
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "批量导出失败");
+    } finally {
+      setExporting("");
+    }
+  }
+
   return (
-    <StandardListPage>
-      <div className="rounded-lg border border-amber-600/20 bg-amber-600/5 px-4 py-3 text-sm">
-        “兼容 JSON”可作为 Baileys creds 文件导入其他支持该凭据格式的环境；“完整备份”还包含 Signal key store，适合本系统间无损迁移。两种文件都属于敏感登录凭据，请勿通过公开渠道传输。
+    <StandardListPage viewport>
+      <div className="notice-warning rounded-lg border px-4 py-3 text-sm">
+        “兼容 JSON”可用于其他支持相同账号格式的环境；“完整备份”适合本系统间迁移。导出文件可用于登录账号，请妥善保管。
       </div>
       <ListToolbar
         search={{ value: keyword, onChange: setKeyword, placeholder: "搜索号码、名称或账号 ID" }}
-        meta={`${visible.length} 个账号`}
-        actions={<Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCwIcon size={16} className={loading ? "spin" : ""} />刷新</Button>}
+        filters={
+          <>
+            <SelectField
+              ariaLabel="连接状态"
+              className="w-[140px]"
+              value={connectionFilter}
+              onValueChange={setConnectionFilter}
+              options={[
+                { value: "all", label: "全部连接状态" },
+                { value: "online", label: "在线" },
+                { value: "offline", label: "离线" },
+              ]}
+            />
+            <SelectField
+              ariaLabel="导出条件"
+              className="w-[140px]"
+              value={validationFilter}
+              onValueChange={setValidationFilter}
+              options={[
+                { value: "all", label: "全部导出条件" },
+                { value: "exportable", label: "当前可导出" },
+                { value: "ready", label: "验证通过" },
+                { value: "validating", label: "验证中" },
+                { value: "failed", label: "验证失败" },
+              ]}
+            />
+            <SelectField
+              ariaLabel="账号来源"
+              className="w-[135px]"
+              value={sourceFilter}
+              onValueChange={setSourceFilter}
+              options={[
+                { value: "all", label: "全部来源" },
+                { value: "landing_page", label: "落地页链接" },
+                { value: "json_import", label: "JSON 导入" },
+              ]}
+            />
+            <SelectField
+              ariaLabel="账号分组"
+              className="w-[145px]"
+              value={groupFilter}
+              onValueChange={setGroupFilter}
+              options={[
+                { value: "all", label: "全部分组" },
+                { value: "__ungrouped__", label: "未分组" },
+                ...groupOptions,
+              ]}
+            />
+          </>
+        }
+        meta={
+          selectedIds.length
+            ? `已选择 ${selectedIds.length} / ${visible.length} 个账号`
+            : `${visible.length} 个账号`
+        }
+        actions={
+          <>
+            {selectedIds.length ? (
+              <>
+                <Button
+                  variant="outline"
+                  disabled={Boolean(exporting)}
+                  onClick={() => void downloadBatch("baileys_creds")}
+                >
+                  {exporting === "batch:baileys_creds" ? <Spinner /> : <DownloadIcon size={15} />}
+                  导出兼容包
+                </Button>
+                <Button
+                  disabled={Boolean(exporting)}
+                  onClick={() => void downloadBatch("native")}
+                >
+                  {exporting === "batch:native" ? <Spinner /> : <DownloadIcon size={15} />}
+                  导出完整包
+                </Button>
+              </>
+            ) : null}
+            <Button variant="outline" onClick={() => void load()} disabled={loading}>
+              <RefreshCwIcon size={16} className={loading ? "spin" : ""} />刷新
+            </Button>
+          </>
+        }
       />
       <ListTableCard>
         {loading ? <div className="loading-state"><Spinner />正在加载账号…</div> : visible.length ? (
           <Table>
-            <TableHeader><TableRow><TableHead>账号</TableHead><TableHead>来源</TableHead><TableHead>连接状态</TableHead><TableHead>入库时间</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow>
+              <TableHead className="w-10">
+                <Checkbox
+                  aria-label="选择全部可导出账号"
+                  checked={allVisibleSelected}
+                  disabled={!canManage || !selectableIds.length}
+                  onCheckedChange={(checked) =>
+                    setSelectedIds((current) =>
+                      checked
+                        ? Array.from(new Set([...current, ...selectableIds]))
+                        : current.filter((id) => !selectableIds.includes(id)),
+                    )
+                  }
+                />
+              </TableHead>
+              <TableHead>账号</TableHead><TableHead>来源</TableHead><TableHead>分组</TableHead><TableHead>导出条件</TableHead><TableHead>入库时间</TableHead><TableHead className="text-right">操作</TableHead>
+            </TableRow></TableHeader>
             <TableBody>{visible.map((row) => (
-              <TableRow key={row.id}>
-                <TableCell><div className="cell-main"><strong>{row.name || row.phone || row.id}</strong><span>{row.phone || row.id}</span></div></TableCell>
+              <TableRow key={row.readKey}>
+                <TableCell>
+                  <Checkbox
+                    aria-label={`选择账号 ${row.phone || row.name || "待迁移账号"}`}
+                    checked={Boolean(row.id) && selectedIds.includes(row.id)}
+                    disabled={!canManage || !exportable(row)}
+                    onCheckedChange={(checked) =>
+                      setSelectedIds((current) =>
+                        checked
+                          ? Array.from(new Set([...current, row.id]))
+                          : current.filter((id) => id !== row.id),
+                      )
+                    }
+                  />
+                </TableCell>
+                <TableCell>
+                  <div className="flex min-w-[220px] items-start gap-3">
+                    <AccountStatusIndicator
+                      status={row.status}
+                      connected={row.connected}
+                      validationStatus={row.validationStatus}
+                      metadataSyncStatus={row.metadataSyncStatus}
+                      lastError={row.lastError}
+                    />
+                    <div className="cell-main min-w-0">
+                      <strong title={row.name || undefined}>{row.phone || row.name || "账号待迁移"}</strong>
+                      {row.id ? (
+                        <span title={row.id}>{row.id}</span>
+                      ) : (
+                        <span>等待 ID 迁移</span>
+                      )}
+                    </div>
+                  </div>
+                </TableCell>
                 <TableCell>{sourceBadge(row.source)}</TableCell>
-                <TableCell><Badge tone={row.connected ? "success" : "neutral"}>{row.connected ? "在线" : "离线"}</Badge></TableCell>
+                <TableCell>
+                  {row.groupId || row.groupName ? (
+                    <div className="cell-main min-w-[140px]">
+                      <strong>{row.groupName || "未命名分组"}</strong>
+                      {row.groupId ? (
+                        <span title={row.groupId}>
+                          {row.groupId}
+                        </span>
+                      ) : (
+                        <span>等待 ID 迁移</span>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-muted-foreground">未分组</span>
+                  )}
+                </TableCell>
+                <TableCell>
+                  {exportable(row) ? (
+                    <Badge tone="success">可导出</Badge>
+                  ) : row.connected ? (
+                    <Badge tone="warning">请先断开</Badge>
+                  ) : row.validationStatus === "failed" ? (
+                    <Badge tone="danger">验证失败</Badge>
+                  ) : (
+                    <Badge tone="neutral">等待验证</Badge>
+                  )}
+                </TableCell>
                 <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
-                <TableCell><div className="flex justify-end gap-2">{row.connected ? <span className="self-center text-xs text-muted-foreground">请先断开</span> : null}<Button variant="outline" size="sm" disabled={!canManage || row.connected || Boolean(exporting)} onClick={() => void download(row, "baileys_creds")}>{exporting === `${row.id}:baileys_creds` ? <Spinner /> : <DownloadIcon size={15} />}兼容 JSON</Button><Button variant="outline" size="sm" disabled={!canManage || row.connected || Boolean(exporting)} onClick={() => void download(row, "native")}>{exporting === `${row.id}:native` ? <Spinner /> : <DownloadIcon size={15} />}完整备份</Button></div></TableCell>
+                <TableCell><div className="flex justify-end gap-2"><Button variant="outline" size="sm" disabled={!canManage || !exportable(row) || Boolean(exporting)} onClick={() => void download(row, "baileys_creds")}>{exporting === `${row.id}:baileys_creds` ? <Spinner /> : <DownloadIcon size={15} />}兼容 JSON</Button><Button variant="outline" size="sm" disabled={!canManage || !exportable(row) || Boolean(exporting)} onClick={() => void download(row, "native")}>{exporting === `${row.id}:native` ? <Spinner /> : <DownloadIcon size={15} />}完整备份</Button></div></TableCell>
               </TableRow>
             ))}</TableBody>
           </Table>
@@ -347,6 +459,7 @@ export function AccountExportPage() {
 
 type AccountGroup = {
   id: string;
+  readKey: string;
   name: string;
   description: string;
   accountCount: number | null;
@@ -354,8 +467,10 @@ type AccountGroup = {
 };
 function accountGroup(input: unknown): AccountGroup {
   const row = input as Record<string, unknown>;
+  const id = snowflakeId(row, "id", "groupId", "group_id");
   return {
-    id: field(row, "publicId", "public_id", "id"),
+    id,
+    readKey: groupRowKey(row, id),
     name: field(row, "name"),
     description: field(row, "description"),
     accountCount: optionalNumber(row, "accountCount", "account_count"),
@@ -401,6 +516,7 @@ export function AccountGroupsPage() {
   }
   async function save() {
     if (!name.trim()) return;
+    if (editing && !editing.id) return;
     setPending(true);
     try {
       await apiRequest(editing ? `/api/account-groups/${editing.id}` : "/api/account-groups", {
@@ -417,6 +533,7 @@ export function AccountGroupsPage() {
     }
   }
   async function remove(row: AccountGroup) {
+    if (!row.id) return;
     if (!(await confirmAction({ title: `删除分组“${row.name}”？`, description: "分组内账号不会被删除，将回到未分组状态。", confirmText: "删除分组" }))) return;
     try {
       await apiRequest(`/api/account-groups/${row.id}`, { method: "DELETE" });
@@ -427,7 +544,7 @@ export function AccountGroupsPage() {
     }
   }
   return (
-    <StandardListPage>
+    <StandardListPage viewport>
       <ListToolbar
         search={{ value: keyword, onChange: setKeyword, placeholder: "搜索分组名称或说明" }}
         meta={`${visible.length} 个分组`}
@@ -435,12 +552,27 @@ export function AccountGroupsPage() {
       />
       <ListTableCard>
         {loading ? <div className="loading-state"><Spinner />正在加载账号分组…</div> : visible.length ? (
-          <Table><TableHeader><TableRow><TableHead>分组</TableHead><TableHead>账号数</TableHead><TableHead>创建时间</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader>
-            <TableBody>{visible.map((row) => <TableRow key={row.id}>
-              <TableCell><div className="cell-main"><strong>{row.name}</strong><span>{row.description || "暂无说明"}</span></div></TableCell>
+          <Table><TableHeader><TableRow><TableHead>分组</TableHead><TableHead>说明</TableHead><TableHead>账号数</TableHead><TableHead>创建时间</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader>
+            <TableBody>{visible.map((row) => <TableRow key={row.readKey}>
+              <TableCell>
+                <EntityPrimaryCell
+                  title={row.name}
+                  id={row.id}
+                  status={{
+                    label: "可用",
+                    description: "分组可以正常用于组织、筛选和批量管理账号。",
+                    tone: "success",
+                    details: [
+                      { label: "账号数", value: row.accountCount == null ? "待同步" : row.accountCount },
+                      { label: "说明", value: row.description || "暂无说明" },
+                    ],
+                  }}
+                />
+              </TableCell>
+              <TableCell className="max-w-[360px] text-muted-foreground">{row.description || "暂无说明"}</TableCell>
               <TableCell>{row.accountCount == null ? <span className="text-muted-foreground">待同步</span> : row.accountCount}</TableCell>
               <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
-              <TableCell><div className="flex justify-end gap-1">{canManage ? <><IconButton label="编辑分组" onClick={() => edit(row)}><PencilIcon size={15} /></IconButton><IconButton label="删除分组" className="text-destructive" onClick={() => void remove(row)}><Trash2Icon size={15} /></IconButton></> : null}</div></TableCell>
+              <TableCell><div className="flex justify-end gap-1">{canManage ? <><IconButton label="编辑分组" disabled={!row.id} onClick={() => edit(row)}><PencilIcon size={15} /></IconButton><IconButton label="删除分组" className="text-destructive" disabled={!row.id} onClick={() => void remove(row)}><Trash2Icon size={15} /></IconButton></> : null}</div></TableCell>
             </TableRow>)}</TableBody>
           </Table>
         ) : <EmptyState title="还没有账号分组" description="创建分组后可按用途、国家或客户业务组织统一账号池。" />}
@@ -448,6 +580,206 @@ export function AccountGroupsPage() {
       <Drawer open={open} onClose={() => !pending && setOpen(false)} title={editing ? "编辑账号分组" : "新建账号分组"} description="分组仅用于组织和筛选，不改变账号凭据或连接状态。" footer={<><Button variant="outline" onClick={() => setOpen(false)}>取消</Button><Button disabled={pending || !name.trim()} onClick={() => void save()}>{pending ? <Spinner /> : null}保存</Button></>}>
         <div className="drawer-form"><label className="field"><span>分组名称</span><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：美国推广账号" /></label><label className="field"><span>分组说明（可选）</span><Textarea rows={4} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="说明用途、地区或运营规则" /></label></div>
       </Drawer>
+    </StandardListPage>
+  );
+}
+
+type IntakeAttempt = {
+  id: string;
+  attemptType: string;
+  status: string;
+  terminalReason: string;
+  providerCode: string;
+  account: {
+    id: string;
+    name: string;
+    phone: string;
+    admissionStatus: string;
+    status: string;
+    validationStatus: string;
+    metadataSyncStatus: string;
+  };
+  channel: { id: string; name: string } | null;
+  protocol: { id: string; name: string } | null;
+  group: { id: string; name: string } | null;
+  syncJob: { id: string; status: string; lastError: string } | null;
+  expiresAt: string;
+  verifiedAt: string;
+  createdAt: string;
+};
+
+const attemptLabel: Record<string, string> = {
+  code_issued: "配对码已生成",
+  waiting_phone: "等待手机确认",
+  reconnecting: "配对连接恢复中",
+  verified: "验证成功",
+  expired: "配对码已过期",
+  cancelled: "用户已取消",
+  failed: "绑定失败",
+};
+
+function attemptBadge(status: string) {
+  if (status === "verified") return <Badge tone="success">验证成功</Badge>;
+  if (["failed", "expired", "cancelled"].includes(status))
+    return <Badge tone={status === "failed" ? "danger" : "neutral"}>{attemptLabel[status] || status}</Badge>;
+  return <Badge tone="warning">{attemptLabel[status] || status}</Badge>;
+}
+
+function admissionBadge(status: string) {
+  if (status === "active") return <Badge tone="success">已正式入池</Badge>;
+  if (status === "reserved") return <Badge tone="warning">接入预留</Badge>;
+  return <Badge tone="neutral">未进入账号池</Badge>;
+}
+
+export function AccountIntakePage() {
+  const [rows, setRows] = useState<IntakeAttempt[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [keyword, setKeyword] = useState("");
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({
+        page: String(page),
+        pageSize: String(pageSize),
+      });
+      if (query) params.set("keyword", query);
+      if (statusFilter !== "all") params.set("status", statusFilter);
+      const payload = await apiRequest(`/api/personal-accounts/intake/attempts?${params}`);
+      const list = unwrapList<IntakeAttempt>(payload);
+      setRows(list.rows);
+      setTotal(list.total);
+    } catch (caught) {
+      setRows([]);
+      setTotal(0);
+      toast.error(caught instanceof Error ? caught.message : "接入记录加载失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [page, pageSize, query, statusFilter]);
+
+  useEffect(() => void load(), [load]);
+
+  return (
+    <StandardListPage viewport>
+      <div className="rounded-lg border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+        这里记录落地页的首次绑定和重新认证。只有验证成功的首次绑定才进入正式账号池；失败、过期和取消记录不会出现在账号管理中。
+      </div>
+      <ListToolbar
+        search={{
+          value: keyword,
+          onChange: setKeyword,
+          onSubmit: () => {
+            setPage(1);
+            setQuery(keyword.trim());
+          },
+          placeholder: "搜索号码、账号名称或接入 ID",
+        }}
+        filters={
+          <SelectField
+            ariaLabel="接入状态"
+            className="w-[165px]"
+            value={statusFilter}
+            onValueChange={(value) => {
+              setPage(1);
+              setStatusFilter(value);
+            }}
+            options={[
+              { value: "all", label: "全部接入状态" },
+              { value: "waiting_phone", label: "等待手机确认" },
+              { value: "reconnecting", label: "连接恢复中" },
+              { value: "verified", label: "验证成功" },
+              { value: "failed", label: "绑定失败" },
+              { value: "expired", label: "配对码过期" },
+              { value: "cancelled", label: "用户取消" },
+            ]}
+          />
+        }
+        meta={`${total} 条接入记录`}
+        actions={
+          <Button variant="outline" onClick={() => void load()} disabled={loading}>
+            <RefreshCwIcon size={16} className={loading ? "spin" : ""} />刷新
+          </Button>
+        }
+      />
+      <ListTableCard>
+        {loading ? (
+          <div className="loading-state"><Spinner />正在加载接入记录…</div>
+        ) : rows.length ? (
+          <Table>
+            <TableHeader><TableRow>
+              <TableHead>号码 / 账号</TableHead>
+              <TableHead>接入类型</TableHead>
+              <TableHead>接入状态</TableHead>
+              <TableHead>入池结果</TableHead>
+              <TableHead>渠道</TableHead>
+              <TableHead>协议 / 分组</TableHead>
+              <TableHead>资料同步</TableHead>
+              <TableHead>发起时间</TableHead>
+            </TableRow></TableHeader>
+            <TableBody>{rows.map((row) => (
+              <TableRow key={row.id}>
+                <TableCell>
+                  <div className="cell-main min-w-[210px]">
+                    <strong>{formatPhoneDisplay(row.account.phone) || row.account.name}</strong>
+                    <span title={row.account.id}>{row.account.id}</span>
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Badge tone={row.attemptType === "reauthentication" ? "info" : "neutral"}>
+                    {row.attemptType === "reauthentication" ? "重新认证" : "首次绑定"}
+                  </Badge>
+                </TableCell>
+                <TableCell>
+                  <div className="flex min-w-[150px] flex-col items-start gap-1">
+                    {attemptBadge(row.status)}
+                    {row.terminalReason ? <span className="text-xs text-muted-foreground" title={row.providerCode || undefined}>{row.terminalReason}</span> : null}
+                  </div>
+                </TableCell>
+                <TableCell>{admissionBadge(row.account.admissionStatus)}</TableCell>
+                <TableCell>
+                  <div className="cell-main min-w-[140px]">
+                    <strong>{row.channel?.name || "渠道已删除"}</strong>
+                    <span>{row.channel?.id || "-"}</span>
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div className="cell-main min-w-[170px]">
+                    <strong>{row.protocol?.name || "协议不可用"}</strong>
+                    <span>{row.group?.name || "未分组"}</span>
+                  </div>
+                </TableCell>
+                <TableCell>
+                  {row.syncJob ? (
+                    <Badge tone={row.syncJob.status === "succeeded" ? "success" : row.syncJob.status === "failed" ? "danger" : "warning"}>
+                      {row.syncJob.status === "succeeded" ? "同步完成" : row.syncJob.status === "failed" ? "同步失败" : "后台同步中"}
+                    </Badge>
+                  ) : <span className="text-muted-foreground">尚未触发</span>}
+                </TableCell>
+                <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
+              </TableRow>
+            ))}</TableBody>
+          </Table>
+        ) : (
+          <EmptyState title="暂无接入记录" description="访客从渠道落地页发起首次绑定或重新认证后，会显示在这里。" />
+        )}
+      </ListTableCard>
+      <ListPagination
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        disabled={loading}
+        onPageChange={setPage}
+        onPageSizeChange={(value) => {
+          setPage(1);
+          setPageSize(value);
+        }}
+      />
     </StandardListPage>
   );
 }

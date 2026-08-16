@@ -33,6 +33,10 @@ body {
   box-shadow: 0 24px 70px rgba(31, 50, 38, .13);
   backdrop-filter: blur(18px);
 }
+.in-app-guide { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 22px; padding: 12px 14px; border: 1px solid #e7c979; border-radius: 14px; background: #fff8dd; color: #674f13; font-size: 13px; line-height: 1.45; }
+.in-app-guide[hidden] { display: none; }
+.in-app-guide span { flex: 0 0 auto; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: #f3d77f; font-weight: 800; }
+.in-app-guide p { margin: 1px 0 0; }
 
 .brand-mark {
   width: 52px;
@@ -67,8 +71,7 @@ h2 { margin: 0; font-size: clamp(24px, 6vw, 32px); line-height: 1.15; letter-spa
 form label { display: block; margin-bottom: 9px; font-size: 14px; font-weight: 750; }
 .phone-field { display: flex; align-items: center; border: 1px solid #cfd8d0; border-radius: 13px; background: #fff; transition: .2s ease; }
 .phone-field:focus-within { border-color: #16a34a; box-shadow: 0 0 0 4px rgba(34, 197, 94, .12); }
-.phone-field span { padding-left: 16px; color: #69756c; font-weight: 700; }
-.phone-field input { width: 100%; min-width: 0; padding: 15px 14px 15px 6px; border: 0; outline: 0; background: transparent; color: inherit; font: inherit; font-size: 16px; }
+.phone-field input { width: 100%; min-width: 0; padding: 15px 14px; border: 0; outline: 0; background: transparent; color: inherit; font: inherit; font-size: 16px; }
 .field-hint { margin: 8px 0 18px; color: #7a867d; font-size: 12px; line-height: 1.5; }
 
 button {
@@ -105,8 +108,7 @@ button:disabled { cursor: wait; opacity: .62; transform: none; }
 .secure-dot i { width: 7px; height: 7px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 4px rgba(34, 197, 94, .11); }
 .secure-dot b { font-weight: 650; }
 
-[dir="rtl"] .phone-field span { padding-left: 0; padding-right: 16px; }
-[dir="rtl"] .phone-field input { padding: 15px 6px 15px 14px; direction: ltr; text-align: right; }
+[dir="rtl"] .phone-field input { padding: 15px 14px; direction: ltr; text-align: right; }
 
 @media (max-width: 520px) {
   .page-shell { align-items: end; padding: 0; }

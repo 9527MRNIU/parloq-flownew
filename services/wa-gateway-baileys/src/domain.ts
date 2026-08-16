@@ -15,6 +15,42 @@ export type SessionCompleteness = 'none' | 'credentials_only' | 'full'
 export type PairingStatus = 'idle' | 'waiting_phone' | 'reconnecting' | 'verified' | 'expired' | 'cancelled' | 'failed'
 export type MessageStatus = 'queued' | 'sent' | 'delivered' | 'failed'
 
+export interface SyncPolicy {
+  avatar: boolean
+  profileStatus: boolean
+  businessProfile: boolean
+  groupSummary: boolean
+  groupDetails: boolean
+  contacts: boolean
+  chats: boolean
+  messageHistory: boolean
+  privacySettings: boolean
+  blocklist: boolean
+}
+
+export const defaultSyncPolicy: SyncPolicy = {
+  avatar: true,
+  profileStatus: true,
+  businessProfile: true,
+  groupSummary: true,
+  groupDetails: false,
+  contacts: false,
+  chats: false,
+  messageHistory: false,
+  privacySettings: false,
+  blocklist: false,
+}
+
+export function normalizeSyncPolicy(value: unknown): SyncPolicy {
+  const input = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const result = { ...defaultSyncPolicy }
+  for (const key of Object.keys(result) as Array<keyof SyncPolicy>) {
+    if (typeof input[key] === 'boolean') result[key] = input[key]
+  }
+  if (result.groupDetails) result.groupSummary = true
+  return result
+}
+
 export interface Account {
   id: string
   phoneE164: string
@@ -22,6 +58,10 @@ export interface Account {
   state: AccountState
   deviceJid: string
   autoConnect: boolean
+  connectionPolicy: 'on_demand' | 'always_on'
+  idleDisconnectSeconds: number
+  postVerifyGraceSeconds: number
+  syncPolicy: SyncPolicy
   sessionStatus: SessionStatus
   sessionCompleteness: SessionCompleteness
   pairingStatus: PairingStatus
@@ -31,6 +71,7 @@ export interface Account {
   groupCount: number | null
   friendCount: number | null
   mutualContactCount: number | null
+  metadata: Record<string, unknown>
   stateChangedAt: Date
   invalidatedAt: Date | null
   reasonCategory: string

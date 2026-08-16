@@ -73,6 +73,7 @@ services:
       DOMAIN_REGISTRAR_MOCK: ${DOMAIN_REGISTRAR_MOCK:-true}
       PROMOTION_INGRESS_HOST: ${PROMOTION_INGRESS_HOST:-promotion.localhost}
       PROMOTION_SUCCESS_WEBHOOK_SECRET: ${PROMOTION_SUCCESS_WEBHOOK_SECRET:-local-promotion-success-secret-change-before-shared-environment}
+      META_CAPI_MOCK: ${META_CAPI_MOCK:-true}
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
@@ -129,6 +130,11 @@ services:
       WA_GATEWAY_WEBHOOK_SECRET: ${WA_GATEWAY_WEBHOOK_SECRET:-local-wa-gateway-webhook-secret-change-before-shared-environment}
       TASK_QUEUE_MOCK: ${TASK_QUEUE_MOCK:-false}
       TASK_WORKER_MAX_CONCURRENCY: ${TASK_WORKER_MAX_CONCURRENCY:-200}
+      META_CAPI_MOCK: ${META_CAPI_MOCK:-true}
+      META_CAPI_BASE_URL: ${META_CAPI_BASE_URL:-https://graph.facebook.com}
+      META_CAPI_API_VERSION: ${META_CAPI_API_VERSION:-v23.0}
+      META_CAPI_MAX_ATTEMPTS: ${META_CAPI_MAX_ATTEMPTS:-5}
+      META_CAPI_BATCH_SIZE: ${META_CAPI_BATCH_SIZE:-50}
     volumes:
       - ./apps/api:/app
     depends_on:
@@ -156,6 +162,7 @@ services:
       WA_GATEWAY_WEBHOOK_URL: ${WA_GATEWAY_WEBHOOK_URL:-http://api:8000/api/internal/wa-gateway/events}
       WA_GATEWAY_WEBHOOK_SECRET: ${WA_GATEWAY_WEBHOOK_SECRET:-local-wa-gateway-webhook-secret-change-before-shared-environment}
       WA_GATEWAY_WEBHOOK_RETRIES: ${WA_GATEWAY_WEBHOOK_RETRIES:-3}
+      WA_GATEWAY_MATERIAL_BASE_URL: http://api:8000
     ports:
       - "${WA_GATEWAY_PORT:-8010}:8010"
     depends_on:

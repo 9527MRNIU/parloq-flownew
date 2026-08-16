@@ -4,10 +4,10 @@ import {
   PencilIcon,
   PlusIcon,
   RefreshCwIcon,
-  UserRoundIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
+import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
 import {
   Badge,
   Button,
@@ -33,27 +33,31 @@ import {
   ListToolbar,
   StandardListPage,
 } from "../components/list-page";
+import { EntityPrimaryCell } from "../components/entity-primary-cell";
 
 type UserRow = {
-  id: string | number;
+  id: string;
+  readKey: string;
   username: string;
-  groupId?: string | number;
+  groupId: string;
   groupName?: string;
   enabled: boolean;
   isAdmin: boolean;
   lastLoginAt?: string;
   createdAt?: string;
 };
-type GroupRow = { id: string | number; name: string; systemKey?: string };
+type GroupRow = { id: string; readKey: string; name: string; systemKey?: string };
 
 function userRow(input: unknown): UserRow {
   const row = input as Record<string, unknown>;
+  const id = snowflakeId(row, "id");
   const status = String(row.status || "");
   const role = String(row.role || "").toLowerCase();
   return {
-    id: (row.id || row.publicId || row.public_id) as string | number,
+    id,
+    readKey: entityRowKey(row, id, "user", `${String(row.username || "")}:${String(row.createdAt || row.created_at || "")}`),
     username: String(row.username || ""),
-    groupId: (row.groupId || row.group_id) as string | number | undefined,
+    groupId: snowflakeId(row, "groupId", "group_id", "roleId", "role_id"),
     groupName: String(row.groupName || row.group_name || ""),
     enabled: Boolean(
       row.enabled ?? row.isActive ?? row.is_active ?? status !== "disabled",
@@ -66,8 +70,10 @@ function userRow(input: unknown): UserRow {
 
 function groupRow(input: unknown): GroupRow {
   const row = input as Record<string, unknown>;
+  const id = snowflakeId(row, "id");
   return {
-    id: (row.id || row.publicId || row.public_id) as string | number,
+    id,
+    readKey: entityRowKey(row, id, "role", `${String(row.name || "")}:${String(row.systemKey || row.system_key || "")}`),
     name: String(row.name || ""),
     systemKey: String(row.systemKey || row.system_key || ""),
   };
@@ -107,7 +113,7 @@ export function UsersPage() {
       const users = unwrapList<unknown>(usersPayload);
       setRows(users.rows.map(userRow));
       setTotal(users.total);
-      setGroups(unwrapList<unknown>(groupsPayload).rows.map(groupRow));
+      setGroups(unwrapList<unknown>(groupsPayload).rows.map(groupRow).filter((row) => row.id));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "加载用户失败");
     } finally {
@@ -129,6 +135,7 @@ export function UsersPage() {
     setOpen(true);
   }
   function edit(row: UserRow) {
+    if (!row.id) return;
     setEditing(row);
     setUsername(row.username);
     setPassword("");
@@ -138,7 +145,7 @@ export function UsersPage() {
   }
 
   async function save() {
-    if (!username.trim() || !groupId || (!editing && !password)) return;
+    if (!username.trim() || !groupId || (editing && !editing.id) || (!editing && !password)) return;
     setPending(true);
     try {
       const body = {
@@ -162,6 +169,7 @@ export function UsersPage() {
   }
 
   async function remove(row: UserRow) {
+    if (!row.id) return;
     if (
       !(await confirmAction({
         title: `停用用户“${row.username}”？`,
@@ -180,7 +188,7 @@ export function UsersPage() {
   }
 
   return (
-    <StandardListPage>
+    <StandardListPage viewport>
       <ListToolbar
         search={{
           value: keyword,
@@ -242,7 +250,6 @@ export function UsersPage() {
                   <TableHead>用户</TableHead>
                   <TableHead>角色</TableHead>
                   <TableHead>账号类型</TableHead>
-                  <TableHead>状态</TableHead>
                   <TableHead>最近登录</TableHead>
                   <TableHead>创建时间</TableHead>
                   <TableHead className="text-right">操作</TableHead>
@@ -250,24 +257,28 @@ export function UsersPage() {
               </TableHeader>
               <TableBody>
                 {rows.map((row) => (
-                  <TableRow key={row.id}>
+                  <TableRow key={row.readKey}>
                     <TableCell>
-                      <div className="user-cell">
-                        <span className="small-avatar">
-                          <UserRoundIcon size={15} />
-                        </span>
-                        <strong>{row.username}</strong>
-                      </div>
+                      <EntityPrimaryCell
+                        title={row.username}
+                        id={row.id}
+                        status={{
+                          label: row.enabled ? "正常" : "已停用",
+                          description: row.enabled
+                            ? "用户可以正常登录并使用已授权功能。"
+                            : "用户登录权限已停用，业务资源和审计记录仍保留。",
+                          tone: row.enabled ? "success" : "warning",
+                          details: [
+                            { label: "账号类型", value: row.isAdmin ? "管理员" : "普通用户" },
+                            { label: "角色", value: row.groupName || "-" },
+                          ],
+                        }}
+                      />
                     </TableCell>
                     <TableCell>{row.groupName || "-"}</TableCell>
                     <TableCell>
                       <Badge tone={row.isAdmin ? "primary" : "neutral"}>
                         {row.isAdmin ? "管理员" : "普通用户"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <Badge tone={row.enabled ? "success" : "warning"}>
-                        {row.enabled ? "正常" : "已停用"}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
@@ -280,6 +291,7 @@ export function UsersPage() {
                       <div className="flex items-center justify-end gap-1">
                         <IconButton
                           label="编辑（可恢复登录）"
+                          disabled={!row.id}
                           onClick={() => edit(row)}
                         >
                           <PencilIcon size={16} />
@@ -292,7 +304,7 @@ export function UsersPage() {
                           }
                           variant="ghost"
                           className="danger"
-                          disabled={row.username === "admin" || !row.enabled}
+                          disabled={!row.id || row.username === "admin" || !row.enabled}
                           onClick={() => void remove(row)}
                         >
                           <BanIcon size={16} />

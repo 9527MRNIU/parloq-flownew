@@ -19,6 +19,10 @@ import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { ListToolbar, StandardListPage } from "../components/list-page";
 import {
+  EntityPrimaryCell,
+  type EntityStatusMeta,
+} from "../components/entity-primary-cell";
+import {
   Badge,
   Button,
   Drawer,
@@ -38,11 +42,17 @@ import {
   confirmAction,
   toast,
 } from "../components/ui";
+import {
+  entityRowKey,
+  legacyReadKey,
+  snowflakeId,
+} from "../lib/entity-identifiers";
+import { formatPhoneDisplay } from "../lib/utils";
 
 type ProxyStatus = "healthy" | "unhealthy" | "testing" | "disabled" | "unknown";
 type IpProxy = {
-  id: string | number;
-  publicId: string;
+  id: string;
+  readKey: string;
   name: string;
   protocol: string;
   host: string;
@@ -61,10 +71,10 @@ type IpProxy = {
   createdAt?: string;
 };
 type ProxyBinding = {
-  id: string | number;
-  publicId: string;
-  proxyPublicId: string;
-  accountPublicId: string;
+  id: string;
+  readKey: string;
+  proxyId: string;
+  accountId: string;
   accountName?: string;
   accountPhone?: string;
   createdAt?: string;
@@ -183,6 +193,7 @@ function countryName(code: string) {
 
 function normalizeProxy(input: unknown): IpProxy {
   const row = input as Record<string, unknown>;
+  const id = snowflakeId(row, "id");
   const enabled = Boolean(row.enabled ?? row.isActive ?? row.is_active ?? true);
   const rawStatus = text(
     row,
@@ -204,8 +215,8 @@ function normalizeProxy(input: unknown): IpProxy {
           ? "testing"
           : "unknown";
   return {
-    id: (row.id || row.publicId || row.public_id) as string | number,
-    publicId: text(row, "publicId", "public_id", "id"),
+    id,
+    readKey: entityRowKey(row, id, "ip-proxy", `${text(row, "host", "hostname")}:${String(row.port || "")}`),
     name: text(row, "name", "label") || "未命名代理",
     protocol:
       text(row, "protocol", "proxyType", "proxy_type").toLowerCase() || "http",
@@ -257,24 +268,36 @@ function normalizeProxy(input: unknown): IpProxy {
 
 function normalizeBinding(input: unknown): ProxyBinding {
   const row = input as Record<string, unknown>;
+  const id = snowflakeId(row, "id", "bindingId", "binding_id");
+  const rawAccountName = text(row, "accountName", "account_name");
   return {
-    id: (row.id || row.publicId || row.public_id) as string | number,
-    publicId: text(row, "publicId", "public_id", "id"),
-    proxyPublicId: text(row, "proxyPublicId", "proxy_public_id"),
-    accountPublicId: text(row, "accountPublicId", "account_public_id"),
-    accountName: text(row, "accountName", "account_name"),
-    accountPhone: text(row, "accountPhone", "account_phone", "phone"),
+    id,
+    readKey:
+      (id && `proxy-binding:${id}`) ||
+      legacyReadKey(row, "proxy-binding") ||
+      `proxy-binding:read-only:${text(row, "accountName", "account_name")}:${text(row, "createdAt", "created_at")}`,
+    proxyId: snowflakeId(row, "proxyId", "proxy_id"),
+    accountId: snowflakeId(row, "accountId", "account_id"),
+    accountName: /^\+\d+$/.test(rawAccountName)
+      ? formatPhoneDisplay(rawAccountName)
+      : rawAccountName,
+    accountPhone: formatPhoneDisplay(
+      text(row, "accountPhone", "account_phone", "phone"),
+    ),
     createdAt: text(row, "createdAt", "created_at"),
   };
 }
 
-function healthBadge(row: IpProxy) {
+function proxyStatus(row: IpProxy): EntityStatusMeta {
   if (!row.enabled || row.status === "disabled")
-    return <Badge tone="neutral">已停用</Badge>;
-  if (row.status === "healthy") return <Badge tone="success">健康</Badge>;
-  if (row.status === "unhealthy") return <Badge tone="danger">异常</Badge>;
-  if (row.status === "testing") return <Badge tone="warning">检测中</Badge>;
-  return <Badge tone="warning">待检测</Badge>;
+    return { label: "已停用", description: "代理已停用，不会参与自动分配。", tone: "neutral" };
+  if (row.status === "healthy")
+    return { label: "健康", description: "最近一次健康检测通过，可以参与账号分配。", tone: "success" };
+  if (row.status === "unhealthy")
+    return { label: "异常", description: row.lastError || "最近一次健康检测失败。", tone: "danger" };
+  if (row.status === "testing")
+    return { label: "检测中", description: "系统正在检测代理连通性与延迟。", tone: "warning" };
+  return { label: "待检测", description: "代理尚未完成首次健康检测。", tone: "warning" };
 }
 
 export function IpManagementPage() {
@@ -308,7 +331,7 @@ export function IpManagementPage() {
     enabled: true,
   });
   const [testingIds, setTestingIds] = useState<string[]>([]);
-  const [accountPublicId, setAccountPublicId] = useState("");
+  const [accountId, setAccountId] = useState("");
   const [bindingPending, setBindingPending] = useState(false);
   const [policy, setPolicy] = useState<AllocationPolicy>(defaultPolicy);
   const [policyDrawerOpen, setPolicyDrawerOpen] = useState(false);
@@ -340,17 +363,24 @@ export function IpManagementPage() {
       setRows(nextRows);
       setAccounts(
         unwrapList<Record<string, unknown>>(accountPayload)
-          .rows.map((row) => ({
-            id: text(row, "publicId", "public_id", "id"),
-            label: `${text(row, "name") || text(row, "phone") || text(row, "id")}${text(row, "phone") && text(row, "phone") !== text(row, "name") ? ` · ${text(row, "phone")}` : ""}`,
-            status: text(row, "status"),
-          }))
+          .rows.map((row) => {
+            const phone = formatPhoneDisplay(text(row, "phone"));
+            const rawName = text(row, "name");
+            const name = /^\+\d+$/.test(rawName)
+              ? formatPhoneDisplay(rawName)
+              : rawName;
+            return {
+              id: snowflakeId(row, "id", "accountId", "account_id"),
+              label: `${name || phone || "未命名账号"}${phone && phone !== formatPhoneDisplay(name) ? ` · ${phone}` : ""}`,
+              status: text(row, "status"),
+            };
+          })
           .filter((row) => row.id),
       );
       setSelectedId((current) =>
-        current && nextRows.some((row) => row.publicId === current)
+        current && nextRows.some((row) => row.id === current)
           ? current
-          : nextRows[0]?.publicId || "",
+          : nextRows.find((row) => row.id)?.id || "",
       );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "加载 IP 代理失败");
@@ -376,22 +406,20 @@ export function IpManagementPage() {
     }
   }, []);
 
-  const loadBindings = useCallback(async (proxyPublicId: string) => {
-    if (!proxyPublicId) {
+  const loadBindings = useCallback(async (proxyId: string) => {
+    if (!proxyId) {
       setBindings([]);
       return;
     }
     setBindingsLoading(true);
     try {
       const payload = await apiRequest(
-        `/api/ip-proxy-bindings?proxyPublicId=${encodeURIComponent(proxyPublicId)}&pageSize=100`,
+        `/api/ip-proxy-bindings?proxyId=${encodeURIComponent(proxyId)}&pageSize=100`,
       );
       setBindings(
         unwrapList<unknown>(payload)
           .rows.map(normalizeBinding)
-          .filter(
-            (row) => !row.proxyPublicId || row.proxyPublicId === proxyPublicId,
-          ),
+          .filter((row) => !row.proxyId || row.proxyId === proxyId),
       );
     } catch {
       setBindings([]);
@@ -441,7 +469,7 @@ export function IpManagementPage() {
       return true;
     });
   }, [country, keyword, protocol, rows, status]);
-  const selected = rows.find((row) => row.publicId === selectedId) || null;
+  const selected = rows.find((row) => row.id === selectedId) || null;
   const bulkLineCount = useMemo(
     () =>
       bulkText
@@ -455,6 +483,7 @@ export function IpManagementPage() {
     setBulkDrawerOpen(true);
   }
   function openEdit(row: IpProxy) {
+    if (!row.id) return;
     setEditing(row);
     setForm({
       name: row.name,
@@ -474,7 +503,7 @@ export function IpManagementPage() {
   }
 
   async function save() {
-    if (!editing || !form.name.trim() || !form.host.trim() || !form.port)
+    if (!editing?.id || !form.name.trim() || !form.host.trim() || !form.port)
       return;
     setPending(true);
     try {
@@ -489,7 +518,7 @@ export function IpManagementPage() {
         provider: form.provider.trim() || undefined,
         enabled: form.enabled,
       };
-      await apiRequest(`/api/ip-proxies/${editing.publicId}`, {
+      await apiRequest(`/api/ip-proxies/${editing.id}`, {
         method: "PATCH",
         body: JSON.stringify(body),
       });
@@ -550,8 +579,9 @@ export function IpManagementPage() {
   }
 
   async function toggle(row: IpProxy) {
+    if (!row.id) return;
     try {
-      await apiRequest(`/api/ip-proxies/${row.publicId}`, {
+      await apiRequest(`/api/ip-proxies/${row.id}`, {
         method: "PATCH",
         body: JSON.stringify({ enabled: !row.enabled }),
       });
@@ -561,19 +591,21 @@ export function IpManagementPage() {
     }
   }
   async function healthTest(row: IpProxy) {
-    setTestingIds((current) => [...current, row.publicId]);
+    if (!row.id) return;
+    setTestingIds((current) => [...current, row.id]);
     try {
-      await apiRequest(`/api/ip-proxies/${row.publicId}/test`, {
+      await apiRequest(`/api/ip-proxies/${row.id}/test`, {
         method: "POST",
       });
       await load();
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "健康检测失败");
     } finally {
-      setTestingIds((current) => current.filter((id) => id !== row.publicId));
+      setTestingIds((current) => current.filter((id) => id !== row.id));
     }
   }
   async function archive(row: IpProxy) {
+    if (!row.id) return;
     if (
       !(await confirmAction({
         title: `归档代理“${row.name}”？`,
@@ -583,22 +615,22 @@ export function IpManagementPage() {
     )
       return;
     try {
-      await apiRequest(`/api/ip-proxies/${row.publicId}`, { method: "DELETE" });
+      await apiRequest(`/api/ip-proxies/${row.id}`, { method: "DELETE" });
       await load();
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "归档失败");
     }
   }
   async function bindAccount() {
-    if (!selected || !accountPublicId.trim()) return;
+    if (!selected?.id || !accountId.trim()) return;
     setBindingPending(true);
     try {
-      await apiRequest(`/api/personal-accounts/${accountPublicId.trim()}`, {
+      await apiRequest(`/api/personal-accounts/${accountId.trim()}`, {
         method: "PATCH",
-        body: JSON.stringify({ proxyPublicId: selected.publicId }),
+        body: JSON.stringify({ proxyId: selected.id }),
       });
-      setAccountPublicId("");
-      await Promise.all([loadBindings(selected.publicId), load()]);
+      setAccountId("");
+      await Promise.all([loadBindings(selected.id), load()]);
     } catch (caught) {
       toast.error(
         caught instanceof Error
@@ -610,18 +642,19 @@ export function IpManagementPage() {
     }
   }
   async function unbind(binding: ProxyBinding) {
+    if (!binding.accountId) return;
     if (
       !(await confirmAction({
-        title: `解绑账号 ${binding.accountName || binding.accountPublicId}？`,
+        title: `解绑账号 ${binding.accountName || binding.accountPhone || "当前账号"}？`,
         description: "在线账号需先断开连接后才能解绑代理。",
         confirmText: "确认解绑",
       }))
     )
       return;
     try {
-      await apiRequest(`/api/personal-accounts/${binding.accountPublicId}`, {
+      await apiRequest(`/api/personal-accounts/${binding.accountId}`, {
         method: "PATCH",
-        body: JSON.stringify({ proxyPublicId: null }),
+        body: JSON.stringify({ proxyId: null }),
       });
       await Promise.all([loadBindings(selectedId), load()]);
     } catch (caught) {
@@ -657,7 +690,7 @@ export function IpManagementPage() {
   }
 
   return (
-    <StandardListPage>
+    <StandardListPage viewport>
       <ListToolbar
         search={{
           value: keyword,
@@ -756,26 +789,32 @@ export function IpManagementPage() {
                     <TableHead>凭证</TableHead>
                     <TableHead>健康</TableHead>
                     <TableHead>绑定</TableHead>
-                    <TableHead>状态</TableHead>
                     <TableHead className="text-right">操作</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {visibleRows.map((row) => (
                     <TableRow
-                      key={row.publicId}
+                      key={row.readKey}
                       className={
-                        selectedId === row.publicId ? "selected-row" : ""
+                        selectedId === row.id ? "selected-row" : ""
                       }
-                      onClick={() => setSelectedId(row.publicId)}
+                      onClick={() => row.id && setSelectedId(row.id)}
                     >
                       <TableCell>
-                        <div className="cell-main">
-                          <strong>{row.name}</strong>
-                          <span>
-                            {row.protocol.toUpperCase()} · {row.host}:{row.port}
-                          </span>
-                        </div>
+                        <EntityPrimaryCell
+                          title={row.name}
+                          id={row.id}
+                          description={`${row.protocol.toUpperCase()} · ${row.host}:${row.port}`}
+                          status={{
+                            ...proxyStatus(row),
+                            details: [
+                              { label: "延迟", value: row.latencyMs ? `${row.latencyMs} ms` : "-" },
+                              { label: "国家", value: row.countryName || row.countryCode || "未设置" },
+                              { label: "绑定数", value: row.bindingCount },
+                            ],
+                          }}
+                        />
                       </TableCell>
                       <TableCell>
                         <div className="cell-main country-cell">
@@ -808,17 +847,16 @@ export function IpManagementPage() {
                       <TableCell className="tabular-nums">
                         {row.bindingCount}
                       </TableCell>
-                      <TableCell>{healthBadge(row)}</TableCell>
                       <TableCell onClick={(event) => event.stopPropagation()}>
                         {canManage ? <div className="flex items-center justify-end gap-1">
                           <IconButton
                             label="健康检测"
                             disabled={
-                              !row.enabled || testingIds.includes(row.publicId)
+                              !row.id || !row.enabled || testingIds.includes(row.id)
                             }
                             onClick={() => void healthTest(row)}
                           >
-                            {testingIds.includes(row.publicId) ? (
+                            {testingIds.includes(row.id) ? (
                               <LoaderCircleIcon className="spin" size={16} />
                             ) : (
                               <PlayIcon size={16} />
@@ -826,12 +864,14 @@ export function IpManagementPage() {
                           </IconButton>
                           <IconButton
                             label="编辑"
+                            disabled={!row.id}
                             onClick={() => openEdit(row)}
                           >
                             <PencilIcon size={16} />
                           </IconButton>
                           <IconButton
                             label={row.enabled ? "停用" : "启用"}
+                            disabled={!row.id}
                             onClick={() => void toggle(row)}
                           >
                             {row.enabled ? (
@@ -843,6 +883,7 @@ export function IpManagementPage() {
                           <IconButton
                             variant="destructive"
                             label="归档"
+                            disabled={!row.id}
                             onClick={() => void archive(row)}
                           >
                             <Trash2Icon size={16} />
@@ -873,7 +914,7 @@ export function IpManagementPage() {
           {selected ? (
             <>
               <div className="binding-notice">
-                通过统一账号池建立固定绑定，并同步到发送网关。在线账号更换代理前需要先断开连接。
+                通过统一账号池建立固定绑定，并应用到发送服务。在线账号更换代理前需要先断开连接。
               </div>
               {canManage ? <form
                 className="binding-form"
@@ -886,9 +927,9 @@ export function IpManagementPage() {
                   <span>账号</span>
                   <SelectField
                     ariaLabel="账号"
-                    value={accountPublicId}
+                    value={accountId}
                     placeholder="请选择账号"
-                    onValueChange={setAccountPublicId}
+                    onValueChange={setAccountId}
                     options={accounts.map((account) => ({
                       value: account.id,
                       label: `${account.label} · ${account.status || "未知状态"}`,
@@ -897,7 +938,11 @@ export function IpManagementPage() {
                 </label>
                 <Button
                   type="submit"
-                  disabled={bindingPending || !accountPublicId.trim()}
+                  disabled={
+                    bindingPending ||
+                    !accountId.trim() ||
+                    !selected?.id
+                  }
                 >
                   {bindingPending ? <Spinner /> : <LinkIcon size={16} />}绑定
                 </Button>
@@ -915,7 +960,7 @@ export function IpManagementPage() {
                   {bindings.map((binding) => (
                     <div
                       className="binding-item"
-                      key={binding.publicId || binding.id}
+                      key={binding.readKey}
                     >
                       <span className="small-avatar">
                         <ShieldCheckIcon size={15} />
@@ -924,13 +969,18 @@ export function IpManagementPage() {
                         <strong>
                           {binding.accountName ||
                             binding.accountPhone ||
-                            binding.accountPublicId}
+                            "账号待迁移"}
                         </strong>
-                        <small>{binding.accountPublicId}</small>
+                        {binding.accountId ? (
+                          <small>{binding.accountId}</small>
+                        ) : (
+                          <small>等待 ID 迁移</small>
+                        )}
                       </div>
                       {canManage ? (
                         <IconButton
                           label="解绑"
+                          disabled={!binding.accountId}
                           onClick={() => void unbind(binding)}
                         >
                           <UnlinkIcon size={15} />

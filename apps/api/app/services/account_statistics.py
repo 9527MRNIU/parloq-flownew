@@ -56,6 +56,7 @@ def _is_invalid_snapshot(point: LifecyclePoint | None) -> bool:
 
 
 def _scope_accounts(statement, user: UserAccount):
+    statement = statement.where(PersonalAccount.admission_status == "active")
     if user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == user.id)
     return statement

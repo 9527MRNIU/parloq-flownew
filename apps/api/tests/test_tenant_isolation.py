@@ -71,7 +71,11 @@ def test_operators_cannot_see_each_others_links_or_accounts(
             json={"name": "Tenant A", "phone": "+12025551001", "countryCode": "US"},
         )
         assert account.status_code == 201
-        account_id = account.json()["data"]["account"]["id"]
+        account_row = account.json()["data"]["account"]
+        account_id = account_row["id"]
+        assert account_id.isdigit()
+        assert "publicId" not in account_row
+        assert "gatewayAccountId" not in account_row
         own_group = first.post(
             "/api/account-groups", json={"name": "Tenant A accounts"}
         )
@@ -93,7 +97,7 @@ def test_operators_cannot_see_each_others_links_or_accounts(
         )
         assert cross_group.status_code == 409
         assert cross_group.json()["detail"] == "账号与分组不属于同一客户"
-        assert account.json()["data"]["account"]["proxyBinding"]["proxyPublicId"] == proxy_id
+        assert account_row["proxyBinding"]["proxyId"] == proxy_id
         visible_proxies = first.get("/api/ip-proxies").json()["data"]
         assert visible_proxies["total"] == 1
         proxy_row = visible_proxies["rows"][0]
@@ -126,7 +130,7 @@ def test_operators_cannot_cross_read_business_resources(
             json={"name": "Private Pixel", "datasetId": "tenant-a-dataset"},
         )
         material = first.post(
-            "/api/hyperlink/materials",
+            "/api/materials",
             json={"name": "Private Material", "type": "text", "contentJson": {"text": "A"}},
         )
         assert domain.status_code == pixel.status_code == material.status_code == 201
@@ -134,11 +138,11 @@ def test_operators_cannot_cross_read_business_resources(
         material_id = material.json()["data"]["material"]["id"]
         assert second.get("/api/domains").json()["data"]["total"] == 0
         assert second.get("/api/meta-pixels").json()["data"]["total"] == 0
-        assert second.get("/api/hyperlink/materials").json()["data"]["total"] == 0
+        assert second.get("/api/materials").json()["data"]["total"] == 0
         assert second.get(f"/api/domains/{domain_id}").status_code == 404
-        assert second.get(f"/api/hyperlink/materials/{material_id}").status_code == 404
+        assert second.get(f"/api/materials/{material_id}").status_code == 404
         assert second.patch(
-            f"/api/hyperlink/materials/{material_id}", json={"name": "stolen"}
+            f"/api/materials/{material_id}", json={"name": "stolen"}
         ).status_code == 404
     finally:
         first.close()

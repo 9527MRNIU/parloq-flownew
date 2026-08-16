@@ -15,6 +15,7 @@ SEQUENCE_BITS = 12
 MAX_NODE_ID = (1 << NODE_BITS) - 1
 MAX_SEQUENCE = (1 << SEQUENCE_BITS) - 1
 MAX_TIMESTAMP_DELTA = (1 << TIMESTAMP_BITS) - 1
+MAX_SNOWFLAKE_ID = (1 << 63) - 1
 
 
 class SnowflakeError(RuntimeError):
@@ -96,6 +97,18 @@ def new_public_id(prefix: str) -> str:
     if not normalized or not normalized.replace("-", "").isalnum():
         raise ValueError("public ID prefix must contain only letters, numbers, or hyphens")
     return f"{normalized}_{next_snowflake_id()}"
+
+
+def parse_snowflake_id(value: str | int) -> int:
+    """Parse the canonical decimal representation used by public APIs."""
+
+    raw = str(value).strip()
+    if not raw.isascii() or not raw.isdigit() or raw != raw.lstrip("0"):
+        raise ValueError("ID must be a canonical decimal Snowflake string")
+    parsed = int(raw)
+    if parsed <= 0 or parsed > MAX_SNOWFLAKE_ID:
+        raise ValueError("ID is outside the signed 64-bit Snowflake range")
+    return parsed
 
 
 def decode_snowflake(value: int) -> dict[str, int | datetime]:

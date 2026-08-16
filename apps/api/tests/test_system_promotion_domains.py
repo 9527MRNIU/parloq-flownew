@@ -24,10 +24,18 @@ def _template_zip() -> bytes:
     return output.getvalue()
 
 
+def _account_group(admin_client: TestClient, name: str) -> str:
+    response = admin_client.post("/api/account-groups", json={"name": name})
+    assert response.status_code == 201, response.text
+    return response.json()["data"]["group"]["id"]
+
+
 def test_system_roles_menus_and_backend_permission(admin_client: TestClient) -> None:
     menus = admin_client.get("/api/system/menus")
     assert menus.status_code == 200
     rows = menus.json()["data"]["rows"]
+    assert rows and all(row["id"].isdecimal() for row in rows)
+    assert all("publicId" not in row for row in rows)
     by_route = {row["routePath"]: row for row in rows if row["routePath"]}
     assert by_route["/promotion/statistics"]["name"] == "渠道统计"
     assert by_route["/promotion/trends"]["name"] == "趋势图"
@@ -45,16 +53,22 @@ def test_system_roles_menus_and_backend_permission(admin_client: TestClient) -> 
     assert by_route["/promotion/domains"]["permissionKey"] == "promotion.domain.read"
 
     promotion_management = next(
-        row for row in rows if row["id"] == "menu_promotion_management"
+        row for row in rows if row["name"] == "推广管理"
     )
     assert admin_client.patch(
         f"/api/system/menus/{promotion_management['id']}", json={"visible": False}
     ).status_code == 200
     hidden_tree = admin_client.get("/api/system/menus/me").json()["data"]["tree"]
-    promotion_root = next(row for row in hidden_tree if row["id"] == "menu_promotion")
-    assert all(child["id"] != "menu_promotion_management" for child in promotion_root["children"])
+    promotion_root = next(
+        row for row in hidden_tree if row["name"] == "推广"
+    )
+    assert all(
+        child["name"] != "推广管理"
+        for child in promotion_root["children"]
+    )
     assert not any(
-        child["id"] == "menu_promotion_templates" for child in promotion_root["children"]
+        child["routePath"] == "/promotion/templates"
+        for child in promotion_root["children"]
     )
     assert admin_client.patch(
         f"/api/system/menus/{promotion_management['id']}", json={"visible": True}
@@ -105,11 +119,15 @@ def test_domain_quote_order_unknown_reconcile_and_channel_options(
     )
     assert quote.status_code == 201, quote.text
     quote_data = quote.json()["data"]["quote"]
+    assert quote_data["id"].isdecimal()
+    assert quote_data["quoteId"] == quote_data["id"]
     order = admin_client.post(
         "/api/domain-orders", json={"quoteId": quote_data["quoteId"], "autoRenew": True}
     )
     assert order.status_code == 201, order.text
     order_id = order.json()["data"]["order"]["id"]
+    assert order_id.isdecimal()
+    assert order.json()["data"]["order"]["quoteId"] == quote_data["id"]
     assert admin_client.post(f"/api/domain-orders/{order_id}/mock-payment").status_code == 200
     completed = admin_client.post(f"/api/domain-orders/{order_id}/provision")
     assert completed.status_code == 200, completed.text
@@ -223,7 +241,7 @@ def test_stale_provisioning_reconciles_and_cannot_be_cancelled(
         f"/api/domain-orders/{order['id']}/mock-payment"
     ).status_code == 200
     with SessionLocal() as db:
-        item = db.scalar(select(DomainOrder).where(DomainOrder.public_id == order["id"]))
+        item = db.scalar(select(DomainOrder).where(DomainOrder.id == int(order["id"])))
         assert item is not None
         item.status = "provisioning"
         item.updated_at = datetime.now(UTC) - timedelta(minutes=10)
@@ -303,6 +321,7 @@ def test_connected_domain_exposes_host_scoped_routing_proof(
 def test_promotion_data_center_aggregates_uv_costs_and_successes(
     admin_client: TestClient,
 ) -> None:
+    account_group_id = _account_group(admin_client, "Analytics Landing Accounts")
     domain = admin_client.post(
         "/api/domains", json={"hostname": "analytics-promotion.example"}
     ).json()["data"]["domain"]
@@ -320,6 +339,7 @@ def test_promotion_data_center_aggregates_uv_costs_and_successes(
             "countryCode": "US",
             "templatePublicId": template["id"],
             "domainPublicId": domain["id"],
+            "accountGroupId": account_group_id,
             "slug": "analytics-channel",
             "status": "active",
         },
@@ -442,6 +462,7 @@ def test_promotion_data_center_aggregates_uv_costs_and_successes(
 def test_channel_slug_is_scoped_to_ready_host(
     admin_client: TestClient,
 ) -> None:
+    account_group_id = _account_group(admin_client, "Host Scoped Landing Accounts")
     domains = []
     for hostname in ("same-slug-one.example", "same-slug-two.example"):
         domain = admin_client.post(
@@ -463,6 +484,7 @@ def test_channel_slug_is_scoped_to_ready_host(
                 "countryCode": "US",
                 "templatePublicId": template["id"],
                 "domainPublicId": domain["id"],
+                "accountGroupId": account_group_id,
                 "slug": "same-landing",
                 "status": "active",
             },
@@ -489,6 +511,7 @@ def test_channel_slug_is_scoped_to_ready_host(
 def test_channel_subdomain_prefix_builds_and_routes_public_url(
     admin_client: TestClient,
 ) -> None:
+    account_group_id = _account_group(admin_client, "Subdomain Landing Accounts")
     domain = admin_client.post(
         "/api/domains", json={"hostname": "subdomain-routing.example"}
     ).json()["data"]["domain"]
@@ -506,6 +529,7 @@ def test_channel_subdomain_prefix_builds_and_routes_public_url(
             "countryCode": "US",
             "templatePublicId": template["id"],
             "domainPublicId": domain["id"],
+            "accountGroupId": account_group_id,
             "slug": "shared-path",
             "status": "active",
         },
@@ -517,6 +541,7 @@ def test_channel_subdomain_prefix_builds_and_routes_public_url(
             "countryCode": "CN",
             "templatePublicId": template["id"],
             "domainPublicId": domain["id"],
+            "accountGroupId": account_group_id,
             "subdomainPrefix": "CN",
             "slug": "shared-path",
             "status": "active",
@@ -563,6 +588,7 @@ def test_channel_subdomain_prefix_builds_and_routes_public_url(
 def test_authenticated_backend_preview_bypasses_unready_domain_without_public_bypass(
     admin_client: TestClient,
 ) -> None:
+    account_group_id = _account_group(admin_client, "Preview Landing Accounts")
     domain = admin_client.post(
         "/api/domains", json={"hostname": "preview-disabled.example"}
     ).json()["data"]["domain"]
@@ -579,6 +605,7 @@ def test_authenticated_backend_preview_bypasses_unready_domain_without_public_by
             "countryCode": "US",
             "templatePublicId": template["id"],
             "domainPublicId": domain["id"],
+            "accountGroupId": account_group_id,
             "slug": "backend-preview-security",
             "status": "active",
         },
@@ -596,7 +623,7 @@ def test_authenticated_backend_preview_bypasses_unready_domain_without_public_by
         headers={"Host": "192.168.50.20:5173"},
     )
     assert preview.status_code == 200, preview.text
-    assert "parloq-promotion-config" in preview.text
+    assert "promotion-runtime-config" in preview.text
     proxied_preview = admin_client.get(
         "/api/public/promotion/channels/backend-preview-security/render",
         headers={"Host": "api:8000"},

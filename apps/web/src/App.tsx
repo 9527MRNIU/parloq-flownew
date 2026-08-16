@@ -13,6 +13,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { IpManagementPage } from "./pages/IpManagementPage";
 import { PersonalAccountsPage } from "./pages/PersonalAccountsPage";
 import {
+  PromotionTemplatePreviewPage,
   PromotionChannelsPage,
   PromotionTemplatesPage,
 } from "./pages/PromotionPages";
@@ -23,11 +24,11 @@ import {
 } from "./pages/PromotionDataPages";
 import {
   HyperlinkDataPackagesPage,
-  HyperlinkMaterialsPage,
   HyperlinkStrategiesPage,
   HyperlinkTasksPage,
   HyperlinkTemplatesPage,
 } from "./pages/HyperlinkResourcePages";
+import { MaterialsPage } from "./pages/HyperlinkMaterialsPage";
 import { HyperlinkMarketInsightsPage } from "./pages/HyperlinkMarketInsightsPage";
 import { UserGroupsPage } from "./pages/UserGroupsPage";
 import { UsersPage } from "./pages/UsersPage";
@@ -35,10 +36,11 @@ import { SystemMenusPage } from "./pages/SystemMenusPage";
 import {
   AccountExportPage,
   AccountGroupsPage,
-  AccountImportPage,
+  AccountIntakePage,
 } from "./pages/AccountCenterPages";
 import { AccountStatisticsPage } from "./pages/AccountStatisticsPage";
 import { ProtocolManagementPage } from "./pages/ProtocolManagementPage";
+import { HomePage } from "./pages/HomePage";
 import {
   GroupMarketingConstructionPage,
   type GroupMarketingPageKind,
@@ -76,16 +78,34 @@ function AdminOnly({ children }: { children: ReactNode }) {
   );
 }
 
+function ProtectedPage({ children }: { children: ReactNode }) {
+  const { user, loading } = useAuth();
+  if (loading)
+    return (
+      <div className="boot-screen">
+        <Spinner />
+        <span>正在加载 Parloq…</span>
+      </div>
+    );
+  if (!user) return <Navigate to="/login" replace />;
+  return children;
+}
+
 export default function App() {
   return (
     <TooltipProvider>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route
+          path="/promotion/templates/:templateId/preview"
+          element={
+            <ProtectedPage>
+              <PromotionTemplatePreviewPage />
+            </ProtectedPage>
+          }
+        />
         <Route element={<ProtectedLayout />}>
-          <Route
-            index
-            element={<Navigate to="/promotion/templates" replace />}
-          />
+          <Route index element={<HomePage />} />
           <Route
             path="/promotion/templates"
             element={<PromotionTemplatesPage />}
@@ -112,11 +132,16 @@ export default function App() {
             path="/personal-accounts"
             element={<Navigate to="/resources/accounts/manage" replace />}
           />
-          <Route path="/resources/accounts/import" element={<AccountImportPage />} />
+          <Route
+            path="/resources/accounts/import"
+            element={<Navigate to="/resources/accounts/manage?import=1" replace />}
+          />
           <Route path="/resources/accounts/export" element={<AccountExportPage />} />
           <Route path="/resources/accounts/manage" element={<PersonalAccountsPage />} />
           <Route path="/resources/accounts/groups" element={<AccountGroupsPage />} />
+          <Route path="/resources/accounts/intake" element={<AccountIntakePage />} />
           <Route path="/resources/accounts/statistics" element={<AccountStatisticsPage />} />
+          <Route path="/resources/materials" element={<MaterialsPage />} />
           <Route path="/resources/operations/protocol" element={<ProtocolManagementPage />} />
           <Route
             path="/ip-management"
@@ -145,7 +170,7 @@ export default function App() {
           />
           <Route
             path="/hyperlink/materials"
-            element={<HyperlinkMaterialsPage />}
+            element={<Navigate to="/resources/materials" replace />}
           />
           <Route
             path="/hyperlink/market-insights"
@@ -197,7 +222,7 @@ export default function App() {
         </Route>
         <Route
           path="*"
-          element={<Navigate to="/promotion/templates" replace />}
+          element={<Navigate to="/" replace />}
         />
       </Routes>
       <Toaster />

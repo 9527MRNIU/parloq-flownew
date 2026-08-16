@@ -6,6 +6,8 @@ import {
   LayoutTemplateIcon,
   Link2Icon,
   LogOutIcon,
+  HouseIcon,
+  ImagesIcon,
   MoonIcon,
   SettingsIcon,
   UsersRoundIcon,
@@ -20,6 +22,7 @@ import { apiRequest } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { BoringAvatar } from "./boring-avatar";
 import { NavMain } from "./sidebar/NavMain";
+import { SystemMetricsIndicator } from "./SystemMetricsIndicator";
 import {
   Button,
   DropdownMenu,
@@ -61,6 +64,16 @@ type NavItem = {
 type NavSection = { label: string; items: NavItem[] };
 
 export const navigation: NavSection[] = [
+  {
+    label: "工作台",
+    items: [
+      {
+        label: "首页",
+        to: "/",
+        icon: HouseIcon,
+      },
+    ],
+  },
   {
     label: "推广",
     items: [
@@ -131,11 +144,6 @@ export const navigation: NavSection[] = [
             permissionKey: "marketing.hyperlink_strategies.read",
           },
           {
-            label: "素材库",
-            to: "/hyperlink/materials",
-            permissionKey: "marketing.materials.read",
-          },
-          {
             label: "超链市场透视",
             to: "/hyperlink/market-insights",
             permissionKey: "marketing.insights.read",
@@ -199,19 +207,9 @@ export const navigation: NavSection[] = [
         icon: BookUserIcon,
         children: [
           {
-            label: "账号导入",
-            to: "/resources/accounts/import",
-            permissionKey: "resources.accounts.import",
-          },
-          {
-            label: "账号导出",
-            to: "/resources/accounts/export",
-            permissionKey: "resources.accounts.export",
-          },
-          {
-            label: "账号管理",
-            to: "/resources/accounts/manage",
-            permissionKey: "resources.accounts.read",
+            label: "账号统计",
+            to: "/resources/accounts/statistics",
+            permissionKey: "resources.account_statistics.read",
           },
           {
             label: "账号分组",
@@ -219,11 +217,27 @@ export const navigation: NavSection[] = [
             permissionKey: "resources.account_groups.read",
           },
           {
-            label: "账号统计",
-            to: "/resources/accounts/statistics",
-            permissionKey: "resources.account_statistics.read",
+            label: "账号管理",
+            to: "/resources/accounts/manage",
+            permissionKey: "resources.accounts.read",
+          },
+          {
+            label: "接入记录",
+            to: "/resources/accounts/intake",
+            permissionKey: "resources.account_intake.read",
+          },
+          {
+            label: "账号导出",
+            to: "/resources/accounts/export",
+            permissionKey: "resources.accounts.export",
           },
         ],
+      },
+      {
+        label: "素材库",
+        to: "/resources/materials",
+        icon: ImagesIcon,
+        permissionKey: "resources.materials.read",
       },
       {
         label: "运营管理",
@@ -382,7 +396,7 @@ function SidebarNav() {
               label: childOverride?.name || child.label,
             }));
           if (item.children && menuAuthority && !children?.length) return [];
-          if (!item.children && menuAuthority && !override) return [];
+          if (!item.children && menuAuthority && !override && item.to !== "/") return [];
           if (override && (!override.enabled || !override.visible)) return [];
           return [
             {
@@ -410,7 +424,9 @@ function SidebarNav() {
               ? item.children.some((child) =>
                   location.pathname.startsWith(child.to),
                 )
-              : location.pathname.startsWith(item.to!);
+              : item.to === "/"
+                ? location.pathname === "/"
+                : location.pathname.startsWith(item.to!);
             return {
               key: `${section.label}-${item.label}`,
               title: item.label,
@@ -461,7 +477,7 @@ export function AppLayout() {
             <SidebarMenuItem>
               <SidebarMenuButton asChild size="lg" tooltip="Parloq">
                 <NavLink
-                  to="/resources/accounts/manage"
+                  to="/"
                   className="flex items-center gap-2"
                 >
                   <img
@@ -557,12 +573,15 @@ export function AppLayout() {
             ) : null}
             <strong className="truncate">{current.title}</strong>
           </div>
-          <IconButton
-            label={dark ? "切换浅色主题" : "切换深色主题"}
-            onClick={() => setDark((value) => !value)}
-          >
-            {dark ? <SunIcon /> : <MoonIcon />}
-          </IconButton>
+          <div className="flex shrink-0 items-center gap-1">
+            <SystemMetricsIndicator />
+            <IconButton
+              label={dark ? "切换浅色主题" : "切换深色主题"}
+              onClick={() => setDark((value) => !value)}
+            >
+              {dark ? <SunIcon /> : <MoonIcon />}
+            </IconButton>
+          </div>
         </header>
         <main className="flex min-w-0 flex-1 p-4">
           <div className="flex w-full min-w-0 flex-1 flex-col gap-4">

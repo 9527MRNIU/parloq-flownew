@@ -18,6 +18,7 @@ from app.routers import (
     domains,
     hyperlink,
     ip_proxies,
+    materials,
     meta_pixels,
     personal_accounts,
     promotion,
@@ -55,11 +56,15 @@ app.include_router(users.router)
 app.include_router(bitly_accounts.router)
 app.include_router(direct_short_links.router)
 app.include_router(meta_pixels.router)
+app.include_router(materials.router)
+app.include_router(materials.legacy_router)
+app.include_router(materials.internal_router)
 app.include_router(ip_proxies.router)
 app.include_router(personal_accounts.router)
 app.include_router(personal_accounts.group_router)
 app.include_router(account_statistics.router)
 app.include_router(protocol_nodes.router)
+app.include_router(protocol_nodes.pool_router)
 app.include_router(domains.router)
 app.include_router(domains.order_router)
 app.include_router(promotion.router)

@@ -24,6 +24,13 @@ x-api-environment: &api-environment
   DOMAIN_REGISTRAR_MOCK: ${DOMAIN_REGISTRAR_MOCK:-false}
   PROMOTION_INGRESS_HOST: ${PROMOTION_INGRESS_HOST:-center.parloq.com}
   PROMOTION_SUCCESS_WEBHOOK_SECRET: ${PROMOTION_SUCCESS_WEBHOOK_SECRET:?PROMOTION_SUCCESS_WEBHOOK_SECRET is required}
+  META_CAPI_MOCK: ${META_CAPI_MOCK:-false}
+  META_CAPI_BASE_URL: ${META_CAPI_BASE_URL:-https://graph.facebook.com}
+  META_CAPI_API_VERSION: ${META_CAPI_API_VERSION:-v23.0}
+  META_CAPI_MAX_ATTEMPTS: ${META_CAPI_MAX_ATTEMPTS:-5}
+  META_CAPI_BATCH_SIZE: ${META_CAPI_BATCH_SIZE:-50}
+  SYSTEM_HOST_PROC_PATH: /host/proc
+  SYSTEM_HOST_DISK_PATH: /host/root
 
 services:
   postgres:
@@ -85,6 +92,7 @@ services:
       WA_GATEWAY_WEBHOOK_URL: http://api:8000/api/internal/wa-gateway/events
       WA_GATEWAY_WEBHOOK_SECRET: ${WA_GATEWAY_WEBHOOK_SECRET:?WA_GATEWAY_WEBHOOK_SECRET is required}
       WA_GATEWAY_WEBHOOK_RETRIES: ${WA_GATEWAY_WEBHOOK_RETRIES:-3}
+      WA_GATEWAY_MATERIAL_BASE_URL: http://api:8000
     depends_on:
       postgres:
         condition: service_healthy
@@ -102,6 +110,17 @@ services:
     environment:
       <<: *api-environment
       SNOWFLAKE_NODE_ID: ${API_SNOWFLAKE_NODE_ID:-1}
+    volumes:
+      - type: bind
+        source: /proc
+        target: /host/proc
+        read_only: true
+      - type: bind
+        source: /
+        target: /host/root
+        read_only: true
+        bind:
+          propagation: rslave
     depends_on:
       postgres:
         condition: service_healthy

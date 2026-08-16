@@ -11,6 +11,8 @@ def test_mock_direct_bitly_link_lifecycle(admin_client: TestClient) -> None:
     accounts = admin_client.get("/api/direct-short-links/accounts")
     assert accounts.status_code == 200
     account = accounts.json()["data"]["rows"][0]
+    assert account["id"].isdecimal()
+    assert "publicId" not in account
     assert account["isMock"] is True
     assert "token" not in account
 
@@ -24,6 +26,10 @@ def test_mock_direct_bitly_link_lifecycle(admin_client: TestClient) -> None:
     )
     assert created.status_code == 201
     link = created.json()["data"]["link"]
+    assert link["id"].isdecimal()
+    assert "publicId" not in link
+    assert link["providerAccountId"] == account["id"]
+    assert "providerAccountPublicId" not in link
     assert link["shortUrl"].startswith("https://bit.ly/")
     assert link["targetUrl"].startswith("https://example.com/landing")
 
@@ -44,6 +50,8 @@ def test_bitly_token_is_encrypted_and_never_returned(admin_client: TestClient) -
     )
     assert response.status_code == 201
     serialized = response.json()["data"]["account"]
+    assert serialized["id"].isdecimal()
+    assert "publicId" not in serialized
     assert serialized["tokenMasked"] == "••••oken"
     assert "top-secret" not in response.text
 

@@ -41,7 +41,9 @@ def test_template_policy_defaults_update_validation_and_tenant_isolation(
         assert login.status_code == 200
         operator_default = operator.get("/api/promotion/template-policy")
         assert operator_default.status_code == 200, operator_default.text
-        assert operator_default.json()["data"]["policy"] == {
+        operator_policy = operator_default.json()["data"]["policy"]
+        assert operator_policy["id"].isdigit()
+        assert {key: value for key, value in operator_policy.items() if key != "id"} == {
             "protectionMode": "strict",
             "devtoolsAction": "blank",
             "lockViewportZoom": True,
@@ -60,7 +62,12 @@ def test_template_policy_defaults_update_validation_and_tenant_isolation(
         )
         assert updated.status_code == 200, updated.text
         updated_policy = updated.json()["data"]["policy"]
-        assert {key: value for key, value in updated_policy.items() if key != "updatedAt"} == {
+        assert updated_policy["id"] == operator_policy["id"]
+        assert {
+            key: value
+            for key, value in updated_policy.items()
+            if key not in {"id", "updatedAt"}
+        } == {
             "protectionMode": "basic",
             "devtoolsAction": "log",
             "lockViewportZoom": False,

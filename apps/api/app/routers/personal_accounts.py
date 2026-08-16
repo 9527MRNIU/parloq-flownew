@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from urllib.parse import quote
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.business_schemas import (
+    AccountBatchExport,
     AccountGroupCreate,
     AccountGroupUpdate,
     PairRequest,
@@ -16,17 +19,22 @@ from app.business_schemas import (
     SendRequest,
 )
 from app.deps import CurrentUser, DbSession
-from app.snowflake import new_public_id
+from app.entity_ids import identifier_filter
+from app.snowflake import new_public_id, parse_snowflake_id
 
 from app.models import (
+    AccountMetadataSyncJob,
+    AccountPairingAttempt,
     AccountGroup,
     AccountProxyBinding,
     IpAllocationPolicy,
     MessageDelivery,
     PersonalAccount,
+    PromotionChannel,
     ProxyEndpoint,
     ProtocolNode,
     RoleActionPermission,
+    HyperlinkTask,
 )
 from app.security import decrypt_secret, utcnow
 from app.serializers import iso
@@ -38,6 +46,7 @@ from app.services.baileys_credentials import (
 from app.services.wa_gateway import GatewayError, WaGatewayClient
 from app.services.protocol_nodes import (
     marketing_protocol_available,
+    normalized_sync_policy,
     select_ingress_protocol,
 )
 from app.services.account_lifecycle import record_initial_account_state
@@ -61,9 +70,13 @@ GATEWAY_ACCOUNT_STATES = {
 }
 
 
-def _group(db: DbSession, public_id: str, user) -> AccountGroup:
+def _group(db: DbSession, group_id: str, user) -> AccountGroup:
+    try:
+        database_id = parse_snowflake_id(group_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="账号分组不存在") from None
     statement = select(AccountGroup).where(
-        AccountGroup.public_id == public_id,
+        AccountGroup.id == database_id,
         AccountGroup.archived_at.is_(None),
     )
     if user.role != "admin":
@@ -101,16 +114,16 @@ def _group_row(db: DbSession, item: AccountGroup) -> dict:
             .where(
                 PersonalAccount.group_id == item.id,
                 PersonalAccount.archived_at.is_(None),
+                PersonalAccount.admission_status == "active",
             )
         )
         or 0
     )
     return {
-        "id": item.public_id,
-        "publicId": item.public_id,
+        "id": str(item.id),
         "name": item.name,
         "description": item.description,
-        "createdBy": item.created_by,
+        "createdBy": str(item.created_by),
         "accountCount": account_count,
         "createdAt": iso(item.created_at),
         "updatedAt": iso(item.updated_at),
@@ -146,14 +159,14 @@ def create_account_group(
     return {"data": {"group": _group_row(db, item)}}
 
 
-@group_router.patch("/{public_id}")
+@group_router.patch("/{group_id}")
 def update_account_group(
-    public_id: str,
+    group_id: str,
     payload: AccountGroupUpdate,
     db: DbSession,
     current_user: CurrentUser,
 ) -> dict:
-    item = _group(db, public_id, current_user)
+    item = _group(db, group_id, current_user)
     if payload.name is not None:
         item.name = payload.name
     if "description" in payload.model_fields_set:
@@ -167,11 +180,36 @@ def update_account_group(
     return {"data": {"group": _group_row(db, item)}}
 
 
-@group_router.delete("/{public_id}")
+@group_router.delete("/{group_id}")
 def archive_account_group(
-    public_id: str, db: DbSession, current_user: CurrentUser
+    group_id: str, db: DbSession, current_user: CurrentUser
 ) -> dict:
-    item = _group(db, public_id, current_user)
+    item = _group(db, group_id, current_user)
+    channel_in_use = db.scalar(
+        select(PromotionChannel.id).where(
+            PromotionChannel.account_group_id == item.id,
+            PromotionChannel.archived_at.is_(None),
+        ).limit(1)
+    )
+    if channel_in_use is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="账号分组仍被推广渠道使用，请先更换渠道的账号入库分组",
+        )
+    task_in_use = db.scalar(
+        select(HyperlinkTask.id).where(
+            HyperlinkTask.account_group_id == item.id,
+            HyperlinkTask.archived_at.is_(None),
+            HyperlinkTask.status.in_(
+                ("draft", "queued", "running", "waiting_accounts", "paused")
+            ),
+        ).limit(1)
+    )
+    if task_in_use is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="账号分组仍被发送任务使用，请先结束或更换相关任务",
+        )
     db.query(PersonalAccount).filter(PersonalAccount.group_id == item.id).update(
         {PersonalAccount.group_id: None}, synchronize_session=False
     )
@@ -180,10 +218,15 @@ def archive_account_group(
     return {"data": {"ok": True}}
 
 
-def _account(db: DbSession, public_id: str, user) -> PersonalAccount:
+def _account(db: DbSession, account_id: str, user) -> PersonalAccount:
+    try:
+        database_id = parse_snowflake_id(account_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="个人账号不存在") from None
     statement = select(PersonalAccount).where(
-            PersonalAccount.public_id == public_id,
-            PersonalAccount.archived_at.is_(None),
+        PersonalAccount.id == database_id,
+        PersonalAccount.archived_at.is_(None),
+        PersonalAccount.admission_status == "active",
         )
     if user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == user.id)
@@ -219,7 +262,7 @@ def _proxy_url(db: DbSession, account_id: str) -> str | None:
 
 
 def account_row(db: DbSession, item: PersonalAccount) -> dict:
-    bound = _binding(db, item.public_id)
+    bound = _binding(db, item.gateway_account_id)
     proxy = bound[1] if bound else None
     group = db.get(AccountGroup, item.group_id) if item.group_id else None
     protocol = db.get(ProtocolNode, item.protocol_id) if item.protocol_id else None
@@ -231,9 +274,8 @@ def account_row(db: DbSession, item: PersonalAccount) -> dict:
             (int(item.has_avatar) + int(item.group_count > 0)) / 2 * 100
         )
     return {
-        "id": item.public_id,
-        "publicId": item.public_id,
-        "createdBy": item.created_by,
+        "id": str(item.id),
+        "createdBy": str(item.created_by),
         "name": item.name,
         "phone": item.phone_e164,
         "countryCode": item.country_code,
@@ -244,9 +286,10 @@ def account_row(db: DbSession, item: PersonalAccount) -> dict:
         "importFormat": item.import_format,
         "validationStatus": item.validation_status,
         "metadataSyncStatus": item.metadata_sync_status,
+        "admissionStatus": item.admission_status,
         "protocol": (
             {
-                "id": protocol.public_id,
+                "id": str(protocol.id),
                 "name": protocol.name,
                 "type": protocol.protocol_type,
                 "online": protocol.online_enabled,
@@ -257,7 +300,7 @@ def account_row(db: DbSession, item: PersonalAccount) -> dict:
             else None
         ),
         "group": (
-            {"id": group.public_id, "name": group.name}
+            {"id": str(group.id), "name": group.name}
             if group is not None and group.archived_at is None
             else None
         ),
@@ -271,10 +314,11 @@ def account_row(db: DbSession, item: PersonalAccount) -> dict:
             "isKnown": quality_score is not None,
         },
         "enabled": item.enabled,
+        "marketingEligible": item.marketing_eligible,
         "proxyBinding": (
             {
-                "bindingId": bound[0].public_id,
-                "proxyPublicId": proxy.public_id,
+                "bindingId": str(bound[0].id),
+                "proxyId": str(proxy.id),
                 "proxyName": proxy.name,
                 "countryCode": proxy.country_code,
                 "healthStatus": proxy.health_status,
@@ -293,9 +337,8 @@ def account_row(db: DbSession, item: PersonalAccount) -> dict:
 
 def delivery_row(item: MessageDelivery) -> dict:
     return {
-        "id": item.public_id,
-        "publicId": item.public_id,
-        "messageId": item.public_id,
+        "id": str(item.id),
+        "messageId": str(item.id),
         "providerMessageId": item.provider_message_id,
         "requestId": item.request_id,
         "to": item.recipient_e164,
@@ -360,7 +403,7 @@ def _sync_gateway_account(
     if client.settings.wa_gateway_mock or not item.phone_e164:
         return
     try:
-        _apply_gateway_account(item, client.get(item.public_id))
+        _apply_gateway_account(item, client.get(item.gateway_account_id))
     except GatewayError as exc:
         item.last_error = str(exc)
         db.commit()
@@ -370,17 +413,17 @@ def _sync_gateway_account(
     db.commit()
 
 
-def _set_binding(db: DbSession, account_id: str, proxy_public_id: str | None) -> None:
+def _set_binding(db: DbSession, account_id: str, proxy_id: str | None) -> None:
     existing = db.scalar(
         select(AccountProxyBinding).where(AccountProxyBinding.account_public_id == account_id)
     )
-    if not proxy_public_id:
+    if not proxy_id:
         if existing:
             db.delete(existing)
         return
     proxy = db.scalar(
         select(ProxyEndpoint).where(
-            ProxyEndpoint.public_id == proxy_public_id,
+            identifier_filter(ProxyEndpoint, proxy_id),
             ProxyEndpoint.archived_at.is_(None),
             ProxyEndpoint.enabled.is_(True),
         )
@@ -490,7 +533,10 @@ def list_accounts(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
 ) -> dict:
-    statement = select(PersonalAccount).where(PersonalAccount.archived_at.is_(None))
+    statement = select(PersonalAccount).where(
+        PersonalAccount.archived_at.is_(None),
+        PersonalAccount.admission_status == "active",
+    )
     if current_user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == current_user.id)
     if keyword:
@@ -512,8 +558,10 @@ def list_accounts(
                 str(value.get("id")): value for value in WaGatewayClient().list()
             }
             for item in items:
-                if item.public_id in gateway_accounts:
-                    _apply_gateway_account(item, gateway_accounts[item.public_id])
+                if item.gateway_account_id in gateway_accounts:
+                    _apply_gateway_account(
+                        item, gateway_accounts[item.gateway_account_id]
+                    )
             db.commit()
         except GatewayError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
@@ -522,20 +570,20 @@ def list_accounts(
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: CurrentUser) -> dict:
-    if payload.proxy_public_id and current_user.role != "admin":
+    if payload.proxy_id and current_user.role != "admin":
         raise HTTPException(status_code=403, detail="固定代理由管理员分配")
-    proxy_public_id = payload.proxy_public_id
-    if not proxy_public_id:
+    proxy_id = payload.proxy_id
+    if not proxy_id:
         proxy = _auto_proxy(db, current_user.id, payload.country_code)
         if proxy is not None:
-            proxy_public_id = proxy.public_id
+            proxy_id = str(proxy.id)
         elif not WaGatewayClient().settings.wa_gateway_mock:
             raise HTTPException(
                 status_code=409,
                 detail="没有可用固定代理，已阻止账号裸连；手动模式下请先选择 IP",
             )
     protocol = select_ingress_protocol(
-        db, current_user.id, payload.protocol_public_id
+        db, current_user.id, payload.protocol_id
     )
     item = PersonalAccount(
         public_id=new_public_id("wa"),
@@ -548,6 +596,7 @@ def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: 
         source_ref_id=payload.source_ref_id,
         validation_status="pending",
         metadata_sync_status="pending",
+        admission_status="active",
         group_id=_group_database_id(
             db,
             payload.group_id,
@@ -556,6 +605,7 @@ def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: 
         ),
         protocol_id=protocol.id,
         enabled=payload.enabled,
+        marketing_eligible=payload.marketing_eligible,
         created_by=current_user.id,
     )
     db.add(item)
@@ -563,12 +613,18 @@ def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: 
     gateway_attempted = False
     try:
         db.flush()
-        _set_binding(db, item.public_id, proxy_public_id)
+        _set_binding(db, item.gateway_account_id, proxy_id)
         db.flush()
         if item.phone_e164:
             gateway_attempted = True
             client.create(
-                item.public_id, item.phone_e164, _proxy_url(db, item.public_id)
+                item.gateway_account_id,
+                item.phone_e164,
+                _proxy_url(db, item.gateway_account_id),
+                connection_policy=protocol.connection_policy,
+                idle_disconnect_seconds=protocol.idle_disconnect_seconds,
+                post_verify_grace_seconds=protocol.post_verify_grace_seconds,
+                sync_policy=normalized_sync_policy(protocol.sync_policy_json),
             )
         record_initial_account_state(
             db, item, reason_category="account_created"
@@ -578,7 +634,7 @@ def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: 
         db.rollback()
         if gateway_attempted:
             try:
-                client.logout(item.public_id)
+                client.logout(item.gateway_account_id)
             except GatewayError:
                 pass
         raise HTTPException(status_code=409, detail="手机号已被其他个人账号使用") from None
@@ -588,7 +644,7 @@ def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: 
         # Best-effort cleanup keeps a subsequent user retry from hitting 409.
         if gateway_attempted:
             try:
-                client.logout(item.public_id)
+                client.logout(item.gateway_account_id)
             except GatewayError:
                 pass
         raise HTTPException(status_code=502, detail=str(exc)) from None
@@ -603,10 +659,12 @@ async def import_account(
     file: UploadFile = File(...),
     name: str | None = Form(default=None),
     group_id: str | None = Form(default=None, alias="groupId"),
-    proxy_public_id: str | None = Form(default=None, alias="proxyPublicId"),
-    protocol_public_id: str | None = Form(default=None, alias="protocolId"),
+    proxy_id: str | None = Form(default=None, alias="proxyId"),
+    legacy_proxy_public_id: str | None = Form(default=None, alias="proxyPublicId"),
+    protocol_id: str | None = Form(default=None, alias="protocolId"),
 ) -> dict:
-    if proxy_public_id and current_user.role != "admin":
+    requested_proxy_id = proxy_id or legacy_proxy_public_id
+    if requested_proxy_id and current_user.role != "admin":
         raise HTTPException(status_code=403, detail="固定代理由管理员分配")
     if not (file.filename or "").lower().endswith(".json"):
         raise HTTPException(status_code=422, detail="只允许导入 JSON 文件")
@@ -630,18 +688,18 @@ async def import_account(
     normalized_name = (name or session.display_name or session.phone_e164).strip()
     if not normalized_name or len(normalized_name) > 120:
         raise HTTPException(status_code=422, detail="账号名称长度必须为 1-120 个字符")
-    selected_proxy_id = proxy_public_id
+    selected_proxy_id = requested_proxy_id
     if not selected_proxy_id:
         proxy = _auto_proxy(db, current_user.id, None)
         if proxy is not None:
-            selected_proxy_id = proxy.public_id
+            selected_proxy_id = str(proxy.id)
         elif not WaGatewayClient().settings.wa_gateway_mock:
             raise HTTPException(
                 status_code=409,
                 detail="没有可用固定代理，已阻止账号裸连；手动模式下请在导入时选择 IP",
             )
 
-    protocol = select_ingress_protocol(db, current_user.id, protocol_public_id)
+    protocol = select_ingress_protocol(db, current_user.id, protocol_id)
     item = PersonalAccount(
         public_id=new_public_id("wa"),
         name=normalized_name,
@@ -651,6 +709,7 @@ async def import_account(
         import_format=session.import_format,
         validation_status="validating",
         metadata_sync_status="pending",
+        admission_status="active",
         group_id=_group_database_id(
             db,
             group_id,
@@ -666,25 +725,33 @@ async def import_account(
     gateway_attempted = False
     try:
         db.flush()
-        _set_binding(db, item.public_id, selected_proxy_id)
+        _set_binding(db, item.gateway_account_id, selected_proxy_id)
         db.flush()
         gateway_attempted = True
         client.import_session(
-            item.public_id,
+            item.gateway_account_id,
             session.value,
-            _proxy_url(db, item.public_id),
+            _proxy_url(db, item.gateway_account_id),
         )
         # Import acceptance is not proof that the remote session is usable.
         # A later gateway sync promotes validation_status to ready.
         record_initial_account_state(
             db, item, reason_category="session_imported"
         )
+        from app.services.account_metadata_sync import enqueue_account_metadata_sync
+
+        enqueue_account_metadata_sync(
+            db,
+            item,
+            sync_policy=normalized_sync_policy(protocol.sync_policy_json),
+            sync_policy_version=protocol.sync_policy_version,
+        )
         db.commit()
     except IntegrityError:
         db.rollback()
         if gateway_attempted:
             try:
-                client.disconnect(item.public_id)
+                client.disconnect(item.gateway_account_id)
             except GatewayError:
                 pass
         raise HTTPException(status_code=409, detail="该手机号已存在于账号池") from None
@@ -692,7 +759,7 @@ async def import_account(
         db.rollback()
         if gateway_attempted:
             try:
-                client.disconnect(item.public_id)
+                client.disconnect(item.gateway_account_id)
             except GatewayError:
                 pass
         raise HTTPException(status_code=502, detail=str(exc)) from None
@@ -713,7 +780,10 @@ def _unknown_aware_metric(values: list[object], predicate) -> dict:
 
 @router.get("/statistics")
 def account_statistics(db: DbSession, current_user: CurrentUser) -> dict:
-    statement = select(PersonalAccount).where(PersonalAccount.archived_at.is_(None))
+    statement = select(PersonalAccount).where(
+        PersonalAccount.archived_at.is_(None),
+        PersonalAccount.admission_status == "active",
+    )
     if current_user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == current_user.id)
     items = list(db.scalars(statement).all())
@@ -754,7 +824,7 @@ def account_statistics(db: DbSession, current_user: CurrentUser) -> dict:
             )
         rows.append(
             {
-                "accountPublicId": item.public_id,
+                "accountId": str(item.id),
                 "displayName": item.name,
                 "phone": item.phone_e164,
                 "source": item.source,
@@ -790,16 +860,16 @@ def account_statistics(db: DbSession, current_user: CurrentUser) -> dict:
     }
 
 
-@router.get("/{public_id}")
-def get_account(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _account(db, public_id, current_user)
+@router.get("/{account_id}")
+def get_account(account_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _account(db, account_id, current_user)
     _sync_gateway_account(db, item, strict=False)
     return {"data": {"account": account_row(db, item)}}
 
 
-@router.get("/{public_id}/export")
+@router.get("/{account_id}/export")
 def export_account(
-    public_id: str,
+    account_id: str,
     db: DbSession,
     current_user: CurrentUser,
     export_format: str = Query(default="baileys_creds", alias="format"),
@@ -807,13 +877,15 @@ def export_account(
     _require_account_export(db, current_user)
     if export_format not in {"baileys_creds", "native"}:
         raise HTTPException(status_code=422, detail="不支持的账号导出格式")
-    item = _account(db, public_id, current_user)
+    item = _account(db, account_id, current_user)
     if item.validation_status != "ready":
         raise HTTPException(status_code=409, detail="账号验证完成后才能导出")
     if item.status in {"pairing", "warming", "online_idle", "sending", "draining"}:
         raise HTTPException(status_code=409, detail="请先断开账号连接再导出凭据")
     try:
-        exported_session = WaGatewayClient().export_session(item.public_id)
+        exported_session = WaGatewayClient().export_session(
+            item.gateway_account_id
+        )
     except GatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from None
     if not isinstance(exported_session, dict):
@@ -830,7 +902,7 @@ def export_account(
         else validated_session.credentials.value
     )
     suffix = "-parloq-full" if export_format == "native" else ""
-    filename = f"{(item.phone_e164 or item.public_id).lstrip('+')}{suffix}.json"
+    filename = f"{(item.phone_e164 or str(item.id)).lstrip('+')}{suffix}.json"
     return Response(
         content=json.dumps(
             document,
@@ -849,34 +921,217 @@ def export_account(
     )
 
 
+@router.post("/export/batch")
+def export_accounts_batch(
+    payload: AccountBatchExport,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> Response:
+    _require_account_export(db, current_user)
+    database_ids = [parse_snowflake_id(value) for value in payload.account_ids]
+    statement = select(PersonalAccount).where(
+        PersonalAccount.id.in_(database_ids),
+        PersonalAccount.archived_at.is_(None),
+        PersonalAccount.admission_status == "active",
+    )
+    if current_user.role != "admin":
+        statement = statement.where(PersonalAccount.created_by == current_user.id)
+    items = {str(item.id): item for item in db.scalars(statement).all()}
+    missing = [account_id for account_id in payload.account_ids if account_id not in items]
+    if missing:
+        raise HTTPException(status_code=404, detail="部分账号不存在或无权导出")
+
+    for account_id in payload.account_ids:
+        item = items[account_id]
+        if item.validation_status != "ready":
+            raise HTTPException(
+                status_code=409,
+                detail=f"账号 {item.phone_e164 or item.id} 尚未验证完成",
+            )
+        if item.status in {"pairing", "warming", "online_idle", "sending", "draining"}:
+            raise HTTPException(
+                status_code=409,
+                detail=f"账号 {item.phone_e164 or item.id} 在线，请先断开后导出",
+            )
+
+    archive = BytesIO()
+    gateway = WaGatewayClient()
+    with ZipFile(archive, mode="w", compression=ZIP_DEFLATED) as bundle:
+        for account_id in payload.account_ids:
+            item = items[account_id]
+            try:
+                exported_session = gateway.export_session(
+                    item.gateway_account_id
+                )
+            except GatewayError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from None
+            if not isinstance(exported_session, dict):
+                raise HTTPException(status_code=502, detail="网关未返回有效的 Baileys 会话")
+            try:
+                validated_session = validate_baileys_session(exported_session)
+            except BaileysCredentialError:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"账号 {item.phone_e164 or item.id} 的会话不完整",
+                ) from None
+            document = (
+                validated_session.value
+                if payload.export_format == "native"
+                else validated_session.credentials.value
+            )
+            suffix = "-parloq-full" if payload.export_format == "native" else ""
+            filename = f"{(item.phone_e164 or str(item.id)).lstrip('+')}{suffix}.json"
+            bundle.writestr(
+                filename,
+                json.dumps(
+                    document,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ),
+            )
+    archive.seek(0)
+    return Response(
+        content=archive.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="parloq-accounts.zip"',
+            "Cache-Control": "no-store, private",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @router.post("/sync-all")
 def sync_all_accounts(db: DbSession, current_user: CurrentUser) -> dict:
-    statement = select(PersonalAccount).where(PersonalAccount.archived_at.is_(None))
+    statement = select(PersonalAccount).where(
+        PersonalAccount.archived_at.is_(None),
+        PersonalAccount.admission_status == "active",
+    )
     if current_user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == current_user.id)
     items = db.scalars(statement).all()
-    try:
-        gateway_accounts = {
-            str(value.get("id")): value for value in WaGatewayClient().list()
-        }
-    except GatewayError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from None
-    synced = 0
+    from app.services.account_metadata_sync import enqueue_account_metadata_sync
+
+    queued = 0
     for item in items:
-        value = gateway_accounts.get(item.public_id)
-        if value is not None:
-            _apply_gateway_account(item, value)
-            synced += 1
+        enqueue_account_metadata_sync(db, item)
+        queued += 1
     db.commit()
-    return {"data": {"syncedCount": synced, "total": len(items)}}
+    return {"data": {"queuedCount": queued, "total": len(items)}}
 
 
-@router.patch("/{public_id}")
-def update_account(public_id: str, payload: PersonalAccountUpdate, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _account(db, public_id, current_user)
-    if "proxy_public_id" in payload.model_fields_set and current_user.role != "admin":
+@router.get("/intake/attempts")
+def list_intake_attempts(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str | None = None,
+    attempt_status: str | None = Query(default=None, alias="status"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+) -> dict:
+    statement = (
+        select(AccountPairingAttempt, PersonalAccount)
+        .join(PersonalAccount, PersonalAccount.id == AccountPairingAttempt.account_id)
+        .where(PersonalAccount.archived_at.is_(None))
+    )
+    if current_user.role != "admin":
+        statement = statement.where(PersonalAccount.created_by == current_user.id)
+    if attempt_status and attempt_status != "all":
+        statement = statement.where(AccountPairingAttempt.status == attempt_status)
+    if keyword:
+        pattern = f"%{keyword.strip()}%"
+        statement = statement.where(
+            or_(
+                PersonalAccount.name.ilike(pattern),
+                PersonalAccount.phone_e164.ilike(pattern),
+                AccountPairingAttempt.public_id.ilike(pattern),
+            )
+        )
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    rows = db.execute(
+        statement.order_by(AccountPairingAttempt.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    result = []
+    for attempt, account in rows:
+        channel = db.get(PromotionChannel, attempt.channel_id)
+        protocol = db.get(ProtocolNode, attempt.protocol_node_id)
+        group = db.get(AccountGroup, attempt.account_group_id)
+        latest_job = db.scalar(
+            select(AccountMetadataSyncJob)
+            .where(AccountMetadataSyncJob.account_id == account.id)
+            .order_by(AccountMetadataSyncJob.created_at.desc())
+            .limit(1)
+        )
+        result.append(
+            {
+                "id": str(attempt.id),
+                "attemptType": attempt.attempt_type,
+                "status": attempt.status,
+                "terminalReason": attempt.terminal_reason,
+                "providerCode": attempt.provider_code,
+                "visitorId": attempt.visitor_id,
+                "account": {
+                    "id": str(account.id),
+                    "name": account.name,
+                    "phone": account.phone_e164,
+                    "admissionStatus": account.admission_status,
+                    "status": account.status,
+                    "validationStatus": account.validation_status,
+                    "metadataSyncStatus": account.metadata_sync_status,
+                },
+                "channel": (
+                    {"id": str(channel.id), "name": channel.name}
+                    if channel is not None
+                    else None
+                ),
+                "protocol": (
+                    {"id": str(protocol.id), "name": protocol.name}
+                    if protocol is not None
+                    else None
+                ),
+                "group": (
+                    {"id": str(group.id), "name": group.name}
+                    if group is not None
+                    else None
+                ),
+                "routeVersion": attempt.route_version,
+                "syncPolicyVersion": attempt.sync_policy_version,
+                "syncJob": (
+                    {
+                        "id": str(latest_job.id),
+                        "status": latest_job.status,
+                        "lastError": latest_job.last_error,
+                    }
+                    if latest_job is not None
+                    else None
+                ),
+                "expiresAt": iso(attempt.expires_at),
+                "verifiedAt": iso(attempt.verified_at),
+                "createdAt": iso(attempt.created_at),
+                "updatedAt": iso(attempt.updated_at),
+            }
+        )
+    return {
+        "data": {
+            "rows": result,
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+    }
+
+
+@router.patch("/{account_id}")
+def update_account(account_id: str, payload: PersonalAccountUpdate, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _account(db, account_id, current_user)
+    if "proxy_id" in payload.model_fields_set and current_user.role != "admin":
         raise HTTPException(status_code=403, detail="固定代理由管理员分配")
     gateway_changes: dict = {}
+    previous_group_id = item.group_id
     if payload.name is not None:
         item.name = payload.name
     if "phone" in payload.model_fields_set:
@@ -898,14 +1153,42 @@ def update_account(public_id: str, payload: PersonalAccountUpdate, db: DbSession
             item.status = "disabled"
         elif item.status == "disabled":
             item.status = "unpaired"
-    if "proxy_public_id" in payload.model_fields_set:
-        _set_binding(db, item.public_id, payload.proxy_public_id)
+    if payload.marketing_eligible is not None:
+        item.marketing_eligible = payload.marketing_eligible
+    if "proxy_id" in payload.model_fields_set:
+        _set_binding(db, item.gateway_account_id, payload.proxy_id)
+    wakeup_group_id = (
+        item.group_id
+        if item.group_id is not None
+        and (
+            item.group_id != previous_group_id
+            or payload.enabled is True
+        )
+        else None
+    )
+    if wakeup_group_id is not None:
+        from app.services.account_group_wakeups import record_group_wakeup
+
+        record_group_wakeup(
+            db,
+            wakeup_group_id,
+            reason=(
+                "account_joined_group"
+                if item.group_id != previous_group_id
+                else "account_enabled"
+            ),
+            account_id=item.id,
+        )
     try:
         db.flush()
-        if "proxy_public_id" in payload.model_fields_set:
-            gateway_changes["proxy_url"] = _proxy_url(db, item.public_id)
+        if "proxy_id" in payload.model_fields_set:
+            gateway_changes["proxy_url"] = _proxy_url(
+                db, item.gateway_account_id
+            )
         if gateway_changes and item.phone_e164:
-            WaGatewayClient().update(item.public_id, **gateway_changes)
+            WaGatewayClient().update(
+                item.gateway_account_id, **gateway_changes
+            )
         db.commit()
     except GatewayError as exc:
         db.rollback()
@@ -914,17 +1197,23 @@ def update_account(public_id: str, payload: PersonalAccountUpdate, db: DbSession
         db.rollback()
         raise HTTPException(status_code=409, detail="手机号已被其他个人账号使用") from None
     db.refresh(item)
+    if wakeup_group_id is not None:
+        from app.services.account_group_wakeups import (
+            dispatch_group_wakeups_best_effort,
+        )
+
+        dispatch_group_wakeups_best_effort(wakeup_group_id)
     return {"data": {"account": account_row(db, item)}}
 
 
-@router.delete("/{public_id}")
-def archive_account(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _account(db, public_id, current_user)
+@router.delete("/{account_id}")
+def archive_account(account_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _account(db, account_id, current_user)
     try:
-        WaGatewayClient().logout(item.public_id)
+        WaGatewayClient().logout(item.gateway_account_id)
     except GatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from None
-    binding = db.scalar(select(AccountProxyBinding).where(AccountProxyBinding.account_public_id == item.public_id))
+    binding = db.scalar(select(AccountProxyBinding).where(AccountProxyBinding.account_public_id == item.gateway_account_id))
     if binding:
         db.delete(binding)
     item.enabled = False
@@ -934,18 +1223,40 @@ def archive_account(public_id: str, db: DbSession, current_user: CurrentUser) ->
     return {"data": {"ok": True}}
 
 
-@router.post("/{public_id}/pairing-code")
-def pairing_code(public_id: str, payload: PairRequest, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _account(db, public_id, current_user)
+@router.post("/{account_id}/pairing-code")
+def pairing_code(account_id: str, payload: PairRequest, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _account(db, account_id, current_user)
     phone = payload.phone or item.phone_e164
     if payload.method == "pairing_code" and not phone:
         raise HTTPException(status_code=422, detail="配对码方式必须提供手机号")
     try:
         client = WaGatewayClient()
+        protocol = db.get(ProtocolNode, item.protocol_id)
+        if protocol is None:
+            raise HTTPException(status_code=409, detail="账号所属协议节点不存在")
         if not item.phone_e164 and phone:
-            client.create(item.public_id, phone, _proxy_url(db, item.public_id))
+            client.create(
+                item.gateway_account_id,
+                phone,
+                _proxy_url(db, item.gateway_account_id),
+                connection_policy=protocol.connection_policy,
+                idle_disconnect_seconds=protocol.idle_disconnect_seconds,
+                post_verify_grace_seconds=protocol.post_verify_grace_seconds,
+                sync_policy=normalized_sync_policy(protocol.sync_policy_json),
+            )
+        else:
+            client.update(
+                item.gateway_account_id,
+                connection_policy=protocol.connection_policy,
+                idle_disconnect_seconds=protocol.idle_disconnect_seconds,
+                post_verify_grace_seconds=protocol.post_verify_grace_seconds,
+                sync_policy=normalized_sync_policy(protocol.sync_policy_json),
+            )
         result = client.pair(
-            item.public_id, phone, payload.method, _proxy_url(db, item.public_id)
+            item.gateway_account_id,
+            phone,
+            payload.method,
+            _proxy_url(db, item.gateway_account_id),
         )
     except GatewayError as exc:
         item.last_error = str(exc)
@@ -958,13 +1269,13 @@ def pairing_code(public_id: str, payload: PairRequest, db: DbSession, current_us
     return {"data": {"pairingCode": result.get("code"), "qrPayload": result.get("qrPayload"), "expiresAt": result.get("expiresAt"), "account": account_row(db, item)}}
 
 
-@router.post("/{public_id}/connect")
-def connect(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _account(db, public_id, current_user)
+@router.post("/{account_id}/connect")
+def connect(account_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _account(db, account_id, current_user)
     if item.status in {"unpaired", "disabled"}:
         raise HTTPException(status_code=409, detail="账号尚未配对或已停用")
     try:
-        result = WaGatewayClient().connect(item.public_id)
+        result = WaGatewayClient().connect(item.gateway_account_id)
     except GatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from None
     _apply_gateway_account(item, result or {"state": "online_idle"})
@@ -973,11 +1284,11 @@ def connect(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
     return {"data": {"account": account_row(db, item)}}
 
 
-@router.post("/{public_id}/disconnect")
-def disconnect(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _account(db, public_id, current_user)
+@router.post("/{account_id}/disconnect")
+def disconnect(account_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _account(db, account_id, current_user)
     try:
-        result = WaGatewayClient().disconnect(item.public_id)
+        result = WaGatewayClient().disconnect(item.gateway_account_id)
     except GatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from None
     _apply_gateway_account(item, result or {"state": "linked_offline"})
@@ -985,11 +1296,11 @@ def disconnect(public_id: str, db: DbSession, current_user: CurrentUser) -> dict
     return {"data": {"account": account_row(db, item)}}
 
 
-@router.post("/{public_id}/logout")
-def logout(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _account(db, public_id, current_user)
+@router.post("/{account_id}/logout")
+def logout(account_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _account(db, account_id, current_user)
     try:
-        result = WaGatewayClient().logout(item.public_id)
+        result = WaGatewayClient().logout(item.gateway_account_id)
     except GatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from None
     _apply_gateway_account(item, result or {"state": "unpaired"})
@@ -999,6 +1310,8 @@ def logout(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
 
 
 def send_message(db: DbSession, item: PersonalAccount, payload: SendRequest) -> MessageDelivery:
+    if not item.marketing_eligible:
+        raise HTTPException(status_code=409, detail="账号未开启营销参与")
     if not marketing_protocol_available(db, item.protocol_id):
         raise HTTPException(status_code=409, detail="账号所属协议未开启营销")
     existing = db.scalar(select(MessageDelivery).where(MessageDelivery.request_id == payload.idempotency_key))
@@ -1012,7 +1325,10 @@ def send_message(db: DbSession, item: PersonalAccount, payload: SendRequest) -> 
     db.commit()
     try:
         result = WaGatewayClient().send(
-            item.public_id, delivery.public_id, payload.to, payload.message
+            item.gateway_account_id,
+            delivery.public_id,
+            payload.to,
+            payload.message,
         )
         delivery.provider_message_id = str(result.get("providerMessageId") or "") or None
         # HTTP 202 only means the gateway durably accepted the queue item.  One
@@ -1027,23 +1343,35 @@ def send_message(db: DbSession, item: PersonalAccount, payload: SendRequest) -> 
     return delivery
 
 
-@router.post("/{public_id}/send")
-def send(public_id: str, payload: SendRequest, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _account(db, public_id, current_user)
+@router.post("/{account_id}/send")
+def send(account_id: str, payload: SendRequest, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _account(db, account_id, current_user)
     if item.status != "online_idle":
         raise HTTPException(status_code=409, detail="账号未在线")
     return {"data": {"messageDelivery": delivery_row(send_message(db, item, payload))}}
 
 
-@router.post("/{public_id}/sync")
-def sync_account(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _account(db, public_id, current_user)
-    _sync_gateway_account(db, item, strict=True)
-    return {"data": {"account": account_row(db, item)}}
+@router.post("/{account_id}/sync", status_code=status.HTTP_202_ACCEPTED)
+def sync_account(account_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _account(db, account_id, current_user)
+    from app.services.account_metadata_sync import (
+        enqueue_account_metadata_sync,
+        metadata_sync_job_row,
+    )
+
+    job = enqueue_account_metadata_sync(db, item)
+    db.commit()
+    db.refresh(job)
+    return {
+        "data": {
+            "account": account_row(db, item),
+            "syncJob": metadata_sync_job_row(job),
+        }
+    }
 
 
-@router.get("/{public_id}/messages")
-def list_messages(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _account(db, public_id, current_user)
+@router.get("/{account_id}/messages")
+def list_messages(account_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _account(db, account_id, current_user)
     rows = db.scalars(select(MessageDelivery).where(MessageDelivery.account_id == item.id).order_by(MessageDelivery.created_at.desc()).limit(500)).all()
     return {"data": {"rows": [delivery_row(row) for row in rows], "total": len(rows)}}

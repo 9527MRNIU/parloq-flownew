@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.business_schemas import PromotionTemplatePolicyUpdate
 from app.deps import CurrentUser, DbSession
+from app.entity_ids import entity_id
 from app.models import PromotionTemplatePolicy
 
 
@@ -48,6 +49,7 @@ def owner_template_policy(
 
 def template_policy_row(item: PromotionTemplatePolicy) -> dict:
     return {
+        "id": entity_id(item),
         "protectionMode": item.protection_mode,
         "devtoolsAction": item.devtools_action,
         "lockViewportZoom": item.lock_viewport_zoom,

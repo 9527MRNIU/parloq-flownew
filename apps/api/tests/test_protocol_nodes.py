@@ -15,6 +15,8 @@ def test_protocol_node_metrics_ingress_and_marketing_controls(
     listed = admin_client.get("/api/protocol-nodes")
     assert listed.status_code == 200, listed.text
     node = listed.json()["data"]["rows"][0]
+    assert node["id"].isdecimal()
+    assert "publicId" not in node
     assert node["protocol"] == "baileys"
     assert node["accountTotal"] >= 0
     assert node["validRate"] is None or 0 <= node["validRate"] <= 100
@@ -54,7 +56,7 @@ def test_protocol_node_metrics_ingress_and_marketing_controls(
 
     with SessionLocal() as db:
         stored = db.scalar(
-            select(PersonalAccount).where(PersonalAccount.public_id == account["id"])
+            select(PersonalAccount).where(PersonalAccount.id == int(account["id"]))
         )
         assert stored is not None
         stored.status = "online_idle"
@@ -85,13 +87,97 @@ def test_protocol_node_metrics_ingress_and_marketing_controls(
     ).status_code == 200
 
 
+def test_protocol_node_create_pool_and_template_contract(
+    admin_client: TestClient,
+) -> None:
+    created = admin_client.post(
+        "/api/protocol-nodes",
+        json={
+            "name": "Landing EU partition",
+            "maxAccountCount": None,
+            "maxOnlineAccounts": 1000,
+            "maxConcurrentPairings": None,
+            "connectionPolicy": "on_demand",
+            "idleDisconnectSeconds": 600,
+            "postVerifyGraceSeconds": 120,
+            "syncPolicy": {
+                "avatar": True,
+                "profileStatus": True,
+                "businessProfile": True,
+                "groupSummary": True,
+                "groupDetails": False,
+                "contacts": False,
+                "chats": False,
+                "messageHistory": False,
+                "privacySettings": False,
+                "blocklist": False,
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    node = created.json()["data"]["protocol"]
+    assert node["id"].isdecimal()
+    assert node["maxAccountCount"] is None
+    assert node["maxOnlineAccounts"] == 1000
+    assert node["connectionPolicy"] == "on_demand"
+    assert node["syncPolicy"]["avatar"] is True
+    assert node["syncPolicy"]["messageHistory"] is False
+
+    updated = admin_client.patch(
+        f"/api/protocol-nodes/{node['id']}",
+        json={"syncPolicy": {**node["syncPolicy"], "contacts": True}},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["data"]["protocol"]["syncPolicyVersion"] == 2
+
+    fallback = admin_client.get("/api/protocol-nodes").json()["data"]["rows"][0]
+    pool = admin_client.post(
+        "/api/protocol-pools",
+        json={
+            "name": "Landing explicit fallback",
+            "members": [
+                {"protocolNodeId": node["id"], "priority": 100},
+                {"protocolNodeId": fallback["id"], "priority": 200},
+            ],
+        },
+    )
+    assert pool.status_code == 201, pool.text
+    pool_row = pool.json()["data"]["pool"]
+    assert pool_row["id"].isdecimal()
+    assert [member["protocolNodeId"] for member in pool_row["members"]] == [
+        node["id"],
+        fallback["id"],
+    ]
+
+    spec = admin_client.get(
+        f"/api/protocol-nodes/{node['id']}/integration-spec"
+    )
+    assert spec.status_code == 200, spec.text
+    contract = spec.json()["data"]
+    assert contract["specVersion"] == "promotion-public-pairing/v1"
+    assert contract["runtime"]["bridge"].startswith("window.PromotionBridge")
+    assert contract["runtime"]["version"] == "promotion-browser-bridge/v2"
+    assert contract["runtime"]["methods"]["status"].startswith(
+        "getPairingStatus"
+    )
+    assert contract["status"]["tokenHeader"] == "Authorization"
+    assert contract["status"]["tokenScheme"] == "Bearer"
+    assert contract["status"]["successCondition"] == (
+        "pairingStatus === 'verified' && verified === true"
+    )
+    assert "protocolId" not in contract["start"]["body"]
+
+    referenced = admin_client.delete(f"/api/protocol-nodes/{node['id']}")
+    assert referenced.status_code == 409
+
+
 def test_protocol_batch_tenant_scope_and_gateway_error_summary(
     admin_client: TestClient, monkeypatch
 ) -> None:
     node = admin_client.get("/api/protocol-nodes").json()["data"]["rows"][0]
     with SessionLocal() as db:
         protocol = db.scalar(
-            select(ProtocolNode).where(ProtocolNode.public_id == node["id"])
+            select(ProtocolNode).where(ProtocolNode.id == int(node["id"]))
         )
         account = db.scalar(
             select(PersonalAccount).where(
@@ -102,14 +188,20 @@ def test_protocol_batch_tenant_scope_and_gateway_error_summary(
         assert account is not None
         account.status = "linked_offline"
         account.enabled = True
+        gateway_account_id = account.gateway_account_id
+        public_account_id = str(account.id)
         db.commit()
+
+    attempted: list[str] = []
+
+    def fail_connect(self, account_id, proxy_url=None):
+        attempted.append(account_id)
+        raise GatewayError("gateway connection refused")
 
     monkeypatch.setattr(
         WaGatewayClient,
         "connect",
-        lambda self, account_id, proxy_url=None: (_ for _ in ()).throw(
-            GatewayError("gateway connection refused")
-        ),
+        fail_connect,
     )
     response = admin_client.post(
         "/api/protocol-nodes/batch-connect", json={"protocolIds": [node["id"]]}
@@ -118,6 +210,10 @@ def test_protocol_batch_tenant_scope_and_gateway_error_summary(
     data = response.json()["data"]
     assert data["failedCount"] >= 1
     assert any("gateway connection refused" in row["error"] for row in data["errors"])
+    assert any(row["accountId"] == public_account_id for row in data["errors"])
+    assert all("protocolPublicId" not in row for row in data["errors"])
+    assert gateway_account_id in attempted
+    assert public_account_id not in attempted
 
     missing = admin_client.post(
         "/api/protocol-nodes/batch-offline",

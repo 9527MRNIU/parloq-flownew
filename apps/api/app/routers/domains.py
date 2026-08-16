@@ -17,6 +17,7 @@ from app.business_schemas import (
 )
 from app.config import get_settings
 from app.deps import CurrentUser, DbSession
+from app.entity_ids import entity_id, identifier_filter
 from app.snowflake import new_public_id
 
 from app.models import DomainOrder, DomainQuote, DomainRecord, PromotionChannel
@@ -34,8 +35,11 @@ router = APIRouter(prefix="/api/domains", tags=["domains"])
 order_router = APIRouter(prefix="/api/domain-orders", tags=["domain-orders"])
 
 
-def _domain(db: DbSession, public_id: str, user) -> DomainRecord:
-    statement = select(DomainRecord).where(DomainRecord.public_id == public_id, DomainRecord.archived_at.is_(None))
+def _domain(db: DbSession, identifier: str, user) -> DomainRecord:
+    statement = select(DomainRecord).where(
+        identifier_filter(DomainRecord, identifier),
+        DomainRecord.archived_at.is_(None),
+    )
     if user.role != "admin": statement = statement.where(DomainRecord.created_by == user.id)
     item = db.scalar(statement)
     if item is None:
@@ -54,8 +58,7 @@ def domain_row(db: DbSession, item: DomainRecord) -> dict:
     )
     settings = get_settings()
     return {
-        "id": item.public_id,
-        "publicId": item.public_id,
+        "id": entity_id(item),
         "hostname": item.hostname,
         "acquisitionType": item.acquisition_type,
         "managementMode": item.management_mode,
@@ -87,8 +90,8 @@ def domain_row(db: DbSession, item: DomainRecord) -> dict:
     }
 
 
-def _order(db: DbSession, public_id: str, user) -> DomainOrder:
-    statement = select(DomainOrder).where(DomainOrder.public_id == public_id)
+def _order(db: DbSession, identifier: str, user) -> DomainOrder:
+    statement = select(DomainOrder).where(identifier_filter(DomainOrder, identifier))
     if user.role != "admin":
         statement = statement.where(DomainOrder.created_by == user.id)
     item = db.scalar(statement)
@@ -105,9 +108,8 @@ def _order_row(db: DbSession, item: DomainOrder) -> dict:
         and updated_at <= utcnow() - timedelta(minutes=5)
     )
     return {
-        "id": item.public_id,
-        "publicId": item.public_id,
-        "quoteId": db.get(DomainQuote, item.quote_id).public_id,
+        "id": entity_id(item),
+        "quoteId": str(item.quote_id),
         "hostname": item.hostname,
         "years": item.years,
         "amount": float(item.amount),
@@ -119,7 +121,7 @@ def _order_row(db: DbSession, item: DomainOrder) -> dict:
         "paidAt": iso(item.paid_at),
         "completedAt": iso(item.completed_at),
         "lastReconciledAt": iso(item.last_reconciled_at),
-        "domainId": domain.public_id if domain else None,
+        "domainId": entity_id(domain) if domain else None,
         "allowedActions": {
             "mockPayment": item.status == "pending_payment" and get_settings().domain_registrar_mock,
             "provision": item.status == "paid",
@@ -133,8 +135,8 @@ def _order_row(db: DbSession, item: DomainOrder) -> dict:
 
 def _quote_row(item: DomainQuote) -> dict:
     return {
-        "id": item.public_id,
-        "quoteId": item.public_id,
+        "id": entity_id(item),
+        "quoteId": entity_id(item),
         "hostname": item.hostname,
         "years": item.years,
         "amount": float(item.amount),
@@ -319,7 +321,7 @@ def create_domain_order(
         raise HTTPException(status_code=503, detail="生产注册商适配器尚未配置")
     quote = db.scalar(
         select(DomainQuote).where(
-            DomainQuote.public_id == payload.quote_id,
+            identifier_filter(DomainQuote, payload.quote_id),
             DomainQuote.created_by == current_user.id,
         )
     )
@@ -353,13 +355,13 @@ def create_domain_order(
     return {"data": {"order": _order_row(db, item)}}
 
 
-@order_router.post("/{public_id}/mock-payment")
+@order_router.post("/{order_id}/mock-payment")
 def mock_pay_domain_order(
-    public_id: str, db: DbSession, current_user: CurrentUser
+    order_id: str, db: DbSession, current_user: CurrentUser
 ) -> dict:
     if not get_settings().domain_registrar_mock:
         raise HTTPException(status_code=404, detail="模拟支付不可用")
-    item = _order(db, public_id, current_user)
+    item = _order(db, order_id, current_user)
     transitioned = db.execute(
         update(DomainOrder)
         .where(DomainOrder.id == item.id, DomainOrder.status == "pending_payment")
@@ -402,11 +404,11 @@ def _complete_order(db: DbSession, item: DomainOrder, provider_order_ref: str) -
     return domain
 
 
-@order_router.post("/{public_id}/provision")
+@order_router.post("/{order_id}/provision")
 def provision_domain_order(
-    public_id: str, db: DbSession, current_user: CurrentUser
+    order_id: str, db: DbSession, current_user: CurrentUser
 ) -> dict:
-    item = _order(db, public_id, current_user)
+    item = _order(db, order_id, current_user)
     if item.provider != "mock" or not get_settings().domain_registrar_mock:
         raise HTTPException(status_code=503, detail="注册商异步开通尚未配置")
     transitioned = db.execute(
@@ -428,7 +430,7 @@ def provision_domain_order(
         db.commit()
     except DomainRegistrarUnknownError as exc:
         db.rollback()
-        unknown = _order(db, public_id, current_user)
+        unknown = _order(db, order_id, current_user)
         unknown.status = "unknown"
         unknown.provider_order_ref = exc.provider_order_ref
         unknown.failure_reason = "注册商返回结果未知，必须先对账，禁止重复购买"
@@ -439,7 +441,7 @@ def provision_domain_order(
         )
     except IntegrityError as exc:
         db.rollback()
-        unknown = _order(db, public_id, current_user)
+        unknown = _order(db, order_id, current_user)
         unknown.status = "unknown"
         unknown.provider_order_ref = provider_order_ref
         unknown.failure_reason = "注册商可能已完成购买，但本地提交失败；必须先对账"
@@ -450,7 +452,7 @@ def provision_domain_order(
         )
     except DomainRegistrarError as exc:
         db.rollback()
-        failed = _order(db, public_id, current_user)
+        failed = _order(db, order_id, current_user)
         failed.status = "failed"
         failed.failure_reason = "域名开通失败，请稍后重试或联系管理员"
         db.commit()
@@ -464,11 +466,11 @@ def provision_domain_order(
     }
 
 
-@order_router.post("/{public_id}/reconcile")
+@order_router.post("/{order_id}/reconcile")
 def reconcile_domain_order(
-    public_id: str, db: DbSession, current_user: CurrentUser
+    order_id: str, db: DbSession, current_user: CurrentUser
 ) -> dict:
-    item = _order(db, public_id, current_user)
+    item = _order(db, order_id, current_user)
     stale_before = utcnow() - timedelta(minutes=5)
     updated_at = item.updated_at.replace(tzinfo=item.updated_at.tzinfo or UTC)
     stale_provisioning = item.status == "provisioning" and updated_at <= stale_before
@@ -502,7 +504,7 @@ def reconcile_domain_order(
         db.commit()
     except (DomainRegistrarError, IntegrityError) as exc:
         db.rollback()
-        unknown = _order(db, public_id, current_user)
+        unknown = _order(db, order_id, current_user)
         unknown.status = "unknown"
         unknown.failure_reason = "注册商对账未完成，禁止重新购买"
         unknown.last_reconciled_at = utcnow()
@@ -511,11 +513,11 @@ def reconcile_domain_order(
     return {"data": {"order": _order_row(db, item), "domain": domain_row(db, domain)}}
 
 
-@order_router.post("/{public_id}/cancel")
+@order_router.post("/{order_id}/cancel")
 def cancel_domain_order(
-    public_id: str, db: DbSession, current_user: CurrentUser
+    order_id: str, db: DbSession, current_user: CurrentUser
 ) -> dict:
-    item = _order(db, public_id, current_user)
+    item = _order(db, order_id, current_user)
     transitioned = db.execute(
         update(DomainOrder)
         .where(
@@ -533,14 +535,14 @@ def cancel_domain_order(
     return {"data": {"order": _order_row(db, item)}}
 
 
-@router.get("/{public_id}")
-def get_domain(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    return {"data": {"domain": domain_row(db, _domain(db, public_id, current_user))}}
+@router.get("/{domain_id}")
+def get_domain(domain_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    return {"data": {"domain": domain_row(db, _domain(db, domain_id, current_user))}}
 
 
-@router.patch("/{public_id}")
-def update_domain(public_id: str, payload: DomainUpdate, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _domain(db, public_id, current_user)
+@router.patch("/{domain_id}")
+def update_domain(domain_id: str, payload: DomainUpdate, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _domain(db, domain_id, current_user)
     if payload.hostname is not None and payload.hostname != item.hostname:
         if item.acquisition_type == "purchased":
             raise HTTPException(status_code=400, detail="已购买域名不能修改名称")
@@ -556,9 +558,9 @@ def update_domain(public_id: str, payload: DomainUpdate, db: DbSession, current_
     return {"data": {"domain": domain_row(db, item)}}
 
 
-@router.post("/{public_id}/verify")
-def verify_domain(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _domain(db, public_id, current_user); item.last_verified_at = utcnow()
+@router.post("/{domain_id}/verify")
+def verify_domain(domain_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _domain(db, domain_id, current_user); item.last_verified_at = utcnow()
     try:
         settings = get_settings()
         if not settings.domain_verify_mock:
@@ -578,9 +580,9 @@ def verify_domain(public_id: str, db: DbSession, current_user: CurrentUser) -> d
     return {"data": {"domain": domain_row(db, item)}}
 
 
-@router.delete("/{public_id}")
-def archive_domain(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _domain(db, public_id, current_user)
+@router.delete("/{domain_id}")
+def archive_domain(domain_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _domain(db, domain_id, current_user)
     if db.scalar(select(func.count()).select_from(PromotionChannel).where(PromotionChannel.domain_id == item.id, PromotionChannel.archived_at.is_(None))):
         raise HTTPException(status_code=409, detail="域名仍绑定推广渠道")
     item.enabled = False; item.archived_at = utcnow(); db.commit()

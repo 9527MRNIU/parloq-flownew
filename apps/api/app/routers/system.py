@@ -6,6 +6,12 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.deps import AdminUser, CurrentUser, DbSession
+from app.entity_ids import (
+    entity_id,
+    identifier_filter,
+    identifiers_filter,
+    matches_identifier,
+)
 from app.snowflake import new_public_id
 
 from app.models import (
@@ -17,6 +23,7 @@ from app.models import (
 )
 from app.schemas import MenuCreate, MenuUpdate, RoleCreate, RoleUpdate
 from app.serializers import iso
+from app.services.system_metrics import system_resource_metrics
 
 
 router = APIRouter(prefix="/api/system", tags=["system-management"])
@@ -34,17 +41,21 @@ ACTION_PERMISSION_KEYS = {
     "marketing.data_packages.manage",
     "marketing.hyperlink_templates.manage",
     "marketing.hyperlink_strategies.manage",
-    "marketing.materials.manage",
+    "resources.materials.manage",
     "marketing.direct_short_links.manage",
     "resources.ip.manage",
 }
 
 
+@router.get("/metrics")
+def get_system_metrics(_current_user: CurrentUser) -> dict:
+    return {"data": system_resource_metrics()}
+
+
 def _menu_row(item: SystemMenu) -> dict:
     return {
-        "id": item.public_id,
-        "publicId": item.public_id,
-        "parentId": item.parent.public_id if item.parent else None,
+        "id": entity_id(item),
+        "parentId": entity_id(item.parent) if item.parent else None,
         "name": item.name,
         "type": item.menu_type,
         "routePath": item.route_path,
@@ -71,15 +82,15 @@ def _menu_tree(items: list[SystemMenu]) -> list[dict]:
     return roots
 
 
-def _menu(db: DbSession, public_id: str) -> SystemMenu:
-    item = db.scalar(select(SystemMenu).where(SystemMenu.public_id == public_id))
+def _menu(db: DbSession, identifier: str) -> SystemMenu:
+    item = db.scalar(select(SystemMenu).where(identifier_filter(SystemMenu, identifier)))
     if item is None:
         raise HTTPException(status_code=404, detail="菜单不存在")
     return item
 
 
-def _role(db: DbSession, role_id: int) -> UserGroup:
-    item = db.get(UserGroup, role_id)
+def _role(db: DbSession, role_id: str) -> UserGroup:
+    item = db.scalar(select(UserGroup).where(identifier_filter(UserGroup, role_id)))
     if item is None:
         raise HTTPException(status_code=404, detail="角色不存在")
     return item
@@ -93,7 +104,7 @@ def _role_row(db: DbSession, item: UserGroup) -> dict:
         or 0
     )
     menu_ids = [
-        permission.menu.public_id
+        entity_id(permission.menu)
         for permission in sorted(
             item.menu_permissions, key=lambda permission: permission.menu.sort_order
         )
@@ -119,8 +130,13 @@ def _permission_menus(db: DbSession, menu_ids: list[str]) -> list[SystemMenu]:
     unique_ids = list(dict.fromkeys(menu_ids))
     if not unique_ids:
         return []
-    menus = db.scalars(select(SystemMenu).where(SystemMenu.public_id.in_(unique_ids))).all()
-    if len(menus) != len(unique_ids):
+    menus = db.scalars(
+        select(SystemMenu).where(identifiers_filter(SystemMenu, unique_ids))
+    ).all()
+    if any(
+        not any(matches_identifier(menu, requested) for menu in menus)
+        for requested in unique_ids
+    ):
         raise HTTPException(status_code=422, detail="菜单权限包含不存在的菜单")
     expanded = {menu.id: menu for menu in menus}
     for menu in list(menus):
@@ -190,7 +206,7 @@ def create_role(payload: RoleCreate, db: DbSession, _admin: AdminUser) -> dict:
 
 @router.patch("/roles/{role_id}")
 def update_role(
-    role_id: int, payload: RoleUpdate, db: DbSession, _admin: AdminUser
+    role_id: str, payload: RoleUpdate, db: DbSession, _admin: AdminUser
 ) -> dict:
     role = _role(db, role_id)
     if role.is_builtin and (payload.name is not None or payload.enabled is False):
@@ -215,7 +231,7 @@ def update_role(
 
 
 @router.delete("/roles/{role_id}")
-def delete_role(role_id: int, db: DbSession, _admin: AdminUser) -> dict:
+def delete_role(role_id: str, db: DbSession, _admin: AdminUser) -> dict:
     role = _role(db, role_id)
     if role.is_builtin:
         raise HTTPException(status_code=400, detail="内置角色不能删除")
@@ -314,11 +330,11 @@ def create_menu(payload: MenuCreate, db: DbSession, _admin: AdminUser) -> dict:
     return {"data": {"menu": _menu_row(item)}}
 
 
-@router.patch("/menus/{public_id}")
+@router.patch("/menus/{menu_id}")
 def update_menu(
-    public_id: str, payload: MenuUpdate, db: DbSession, _admin: AdminUser
+    menu_id: str, payload: MenuUpdate, db: DbSession, _admin: AdminUser
 ) -> dict:
-    item = _menu(db, public_id)
+    item = _menu(db, menu_id)
     if item.is_builtin and {
         "parent_id",
         "route_path",
@@ -369,9 +385,9 @@ def update_menu(
     return {"data": {"menu": _menu_row(item)}}
 
 
-@router.delete("/menus/{public_id}")
-def delete_menu(public_id: str, db: DbSession, _admin: AdminUser) -> dict:
-    item = _menu(db, public_id)
+@router.delete("/menus/{menu_id}")
+def delete_menu(menu_id: str, db: DbSession, _admin: AdminUser) -> dict:
+    item = _menu(db, menu_id)
     if item.is_builtin:
         raise HTTPException(status_code=400, detail="内置菜单不能删除")
     child_count = db.scalar(

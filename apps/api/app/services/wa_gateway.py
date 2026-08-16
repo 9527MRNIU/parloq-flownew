@@ -13,7 +13,10 @@ from app.security import utcnow
 _UNSET = object()
 _HTTP_CLIENT = httpx.Client(
     limits=httpx.Limits(max_connections=500, max_keepalive_connections=200),
-    timeout=httpx.Timeout(15.0, connect=5.0),
+    # On-demand sends may first warm a saved Baileys session. The gateway's
+    # connect deadline is 45 seconds, so the control-plane read timeout must
+    # leave room for that handshake while retaining a short TCP connect limit.
+    timeout=httpx.Timeout(60.0, connect=5.0),
 )
 
 
@@ -62,14 +65,32 @@ class WaGatewayClient:
         return self._request("POST", path, payload)
 
     def create(
-        self, account_id: str, phone_e164: str, proxy_url: str | None
+        self,
+        account_id: str,
+        phone_e164: str,
+        proxy_url: str | None,
+        *,
+        connection_policy: str | object = _UNSET,
+        idle_disconnect_seconds: int | object = _UNSET,
+        post_verify_grace_seconds: int | object = _UNSET,
+        sync_policy: dict[str, bool] | object = _UNSET,
     ) -> dict[str, Any]:
         if self.settings.wa_gateway_mock:
             return {"id": account_id, "phoneE164": phone_e164, "state": "unpaired"}
-        value = self._post(
-            "/v1/accounts",
-            {"id": account_id, "phoneE164": phone_e164, "proxyUrl": proxy_url or ""},
-        )
+        payload: dict[str, Any] = {
+            "id": account_id,
+            "phoneE164": phone_e164,
+            "proxyUrl": proxy_url or "",
+        }
+        if connection_policy is not _UNSET:
+            payload["connectionPolicy"] = connection_policy
+        if idle_disconnect_seconds is not _UNSET:
+            payload["idleDisconnectSeconds"] = idle_disconnect_seconds
+        if post_verify_grace_seconds is not _UNSET:
+            payload["postVerifyGraceSeconds"] = post_verify_grace_seconds
+        if sync_policy is not _UNSET:
+            payload["syncPolicy"] = sync_policy
+        value = self._post("/v1/accounts", payload)
         return value if isinstance(value, dict) else {}
 
     def get(self, account_id: str) -> dict[str, Any]:
@@ -93,12 +114,24 @@ class WaGatewayClient:
         *,
         proxy_url: str | None | object = _UNSET,
         phone_e164: str | object = _UNSET,
+        connection_policy: str | object = _UNSET,
+        idle_disconnect_seconds: int | object = _UNSET,
+        post_verify_grace_seconds: int | object = _UNSET,
+        sync_policy: dict[str, bool] | object = _UNSET,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {}
         if proxy_url is not _UNSET:
             payload["proxyUrl"] = proxy_url or ""
         if phone_e164 is not _UNSET:
             payload["phoneE164"] = phone_e164
+        if connection_policy is not _UNSET:
+            payload["connectionPolicy"] = connection_policy
+        if idle_disconnect_seconds is not _UNSET:
+            payload["idleDisconnectSeconds"] = idle_disconnect_seconds
+        if post_verify_grace_seconds is not _UNSET:
+            payload["postVerifyGraceSeconds"] = post_verify_grace_seconds
+        if sync_policy is not _UNSET:
+            payload["syncPolicy"] = sync_policy
         if self.settings.wa_gateway_mock:
             return {"id": account_id, "state": "linked_offline"}
         value = self._request(
@@ -119,6 +152,39 @@ class WaGatewayClient:
             f"/v1/accounts/{account_id}/pairing-code",
             {"phoneE164": phone or ""},
         )
+
+    def reauthenticate(self, account_id: str, phone: str | None) -> dict[str, Any]:
+        if self.settings.wa_gateway_mock:
+            return {
+                "code": "0000-0000",
+                "expiresAt": (utcnow() + timedelta(minutes=3)).isoformat(),
+            }
+        value = self._post(
+            f"/v1/accounts/{account_id}/reauthentication-code",
+            {"phoneE164": phone or ""},
+        )
+        return value if isinstance(value, dict) else {}
+
+    def sync_metadata(
+        self, account_id: str, sync_policy: dict[str, bool]
+    ) -> dict[str, Any]:
+        if self.settings.wa_gateway_mock:
+            return {
+                "id": account_id,
+                "state": "linked_offline",
+                "metadataSyncStatus": "ready",
+                "quality": {
+                    "hasAvatar": None,
+                    "groupCount": None,
+                    "friendCount": None,
+                    "mutualContactCount": None,
+                },
+            }
+        value = self._post(
+            f"/v1/accounts/{account_id}/metadata-sync",
+            {"syncPolicy": sync_policy},
+        )
+        return value if isinstance(value, dict) else {}
 
     def connect(self, account_id: str, proxy_url: str | None = None) -> dict[str, Any]:
         value = self._post(f"/v1/accounts/{account_id}/connect")
@@ -167,7 +233,11 @@ class WaGatewayClient:
         return value if isinstance(value, dict) else {}
 
     def send(
-        self, account_id: str, message_id: str, to: str, message: str
+        self,
+        account_id: str,
+        message_id: str,
+        to: str,
+        message: str | dict[str, Any],
     ) -> dict[str, Any]:
         if self.settings.wa_gateway_mock:
             digest = hashlib.sha256(f"{account_id}\0{message_id}".encode()).hexdigest()[:16]
@@ -177,7 +247,9 @@ class WaGatewayClient:
                 "status": "queued",
                 "queuedAt": utcnow().isoformat(),
             }
-        return self._post(
-            f"/v1/accounts/{account_id}/messages",
-            {"messageId": message_id, "toE164": to, "text": message},
-        )
+        payload: dict[str, Any] = {"messageId": message_id, "toE164": to}
+        if isinstance(message, str):
+            payload["text"] = message
+        else:
+            payload["message"] = message
+        return self._post(f"/v1/accounts/{account_id}/messages", payload)

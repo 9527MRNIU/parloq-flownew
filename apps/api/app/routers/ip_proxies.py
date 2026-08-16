@@ -10,7 +10,8 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
 from app.deps import AdminUser, CurrentUser, DbSession
-from app.snowflake import new_public_id
+from app.entity_ids import entity_id, identifier_filter
+from app.snowflake import new_public_id, parse_snowflake_id
 
 from app.models import AccountProxyBinding, IpAllocationPolicy, PersonalAccount, ProxyEndpoint
 from app.schemas import (
@@ -110,7 +111,7 @@ def _parse_proxy_line(raw_line: str, default_protocol: str) -> _ParsedProxyLine:
 
 def _policy_row(item: IpAllocationPolicy) -> dict:
     return {
-        "id": item.public_id,
+        "id": entity_id(item),
         "allocationMode": item.allocation_mode,
         "countryMatch": item.country_match,
         "maxAccountsPerIp": item.max_accounts_per_ip,
@@ -162,11 +163,11 @@ def update_ip_allocation_policy(
     return {"data": {"policy": _policy_row(item)}}
 
 
-def _proxy_or_404(db: DbSession, public_id: str, user=None) -> ProxyEndpoint:
+def _proxy_or_404(db: DbSession, identifier: str, user=None) -> ProxyEndpoint:
     statement = select(ProxyEndpoint).where(
-            ProxyEndpoint.public_id == public_id,
-            ProxyEndpoint.archived_at.is_(None),
-        )
+        identifier_filter(ProxyEndpoint, identifier),
+        ProxyEndpoint.archived_at.is_(None),
+    )
     if user is not None and user.role != "admin":
         statement = statement.join(AccountProxyBinding).join(
             PersonalAccount,
@@ -178,8 +179,12 @@ def _proxy_or_404(db: DbSession, public_id: str, user=None) -> ProxyEndpoint:
     return proxy
 
 
-def _binding_or_404(db: DbSession, public_id: str, user=None) -> AccountProxyBinding:
-    statement = select(AccountProxyBinding).where(AccountProxyBinding.public_id == public_id)
+def _binding_or_404(db: DbSession, identifier: str, user=None) -> AccountProxyBinding:
+    try:
+        binding_id = parse_snowflake_id(identifier)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="代理绑定不存在") from None
+    statement = select(AccountProxyBinding).where(AccountProxyBinding.id == binding_id)
     if user is not None and user.role != "admin":
         statement = statement.join(
             PersonalAccount,
@@ -222,6 +227,37 @@ def _sync_account_proxy(db: DbSession, account_public_id: str) -> None:
     from app.routers.personal_accounts import _proxy_url
 
     WaGatewayClient().update_proxy(account_public_id, _proxy_url(db, account_public_id))
+
+
+def _binding_account(db: DbSession, identifier: str) -> PersonalAccount | None:
+    """Resolve the control-plane Snowflake ID, with legacy gateway IDs read-only."""
+    try:
+        account_id = parse_snowflake_id(identifier)
+    except ValueError:
+        return db.scalar(
+            select(PersonalAccount).where(
+                PersonalAccount.public_id == identifier,
+                PersonalAccount.archived_at.is_(None),
+            )
+        )
+    return db.scalar(
+        select(PersonalAccount).where(
+            PersonalAccount.id == account_id,
+            PersonalAccount.archived_at.is_(None),
+        )
+    )
+
+
+def _binding_row(db: DbSession, binding: AccountProxyBinding) -> dict:
+    account = db.scalar(
+        select(PersonalAccount).where(
+            PersonalAccount.public_id == binding.account_public_id,
+            PersonalAccount.archived_at.is_(None),
+        )
+    )
+    return account_proxy_binding_row(
+        binding, str(account.id) if account is not None else None
+    )
 
 
 @router.get("/api/ip-proxies")
@@ -376,7 +412,7 @@ def bulk_create_proxies(
         db.flush()
         created_rows = [proxy_endpoint_row(proxy) for proxy in created]
         for index, proxy in zip(result_indexes, created, strict=True):
-            results[index]["proxyId"] = proxy.public_id
+            results[index]["proxyId"] = entity_id(proxy)
         db.commit()
     else:
         created_rows = []
@@ -397,20 +433,20 @@ def bulk_create_proxies(
     }
 
 
-@router.get("/api/ip-proxies/{public_id}")
-def get_proxy(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    proxy = _proxy_or_404(db, public_id, current_user)
+@router.get("/api/ip-proxies/{proxy_id}")
+def get_proxy(proxy_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    proxy = _proxy_or_404(db, proxy_id, current_user)
     return {"data": {"proxy": proxy_endpoint_row(proxy, _assigned_count(db, proxy.id))}}
 
 
-@router.patch("/api/ip-proxies/{public_id}")
+@router.patch("/api/ip-proxies/{proxy_id}")
 def update_proxy(
-    public_id: str,
+    proxy_id: str,
     payload: ProxyEndpointUpdate,
     db: DbSession,
     _admin: AdminUser,
 ) -> dict:
-    proxy = _proxy_or_404(db, public_id)
+    proxy = _proxy_or_404(db, proxy_id)
     connection_fields = {"protocol", "host", "port", "username", "password"}
     if payload.name is not None:
         proxy.name = payload.name
@@ -443,9 +479,9 @@ def update_proxy(
     return {"data": {"proxy": proxy_endpoint_row(proxy, _assigned_count(db, proxy.id))}}
 
 
-@router.delete("/api/ip-proxies/{public_id}")
-def archive_proxy(public_id: str, db: DbSession, _admin: AdminUser) -> dict:
-    proxy = _proxy_or_404(db, public_id)
+@router.delete("/api/ip-proxies/{proxy_id}")
+def archive_proxy(proxy_id: str, db: DbSession, _admin: AdminUser) -> dict:
+    proxy = _proxy_or_404(db, proxy_id)
     if _assigned_count(db, proxy.id):
         raise HTTPException(status_code=409, detail="代理仍绑定个人账号，请先解除绑定")
     proxy.enabled = False
@@ -454,9 +490,9 @@ def archive_proxy(public_id: str, db: DbSession, _admin: AdminUser) -> dict:
     return {"data": {"ok": True}}
 
 
-@router.post("/api/ip-proxies/{public_id}/test")
-def test_proxy(public_id: str, db: DbSession, _admin: AdminUser) -> dict:
-    proxy = _proxy_or_404(db, public_id)
+@router.post("/api/ip-proxies/{proxy_id}/test")
+def test_proxy(proxy_id: str, db: DbSession, _admin: AdminUser) -> dict:
+    proxy = _proxy_or_404(db, proxy_id)
     proxy.last_checked_at = utcnow()
     try:
         if not get_settings().ip_proxy_mock:
@@ -475,8 +511,8 @@ def test_proxy(public_id: str, db: DbSession, _admin: AdminUser) -> dict:
 def list_bindings(
     db: DbSession,
     current_user: CurrentUser,
-    account_public_id: str | None = Query(default=None, alias="accountPublicId"),
-    proxy_public_id: str | None = Query(default=None, alias="proxyPublicId"),
+    account_id: str | None = Query(default=None, alias="accountId"),
+    proxy_id: str | None = Query(default=None, alias="proxyId"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
 ) -> dict:
@@ -486,11 +522,16 @@ def list_bindings(
             PersonalAccount,
             PersonalAccount.public_id == AccountProxyBinding.account_public_id,
         ).where(PersonalAccount.created_by == current_user.id)
-    if account_public_id:
-        statement = statement.where(AccountProxyBinding.account_public_id == account_public_id)
-    if proxy_public_id:
+    if account_id:
+        account = _binding_account(db, account_id)
+        if account is None:
+            return {"data": {"rows": [], "total": 0, "page": page, "pageSize": page_size}}
+        statement = statement.where(
+            AccountProxyBinding.account_public_id == account.gateway_account_id
+        )
+    if proxy_id:
         statement = statement.join(ProxyEndpoint).where(
-            ProxyEndpoint.public_id == proxy_public_id
+            identifier_filter(ProxyEndpoint, proxy_id)
         )
     total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
     bindings = db.scalars(
@@ -500,7 +541,7 @@ def list_bindings(
     ).all()
     return {
         "data": {
-            "rows": [account_proxy_binding_row(binding) for binding in bindings],
+            "rows": [_binding_row(db, binding) for binding in bindings],
             "total": total,
             "page": page,
             "pageSize": page_size,
@@ -514,12 +555,15 @@ def create_binding(
     db: DbSession,
     _admin: AdminUser,
 ) -> dict:
-    proxy = _proxy_or_404(db, payload.proxy_public_id)
+    proxy = _proxy_or_404(db, payload.proxy_id)
     if not proxy.enabled:
         raise HTTPException(status_code=409, detail="不能绑定已停用的代理")
+    account = _binding_account(db, payload.account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="个人账号不存在")
     binding = AccountProxyBinding(
         public_id=new_public_id("ipb"),
-        account_public_id=payload.account_public_id,
+        account_public_id=account.gateway_account_id,
         proxy_id=proxy.id,
     )
     db.add(binding)
@@ -534,23 +578,23 @@ def create_binding(
         db.rollback()
         raise HTTPException(status_code=409, detail="该个人账号已绑定代理") from None
     db.refresh(binding)
-    return {"data": {"binding": account_proxy_binding_row(binding)}}
+    return {"data": {"binding": _binding_row(db, binding)}}
 
 
-@router.get("/api/ip-proxy-bindings/{public_id}")
-def get_binding(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    return {"data": {"binding": account_proxy_binding_row(_binding_or_404(db, public_id, current_user))}}
+@router.get("/api/ip-proxy-bindings/{binding_id}")
+def get_binding(binding_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    return {"data": {"binding": _binding_row(db, _binding_or_404(db, binding_id, current_user))}}
 
 
-@router.patch("/api/ip-proxy-bindings/{public_id}")
+@router.patch("/api/ip-proxy-bindings/{binding_id}")
 def update_binding(
-    public_id: str,
+    binding_id: str,
     payload: AccountProxyBindingUpdate,
     db: DbSession,
     _admin: AdminUser,
 ) -> dict:
-    binding = _binding_or_404(db, public_id)
-    proxy = _proxy_or_404(db, payload.proxy_public_id)
+    binding = _binding_or_404(db, binding_id)
+    proxy = _proxy_or_404(db, payload.proxy_id)
     if not proxy.enabled:
         raise HTTPException(status_code=409, detail="不能绑定已停用的代理")
     binding.proxy_id = proxy.id
@@ -562,12 +606,12 @@ def update_binding(
         db.rollback()
         raise HTTPException(status_code=502, detail=str(exc)) from None
     db.refresh(binding)
-    return {"data": {"binding": account_proxy_binding_row(binding)}}
+    return {"data": {"binding": _binding_row(db, binding)}}
 
 
-@router.delete("/api/ip-proxy-bindings/{public_id}")
-def delete_binding(public_id: str, db: DbSession, _admin: AdminUser) -> dict:
-    binding = _binding_or_404(db, public_id)
+@router.delete("/api/ip-proxy-bindings/{binding_id}")
+def delete_binding(binding_id: str, db: DbSession, _admin: AdminUser) -> dict:
+    binding = _binding_or_404(db, binding_id)
     account_public_id = binding.account_public_id
     db.delete(binding)
     try:

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://platform.example/schemas/promotion-template-v2.schema.json",
+  "title": "Promotion Template v2",
+  "type": "object",
+  "required": [
+    "schema",
+    "version",
+    "entry",
+    "format",
+    "capabilities",
+    "runtime",
+    "requirements",
+    "interactionProtection",
+    "defaultLocale",
+    "supportedLocales",
+    "i18n"
+  ],
+  "properties": {
+    "schema": { "const": "promotion-template/v2" },
+    "version": { "type": "string", "minLength": 1, "maxLength": 40 },
+    "entry": { "const": "index.html" },
+    "format": { "enum": ["static-bundle", "vite-dist"] },
+    "capabilities": {
+      "type": "array",
+      "const": ["phone-pairing"]
+    },
+    "runtime": { "const": "promotion-browser-bridge/v2" },
+    "requirements": {
+      "type": "object",
+      "required": ["pairingContract"],
+      "properties": {
+        "pairingContract": { "const": "promotion-public-pairing/v1" },
+        "componentKit": { "const": "account-link-elements/v1" }
+      },
+      "additionalProperties": true
+    },
+    "interactionProtection": { "const": "platform" },
+    "defaultLocale": { "$ref": "#/$defs/locale" },
+    "supportedLocales": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/locale" }
+    },
+    "i18n": {
+      "type": "object",
+      "required": ["mode", "path", "fallbackLocale"],
+      "properties": {
+        "mode": { "enum": ["bundled", "runtime"] },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+        },
+        "fallbackLocale": { "$ref": "#/$defs/locale" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "locale": {
+      "type": "string",
+      "pattern": "^[A-Za-z]{2,3}(?:-[A-Za-z]{2,4})?$"
+    }
+  },
+  "additionalProperties": true
+}

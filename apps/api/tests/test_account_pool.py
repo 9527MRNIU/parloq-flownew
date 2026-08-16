@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+from zipfile import ZipFile
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -190,6 +191,8 @@ def test_import_group_statistics_and_export(
     )
     assert created_group.status_code == 201, created_group.text
     group_id = created_group.json()["data"]["group"]["id"]
+    assert group_id.isdigit()
+    assert "publicId" not in created_group.json()["data"]["group"]
 
     payload = json.dumps(_credentials()).encode()
     imported = admin_client.post(
@@ -199,6 +202,9 @@ def test_import_group_statistics_and_export(
     )
     assert imported.status_code == 201, imported.text
     account = imported.json()["data"]["account"]
+    assert account["id"].isdigit()
+    assert "publicId" not in account
+    assert "gatewayAccountId" not in account
     assert account["source"] == "json_import"
     assert account["importFormat"] == "baileys_creds_json"
     assert account["validationStatus"] == "validating"
@@ -214,14 +220,14 @@ def test_import_group_statistics_and_export(
     assert quality["score"]["average"] is None
     stats_body = statistics.json()["data"]
     assert stats_body["summary"]["totalAccounts"] >= 1
-    stats_account = next(row for row in stats_body["rows"] if row["accountPublicId"] == account["id"])
+    stats_account = next(row for row in stats_body["rows"] if row["accountId"] == account["id"])
     assert stats_account["hasAvatar"] is None
     assert stats_account["groupCount"] is None
     assert stats_account["syncStatus"] == "pending"
 
     with SessionLocal() as db:
         stored = db.scalar(
-            select(PersonalAccount).where(PersonalAccount.public_id == account["id"])
+            select(PersonalAccount).where(PersonalAccount.id == int(account["id"]))
         )
         assert stored is not None
         stored.validation_status = "ready"
@@ -238,12 +244,25 @@ def test_import_group_statistics_and_export(
     assert "attachment" in exported.headers["content-disposition"]
     assert exported.json()["me"]["id"] == _credentials()["me"]["id"]
 
+    batch_exported = admin_client.post(
+        "/api/personal-accounts/export/batch",
+        json={"accountIds": [account["id"]], "format": "baileys_creds"},
+    )
+    assert batch_exported.status_code == 200, batch_exported.text
+    assert batch_exported.headers["content-type"] == "application/zip"
+    assert batch_exported.headers["cache-control"] == "no-store, private"
+    with ZipFile(io.BytesIO(batch_exported.content)) as archive:
+        filenames = archive.namelist()
+        assert filenames == ["12025550991.json"]
+        document = json.loads(archive.read(filenames[0]))
+        assert document["me"]["id"] == _credentials()["me"]["id"]
+
     groups = admin_client.get("/api/account-groups").json()["data"]
     matched = next(row for row in groups["rows"] if row["id"] == group_id)
     assert matched["accountCount"] == 1
 
     with SessionLocal() as db:
-        stored = db.scalar(select(PersonalAccount).where(PersonalAccount.public_id == account["id"]))
+        stored = db.scalar(select(PersonalAccount).where(PersonalAccount.id == int(account["id"])))
         assert stored is not None
         # Credential material is relayed to the gateway and never persisted in
         # the control-plane account row.
@@ -278,10 +297,11 @@ def test_native_bundle_import_export_round_trip(
     assert account["phone"] == "+12025550995"
     assert account["importFormat"] == "parloq_baileys_session_v1"
     assert relayed["session"] == bundle
+    assert relayed["accountId"] != account["id"]
 
     with SessionLocal() as db:
         stored = db.scalar(
-            select(PersonalAccount).where(PersonalAccount.public_id == account["id"])
+            select(PersonalAccount).where(PersonalAccount.id == int(account["id"]))
         )
         assert stored is not None
         stored.validation_status = "ready"

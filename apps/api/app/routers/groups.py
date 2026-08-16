@@ -8,6 +8,7 @@ from app.deps import AdminUser, DbSession
 from app.models import RoleActionPermission, RoleMenuPermission, UserAccount, UserGroup
 from app.schemas import GroupCreate, GroupUpdate
 from app.serializers import group_row
+from app.snowflake import parse_snowflake_id
 
 
 router = APIRouter(prefix="/api/user-groups", tags=["user-groups"])
@@ -49,9 +50,13 @@ def create_group(payload: GroupCreate, db: DbSession, _admin: AdminUser) -> dict
 
 @router.patch("/{group_id}")
 def update_group(
-    group_id: int, payload: GroupUpdate, db: DbSession, _admin: AdminUser
+    group_id: str, payload: GroupUpdate, db: DbSession, _admin: AdminUser
 ) -> dict:
-    group = db.get(UserGroup, group_id)
+    try:
+        database_id = parse_snowflake_id(group_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="用户组不存在") from None
+    group = db.get(UserGroup, database_id)
     if group is None:
         raise HTTPException(status_code=404, detail="用户组不存在")
     if payload.name is not None:
@@ -71,8 +76,12 @@ def update_group(
 
 
 @router.delete("/{group_id}")
-def delete_group(group_id: int, db: DbSession, _admin: AdminUser) -> dict:
-    group = db.get(UserGroup, group_id)
+def delete_group(group_id: str, db: DbSession, _admin: AdminUser) -> dict:
+    try:
+        database_id = parse_snowflake_id(group_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="用户组不存在") from None
+    group = db.get(UserGroup, database_id)
     if group is None:
         raise HTTPException(status_code=404, detail="用户组不存在")
     if group.is_builtin:

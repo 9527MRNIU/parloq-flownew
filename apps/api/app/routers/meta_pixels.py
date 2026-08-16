@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.deps import CurrentUser, DbSession
+from app.entity_ids import identifier_filter
 from app.snowflake import new_public_id
 
 from app.models import MetaPixel
@@ -17,11 +18,11 @@ from app.serializers import meta_pixel_row
 router = APIRouter(prefix="/api/meta-pixels", tags=["meta-pixels"])
 
 
-def _pixel_or_404(db: DbSession, public_id: str, user) -> MetaPixel:
+def _pixel_or_404(db: DbSession, identifier: str, user) -> MetaPixel:
     statement = select(MetaPixel).where(
-            MetaPixel.public_id == public_id,
-            MetaPixel.archived_at.is_(None),
-        )
+        identifier_filter(MetaPixel, identifier),
+        MetaPixel.archived_at.is_(None),
+    )
     if user.role != "admin":
         statement = statement.where(MetaPixel.created_by == user.id)
     pixel = db.scalar(statement)
@@ -62,14 +63,14 @@ def create_pixel(payload: MetaPixelCreate, db: DbSession, current_user: CurrentU
     return {"data": {"pixel": meta_pixel_row(pixel)}}
 
 
-@router.patch("/{public_id}")
+@router.patch("/{pixel_id}")
 def update_pixel(
-    public_id: str,
+    pixel_id: str,
     payload: MetaPixelUpdate,
     db: DbSession,
     current_user: CurrentUser,
 ) -> dict:
-    pixel = _pixel_or_404(db, public_id, current_user)
+    pixel = _pixel_or_404(db, pixel_id, current_user)
     if payload.name is not None:
         pixel.name = payload.name
     if payload.dataset_id is not None:
@@ -89,9 +90,9 @@ def update_pixel(
     return {"data": {"pixel": meta_pixel_row(pixel)}}
 
 
-@router.delete("/{public_id}")
-def archive_pixel(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    pixel = _pixel_or_404(db, public_id, current_user)
+@router.delete("/{pixel_id}")
+def archive_pixel(pixel_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    pixel = _pixel_or_404(db, pixel_id, current_user)
     pixel.enabled = False
     pixel.archived_at = utcnow()
     db.commit()

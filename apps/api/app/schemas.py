@@ -18,7 +18,7 @@ class UserCreate(ApiModel):
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=8, max_length=512)
     display_name: str | None = Field(default=None, alias="displayName", max_length=120)
-    group_id: int = Field(
+    group_id: str = Field(
         alias="groupId", validation_alias=AliasChoices("roleId", "groupId", "group_id")
     )
     is_active: bool = Field(
@@ -31,7 +31,7 @@ class UserUpdate(ApiModel):
     username: str | None = Field(default=None, min_length=1, max_length=80)
     password: str | None = Field(default=None, min_length=8, max_length=512)
     display_name: str | None = Field(default=None, alias="displayName", max_length=120)
-    group_id: int | None = Field(
+    group_id: str | None = Field(
         default=None,
         alias="groupId",
         validation_alias=AliasChoices("roleId", "groupId", "group_id"),
@@ -275,9 +275,24 @@ class IpAllocationPolicyUpdate(ApiModel):
 
 
 class AccountProxyBindingCreate(ApiModel):
-    account_public_id: str = Field(alias="accountPublicId", min_length=1, max_length=120)
-    proxy_public_id: str = Field(alias="proxyPublicId", min_length=1, max_length=64)
+    account_id: str = Field(
+        alias="accountId",
+        validation_alias=AliasChoices("accountId", "accountPublicId"),
+        min_length=1,
+        max_length=120,
+    )
+    proxy_id: str = Field(
+        alias="proxyId",
+        validation_alias=AliasChoices("proxyId", "proxyPublicId"),
+        min_length=1,
+        max_length=64,
+    )
 
 
 class AccountProxyBindingUpdate(ApiModel):
-    proxy_public_id: str = Field(alias="proxyPublicId", min_length=1, max_length=64)
+    proxy_id: str = Field(
+        alias="proxyId",
+        validation_alias=AliasChoices("proxyId", "proxyPublicId"),
+        min_length=1,
+        max_length=64,
+    )

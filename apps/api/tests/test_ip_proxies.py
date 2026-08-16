@@ -8,6 +8,19 @@ from app.models import ProxyEndpoint
 
 
 def test_ip_proxy_and_binding_lifecycle(admin_client: TestClient) -> None:
+    accounts = []
+    for suffix in ("61", "62"):
+        response = admin_client.post(
+            "/api/personal-accounts",
+            json={"name": f"Proxy account {suffix}", "phone": f"+120255500{suffix}"},
+        )
+        assert response.status_code == 201, response.text
+        account = response.json()["data"]["account"]
+        if account["proxyBinding"] is not None:
+            assert admin_client.delete(
+                f"/api/ip-proxy-bindings/{account['proxyBinding']['bindingId']}"
+            ).status_code == 200
+        accounts.append(account)
     default_policy = admin_client.get("/api/ip-allocation-policy")
     assert default_policy.status_code == 200
     assert default_policy.json()["data"]["policy"]["allocationMode"] == "least_load"
@@ -39,6 +52,8 @@ def test_ip_proxy_and_binding_lifecycle(admin_client: TestClient) -> None:
     )
     assert created.status_code == 201
     proxy = created.json()["data"]["proxy"]
+    assert proxy["id"].isdecimal()
+    assert "publicId" not in proxy
     assert proxy["countryCode"] == "US"
     assert proxy["usernameMasked"] == "••••user"
     assert proxy["passwordMasked"] == "••••word"
@@ -48,7 +63,7 @@ def test_ip_proxy_and_binding_lifecycle(admin_client: TestClient) -> None:
 
     with SessionLocal() as db:
         stored = db.scalar(
-            select(ProxyEndpoint).where(ProxyEndpoint.public_id == proxy["id"])
+            select(ProxyEndpoint).where(ProxyEndpoint.id == int(proxy["id"]))
         )
         assert stored is not None
         assert "customer-user" not in (stored.username_ciphertext or "")
@@ -61,20 +76,23 @@ def test_ip_proxy_and_binding_lifecycle(admin_client: TestClient) -> None:
 
     first_binding = admin_client.post(
         "/api/ip-proxy-bindings",
-        json={"accountPublicId": "waacct_customer_001", "proxyPublicId": proxy["id"]},
+        json={"accountId": accounts[0]["id"], "proxyId": proxy["id"]},
     )
     assert first_binding.status_code == 201
     binding_one = first_binding.json()["data"]["binding"]
+    assert binding_one["accountId"] == accounts[0]["id"]
+    assert "accountPublicId" not in binding_one
+    assert "publicId" not in binding_one
     second_binding = admin_client.post(
         "/api/ip-proxy-bindings",
-        json={"accountPublicId": "waacct_customer_002", "proxyPublicId": proxy["id"]},
+        json={"accountId": accounts[1]["id"], "proxyId": proxy["id"]},
     )
     assert second_binding.status_code == 201
     binding_two = second_binding.json()["data"]["binding"]
 
     duplicate = admin_client.post(
         "/api/ip-proxy-bindings",
-        json={"accountPublicId": "waacct_customer_001", "proxyPublicId": proxy["id"]},
+        json={"accountId": accounts[0]["id"], "proxyId": proxy["id"]},
     )
     assert duplicate.status_code == 409
     detail = admin_client.get(f"/api/ip-proxies/{proxy['id']}").json()["data"]["proxy"]

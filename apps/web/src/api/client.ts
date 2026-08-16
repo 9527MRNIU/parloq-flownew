@@ -64,6 +64,9 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
 
 export async function apiDownload(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers)
+  if (typeof init.body === 'string' && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
   if (bearerToken && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${bearerToken}`)
 
   const response = await fetch(path, {

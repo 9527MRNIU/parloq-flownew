@@ -1,5 +1,4 @@
 import {
-  CopyIcon,
   ExternalLinkIcon,
   KeyRoundIcon,
   Link2Icon,
@@ -12,11 +11,16 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
 import {
   ListTableCard,
   ListToolbar,
   StandardListPage,
 } from "../components/list-page";
+import {
+  EntityPrimaryCell,
+  type EntityStatusMeta,
+} from "../components/entity-primary-cell";
 import {
   Badge,
   Button,
@@ -38,8 +42,8 @@ import {
 } from "../components/ui";
 
 type BitlyAccount = {
-  id: string | number;
-  publicId?: string;
+  id: string;
+  readKey: string;
   name: string;
   shortDomain?: string;
   enabled?: boolean;
@@ -50,14 +54,14 @@ type BitlyAccount = {
 };
 
 type DirectShortLink = {
-  id: string | number;
-  publicId?: string;
+  id: string;
+  readKey: string;
   title?: string;
   shortUrl: string;
   targetUrl: string;
   enabled: boolean;
   status: string;
-  providerAccountId?: string | number;
+  providerAccountId: string;
   providerAccountName?: string;
   clickCount?: number;
   createdAt?: string;
@@ -65,9 +69,10 @@ type DirectShortLink = {
 
 function normalizeAccount(input: unknown): BitlyAccount {
   const row = input as Record<string, unknown>;
+  const id = snowflakeId(row, "id");
   return {
-    id: (row.id || row.publicId || row.public_id) as string | number,
-    publicId: String(row.publicId || row.public_id || row.id || ""),
+    id,
+    readKey: entityRowKey(row, id, "bitly-account", `${String(row.name || row.label || "")}:${String(row.createdAt || row.created_at || "")}`),
     name: String(row.name || row.label || "Bitly 账号"),
     shortDomain: String(row.shortDomain || row.short_domain || "bit.ly"),
     enabled: Boolean(row.enabled ?? true),
@@ -86,9 +91,10 @@ function normalizeAccount(input: unknown): BitlyAccount {
 
 function normalizeLink(input: unknown): DirectShortLink {
   const row = input as Record<string, unknown>;
+  const id = snowflakeId(row, "id");
   return {
-    id: (row.id || row.publicId || row.public_id) as string | number,
-    publicId: String(row.publicId || row.public_id || row.id || ""),
+    id,
+    readKey: entityRowKey(row, id, "direct-short-link", `${String(row.shortUrl || row.short_url || "")}:${String(row.createdAt || row.created_at || "")}`),
     title: String(row.title || ""),
     shortUrl: String(row.shortUrl || row.short_url || ""),
     targetUrl: String(row.targetUrl || row.target_url || ""),
@@ -96,8 +102,7 @@ function normalizeLink(input: unknown): DirectShortLink {
     status: String(
       row.status || (row.enabled === false ? "disabled" : "active"),
     ),
-    providerAccountId: (row.providerAccountId || row.provider_account_id) as
-      string | number | undefined,
+    providerAccountId: snowflakeId(row, "providerAccountId", "provider_account_id"),
     providerAccountName: String(
       row.providerAccountName || row.provider_account_name || "",
     ),
@@ -106,12 +111,24 @@ function normalizeLink(input: unknown): DirectShortLink {
   };
 }
 
-function stateBadge(row: DirectShortLink) {
+function linkStatus(row: DirectShortLink): EntityStatusMeta {
   if (!row.enabled || row.status === "disabled")
-    return <Badge tone="warning">已停用</Badge>;
+    return {
+      label: "已停用",
+      description: "短链接已停用，不应继续用于新流量。",
+      tone: "warning",
+    };
   if (["failed", "invalid", "error"].includes(row.status))
-    return <Badge tone="danger">异常</Badge>;
-  return <Badge tone="success">正常</Badge>;
+    return {
+      label: "异常",
+      description: "短链接服务返回异常，请检查账号授权或目标地址。",
+      tone: "danger",
+    };
+  return {
+    label: "正常",
+    description: "短链接可以正常访问并统计点击数据。",
+    tone: "success",
+  };
 }
 
 export function DirectShortLinksPage() {
@@ -186,7 +203,7 @@ export function DirectShortLinksPage() {
   }, [loadLinks]);
 
   const selectedAccount = useMemo(
-    () => accounts.find((row) => String(row.publicId || row.id) === accountId),
+    () => accounts.find((row) => row.id === accountId),
     [accountId, accounts],
   );
 
@@ -199,6 +216,7 @@ export function DirectShortLinksPage() {
   }
 
   function openEdit(row: DirectShortLink) {
+    if (!row.id) return;
     setEditing(row);
     setTitle(row.title || "");
     setTargetUrl(row.targetUrl);
@@ -207,7 +225,7 @@ export function DirectShortLinksPage() {
   }
 
   async function save() {
-    if (!targetUrl.trim()) return;
+    if (!targetUrl.trim() || (editing && !editing.id)) return;
     setPending(true);
     try {
       const body = {
@@ -217,7 +235,7 @@ export function DirectShortLinksPage() {
       };
       if (editing)
         await apiRequest(
-          `/api/direct-short-links/${editing.publicId || editing.id}`,
+          `/api/direct-short-links/${editing.id}`,
           { method: "PATCH", body: JSON.stringify(body) },
         );
       else
@@ -236,6 +254,7 @@ export function DirectShortLinksPage() {
   }
 
   async function archive(row: DirectShortLink) {
+    if (!row.id) return;
     if (
       !(await confirmAction({
         title: `归档短链“${row.title || row.shortUrl}”？`,
@@ -245,7 +264,7 @@ export function DirectShortLinksPage() {
     )
       return;
     try {
-      await apiRequest(`/api/direct-short-links/${row.publicId || row.id}`, {
+      await apiRequest(`/api/direct-short-links/${row.id}`, {
         method: "DELETE",
       });
       await loadLinks();
@@ -256,6 +275,7 @@ export function DirectShortLinksPage() {
   }
 
   function openAccount(row?: BitlyAccount) {
+    if (row && !row.id) return;
     setEditingAccount(row || null);
     setAccountForm(
       row
@@ -278,7 +298,7 @@ export function DirectShortLinksPage() {
   }
 
   async function saveAccount() {
-    if (!accountForm.name.trim() || !accountForm.shortDomain.trim()) return;
+    if (!accountForm.name.trim() || !accountForm.shortDomain.trim() || (editingAccount && !editingAccount.id)) return;
     setAccountPending(true);
     try {
       const body = {
@@ -290,7 +310,7 @@ export function DirectShortLinksPage() {
       };
       await apiRequest(
         editingAccount
-          ? `/api/bitly-accounts/${editingAccount.publicId || editingAccount.id}`
+          ? `/api/bitly-accounts/${editingAccount.id}`
           : "/api/bitly-accounts",
         {
           method: editingAccount ? "PATCH" : "POST",
@@ -317,6 +337,7 @@ export function DirectShortLinksPage() {
   }
 
   async function archiveAccount(row: BitlyAccount) {
+    if (!row.id) return;
     if (
       !(await confirmAction({
         title: `归档 Bitly 账号“${row.name}”？`,
@@ -326,7 +347,7 @@ export function DirectShortLinksPage() {
     )
       return;
     try {
-      await apiRequest(`/api/bitly-accounts/${row.publicId || row.id}`, {
+      await apiRequest(`/api/bitly-accounts/${row.id}`, {
         method: "DELETE",
       });
       await loadAccounts();
@@ -346,7 +367,7 @@ export function DirectShortLinksPage() {
   }
 
   return (
-    <StandardListPage>
+    <StandardListPage viewport>
       <ListToolbar
         search={{
           value: keyword,
@@ -364,8 +385,8 @@ export function DirectShortLinksPage() {
               }
               options={[
                 { value: "__all__", label: "全部 Bitly 账号" },
-                ...accounts.map((account) => ({
-                  value: String(account.publicId || account.id),
+                ...accounts.filter((account) => account.id).map((account) => ({
+                  value: account.id,
                   label: account.name,
                 })),
               ]}
@@ -429,38 +450,26 @@ export function DirectShortLinksPage() {
                   <TableHead>目标地址</TableHead>
                   <TableHead>账号</TableHead>
                   <TableHead>点击数</TableHead>
-                  <TableHead>状态</TableHead>
                   <TableHead>创建时间</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {rows.map((row) => (
-                  <TableRow key={row.publicId || row.id}>
+                  <TableRow key={row.readKey}>
                     <TableCell>
-                      <div className="cell-main">
-                        <strong>
-                          {row.title || row.shortUrl || "Bitly 短链"}
-                        </strong>
-                        <span className="inline-link">
-                          <a
-                            href={row.shortUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            {row.shortUrl || "创建中"}
-                          </a>
-                          {row.shortUrl ? (
-                            <IconButton
-                              label="复制"
-                              className="mini-icon"
-                              onClick={() => void copy(row.shortUrl)}
-                            >
-                              <CopyIcon size={14} />
-                            </IconButton>
-                          ) : null}
-                        </span>
-                      </div>
+                      <EntityPrimaryCell
+                        title={row.title || row.shortUrl || "Bitly 短链"}
+                        id={row.id}
+                        description={row.shortUrl || "创建中"}
+                        status={{
+                          ...linkStatus(row),
+                          details: [
+                            { label: "服务账号", value: row.providerAccountName || "-" },
+                            { label: "点击数", value: (row.clickCount || 0).toLocaleString() },
+                          ],
+                        }}
+                      />
                     </TableCell>
                     <TableCell>
                       <div className="truncate-cell" title={row.targetUrl}>
@@ -478,7 +487,6 @@ export function DirectShortLinksPage() {
                     <TableCell className="tabular-nums">
                       {(row.clickCount || 0).toLocaleString()}
                     </TableCell>
-                    <TableCell>{stateBadge(row)}</TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatDateTime(row.createdAt)}
                     </TableCell>
@@ -492,13 +500,14 @@ export function DirectShortLinksPage() {
                         </IconButton>
                         {canManage ? (
                           <>
-                            <IconButton label="编辑" onClick={() => openEdit(row)}>
+                            <IconButton label="编辑" disabled={!row.id} onClick={() => openEdit(row)}>
                               <PencilIcon size={16} />
                             </IconButton>
                             <IconButton
                               label="归档"
                               variant="ghost"
                               className="danger"
+                              disabled={!row.id}
                               onClick={() => void archive(row)}
                             >
                               <Trash2Icon size={16} />
@@ -515,7 +524,7 @@ export function DirectShortLinksPage() {
         ) : (
           <EmptyState
             title="暂无直接短链"
-            description="创建后将直接获得 Bitly 短链接，不经过本站域名或跳转网关。"
+            description="创建后将直接获得 Bitly 短链接，不使用本站域名。"
           />
         )}
       </ListTableCard>
@@ -580,9 +589,9 @@ export function DirectShortLinksPage() {
                 options={[
                   { value: "__auto__", label: "自动选择可用账号" },
                   ...accounts
-                    .filter((row) => row.enabled)
+                    .filter((row) => row.enabled && row.id)
                     .map((account) => ({
-                      value: String(account.publicId || account.id),
+                      value: account.id,
                       label: `${account.name} · ${account.shortDomain || "bit.ly"}`,
                     })),
                 ]}
@@ -603,7 +612,7 @@ export function DirectShortLinksPage() {
               <Link2Icon size={16} /> Bitly 短链
             </strong>
             <small>
-              Bitly → 原始目标地址。不会创建本站短链或经过本站网关。
+              Bitly → 原始目标地址。
             </small>
           </div>
         </div>
@@ -714,9 +723,10 @@ export function DirectShortLinksPage() {
           {accounts.length ? (
             <div className="pixel-list">
               {accounts.map((row) => (
-                <div key={row.publicId || row.id}>
+                <div key={row.readKey}>
                   <div>
                     <strong>{row.name}</strong>
+                    <span>{row.id || "等待 ID 迁移"}</span>
                     <span>
                       {row.shortDomain || "bit.ly"} ·{" "}
                       {row.tokenMasked || row.status || "已配置"}
@@ -728,6 +738,7 @@ export function DirectShortLinksPage() {
                   <Button
                     variant="ghost"
                     size="sm"
+                    disabled={!row.id}
                     onClick={() => openAccount(row)}
                   >
                     编辑
@@ -736,6 +747,7 @@ export function DirectShortLinksPage() {
                     label="归档 Bitly 账号"
                     variant="ghost"
                     className="danger"
+                    disabled={!row.id}
                     onClick={() => void archiveAccount(row)}
                   >
                     <Trash2Icon size={15} />

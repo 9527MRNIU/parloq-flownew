@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.entity_ids import entity_id
 from app.models import (
     AccountProxyBinding,
     BitlyProviderAccount,
@@ -52,8 +53,7 @@ def group_row(group: UserGroup, user_count: int = 0) -> dict[str, Any]:
 
 def bitly_account_row(account: BitlyProviderAccount) -> dict[str, Any]:
     return {
-        "id": account.public_id,
-        "publicId": account.public_id,
+        "id": entity_id(account),
         "provider": "bitly",
         "name": account.name,
         "tokenMasked": f"••••{account.token_last4}" if account.token_last4 else "已保存",
@@ -69,13 +69,12 @@ def bitly_account_row(account: BitlyProviderAccount) -> dict[str, Any]:
 
 def direct_short_link_row(link: DirectShortLink) -> dict[str, Any]:
     return {
-        "id": link.public_id,
-        "publicId": link.public_id,
+        "id": entity_id(link),
         "title": link.title,
         "targetUrl": link.target_url,
         "bitlinkId": link.bitlink_id,
         "shortUrl": link.short_url,
-        "providerAccountId": link.provider_account.public_id,
+        "providerAccountId": entity_id(link.provider_account),
         "providerAccountName": link.provider_account.name,
         "enabled": link.enabled,
         "status": link.status,
@@ -87,11 +86,11 @@ def direct_short_link_row(link: DirectShortLink) -> dict[str, Any]:
 
 def meta_pixel_row(pixel: MetaPixel) -> dict[str, Any]:
     return {
-        "id": pixel.public_id,
-        "publicId": pixel.public_id,
+        "id": entity_id(pixel),
         "name": pixel.name,
         "datasetId": pixel.dataset_id,
         "capiTokenMasked": f"••••{pixel.capi_token_last4}" if pixel.capi_token_last4 else None,
+        "capiTokenConfigured": bool(pixel.capi_token_ciphertext),
         "enabled": pixel.enabled,
         "createdAt": iso(pixel.created_at),
         "updatedAt": iso(pixel.updated_at),
@@ -100,8 +99,7 @@ def meta_pixel_row(pixel: MetaPixel) -> dict[str, Any]:
 
 def proxy_endpoint_row(proxy: ProxyEndpoint, assigned_count: int = 0) -> dict[str, Any]:
     return {
-        "id": proxy.public_id,
-        "publicId": proxy.public_id,
+        "id": entity_id(proxy),
         "name": proxy.name,
         "protocol": proxy.protocol,
         "host": proxy.host,
@@ -120,14 +118,17 @@ def proxy_endpoint_row(proxy: ProxyEndpoint, assigned_count: int = 0) -> dict[st
     }
 
 
-def account_proxy_binding_row(binding: AccountProxyBinding) -> dict[str, Any]:
-    return {
-        "id": binding.public_id,
-        "publicId": binding.public_id,
-        "accountPublicId": binding.account_public_id,
-        "proxyPublicId": binding.proxy.public_id,
+def account_proxy_binding_row(
+    binding: AccountProxyBinding, account_id: str | None = None
+) -> dict[str, Any]:
+    row = {
+        "id": str(binding.id),
+        "proxyId": entity_id(binding.proxy),
         "proxyName": binding.proxy.name,
         "countryCode": binding.proxy.country_code,
         "createdAt": iso(binding.created_at),
         "updatedAt": iso(binding.updated_at),
     }
+    if account_id is not None:
+        row["accountId"] = account_id
+    return row

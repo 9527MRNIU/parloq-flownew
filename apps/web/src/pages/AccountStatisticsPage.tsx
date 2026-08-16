@@ -10,7 +10,12 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiRequest, formatLocalDateInput } from "../api/client";
 import { DatePickerField } from "../components/date-picker-field";
-import { StandardListPage } from "../components/list-page";
+import { EntityPrimaryCell } from "../components/entity-primary-cell";
+import {
+  ListTableCard,
+  ListToolbar,
+  StandardListPage,
+} from "../components/list-page";
 import {
   Badge,
   Button,
@@ -24,6 +29,8 @@ import {
   TableHeader,
   TableRow,
 } from "../components/ui";
+import { accountRowKey, snowflakeId } from "../lib/account-identifiers";
+import { formatPhoneDisplay } from "../lib/utils";
 
 const pick = (row: Record<string, unknown>, ...keys: string[]) => {
   for (const key of keys) if (row[key] != null) return row[key];
@@ -133,7 +140,7 @@ function countryRow(input: unknown): CountryRow {
 }
 
 type QualityMetric = { count: number | null; rate: number | null; known: number | null; unknown: number | null };
-type QualityRow = { id: string; account: string; source: string; avatar: boolean | null; groups: number | null; friends: number | null; mutual: number | null; score: number | null; sync: string };
+type QualityRow = { id: string; readKey: string; account: string; phone: string; source: string; avatar: boolean | null; groups: number | null; friends: number | null; mutual: number | null; score: number | null; sync: string };
 function qualityMetric(input: unknown, average = false): QualityMetric {
   const row = (input || {}) as Record<string, unknown>;
   return {
@@ -146,9 +153,18 @@ function qualityMetric(input: unknown, average = false): QualityMetric {
 function qualityRow(input: unknown): QualityRow {
   const row = input as Record<string, unknown>;
   const avatar = pick(row, "hasAvatar", "has_avatar");
+  const id = snowflakeId(row, "id", "accountId", "account_id");
+  const phone = formatPhoneDisplay(
+    stringValue(row, "phone", "phoneNumber", "phone_number"),
+  );
+  const displayName = stringValue(row, "displayName", "display_name");
   return {
-    id: stringValue(row, "accountPublicId", "account_public_id", "id"),
-    account: stringValue(row, "displayName", "display_name", "phone", "accountPublicId"),
+    id,
+    readKey: accountRowKey(row, id),
+    account: /^\+\d+$/.test(displayName)
+      ? formatPhoneDisplay(displayName)
+      : displayName || phone,
+    phone,
     source: stringValue(row, "source"),
     avatar: avatar == null ? null : Boolean(avatar),
     groups: numberValue(row, "groupCount", "group_count"),
@@ -229,43 +245,267 @@ export function AccountStatisticsPage() {
     { label: "0 双向 / 率", data: quality.zeroMutual },
     { label: "平均评分", data: quality.score, score: true },
   ];
-  const countryOptions = useMemo(() => countries.map((row) => ({ value: row.code, label: `${row.name || row.code}${row.code ? ` · ${row.code}` : ""}` })), [countries]);
+  const countryOptions = useMemo(
+    () =>
+      countries.map((row) => ({
+        value: row.code,
+        label:
+          row.name && row.name !== row.code
+            ? `${row.name} · ${row.code}`
+            : row.code || row.name,
+      })),
+    [countries],
+  );
 
   return (
     <StandardListPage>
-      <div className="flex justify-end"><Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCwIcon size={16} className={loading ? "spin" : ""} />刷新全部</Button></div>
-      {error ? <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">{error}</div> : null}
-      <section>
-        <div className="mb-3"><h2>账号池实时概览</h2><p className="text-sm text-muted-foreground">当前账号池的实时经营快照。</p></div>
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">{overviewCards.map(({ label, value, detail, icon: Icon }) => <div className="summary-card" key={label}><span className="summary-icon"><Icon size={18} /></span><div><small>{label}</small><strong>{loading && value == null ? "-" : value == null ? "-" : value.toLocaleString()}</strong><small>{value == null ? "待同步" : detail}</small></div></div>)}</div>
-      </section>
-
-      <section className="card">
-        <div className="flex flex-col gap-3 border-b pb-4 lg:flex-row lg:items-end lg:justify-between">
-          <div><h2>账号日统计</h2><p className="mt-1 text-sm text-muted-foreground">历史与今日实时数据，日期范围最长 90 天。</p></div>
-          <div className="flex flex-wrap items-end gap-2">
-            <DatePickerField value={dateFrom} onValueChange={setDateFrom} ariaLabel="开始日期" className="w-36" />
-            <span className="pb-2 text-muted-foreground">至</span>
-            <DatePickerField value={dateTo} onValueChange={setDateTo} ariaLabel="结束日期" className="w-36" />
-            <SelectField value={countryCode} onValueChange={setCountryCode} options={countryOptions} placeholder="全部国家" clearable className="w-40" />
-            {[7, 30, 90].map((days) => <Button key={days} variant="outline" onClick={() => preset(days)}>近 {days} 天</Button>)}
-          </div>
+      <ListToolbar
+        filters={
+          <>
+            <DatePickerField
+              value={dateFrom}
+              onValueChange={setDateFrom}
+              ariaLabel="开始日期"
+              className="w-36"
+            />
+            <span className="hidden text-sm text-muted-foreground xl:inline">至</span>
+            <DatePickerField
+              value={dateTo}
+              onValueChange={setDateTo}
+              ariaLabel="结束日期"
+              className="w-36"
+            />
+            <SelectField
+              value={countryCode}
+              onValueChange={setCountryCode}
+              options={countryOptions}
+              placeholder="全部国家"
+              clearable
+              className="w-40"
+            />
+            {[7, 30, 90].map((days) => (
+              <Button key={days} variant="outline" onClick={() => preset(days)}>
+                近 {days} 天
+              </Button>
+            ))}
+          </>
+        }
+        meta={`${dateFrom} 至 ${dateTo}`}
+        actions={
+          <Button variant="outline" onClick={() => void load()} disabled={loading}>
+            <RefreshCwIcon size={16} className={loading ? "spin" : ""} />
+            刷新
+          </Button>
+        }
+      />
+      {error ? (
+        <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">
+          {error}
         </div>
-        <p className="my-3 text-sm text-muted-foreground">正在查看 {dateFrom} 至 {dateTo} 内、{countryCode || "全部国家"}的账号每天变化情况。</p>
-        {loading ? <div className="loading-state min-h-64"><Spinner />正在汇总日统计…</div> : daily.length ? <div className="table-scroll"><Table><TableHeader><TableRow><TableHead>日期</TableHead><TableHead>来源</TableHead><TableHead>总数</TableHead><TableHead>可用</TableHead><TableHead>在线 / 率</TableHead><TableHead>留存</TableHead><TableHead>日新增</TableHead><TableHead>新号当日解绑 / 率</TableHead><TableHead>日解绑</TableHead><TableHead>营销前解绑 / 率</TableHead><TableHead>营销后解绑 / 率</TableHead><TableHead>日净增</TableHead><TableHead>整体解绑率</TableHead></TableRow></TableHeader>
-          <TableBody>{daily.map((row) => <TableRow key={`${row.date}-${row.source}`}><TableCell><strong>{row.date}</strong></TableCell><TableCell><Badge tone={row.source === "realtime" || row.source === "实时" ? "success" : "primary"}>{row.source === "realtime" ? "实时" : row.source || "历史"}</Badge></TableCell><TableCell>{metric(row.total)}</TableCell><TableCell>{metric(row.valid)}</TableCell><TableCell>{metric(row.online)} / {percent(row.onlineRate)}</TableCell><TableCell>{metric(row.retained)}</TableCell><TableCell>{row.added == null ? "-" : `+${row.added}`}</TableCell><TableCell>{metric(row.newInvalid)} / {percent(row.newInvalidRate)}</TableCell><TableCell>{metric(row.invalid)}</TableCell><TableCell>{metric(row.preMarketingInvalid)} / {percent(row.preMarketingRate)}</TableCell><TableCell>{metric(row.postMarketingInvalid)} / {percent(row.postMarketingRate)}</TableCell><TableCell><span className={row.netGrowth != null && row.netGrowth < 0 ? "text-destructive" : "text-emerald-600"}>{row.netGrowth == null ? "-" : `${row.netGrowth >= 0 ? "+" : ""}${row.netGrowth}`}</span></TableCell><TableCell>{percent(row.overallInvalidRate)}</TableCell></TableRow>)}</TableBody></Table></div> : <EmptyState title="暂无日统计" description="所选时间和国家范围内暂无账号快照。" />}
+      ) : null}
+
+      <section className="grid gap-3">
+        <div>
+          <h2 className="text-base font-semibold">账号池概览</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            账号总量、可用性与在线状态的实时快照。
+          </p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          {overviewCards.map(({ label, value, detail, icon: Icon }) => (
+            <div className="summary-card" key={label}>
+              <span className="summary-icon"><Icon size={18} /></span>
+              <div>
+                <small>{label}</small>
+                <strong>{value == null ? "-" : value.toLocaleString()}</strong>
+                <small>{value == null ? "待同步" : detail}</small>
+              </div>
+            </div>
+          ))}
+        </div>
       </section>
 
-      <section className="card">
-        <div className="mb-3"><h2>按国家统计</h2><p className="mt-1 text-sm text-muted-foreground">查看账号在各国家的分布与有效占比。</p></div>
-        {loading ? <div className="loading-state min-h-48"><Spinner />正在汇总国家分布…</div> : countries.length ? <div className="table-scroll"><Table><TableHeader><TableRow><TableHead>国家</TableHead><TableHead>账号总数</TableHead><TableHead>在线数</TableHead><TableHead>无效数</TableHead><TableHead>有效占比</TableHead></TableRow></TableHeader><TableBody>{countries.map((row) => <TableRow key={row.code || row.name}><TableCell><strong>{row.name || row.code}</strong><span className="ml-2 text-muted-foreground">{row.code}</span></TableCell><TableCell>{metric(row.total)}</TableCell><TableCell><Badge tone="success">{row.online == null ? "-" : row.online.toLocaleString()}</Badge></TableCell><TableCell><Badge tone={row.invalid ? "danger" : "neutral"}>{row.invalid == null ? "-" : row.invalid.toLocaleString()}</Badge></TableCell><TableCell>{percent(row.validRate)}</TableCell></TableRow>)}</TableBody></Table></div> : <EmptyState title="暂无国家统计" description="账号同步国家信息后，这里会显示分布。" />}
+      <section className="grid gap-3">
+        <div>
+          <h2 className="text-base font-semibold">账号质量</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            只使用已同步资料计算；未知数据不会被当作 0。
+          </p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          {qualityCards.map(({ label, data, score }) => (
+            <div className="summary-card" key={label}>
+              <span className="summary-icon"><UserPlusIcon size={18} /></span>
+              <div>
+                <small>{label}</small>
+                <strong>
+                  {data?.count == null
+                    ? "-"
+                    : score
+                      ? data.count.toFixed(1)
+                      : data.count.toLocaleString()}
+                </strong>
+                <small>
+                  {data?.count == null
+                    ? "待同步"
+                    : score
+                      ? `已知 ${data.known ?? "-"} · 未知 ${data.unknown ?? "-"}`
+                      : `${percent(data.rate)} · 未知 ${data.unknown ?? "-"}`}
+                </small>
+              </div>
+            </div>
+          ))}
+        </div>
       </section>
 
-      <section>
-        <div className="mb-3"><h2>账号质量</h2><p className="text-sm text-muted-foreground">质量只使用已同步数据计算；未知数据不记为 0。</p></div>
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">{qualityCards.map(({ label, data, score }) => <div className="summary-card" key={label}><span className="summary-icon"><UserPlusIcon size={18} /></span><div><small>{label}</small><strong>{data?.count == null ? "-" : score ? data.count.toFixed(1) : data.count.toLocaleString()}</strong><small>{data?.count == null ? "待同步" : score ? `已知 ${data.known ?? "-"} · 未知 ${data.unknown ?? "-"}` : `${percent(data.rate)} · 未知 ${data.unknown ?? "-"}`}</small></div></div>)}</div>
-        <section className="mt-3 overflow-hidden rounded-lg border bg-background">{qualityRows.length ? <div className="table-scroll"><Table><TableHeader><TableRow><TableHead>账号</TableHead><TableHead>来源</TableHead><TableHead>头像</TableHead><TableHead>群组</TableHead><TableHead>好友</TableHead><TableHead>双向</TableHead><TableHead>评分</TableHead><TableHead>同步状态</TableHead></TableRow></TableHeader><TableBody>{qualityRows.map((row) => <TableRow key={row.id || row.account}><TableCell><strong>{row.account || row.id}</strong></TableCell><TableCell>{row.source === "json_import" ? "JSON 导入" : row.source === "landing_page" ? "落地页链接" : "-"}</TableCell><TableCell>{row.avatar == null ? "-" : row.avatar ? "有" : "无"}</TableCell><TableCell>{metric(row.groups)}</TableCell><TableCell>{metric(row.friends)}</TableCell><TableCell>{metric(row.mutual)}</TableCell><TableCell>{metric(row.score)}</TableCell><TableCell><Badge tone={row.sync === "synced" || row.sync === "ready" ? "success" : "warning"}>{row.sync === "synced" || row.sync === "ready" ? "已同步" : "待同步"}</Badge></TableCell></TableRow>)}</TableBody></Table></div> : <EmptyState title="暂无账号质量数据" description="账号资料同步后才会参与质量统计。" />}</section>
-      </section>
+      <ListTableCard>
+        <div className="border-b px-4 py-3">
+          <h2 className="text-base font-semibold">账号日统计</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            每日账号池变化与解绑阶段，范围最长 90 天。
+          </p>
+        </div>
+        {loading ? (
+          <div className="loading-state min-h-64"><Spinner />正在汇总日统计…</div>
+        ) : daily.length ? (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>日期</TableHead>
+                <TableHead>账号池</TableHead>
+                <TableHead>在线</TableHead>
+                <TableHead>新增账号</TableHead>
+                <TableHead>解绑阶段</TableHead>
+                <TableHead>净变化</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {daily.map((row) => (
+                <TableRow key={`${row.date}-${row.source}`}>
+                  <TableCell>
+                    <div className="cell-main min-w-[130px]">
+                      <strong>{row.date}</strong>
+                      <span>
+                        <Badge tone={row.source === "realtime" || row.source === "实时" ? "success" : "primary"}>
+                          {row.source === "realtime" ? "实时" : row.source || "历史"}
+                        </Badge>
+                      </span>
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <div className="cell-main min-w-[145px]">
+                      <strong>总数 {metric(row.total)}</strong>
+                      <span>有效 {metric(row.valid)} · 留存 {metric(row.retained)}</span>
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <div className="cell-main min-w-[110px]">
+                      <strong>{metric(row.online)}</strong>
+                      <span>在线率 {percent(row.onlineRate)}</span>
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <div className="cell-main min-w-[150px]">
+                      <strong>{row.added == null ? "-" : `+${row.added}`}</strong>
+                      <span>当日解绑 {metric(row.newInvalid)} · {percent(row.newInvalidRate)}</span>
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <div className="cell-main min-w-[185px]">
+                      <strong>合计 {metric(row.invalid)}</strong>
+                      <span>营销前 {metric(row.preMarketingInvalid)} · 营销后 {metric(row.postMarketingInvalid)}</span>
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <div className="cell-main min-w-[110px]">
+                      <strong className={row.netGrowth != null && row.netGrowth < 0 ? "text-destructive" : "text-emerald-600"}>
+                        {row.netGrowth == null ? "-" : `${row.netGrowth >= 0 ? "+" : ""}${row.netGrowth}`}
+                      </strong>
+                      <span>解绑率 {percent(row.overallInvalidRate)}</span>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        ) : (
+          <EmptyState title="暂无日统计" description="所选时间和国家范围内暂无账号快照。" />
+        )}
+      </ListTableCard>
+
+      <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
+        <ListTableCard>
+          <div className="border-b px-4 py-3">
+            <h2 className="text-base font-semibold">国家分布</h2>
+            <p className="mt-1 text-sm text-muted-foreground">账号覆盖与有效占比。</p>
+          </div>
+          {loading ? (
+            <div className="loading-state"><Spinner />正在汇总国家分布…</div>
+          ) : countries.length ? (
+            <Table>
+              <TableHeader><TableRow><TableHead>国家</TableHead><TableHead>账号</TableHead><TableHead>在线</TableHead><TableHead>有效率</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {countries.map((row) => (
+                  <TableRow key={row.code || row.name}>
+                    <TableCell>
+                      <strong>{row.name || row.code}</strong>
+                      {row.name && row.code && row.name !== row.code ? <span className="ml-2 text-muted-foreground">{row.code}</span> : null}
+                    </TableCell>
+                    <TableCell>{metric(row.total)}</TableCell>
+                    <TableCell><Badge tone="success">{row.online == null ? "-" : row.online.toLocaleString()}</Badge></TableCell>
+                    <TableCell>{percent(row.validRate)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          ) : (
+            <EmptyState title="暂无国家统计" description="同步国家信息后会在这里显示分布。" />
+          )}
+        </ListTableCard>
+
+        <ListTableCard>
+          <div className="border-b px-4 py-3">
+            <h2 className="text-base font-semibold">账号质量明细</h2>
+            <p className="mt-1 text-sm text-muted-foreground">用于定位尚未完成资料同步的账号。</p>
+          </div>
+          {qualityRows.length ? (
+            <Table>
+              <TableHeader><TableRow><TableHead>账号</TableHead><TableHead>来源</TableHead><TableHead>头像</TableHead><TableHead>群组</TableHead><TableHead>好友</TableHead><TableHead>双向</TableHead><TableHead>评分</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {qualityRows.map((row) => (
+                  <TableRow key={row.readKey}>
+                    <TableCell>
+                      <EntityPrimaryCell
+                        title={row.phone || row.account || "账号待迁移"}
+                        id={row.id}
+                        status={{
+                          label: row.sync === "synced" || row.sync === "ready" ? "已同步" : "待同步",
+                          description: row.sync === "synced" || row.sync === "ready"
+                            ? "账号资料已同步，可以参与质量指标统计。"
+                            : "账号资料尚未完成同步，部分质量指标暂不可用。",
+                          tone: row.sync === "synced" || row.sync === "ready" ? "success" : "warning",
+                          details: [
+                            { label: "头像", value: row.avatar == null ? "未知" : row.avatar ? "有" : "无" },
+                            { label: "评分", value: row.score == null ? "-" : row.score },
+                          ],
+                        }}
+                      />
+                    </TableCell>
+                    <TableCell>{row.source === "json_import" ? <Badge tone="neutral">JSON 导入</Badge> : row.source === "landing_page" ? <Badge tone="info">落地页链接</Badge> : "-"}</TableCell>
+                    <TableCell>{row.avatar == null ? "-" : row.avatar ? "有" : "无"}</TableCell>
+                    <TableCell>{metric(row.groups)}</TableCell>
+                    <TableCell>{metric(row.friends)}</TableCell>
+                    <TableCell>{metric(row.mutual)}</TableCell>
+                    <TableCell>{metric(row.score)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          ) : (
+            <EmptyState title="暂无账号质量数据" description="账号资料同步后才会参与质量统计。" />
+          )}
+        </ListTableCard>
+      </div>
     </StandardListPage>
   );
 }

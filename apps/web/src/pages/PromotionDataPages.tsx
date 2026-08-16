@@ -17,6 +17,7 @@ import {
 } from "recharts";
 import { apiRequest, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
 import {
   Button,
   DatePickerField,
@@ -48,6 +49,7 @@ import {
 
 type Channel = {
   id: string;
+  readKey: string;
   name: string;
   countryCode: string;
   templateId: string;
@@ -114,22 +116,35 @@ function dateInput(offsetDays = 0) {
 
 function channelFrom(value: unknown): Channel {
   const row = record(value);
+  const id = snowflakeId(row, "id");
   return {
-    id: text(row, "publicId", "id"),
+    id,
+    readKey: entityRowKey(row, id, "promotion-channel", `${text(row, "name")}:${text(row, "countryCode", "country_code")}`),
     name: text(row, "name"),
     countryCode: text(row, "countryCode", "country_code"),
-    templateId: text(row, "templatePublicId", "templateId"),
+    templateId: snowflakeId(row, "templateId", "template_id"),
     templateName: text(row, "templateName"),
   };
 }
 
 function analyticsRow(value: unknown): ReportRow {
   const row = record(value);
+  const id = snowflakeId(row, "promotionChannelId", "promotion_channel_id", "id");
   return {
-    id: text(row, "promotionChannelId", "id"),
+    id,
+    readKey: entityRowKey(
+      row,
+      id,
+      "promotion-channel-stat",
+      `${text(row, "promotionChannelName", "name")}:${text(row, "countryCode")}`,
+      "promotionChannelPublicId",
+      "promotion_channel_public_id",
+      "publicId",
+      "public_id",
+    ),
     name: text(row, "promotionChannelName", "name"),
     countryCode: text(row, "countryCode"),
-    templateId: text(row, "templateId"),
+    templateId: snowflakeId(row, "templateId", "template_id"),
     templateName: text(row, "templateName"),
     spend: number(row.spend),
     otherCost: number(row.otherCost),
@@ -156,17 +171,20 @@ function analyticsRow(value: unknown): ReportRow {
     fissionLoginRequestUv: number(row.fissionLoginRequestUv),
     fissionLoginSuccessCount: number(row.fissionLoginSuccessCount),
     fissionLoginSuccessUv: number(row.fissionLoginSuccessUv),
-    creatorId: text(row, "creatorId"),
+    creatorId: snowflakeId(row, "creatorId", "creator_id"),
     creatorName: text(row, "creatorName"),
     daily: Array.isArray(row.daily)
       ? row.daily.map((item) => {
           const value = record(item);
-          return Object.fromEntries(
+          return {
+            ...Object.fromEntries(
             Object.entries(value).map(([key, raw]) => [
               key,
-              key === "date" || key === "adMetricId" ? String(raw || "") : number(raw),
+              key === "date" ? String(raw || "") : number(raw),
             ]),
-          );
+            ),
+            adMetricId: snowflakeId(value, "adMetricId", "ad_metric_id"),
+          };
         })
       : [],
   };
@@ -312,7 +330,7 @@ function DailyMetricEditor({
         if (!active) return;
         const data = record(record(payload).data);
         const saved = record(data.adMetric || data.metric || data);
-        const nextId = text(saved, "publicId", "id");
+        const nextId = snowflakeId(saved, "id");
         if (nextId) setMetricId(nextId);
         setState("saved");
       } catch {
@@ -373,7 +391,7 @@ export function PromotionChannelStatisticsPage() {
   const [visibleColumns, setVisibleColumns] = useState(["fission", "template", "creator"]);
   const templates = useMemo(
     () =>
-      Array.from(new Map(report.channels.map((row) => [row.templateId, row])).values()),
+      Array.from(new Map(report.channels.filter((row) => row.templateId).map((row) => [row.templateId, row])).values()),
     [report.channels],
   );
   const countries = useMemo(
@@ -457,7 +475,7 @@ export function PromotionChannelStatisticsPage() {
   }
 
   return (
-    <StandardListPage>
+    <StandardListPage viewport>
       <ListToolbar
         search={{ value: keyword, onChange: setKeyword, placeholder: "搜索渠道名称" }}
         filters={
@@ -469,7 +487,7 @@ export function PromotionChannelStatisticsPage() {
               onValueChange={setChannelId}
               options={[
                 { value: "all", label: "全部渠道" },
-                ...report.channels.map((row) => ({ value: row.id, label: row.name })),
+                ...report.channels.filter((row) => row.id).map((row) => ({ value: row.id, label: row.name })),
               ]}
             />
             <SelectField
@@ -553,17 +571,17 @@ export function PromotionChannelStatisticsPage() {
               </TableHeader>
               <TableBody>
                 {rows.flatMap((row) => {
-                  const open = expanded.includes(row.id);
+                  const open = expanded.includes(row.readKey);
                   const parent = (
-                    <TableRow key={row.id}>
+                    <TableRow key={row.readKey}>
                       <TableCell>
                         <IconButton
                           label={open ? "收起每日明细" : "展开每日明细"}
                           onClick={() =>
                             setExpanded((current) =>
                               open
-                                ? current.filter((value) => value !== row.id)
-                                : [...current, row.id],
+                                ? current.filter((value) => value !== row.readKey)
+                                : [...current, row.readKey],
                             )
                           }
                         >
@@ -573,6 +591,7 @@ export function PromotionChannelStatisticsPage() {
                       <TableCell>
                         <div className="cell-main">
                           <strong>{row.name}</strong>
+                          <span>{row.id || "等待 ID 迁移"}</span>
                           <span>{row.countryCode || "-"}</span>
                         </div>
                       </TableCell>
@@ -592,7 +611,7 @@ export function PromotionChannelStatisticsPage() {
                     </TableRow>
                   );
                   const detail = open ? (
-                    <TableRow key={`${row.id}-detail`} className="table-detail-row">
+                    <TableRow key={`${row.readKey}-detail`} className="table-detail-row">
                       <TableCell colSpan={8 + visibleColumns.length}>
                         <div className="p-2">
                           <div className="mb-2 flex items-center justify-between"><strong>每日广告成本明细</strong><span className="text-xs text-muted-foreground">修改后 600ms 自动保存</span></div>
@@ -601,7 +620,7 @@ export function PromotionChannelStatisticsPage() {
                               key={item.date}
                               channelId={row.id}
                               item={item}
-                              canEdit={canEditMetrics}
+                              canEdit={canEditMetrics && Boolean(row.id)}
                             />
                           )) : <span className="text-muted-foreground">所选日期暂无明细</span>}
                         </div>
@@ -710,7 +729,7 @@ export function PromotionTrendPage() {
               onValueChange={setChannelId}
               options={[
                 { value: "all", label: "全部渠道" },
-                ...report.channels.map((row) => ({ value: row.id, label: row.name })),
+                ...report.channels.filter((row) => row.id).map((row) => ({ value: row.id, label: row.name })),
               ]}
             />
           </>

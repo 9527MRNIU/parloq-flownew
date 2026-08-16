@@ -22,7 +22,7 @@ class MemoryStore implements Store {
       throw new GatewayError('conflict', 'duplicate')
     }
     const now = new Date()
-    const account: Account = { ...input, deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'idle', pairingExpiresAt: null, metadataSyncStatus: 'pending', hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, stateChangedAt: now, invalidatedAt: null, reasonCategory: 'created', providerCode: null, createdAt: now, updatedAt: now }
+    const account: Account = { ...input, deviceJid: '', autoConnect: false, connectionPolicy: 'on_demand', idleDisconnectSeconds: 600, postVerifyGraceSeconds: 120, syncPolicy: { avatar: true, profileStatus: true, businessProfile: true, groupSummary: true, groupDetails: false, contacts: false, chats: false, messageHistory: false, privacySettings: false, blocklist: false }, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'idle', pairingExpiresAt: null, metadataSyncStatus: 'pending', hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {}, stateChangedAt: now, invalidatedAt: null, reasonCategory: 'created', providerCode: null, createdAt: now, updatedAt: now }
     this.accounts.set(account.id, account)
     return account
   }
@@ -31,7 +31,7 @@ class MemoryStore implements Store {
     if (!current || current.id === input.id || current.state !== 'unpaired' || current.deviceJid || current.sessionStatus !== 'none' || this.creds.has(current.id)) return null
     if ([...this.keys.keys()].some((id) => id.startsWith(`${current.id}:`)) || [...this.messages.values()].some((message) => message.accountId === current.id)) return null
     this.accounts.delete(current.id)
-    const claimed = { ...current, id: input.id, proxyUrl: input.proxyUrl, reasonCategory: 'orphan_reclaimed', providerCode: null, updatedAt: new Date() }
+    const claimed = { ...current, ...input, reasonCategory: 'orphan_reclaimed', providerCode: null, updatedAt: new Date() }
     this.accounts.set(claimed.id, claimed)
     return claimed
   }
@@ -40,6 +40,10 @@ class MemoryStore implements Store {
     const now = new Date()
     const account: Account = {
       ...input,
+      connectionPolicy: 'on_demand',
+      idleDisconnectSeconds: 600,
+      postVerifyGraceSeconds: 120,
+      syncPolicy: { avatar: true, profileStatus: true, businessProfile: true, groupSummary: true, groupDetails: false, contacts: false, chats: false, messageHistory: false, privacySettings: false, blocklist: false },
       pairingStatus: 'idle',
       pairingExpiresAt: null,
       metadataSyncStatus: 'pending',
@@ -47,6 +51,7 @@ class MemoryStore implements Store {
       groupCount: null,
       friendCount: null,
       mutualContactCount: null,
+      metadata: {},
       stateChangedAt: now,
       invalidatedAt: null,
       reasonCategory: 'session_imported',
@@ -115,8 +120,8 @@ class TerminalConnectEngine implements ProtocolEngine {
   }
   async disconnect(_accountId: string): Promise<void> {}
   async logout(_account: EngineAccount): Promise<void> {}
-  async send(_accountId: string, _toE164: string, _text: string): Promise<string> { throw new Error('not implemented') }
-  async getQuality(_accountId: string): Promise<AccountQuality> { return { hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null } }
+  async send(_accountId: string, _toE164: string, _message: import('./message-content.js').OutboundMessage): Promise<string> { throw new Error('not implemented') }
+  async getQuality(_accountId: string): Promise<AccountQuality> { return { hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {} } }
   isOnline(_accountId: string): boolean { return false }
 }
 
@@ -139,8 +144,8 @@ class InterruptedPairingEngine implements ProtocolEngine {
   async connect(_account: EngineAccount): Promise<void> { throw new Error('not implemented') }
   async disconnect(_accountId: string): Promise<void> {}
   async logout(_account: EngineAccount): Promise<void> {}
-  async send(_accountId: string, _toE164: string, _text: string): Promise<string> { throw new Error('not implemented') }
-  async getQuality(_accountId: string): Promise<AccountQuality> { return { hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null } }
+  async send(_accountId: string, _toE164: string, _message: import('./message-content.js').OutboundMessage): Promise<string> { throw new Error('not implemented') }
+  async getQuality(_accountId: string): Promise<AccountQuality> { return { hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {} } }
   isOnline(_accountId: string): boolean { return false }
 }
 
@@ -163,8 +168,8 @@ class RestartingPairingEngine implements ProtocolEngine {
   async connect(_account: EngineAccount): Promise<void> { throw new Error('not implemented') }
   async disconnect(_accountId: string): Promise<void> {}
   async logout(_account: EngineAccount): Promise<void> {}
-  async send(_accountId: string, _toE164: string, _text: string): Promise<string> { throw new Error('not implemented') }
-  async getQuality(_accountId: string): Promise<AccountQuality> { return { hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null } }
+  async send(_accountId: string, _toE164: string, _message: import('./message-content.js').OutboundMessage): Promise<string> { throw new Error('not implemented') }
+  async getQuality(_accountId: string): Promise<AccountQuality> { return { hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {} } }
   isOnline(_accountId: string): boolean { return false }
 }
 
@@ -309,6 +314,44 @@ describe('Baileys gateway HTTP contract', () => {
     expect(await store.getCreds('wa_pending_import')).toBe(importedCreds)
   })
 
+  it('replaces only a reauthentication-required session without changing the account id', async () => {
+    await store.createAccount({ id: 'wa_reauth_pair', phoneE164: '+14155550136', proxyUrl: 'socks5://proxy.example:1080', state: 'reauth_required' })
+    await store.setCreds('wa_reauth_pair', { invalid: true })
+    await store.updateAccount('wa_reauth_pair', {
+      deviceJid: '14155550136:1@s.whatsapp.net',
+      sessionStatus: 'verified',
+    })
+
+    const pairing = await service.requestReauthenticationCode('wa_reauth_pair')
+    expect(pairing).toMatchObject({ accountId: 'wa_reauth_pair', code: '0000-0000' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(await store.getCreds('wa_reauth_pair')).toBeNull()
+    expect(await store.getAccount('wa_reauth_pair')).toMatchObject({
+      id: 'wa_reauth_pair',
+      state: 'online_idle',
+      pairingStatus: 'verified',
+      sessionStatus: 'verified',
+    })
+  })
+
+  it('runs metadata collection only through the explicit background-task endpoint', async () => {
+    const headers = { authorization: `Bearer ${token}` }
+    await app.inject({ method: 'POST', url: '/v1/accounts', headers, payload: { id: 'wa_metadata', phoneE164: '+14155550137' } })
+    await app.inject({ method: 'POST', url: '/v1/accounts/wa_metadata/pairing-code', headers, payload: {} })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect((await store.getAccount('wa_metadata')).metadataSyncStatus).toBe('pending')
+
+    const synced = await app.inject({
+      method: 'POST',
+      url: '/v1/accounts/wa_metadata/metadata-sync',
+      headers,
+      payload: { syncPolicy: { contacts: false, groupSummary: true } },
+    })
+    expect(synced.statusCode).toBe(200)
+    expect(synced.json().data.metadataSyncStatus).toBe('ready')
+    expect((await store.getAccount('wa_metadata')).metadataSyncStatus).toBe('ready')
+  })
+
   it('imports legacy Baileys creds as pending and exports a complete versioned bundle', async () => {
     const headers = { authorization: `Bearer ${token}` }
     const creds = initAuthCreds()
@@ -358,6 +401,37 @@ describe('Baileys gateway HTTP contract', () => {
     expect(status.json().data.status).toBe('sent')
   })
 
+  it('requeues a durable queued message after an in-memory queue restart', async () => {
+    await service.createAccount({ id: 'wa_recover_message', phoneE164: '+14155550136' })
+    await service.requestPairingCode('wa_recover_message')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const now = new Date()
+    await store.createMessage({
+      messageId: 'msg-recover-1',
+      accountId: 'wa_recover_message',
+      recipientE164: '+14155550137',
+      providerMessageId: '',
+      status: 'queued',
+      errorCode: '',
+      queuedAt: now,
+      sentAt: null,
+      deliveredAt: null,
+      updatedAt: now,
+    })
+    const send = vi.spyOn(engine, 'send')
+
+    const queued = await service.sendMessage('wa_recover_message', {
+      messageId: 'msg-recover-1',
+      toE164: '+14155550137',
+      text: 'recover me',
+    })
+    expect(queued.status).toBe('queued')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+
+    expect(send).toHaveBeenCalledTimes(1)
+    expect((await store.getMessage('msg-recover-1')).status).toBe('sent')
+  })
+
   it('does not let connect or disconnect erase a terminal account state', async () => {
     const headers = { authorization: `Bearer ${token}` }
     await app.inject({ method: 'POST', url: '/v1/accounts', headers, payload: { id: 'wa_restricted', phoneE164: '+14155550128' } })
@@ -376,6 +450,29 @@ describe('Baileys gateway HTTP contract', () => {
 })
 
 describe('terminal connection failures', () => {
+  it('warms an on-demand linked session before sending without enabling restart autoconnect', async () => {
+    const store = new MemoryStore()
+    const engine = new MockEngine()
+    const logger = pino({ level: 'silent' })
+    const service = new GatewayService(store, engine, new WebhookClient('', '', 0, logger), logger)
+    await service.start()
+    await store.createAccount({ id: 'wa_on_demand', phoneE164: '+14155550138', proxyUrl: 'socks5://proxy.example:1080', state: 'linked_offline' })
+    await store.setCreds('wa_on_demand', { registered: true })
+    await store.updateAccount('wa_on_demand', { deviceJid: '14155550138:1@s.whatsapp.net' })
+
+    const queued = await service.sendMessage('wa_on_demand', {
+      messageId: 'msg-on-demand-1',
+      toE164: '+14155550139',
+      text: 'warm first',
+    })
+    expect(queued.status).toBe('queued')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(engine.isOnline('wa_on_demand')).toBe(true)
+    expect((await store.getAccount('wa_on_demand')).autoConnect).toBe(false)
+    expect((await store.getMessage('msg-on-demand-1')).status).toBe('sent')
+    await service.close()
+  })
+
   it('preserves a restricted event instead of overwriting it with linked_offline', async () => {
     const store = new MemoryStore()
     const logger = pino({ level: 'silent' })

@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 
 from app.deps import CurrentUser, DbSession
+from app.entity_ids import identifier_filter
 from app.snowflake import new_public_id
 
 from app.models import BitlyProviderAccount, DirectShortLink
@@ -17,27 +18,25 @@ from app.services.bitly import BitlyClient, BitlyServiceError
 router = APIRouter(prefix="/api/direct-short-links", tags=["direct-short-links"])
 
 
-def _account_for_create(
-    db: DbSession, public_id: str | None
-) -> BitlyProviderAccount:
+def _account_for_create(db: DbSession, identifier: str | None) -> BitlyProviderAccount:
     statement = select(BitlyProviderAccount).where(
         BitlyProviderAccount.archived_at.is_(None),
         BitlyProviderAccount.enabled.is_(True),
         BitlyProviderAccount.status == "active",
     )
-    if public_id:
-        statement = statement.where(BitlyProviderAccount.public_id == public_id)
+    if identifier:
+        statement = statement.where(identifier_filter(BitlyProviderAccount, identifier))
     account = db.scalar(statement.order_by(BitlyProviderAccount.id).limit(1))
     if account is None:
         raise HTTPException(status_code=409, detail="没有可用的 Bitly 账号")
     return account
 
 
-def _link_or_404(db: DbSession, public_id: str, user) -> DirectShortLink:
+def _link_or_404(db: DbSession, identifier: str, user) -> DirectShortLink:
     statement = select(DirectShortLink).where(
-            DirectShortLink.public_id == public_id,
-            DirectShortLink.archived_at.is_(None),
-        )
+        identifier_filter(DirectShortLink, identifier),
+        DirectShortLink.archived_at.is_(None),
+    )
     if user.role != "admin":
         statement = statement.where(DirectShortLink.created_by == user.id)
     link = db.scalar(statement)
@@ -80,7 +79,7 @@ def list_links(
         statement = statement.where(DirectShortLink.status == link_status)
     if provider_account_id:
         statement = statement.join(BitlyProviderAccount).where(
-            BitlyProviderAccount.public_id == provider_account_id
+            identifier_filter(BitlyProviderAccount, provider_account_id)
         )
     total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
     links = db.scalars(
@@ -136,14 +135,14 @@ def create_link(
     return {"data": {"link": direct_short_link_row(link)}}
 
 
-@router.patch("/{public_id}")
+@router.patch("/{link_id}")
 def update_link(
-    public_id: str,
+    link_id: str,
     payload: DirectShortLinkUpdate,
     db: DbSession,
     current_user: CurrentUser,
 ) -> dict:
-    link = _link_or_404(db, public_id, current_user)
+    link = _link_or_404(db, link_id, current_user)
     target_url = str(payload.target_url) if payload.target_url is not None else None
     title = payload.title if "title" in payload.model_fields_set else None
     try:
@@ -171,9 +170,9 @@ def update_link(
     return {"data": {"link": direct_short_link_row(link)}}
 
 
-@router.delete("/{public_id}")
-def archive_link(public_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    link = _link_or_404(db, public_id, current_user)
+@router.delete("/{link_id}")
+def archive_link(link_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    link = _link_or_404(db, link_id, current_user)
     try:
         _client(link.provider_account).update_bitlink(link.bitlink_id, archived=True)
     except BitlyServiceError as exc:

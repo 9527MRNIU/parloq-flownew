@@ -32,9 +32,15 @@ import {
   StandardListPage,
 } from "../components/list-page";
 import { useAuth } from "../auth/AuthContext";
+import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
+import {
+  EntityPrimaryCell,
+  type EntityStatusMeta,
+} from "../components/entity-primary-cell";
 
 type DomainRow = {
   id: string;
+  readKey: string;
   hostname: string;
   enabled: boolean;
   dnsStatus: string;
@@ -56,6 +62,7 @@ type DomainRow = {
 };
 type DomainOrderRow = {
   id: string;
+  readKey: string;
   hostname: string;
   years: number;
   amount: number;
@@ -80,8 +87,10 @@ const get = (row: Record<string, unknown>, ...keys: string[]) => {
 };
 function normalize(input: unknown): DomainRow {
   const row = input as Record<string, unknown>;
+  const id = snowflakeId(row, "id");
   return {
-    id: get(row, "publicId", "public_id", "id"),
+    id,
+    readKey: entityRowKey(row, id, "domain", get(row, "hostname", "domain")),
     hostname: get(row, "hostname", "domain"),
     enabled: Boolean(row.enabled ?? true),
     dnsStatus: get(row, "dnsStatus", "dns_status") || "pending",
@@ -106,8 +115,10 @@ function normalizeOrder(input: unknown): DomainOrderRow {
   const allowed = (row.allowedActions && typeof row.allowedActions === "object"
     ? row.allowedActions
     : row.allowed_actions || {}) as Record<string, unknown>;
+  const id = snowflakeId(row, "id");
   return {
-    id: get(row, "publicId", "public_id", "id"),
+    id,
+    readKey: entityRowKey(row, id, "domain-order", `${get(row, "hostname")}:${get(row, "createdAt", "created_at")}`),
     hostname: get(row, "hostname"),
     years: Number(row.years || 1),
     amount: Number(row.amount || 0),
@@ -116,7 +127,7 @@ function normalizeOrder(input: unknown): DomainOrderRow {
     provider: get(row, "provider"),
     autoRenew: Boolean(row.autoRenew ?? row.auto_renew),
     failureReason: get(row, "failureReason", "failure_reason"),
-    domainId: get(row, "domainId", "domain_id"),
+    domainId: snowflakeId(row, "domainId", "domain_id"),
     allowedActions: {
       mockPayment: Boolean(allowed.mockPayment ?? allowed.mock_payment),
       provision: Boolean(allowed.provision),
@@ -143,15 +154,36 @@ const orderStatusLabels: Record<string, string> = {
   cancelled: "已取消",
   failed: "失败",
 };
-function orderStatusBadge(status: string) {
-  const tone = status === "completed"
+function domainStatus(row: DomainRow): EntityStatusMeta {
+  if (!row.enabled) {
+    return { label: "已停用", description: "域名已停用，不能分配给推广渠道。", tone: "neutral" };
+  }
+  if (row.lastError || [row.dnsStatus, row.sslStatus].some((value) => ["failed", "invalid", "error"].includes(value))) {
+    return {
+      label: "异常",
+      description: row.lastError || "DNS 或 TLS 验证失败，请检查域名配置。",
+      tone: "danger",
+    };
+  }
+  if (row.channelSelectable) {
+    return { label: "可用", description: "域名验证完成，可以分配给推广渠道。", tone: "success" };
+  }
+  return { label: "配置中", description: "域名仍在等待 DNS、TLS 或托管配置完成。", tone: "warning" };
+}
+function domainOrderStatus(row: DomainOrderRow): EntityStatusMeta {
+  const label = orderStatusLabels[row.status] || row.status;
+  const tone = row.status === "completed"
     ? "success"
-    : status === "failed"
+    : row.status === "failed"
       ? "danger"
-      : ["pending_payment", "paid", "provisioning", "unknown"].includes(status)
+      : ["pending_payment", "paid", "provisioning", "unknown"].includes(row.status)
         ? "warning"
         : "neutral";
-  return <Badge tone={tone}>{orderStatusLabels[status] || status}</Badge>;
+  return {
+    label,
+    description: row.failureReason || `当前域名订单状态为“${label}”。`,
+    tone,
+  };
 }
 export function DomainsPage() {
   const { can } = useAuth();
@@ -276,6 +308,7 @@ export function DomainsPage() {
     }
   }
   async function verify(row: DomainRow) {
+    if (!row.id) return;
     setTesting(row.id);
     try {
       const payload = await apiRequest(`/api/domains/${row.id}/verify`, { method: "POST" });
@@ -292,6 +325,7 @@ export function DomainsPage() {
     }
   }
   async function runOrderAction(row: DomainOrderRow, action: "mock-payment" | "provision" | "reconcile" | "cancel") {
+    if (!row.id) return;
     if (action === "cancel" && !(await confirmAction({
       title: `取消域名订单 ${row.hostname}？`,
       description: "取消后需要重新询价才能再次购买。",
@@ -325,6 +359,7 @@ export function DomainsPage() {
     }
   }
   async function remove(row: DomainRow) {
+    if (!row.id) return;
     if (
       !(await confirmAction({
         title: `归档域名 ${row.hostname}？`,
@@ -395,15 +430,25 @@ export function DomainsPage() {
                   <TableHead>到期时间</TableHead>
                   <TableHead>绑定渠道</TableHead>
                   <TableHead>最近验证</TableHead>
-                  <TableHead>状态</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {visible.map((row) => (
-                  <TableRow key={row.id}>
+                  <TableRow key={row.readKey}>
                     <TableCell>
-                      <strong>{row.hostname}</strong>
+                      <EntityPrimaryCell
+                        title={row.hostname}
+                        id={row.id}
+                        status={{
+                          ...domainStatus(row),
+                          details: [
+                            { label: "DNS", value: row.dnsStatus },
+                            { label: "TLS", value: row.sslStatus },
+                            { label: "绑定渠道", value: row.boundCount },
+                          ],
+                        }}
+                      />
                     </TableCell>
                     <TableCell>
                       <div className="cell-main">
@@ -428,17 +473,12 @@ export function DomainsPage() {
                       {formatDateTime(row.lastVerifiedAt)}
                     </TableCell>
                     <TableCell>
-                      <Badge tone={row.enabled ? "success" : "neutral"}>
-                        {row.enabled ? "启用" : "停用"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
                       <div className="flex items-center justify-end gap-1">
                         {canManage ? (
                           <>
                             <IconButton
                               label="立即验证"
-                              disabled={testing === row.id}
+                              disabled={!row.id || testing === row.id}
                               onClick={() => void verify(row)}
                             >
                               {testing === row.id ? (
@@ -447,13 +487,14 @@ export function DomainsPage() {
                                 <RefreshCwIcon size={16} />
                               )}
                             </IconButton>
-                            <IconButton label="编辑" onClick={() => open(row)}>
+                            <IconButton label="编辑" disabled={!row.id} onClick={() => open(row)}>
                               <PencilIcon size={16} />
                             </IconButton>
                             <IconButton
                               label="归档"
                               variant="ghost"
                               className="danger"
+                              disabled={!row.id}
                               onClick={() => void remove(row)}
                             >
                               <Trash2Icon size={16} />
@@ -486,47 +527,52 @@ export function DomainsPage() {
                   <TableHead>年限</TableHead>
                   <TableHead>金额</TableHead>
                   <TableHead>注册商</TableHead>
-                  <TableHead>订单状态</TableHead>
                   <TableHead>创建时间</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {orders.map((row) => {
-                  const busy = orderPending.startsWith(`${row.id}:`);
+                  const busy = Boolean(row.id) && orderPending.startsWith(`${row.id}:`);
                   return (
-                    <TableRow key={row.id}>
+                    <TableRow key={row.readKey}>
                       <TableCell>
-                        <div className="cell-main">
-                          <strong>{row.hostname}</strong>
-                          <span>{row.id}</span>
-                          {row.failureReason ? <span className="danger-text">{row.failureReason}</span> : null}
-                        </div>
+                        <EntityPrimaryCell
+                          title={row.hostname}
+                          id={row.id}
+                          description={row.failureReason || undefined}
+                          status={{
+                            ...domainOrderStatus(row),
+                            details: [
+                              { label: "年限", value: `${row.years} 年` },
+                              { label: "金额", value: `${row.currency} ${row.amount.toFixed(2)}` },
+                            ],
+                          }}
+                        />
                       </TableCell>
                       <TableCell>{row.years} 年</TableCell>
                       <TableCell className="tabular-nums">{row.currency} {row.amount.toFixed(2)}</TableCell>
                       <TableCell>{row.provider || "-"}</TableCell>
-                      <TableCell>{orderStatusBadge(row.status)}</TableCell>
                       <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
                       <TableCell>
                         <div className="flex items-center justify-end gap-1">
                           {canPurchase && row.allowedActions.mockPayment ? (
-                            <Button size="sm" disabled={busy} onClick={() => void runOrderAction(row, "mock-payment")}>
+                            <Button size="sm" disabled={!row.id || busy} onClick={() => void runOrderAction(row, "mock-payment")}>
                               {busy ? <Spinner /> : null}确认支付并开通
                             </Button>
                           ) : null}
                           {canPurchase && row.allowedActions.provision ? (
-                            <Button size="sm" disabled={busy} onClick={() => void runOrderAction(row, "provision")}>
+                            <Button size="sm" disabled={!row.id || busy} onClick={() => void runOrderAction(row, "provision")}>
                               {busy ? <Spinner /> : null}立即开通
                             </Button>
                           ) : null}
                           {canPurchase && row.allowedActions.reconcile ? (
-                            <Button size="sm" variant="outline" disabled={busy} onClick={() => void runOrderAction(row, "reconcile")}>
+                            <Button size="sm" variant="outline" disabled={!row.id || busy} onClick={() => void runOrderAction(row, "reconcile")}>
                               {busy ? <Spinner /> : null}订单对账
                             </Button>
                           ) : null}
                           {canPurchase && row.allowedActions.cancel ? (
-                            <Button size="sm" variant="ghost" className="danger" disabled={busy} onClick={() => void runOrderAction(row, "cancel")}>
+                            <Button size="sm" variant="ghost" className="danger" disabled={!row.id || busy} onClick={() => void runOrderAction(row, "cancel")}>
                               取消
                             </Button>
                           ) : null}
@@ -576,7 +622,7 @@ export function DomainsPage() {
               <strong>DNS 解析记录</strong>
               <div><span>CNAME</span><code>{editing.connection.cname?.name}</code><code>{editing.connection.cname?.target}</code></div>
               <div><span>TXT</span><code>{editing.connection.txt?.name}</code><code>{editing.connection.txt?.value}</code></div>
-              <Button variant="outline" disabled={testing === editing.id} onClick={() => void verify(editing)}>
+              <Button variant="outline" disabled={!editing.id || testing === editing.id} onClick={() => void verify(editing)}>
                 {testing === editing.id ? <LoaderCircleIcon className="spin" size={16} /> : <RefreshCwIcon size={16} />}
                 验证解析
               </Button>
@@ -642,7 +688,7 @@ export function DomainsPage() {
             <div className="quote-card order-status-card">
               <span>订单已创建</span>
               <strong>{order.hostname || purchaseHostname}</strong>
-              <small>状态：{orderStatusLabels[order.status] || order.status} · 订单号 {order.id || "-"}</small>
+              <small>状态：{orderStatusLabels[order.status] || order.status} · {order.id || "等待 ID 迁移"}</small>
               {order.failureReason ? <small className="danger-text">{order.failureReason}</small> : null}
             </div>
           ) : null}

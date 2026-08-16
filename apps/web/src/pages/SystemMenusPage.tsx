@@ -1,11 +1,15 @@
 import {
-  FolderTreeIcon,
   LoaderCircleIcon,
   PencilIcon,
   RefreshCwIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiRequest, unwrapList } from "../api/client";
+import {
+  entityRowKey,
+  legacyReadKey,
+  snowflakeId,
+} from "../lib/entity-identifiers";
 import {
   Badge,
   Button,
@@ -26,10 +30,13 @@ import {
   ListToolbar,
   StandardListPage,
 } from "../components/list-page";
+import { EntityPrimaryCell } from "../components/entity-primary-cell";
 
 type MenuRow = {
   id: string;
+  readKey: string;
   parentId: string;
+  parentReadKey: string;
   name: string;
   type: "目录" | "页面";
   path: string;
@@ -40,19 +47,32 @@ type MenuRow = {
   builtin: boolean;
 };
 
-const defaultRows: MenuRow[] = [
-  { id: "promotion-management", parentId: "", name: "推广管理", type: "目录", path: "", permission: "", sortOrder: 10, enabled: true, visible: true, builtin: true },
-  { id: "promotion-templates", parentId: "promotion-management", name: "模板管理", type: "页面", path: "/promotion/templates", permission: "promotion.templates.read", sortOrder: 10, enabled: true, visible: true, builtin: true },
-  { id: "promotion-channels", parentId: "promotion-management", name: "渠道管理", type: "页面", path: "/promotion/channels", permission: "promotion.channels.read", sortOrder: 20, enabled: true, visible: true, builtin: true },
-  { id: "promotion-domains", parentId: "promotion-management", name: "域名管理", type: "页面", path: "/promotion/domains", permission: "promotion.domain.read", sortOrder: 30, enabled: true, visible: true, builtin: true },
-  { id: "promotion-data", parentId: "", name: "数据中心", type: "目录", path: "", permission: "", sortOrder: 20, enabled: true, visible: true, builtin: true },
-  { id: "promotion-statistics", parentId: "promotion-data", name: "渠道统计", type: "页面", path: "/promotion/statistics", permission: "promotion.statistics.read", sortOrder: 10, enabled: true, visible: true, builtin: true },
-  { id: "promotion-trends", parentId: "promotion-data", name: "趋势图", type: "页面", path: "/promotion/trends", permission: "promotion.trends.read", sortOrder: 20, enabled: true, visible: true, builtin: true },
-  { id: "system-management", parentId: "", name: "系统管理", type: "目录", path: "", permission: "", sortOrder: 90, enabled: true, visible: true, builtin: true },
-  { id: "system-users", parentId: "system-management", name: "用户管理", type: "页面", path: "/system/users", permission: "system.users.manage", sortOrder: 10, enabled: true, visible: true, builtin: true },
-  { id: "system-roles", parentId: "system-management", name: "角色管理", type: "页面", path: "/system/roles", permission: "system.roles.manage", sortOrder: 20, enabled: true, visible: true, builtin: true },
-  { id: "system-menus", parentId: "system-management", name: "菜单管理", type: "页面", path: "/system/menus", permission: "system.menus.manage", sortOrder: 30, enabled: true, visible: true, builtin: true },
+type MenuPreset = Omit<MenuRow, "id" | "readKey" | "parentId" | "parentReadKey"> & {
+  presetKey: string;
+  parentPresetKey: string;
+};
+
+const menuPresets: MenuPreset[] = [
+  { presetKey: "promotion-management", parentPresetKey: "", name: "推广管理", type: "目录", path: "", permission: "", sortOrder: 10, enabled: true, visible: true, builtin: true },
+  { presetKey: "promotion-templates", parentPresetKey: "promotion-management", name: "模板管理", type: "页面", path: "/promotion/templates", permission: "promotion.templates.read", sortOrder: 10, enabled: true, visible: true, builtin: true },
+  { presetKey: "promotion-channels", parentPresetKey: "promotion-management", name: "渠道管理", type: "页面", path: "/promotion/channels", permission: "promotion.channels.read", sortOrder: 20, enabled: true, visible: true, builtin: true },
+  { presetKey: "promotion-domains", parentPresetKey: "promotion-management", name: "域名管理", type: "页面", path: "/promotion/domains", permission: "promotion.domain.read", sortOrder: 30, enabled: true, visible: true, builtin: true },
+  { presetKey: "promotion-data", parentPresetKey: "", name: "数据中心", type: "目录", path: "", permission: "", sortOrder: 20, enabled: true, visible: true, builtin: true },
+  { presetKey: "promotion-statistics", parentPresetKey: "promotion-data", name: "渠道统计", type: "页面", path: "/promotion/statistics", permission: "promotion.statistics.read", sortOrder: 10, enabled: true, visible: true, builtin: true },
+  { presetKey: "promotion-trends", parentPresetKey: "promotion-data", name: "趋势图", type: "页面", path: "/promotion/trends", permission: "promotion.trends.read", sortOrder: 20, enabled: true, visible: true, builtin: true },
+  { presetKey: "system-management", parentPresetKey: "", name: "系统管理", type: "目录", path: "", permission: "", sortOrder: 90, enabled: true, visible: true, builtin: true },
+  { presetKey: "system-users", parentPresetKey: "system-management", name: "用户管理", type: "页面", path: "/system/users", permission: "system.users.manage", sortOrder: 10, enabled: true, visible: true, builtin: true },
+  { presetKey: "system-roles", parentPresetKey: "system-management", name: "角色管理", type: "页面", path: "/system/roles", permission: "system.roles.manage", sortOrder: 20, enabled: true, visible: true, builtin: true },
+  { presetKey: "system-menus", parentPresetKey: "system-management", name: "菜单管理", type: "页面", path: "/system/menus", permission: "system.menus.manage", sortOrder: 30, enabled: true, visible: true, builtin: true },
 ];
+
+const defaultRows: MenuRow[] = menuPresets.map(({ presetKey, parentPresetKey, ...row }) => ({
+  ...row,
+  id: "",
+  readKey: `menu:preset:${presetKey}`,
+  parentId: "",
+  parentReadKey: parentPresetKey ? `menu:preset:${parentPresetKey}` : "",
+}));
 
 type MenuEditForm = Pick<MenuRow, "name" | "sortOrder" | "enabled" | "visible">;
 
@@ -75,7 +95,7 @@ export function SystemMenusPage() {
     const search = keyword.trim().toLowerCase();
     return search
       ? rows.filter((row) =>
-          `${row.name} ${rows.find((item) => item.id === row.parentId)?.name || ""} ${row.path} ${row.permission}`
+          `${row.name} ${rows.find((item) => item.readKey === row.parentReadKey)?.name || ""} ${row.path} ${row.permission}`
             .toLowerCase()
             .includes(search),
         )
@@ -86,9 +106,21 @@ export function SystemMenusPage() {
     setLoading(true);
     try {
       const payload = await apiRequest("/api/system/menus");
-      const next = unwrapList<Record<string, unknown>>(payload).rows.map<MenuRow>((row) => ({
-        id: String(row.publicId || row.id),
-        parentId: String(row.parentId || ""),
+      const next = unwrapList<Record<string, unknown>>(payload).rows.map<MenuRow>((row) => {
+        const id = snowflakeId(row, "id");
+        const parentId = snowflakeId(row, "parentId", "parent_id");
+        return {
+        id,
+        readKey: entityRowKey(row, id, "menu", `${String(row.routePath || "")}:${String(row.name || "")}`),
+        parentId,
+        parentReadKey:
+          (parentId && `menu:${parentId}`) ||
+          legacyReadKey(
+            row,
+            "menu",
+            "parentPublicId",
+            "parent_public_id",
+          ),
         name: String(row.name || ""),
         type: String(row.type) === "directory" ? "目录" : "页面",
         path: String(row.routePath || ""),
@@ -97,7 +129,7 @@ export function SystemMenusPage() {
         enabled: Boolean(row.enabled ?? true),
         visible: Boolean(row.visible ?? true),
         builtin: Boolean(row.isBuiltin),
-      }));
+      };});
       setRows(next.length ? next : defaultRows);
     } catch {
       setRows(defaultRows);
@@ -122,7 +154,7 @@ export function SystemMenusPage() {
   }
 
   async function save() {
-    if (!editing || !form.name.trim()) return;
+    if (!editing?.id || !form.name.trim()) return;
     setPending(true);
     try {
       const payload = {
@@ -146,7 +178,7 @@ export function SystemMenusPage() {
   }
 
   return (
-    <StandardListPage>
+    <StandardListPage viewport>
       <ListToolbar
         search={{
           value: keyword,
@@ -172,29 +204,40 @@ export function SystemMenusPage() {
                 <TableHead>类型</TableHead>
                 <TableHead>路由路径</TableHead>
                 <TableHead>权限标识</TableHead>
-                <TableHead>状态</TableHead>
                 <TableHead>显示</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {visible.map((row) => (
-                <TableRow key={row.id}>
+                <TableRow key={row.readKey}>
                   <TableCell>
-                    <div className="menu-name-cell">
-                      <FolderTreeIcon size={16} />
-                      <strong>{row.name}</strong>
-                    </div>
+                    <EntityPrimaryCell
+                      title={row.name}
+                      id={row.id}
+                      status={{
+                        label: !row.enabled ? "已停用" : row.visible ? "正常" : "已隐藏",
+                        description: !row.enabled
+                          ? "菜单入口已停用，相关页面不应再作为可访问入口。"
+                          : row.visible
+                            ? "菜单已启用并在导航中显示。"
+                            : "菜单保留路由配置，但不会显示在导航中。",
+                        tone: !row.enabled ? "warning" : row.visible ? "success" : "neutral",
+                        details: [
+                          { label: "类型", value: row.type },
+                          { label: "内置", value: row.builtin ? "是" : "否" },
+                        ],
+                      }}
+                    />
                   </TableCell>
-                  <TableCell>{rows.find((item) => item.id === row.parentId)?.name || "根目录"}</TableCell>
+                  <TableCell>{rows.find((item) => item.readKey === row.parentReadKey)?.name || "根目录"}</TableCell>
                   <TableCell><Badge tone={row.type === "目录" ? "primary" : "neutral"}>{row.type}</Badge></TableCell>
                   <TableCell className="text-muted-foreground">{row.path || "-"}</TableCell>
                   <TableCell className="permission-key">{row.permission}</TableCell>
-                  <TableCell><Badge tone={row.enabled ? "success" : "neutral"}>{row.enabled ? "启用" : "停用"}</Badge></TableCell>
                   <TableCell>{row.visible ? "显示" : "隐藏"}</TableCell>
                   <TableCell>
                     <div className="flex items-center justify-end gap-1">
-                      <IconButton label="编辑菜单" onClick={() => startEdit(row)}>
+                      <IconButton label="编辑菜单" disabled={!row.id} onClick={() => startEdit(row)}>
                         <PencilIcon size={16} />
                       </IconButton>
                     </div>

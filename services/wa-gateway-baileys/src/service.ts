@@ -1,15 +1,16 @@
 import type { Logger } from 'pino'
 import type { Account, AccountState, Message, PublicAccount } from './domain.js'
-import { GatewayError, normalizeE164, publicAccount, safeError, validateProxy } from './domain.js'
+import { GatewayError, defaultSyncPolicy, normalizeE164, normalizeSyncPolicy, publicAccount, safeError, validateProxy, type SyncPolicy } from './domain.js'
 import type { EngineEvent, PairResult, ProtocolEngine } from './engine.js'
 import { exportSession, parseImportedSession, phoneFromDeviceJid } from './session.js'
 import type { Store } from './store.js'
 import { newPublicId } from './snowflake.js'
 import { WebhookClient } from './webhook.js'
+import { normalizeOutboundMessage, type OutboundMessage, type SendMessageRequest } from './message-content.js'
 
-export interface CreateAccountRequest { id?: string; phoneE164: string; proxyUrl?: string }
-export interface UpdateAccountRequest { phoneE164?: string; proxyUrl?: string; autoConnect?: boolean }
-export interface SendTextRequest { messageId: string; toE164: string; text: string }
+export interface CreateAccountRequest { id?: string; phoneE164: string; proxyUrl?: string; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: SyncPolicy }
+export interface UpdateAccountRequest { phoneE164?: string; proxyUrl?: string; autoConnect?: boolean; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: SyncPolicy }
+export interface MetadataSyncRequest { syncPolicy?: SyncPolicy }
 
 function pairingCodeFromCreds(value: unknown): string | null {
   if (!value || typeof value !== 'object') return null
@@ -20,9 +21,11 @@ function pairingCodeFromCreds(value: unknown): string | null {
 export class GatewayService {
   private readonly queueDepth = new Map<string, number>()
   private readonly queueTail = new Map<string, Promise<void>>()
+  private readonly activeMessageIds = new Set<string>()
   private readonly nextSendAt = new Map<string, number>()
   private readonly pendingEngineEvents = new Map<string, Promise<void>>()
   private readonly pairingExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly idleDisconnectTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
   constructor(
     private readonly store: Store,
@@ -68,7 +71,7 @@ export class GatewayService {
         pairingExpiresAt: null,
       }, 'pairing_interrupted')
     }
-    for (const account of accounts.filter((item) => item.autoConnect && item.deviceJid)) {
+    for (const account of accounts.filter((item) => item.connectionPolicy === 'always_on' && item.autoConnect && item.deviceJid)) {
       void this.connect(account.id).catch((error: unknown) => this.logger.warn({ accountId: account.id, error: safeError(error) }, 'account_restore_failed'))
     }
   }
@@ -76,6 +79,8 @@ export class GatewayService {
   async close(): Promise<void> {
     for (const timer of this.pairingExpiryTimers.values()) clearTimeout(timer)
     this.pairingExpiryTimers.clear()
+    for (const timer of this.idleDisconnectTimers.values()) clearTimeout(timer)
+    this.idleDisconnectTimers.clear()
     await this.engine.close()
     await this.store.close()
   }
@@ -84,16 +89,20 @@ export class GatewayService {
   async createAccount(request: CreateAccountRequest): Promise<PublicAccount> {
     const phoneE164 = normalizeE164(request.phoneE164)
     const proxyUrl = validateProxy(request.proxyUrl ?? '')
+    const connectionPolicy = request.connectionPolicy === 'always_on' ? 'always_on' : 'on_demand'
+    const idleDisconnectSeconds = Math.min(86_400, Math.max(60, request.idleDisconnectSeconds ?? 600))
+    const postVerifyGraceSeconds = Math.min(3_600, Math.max(0, request.postVerifyGraceSeconds ?? 120))
+    const syncPolicy = normalizeSyncPolicy(request.syncPolicy ?? defaultSyncPolicy)
     const id = request.id?.trim() || newPublicId('wa')
     if (!/^[A-Za-z0-9_.-]{1,80}$/.test(id)) throw new GatewayError('invalid_argument', 'account id contains unsupported characters')
     try {
-      return publicAccount(await this.store.createAccount({ id, phoneE164, proxyUrl, state: 'unpaired' }))
+      return publicAccount(await this.store.createAccount({ id, phoneE164, proxyUrl, state: 'unpaired', connectionPolicy, idleDisconnectSeconds, postVerifyGraceSeconds, syncPolicy }))
     } catch (error) {
       if (!(error instanceof GatewayError) || error.code !== 'conflict') throw error
       // A control-plane transaction may fail after the gateway account was
       // created. Reclaim only a credential-free, unused row for the exact
       // phone so a later landing-page retry is not permanently blocked.
-      const reclaimed = await this.store.claimUnpairedAccount({ id, phoneE164, proxyUrl })
+      const reclaimed = await this.store.claimUnpairedAccount({ id, phoneE164, proxyUrl, connectionPolicy, idleDisconnectSeconds, postVerifyGraceSeconds, syncPolicy })
       if (!reclaimed) throw error
       return publicAccount(reclaimed)
     }
@@ -104,10 +113,14 @@ export class GatewayService {
 
   async updateAccount(id: string, request: UpdateAccountRequest): Promise<PublicAccount> {
     const current = await this.store.getAccount(id)
-    const changes: Partial<Pick<Account, 'phoneE164' | 'proxyUrl' | 'autoConnect'>> = {}
+    const changes: Partial<Pick<Account, 'phoneE164' | 'proxyUrl' | 'autoConnect' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>> = {}
     if (request.phoneE164 !== undefined) changes.phoneE164 = normalizeE164(request.phoneE164)
     if (request.proxyUrl !== undefined) changes.proxyUrl = validateProxy(request.proxyUrl)
     if (request.autoConnect !== undefined) changes.autoConnect = request.autoConnect
+    if (request.connectionPolicy !== undefined) changes.connectionPolicy = request.connectionPolicy
+    if (request.idleDisconnectSeconds !== undefined) changes.idleDisconnectSeconds = Math.min(86_400, Math.max(60, request.idleDisconnectSeconds))
+    if (request.postVerifyGraceSeconds !== undefined) changes.postVerifyGraceSeconds = Math.min(3_600, Math.max(0, request.postVerifyGraceSeconds))
+    if (request.syncPolicy !== undefined) changes.syncPolicy = normalizeSyncPolicy(request.syncPolicy)
     if (this.engine.isOnline(id) && (changes.phoneE164 !== undefined || changes.proxyUrl !== undefined)) {
       throw new GatewayError('conflict', 'disconnect the account before changing its phone or proxy')
     }
@@ -165,7 +178,7 @@ export class GatewayService {
       pairingExpiresAt: provisionalExpiry,
     }, 'pairing_started')
     try {
-      const result = await this.engine.pair({ accountId: id, phoneE164: current.phoneE164, proxyUrl: current.proxyUrl })
+      const result = await this.engine.pair({ accountId: id, phoneE164: current.phoneE164, proxyUrl: current.proxyUrl, syncPolicy: current.syncPolicy })
       const expiresAt = result.expiresAt.getTime() > Date.now() ? result.expiresAt : provisionalExpiry
       await this.store.updateAccount(id, { pairingStatus: 'waiting_phone', pairingExpiresAt: expiresAt })
       this.schedulePairingExpiry(id, expiresAt)
@@ -179,6 +192,27 @@ export class GatewayService {
       this.logger.warn({ accountId: id, error: safeError(error) }, 'pairing_code_failed')
       throw new GatewayError('protocol_error', 'unable to request a pairing code; verify the phone number, proxy and network')
     }
+  }
+
+  async requestReauthenticationCode(id: string, phoneOverride?: string): Promise<PairResult> {
+    const current = await this.store.getAccount(id)
+    if (current.state !== 'reauth_required') {
+      throw new GatewayError('conflict', 'account does not require reauthentication')
+    }
+    this.clearIdleDisconnect(id)
+    this.clearPairingExpiry(id)
+    await this.engine.disconnect(id)
+    await this.store.clearAuth(id)
+    await this.transitionAccount(id, 'unpaired', {
+      deviceJid: '',
+      autoConnect: false,
+      sessionStatus: 'none',
+      sessionCompleteness: 'none',
+      pairingStatus: 'idle',
+      pairingExpiresAt: null,
+      metadataSyncStatus: 'pending',
+    }, 'reauthentication_started')
+    return this.requestPairingCode(id, phoneOverride)
   }
 
   async cancelPairing(id: string): Promise<PublicAccount> {
@@ -201,15 +235,19 @@ export class GatewayService {
 
   async connect(id: string): Promise<PublicAccount> {
     const current = await this.store.getAccount(id)
+    if (this.engine.isOnline(id) && ['online_idle', 'sending'].includes(current.state)) return publicAccount(current)
     if (current.state === 'restricted') throw new GatewayError('conflict', 'restricted account cannot connect; logout or replace the session first')
     if (current.state === 'reauth_required') throw new GatewayError('conflict', 'account requires a new session before connecting')
     if (current.state === 'pairing') throw new GatewayError('conflict', 'finish pairing before connecting the account')
     if (!current.deviceJid && !(await this.store.getCreds(id))) throw new GatewayError('conflict', 'account must be paired or imported before connecting')
     if (this.engine.name !== 'mock' && !current.proxyUrl) throw new GatewayError('conflict', 'a fixed proxy is required before connecting')
-    await this.transitionAccount(id, 'warming', { autoConnect: true }, 'connect_requested')
+    this.clearIdleDisconnect(id)
+    const autoConnect = current.connectionPolicy === 'always_on'
+    await this.transitionAccount(id, 'warming', { autoConnect }, 'connect_requested')
     try {
-      await this.engine.connect({ accountId: id, phoneE164: current.phoneE164, proxyUrl: current.proxyUrl })
-      const updated = await this.transitionAccount(id, 'online_idle', { autoConnect: true, sessionStatus: 'verified' }, 'connected')
+      await this.engine.connect({ accountId: id, phoneE164: current.phoneE164, proxyUrl: current.proxyUrl, syncPolicy: current.syncPolicy })
+      const updated = await this.transitionAccount(id, 'online_idle', { autoConnect, sessionStatus: 'verified' }, 'connected')
+      this.scheduleIdleDisconnect(updated)
       return publicAccount(updated)
     } catch (error) {
       // A close event is emitted before Baileys rejects the in-flight connect.
@@ -230,6 +268,7 @@ export class GatewayService {
     if (current.state === 'pairing' && ['waiting_phone', 'reconnecting'].includes(current.pairingStatus)) {
       return this.cancelPairing(id)
     }
+    this.clearIdleDisconnect(id)
     await this.engine.disconnect(id)
     const state: AccountState = ['restricted', 'reauth_required', 'unpaired'].includes(current.state)
       ? current.state
@@ -240,7 +279,8 @@ export class GatewayService {
   async logout(id: string): Promise<PublicAccount> {
     const current = await this.store.getAccount(id)
     if (!(await this.store.getCreds(id)) && !current.deviceJid) return publicAccount(current)
-    try { await this.engine.logout({ accountId: id, phoneE164: current.phoneE164, proxyUrl: current.proxyUrl }) } catch (error) {
+    this.clearIdleDisconnect(id)
+    try { await this.engine.logout({ accountId: id, phoneE164: current.phoneE164, proxyUrl: current.proxyUrl, syncPolicy: current.syncPolicy }) } catch (error) {
       this.logger.warn({ accountId: id, error: safeError(error) }, 'account_logout_failed')
       throw new GatewayError('protocol_error', 'WhatsApp did not confirm logout')
     }
@@ -270,6 +310,10 @@ export class GatewayService {
         autoConnect: false,
         sessionStatus: 'pending_verification',
         sessionCompleteness: parsed.completeness,
+        connectionPolicy: 'on_demand',
+        idleDisconnectSeconds: 600,
+        postVerifyGraceSeconds: 120,
+        syncPolicy: { ...defaultSyncPolicy },
       }, parsed.auth)
       return { account: publicAccount(created), format: parsed.completeness === 'full' ? 'parloq-baileys-session/v1' : 'baileys-creds', status: 'pending_verification' }
     }
@@ -297,34 +341,85 @@ export class GatewayService {
     return { session: exportSession({ creds, keys }), format: 'parloq-baileys-session/v1', status: 'ready' }
   }
 
-  async sendText(id: string, request: SendTextRequest): Promise<Message> {
+  async syncAccountMetadata(id: string, request: MetadataSyncRequest = {}): Promise<PublicAccount> {
+    let current = await this.store.getAccount(id)
+    if (request.syncPolicy !== undefined) {
+      current = await this.store.updateAccount(id, {
+        syncPolicy: normalizeSyncPolicy(request.syncPolicy),
+      })
+    }
+    if (current.state === 'restricted' || current.state === 'reauth_required' || current.state === 'pairing') {
+      throw new GatewayError('conflict', 'account is not available for metadata synchronization')
+    }
+    const wasOnline = this.engine.isOnline(id)
+    if (!wasOnline) {
+      await this.connect(id)
+      current = await this.store.getAccount(id)
+    }
+    await this.store.updateAccount(id, { metadataSyncStatus: 'syncing' })
+    try {
+      await this.syncMetadata(await this.store.getAccount(id))
+    } finally {
+      const latest = await this.store.getAccount(id)
+      if (!wasOnline && latest.connectionPolicy === 'on_demand' && this.engine.isOnline(id)) {
+        await this.disconnect(id)
+      }
+    }
+    return publicAccount(await this.store.getAccount(id))
+  }
+
+  async sendMessage(id: string, request: SendMessageRequest): Promise<Message> {
     if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(request.messageId)) throw new GatewayError('invalid_argument', 'messageId is required and contains unsupported characters')
     const recipientE164 = normalizeE164(request.toE164)
-    if (!request.text.trim() || [...request.text].length > 4_096) throw new GatewayError('invalid_argument', 'text is required and must be at most 4096 characters')
-    const current = await this.store.getAccount(id)
+    const message = normalizeOutboundMessage(request)
+    let current = await this.store.getAccount(id)
+    if (!this.engine.isOnline(id) && current.connectionPolicy === 'on_demand' && current.state === 'linked_offline') {
+      await this.connect(id)
+      current = await this.store.getAccount(id)
+    }
     if (!['online_idle', 'sending'].includes(current.state) || !this.engine.isOnline(id)) throw new GatewayError('account_offline', 'account is not connected')
+    this.clearIdleDisconnect(id)
     const now = new Date()
     const result = await this.store.createMessage({ messageId: request.messageId, accountId: id, recipientE164, providerMessageId: '', status: 'queued', errorCode: '', queuedAt: now, sentAt: null, deliveredAt: null, updatedAt: now })
     if (!result.created) {
       if (result.message.accountId !== id || result.message.recipientE164 !== recipientE164) throw new GatewayError('conflict', 'messageId was already used for a different request')
+      if (result.message.status === 'queued' && !this.activeMessageIds.has(request.messageId)) {
+        this.enqueueMessage(request.messageId, id, recipientE164, message)
+      }
       return result.message
     }
-    const depth = this.queueDepth.get(id) ?? 0
-    if (depth >= this.maxQueueSize) {
+    try {
+      this.enqueueMessage(request.messageId, id, recipientE164, message)
+    } catch (error) {
       const failed = await this.store.updateMessage(request.messageId, { status: 'failed', errorCode: 'queue_full' })
       this.webhook.deliver(failed)
-      throw new GatewayError('queue_full', 'account send queue is full')
+      throw error
     }
-    this.queueDepth.set(id, depth + 1)
-    const previous = this.queueTail.get(id) ?? Promise.resolve()
-    const next = previous.catch(() => undefined).then(() => this.processSend(request.messageId, id, recipientE164, request.text))
-    this.queueTail.set(id, next)
-    void next.finally(() => {
-      this.queueDepth.set(id, Math.max(0, (this.queueDepth.get(id) ?? 1) - 1))
-      if (this.queueTail.get(id) === next) this.queueTail.delete(id)
-    })
     this.webhook.deliver(result.message)
     return result.message
+  }
+
+  private enqueueMessage(
+    messageId: string,
+    accountId: string,
+    recipientE164: string,
+    message: OutboundMessage,
+  ): void {
+    if (this.activeMessageIds.has(messageId)) return
+    const depth = this.queueDepth.get(accountId) ?? 0
+    if (depth >= this.maxQueueSize) {
+      throw new GatewayError('queue_full', 'account send queue is full')
+    }
+    this.activeMessageIds.add(messageId)
+    this.queueDepth.set(accountId, depth + 1)
+    const previous = this.queueTail.get(accountId) ?? Promise.resolve()
+    const next = previous.catch(() => undefined).then(() => this.processSend(messageId, accountId, recipientE164, message))
+    this.queueTail.set(accountId, next)
+    void next.finally(() => {
+      this.activeMessageIds.delete(messageId)
+      this.queueDepth.set(accountId, Math.max(0, (this.queueDepth.get(accountId) ?? 1) - 1))
+      if (this.queueTail.get(accountId) === next) this.queueTail.delete(accountId)
+    })
   }
 
   async getMessage(id: string): Promise<Message> { return this.store.getMessage(id) }
@@ -357,6 +452,57 @@ export class GatewayService {
     const timer = this.pairingExpiryTimers.get(id)
     if (timer) clearTimeout(timer)
     this.pairingExpiryTimers.delete(id)
+  }
+
+  private clearIdleDisconnect(id: string): void {
+    const timer = this.idleDisconnectTimers.get(id)
+    if (timer) clearTimeout(timer)
+    this.idleDisconnectTimers.delete(id)
+  }
+
+  private scheduleIdleDisconnect(account: Account, graceSeconds?: number): void {
+    this.clearIdleDisconnect(account.id)
+    if (account.connectionPolicy !== 'on_demand' || !this.engine.isOnline(account.id)) return
+    const seconds = graceSeconds ?? account.idleDisconnectSeconds
+    const timer = setTimeout(() => {
+      this.idleDisconnectTimers.delete(account.id)
+      void this.idleDisconnect(account.id).catch((error: unknown) => {
+        this.logger.warn({ accountId: account.id, error: safeError(error) }, 'idle_disconnect_failed')
+      })
+    }, Math.max(0, seconds) * 1_000)
+    timer.unref()
+    this.idleDisconnectTimers.set(account.id, timer)
+  }
+
+  private async idleDisconnect(id: string): Promise<void> {
+    if ((this.queueDepth.get(id) ?? 0) > 0) {
+      this.scheduleIdleDisconnect(await this.store.getAccount(id))
+      return
+    }
+    const current = await this.store.getAccount(id)
+    if (current.connectionPolicy !== 'on_demand' || !this.engine.isOnline(id)) return
+    await this.engine.disconnect(id)
+    await this.transitionAccount(id, 'linked_offline', { autoConnect: false }, 'idle_disconnect')
+  }
+
+  private async syncMetadata(account: Account): Promise<Account> {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        const quality = await this.engine.getQuality(account.id, account.syncPolicy)
+        return await this.store.updateAccount(account.id, {
+          metadataSyncStatus: 'ready',
+          ...quality,
+        })
+      } catch (error) {
+        if (attempt === 3 || !this.engine.isOnline(account.id)) {
+          await this.store.updateAccount(account.id, { metadataSyncStatus: 'failed' })
+          this.logger.warn({ accountId: account.id, error: safeError(error), attempts: attempt }, 'metadata_sync_failed')
+          throw new GatewayError('protocol_error', 'unable to synchronize account metadata')
+        }
+        await new Promise((resolve) => setTimeout(resolve, attempt * 1_000))
+      }
+    }
+    throw new GatewayError('protocol_error', 'unable to synchronize account metadata')
   }
 
   private schedulePairingExpiry(id: string, expiresAt: Date): void {
@@ -398,7 +544,7 @@ export class GatewayService {
     }, 'pairing_expired')
   }
 
-  private async processSend(messageId: string, accountId: string, recipient: string, text: string): Promise<void> {
+  private async processSend(messageId: string, accountId: string, recipient: string, message: OutboundMessage): Promise<void> {
     try {
       const intervalMs = Math.ceil(1_000 / this.sendQps)
       const now = Date.now()
@@ -407,13 +553,15 @@ export class GatewayService {
       if (allowedAt > now) {
         await new Promise((resolve) => setTimeout(resolve, allowedAt - now))
       }
-      const providerMessageId = await this.engine.send(accountId, recipient, text)
+      const providerMessageId = await this.engine.send(accountId, recipient, message)
       const sent = await this.store.updateMessage(messageId, { providerMessageId, status: 'sent', errorCode: '', sentAt: new Date() })
       this.webhook.deliver(sent)
     } catch (error) {
       const failed = await this.store.updateMessage(messageId, { status: 'failed', errorCode: 'send_failed' })
       this.webhook.deliver(failed)
       this.logger.warn({ messageId, accountId, error: safeError(error) }, 'message_send_failed')
+    } finally {
+      try { this.scheduleIdleDisconnect(await this.store.getAccount(accountId)) } catch { /* account may have been removed */ }
     }
   }
 
@@ -423,22 +571,17 @@ export class GatewayService {
         const current = await this.store.getAccount(event.accountId)
         const completedPairing = current.state === 'pairing' && ['waiting_phone', 'reconnecting'].includes(current.pairingStatus)
         if (completedPairing) this.clearPairingExpiry(event.accountId)
-        await this.transitionAccount(event.accountId, 'online_idle', {
+        const connected = await this.transitionAccount(event.accountId, 'online_idle', {
           deviceJid: event.deviceJid || current.deviceJid,
-          autoConnect: true,
+          autoConnect: current.connectionPolicy === 'always_on',
           sessionStatus: 'verified',
           ...(completedPairing ? { pairingStatus: 'verified' as const, pairingExpiresAt: null } : {}),
-          metadataSyncStatus: 'syncing',
+          metadataSyncStatus: completedPairing ? 'pending' : current.metadataSyncStatus,
         }, 'connected')
-        try {
-          const quality = await this.engine.getQuality(event.accountId)
-          await this.store.updateAccount(event.accountId, {
-            metadataSyncStatus: quality.hasAvatar !== null || quality.groupCount !== null ? 'ready' : 'unsupported',
-            ...quality,
-          })
-        } catch {
-          await this.store.updateAccount(event.accountId, { metadataSyncStatus: 'failed' })
-        }
+        this.scheduleIdleDisconnect(
+          connected,
+          completedPairing ? current.postVerifyGraceSeconds : undefined,
+        )
       } else if (event.kind === 'pairing_restarting') {
         const current = await this.store.getAccount(event.accountId)
         if (

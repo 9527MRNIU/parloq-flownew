@@ -56,7 +56,7 @@ export function SheetHeader({
   return (
     <header
       data-slot="sheet-header"
-      className={cn("flex flex-col gap-0.5 p-4 pr-12", className)}
+      className={cn("flex flex-col gap-1 border-b px-6 py-5 pr-14", className)}
       {...props}
     />
   );
@@ -68,7 +68,7 @@ export function SheetBody({
   return (
     <div
       data-slot="sheet-body"
-      className={cn("min-h-0 flex-1 overflow-y-auto px-4 pb-4", className)}
+      className={cn("min-h-0 flex-1 overflow-y-auto px-6 py-5", className)}
       {...props}
     />
   );
@@ -81,7 +81,7 @@ export function SheetFooter({
     <footer
       data-slot="sheet-footer"
       className={cn(
-        "mt-auto flex flex-row justify-end gap-2 border-t p-4",
+        "mt-auto flex flex-row justify-end gap-2 border-t px-6 py-4",
         className,
       )}
       {...props}
@@ -95,7 +95,7 @@ export function SheetTitle({
   return (
     <SheetPrimitive.Title
       data-slot="sheet-title"
-      className={cn("text-base font-medium text-foreground", className)}
+      className={cn("text-lg font-semibold text-foreground", className)}
       {...props}
     />
   );

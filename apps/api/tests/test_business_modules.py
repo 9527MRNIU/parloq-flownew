@@ -12,11 +12,21 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.database import SessionLocal
-from app.models import AccountLifecycleEvent, PersonalAccount
+from app.models import (
+    AccountLifecycleEvent,
+    AccountMetadataSyncJob,
+    AccountPairingAttempt,
+    AccountProxyBinding,
+    MessageDelivery,
+    PersonalAccount,
+)
 from app.routers.promotion import _localize_template_html
 from app.security import utcnow
 from app.services.wa_gateway import GatewayError, WaGatewayClient
-from app.task_worker import process_task
+from app.services.account_metadata_sync import (
+    process_pending_account_metadata_sync_jobs,
+)
+from app.task_worker import process_task, recover_running_tasks
 
 
 def _zip(files: dict[str, str]) -> bytes:
@@ -50,6 +60,15 @@ def test_server_side_template_localization_escapes_copy_and_attributes() -> None
 
 
 def _gateway_event(client: TestClient, message_id: str, account_id: str, event_status: str):
+    with SessionLocal() as db:
+        if message_id.isdigit():
+            delivery = db.get(MessageDelivery, int(message_id))
+            assert delivery is not None
+            message_id = delivery.public_id
+        if account_id.isdigit():
+            account = db.get(PersonalAccount, int(account_id))
+            assert account is not None
+            account_id = account.gateway_account_id
     body = json.dumps(
         {
             "event": "message.status",
@@ -81,6 +100,11 @@ def _gateway_account_event(
     reason: str,
     occurred_at,
 ):
+    if account_id.isdigit():
+        with SessionLocal() as db:
+            account = db.get(PersonalAccount, int(account_id))
+            assert account is not None
+            account_id = account.gateway_account_id
     body = json.dumps(
         {
             "event": "account.state",
@@ -162,7 +186,7 @@ def test_account_state_webhook_is_durable_idempotent_and_ordered(
     assert detail.json()["data"]["account"]["status"] == "restricted"
     with SessionLocal() as db:
         account = db.scalar(
-            select(PersonalAccount).where(PersonalAccount.public_id == account_id)
+            select(PersonalAccount).where(PersonalAccount.id == int(account_id))
         )
         assert account is not None
         events = db.scalars(
@@ -170,11 +194,10 @@ def test_account_state_webhook_is_durable_idempotent_and_ordered(
                 AccountLifecycleEvent.account_id == account.id
             )
         ).all()
-        assert {event.public_id for event in events} >= {
-            f"initial_{account_id}",
-            "ast_restricted_test",
-            "ast_stale_connected_test",
-        }
+        event_ids = {event.public_id for event in events}
+        assert "ast_restricted_test" in event_ids
+        assert "ast_stale_connected_test" in event_ids
+        assert any(event_id.startswith("initial_") for event_id in event_ids)
 
 
 def test_interrupted_pairing_webhook_marks_account_retryable(
@@ -229,8 +252,10 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     )
     assert imported.status_code == 201, imported.text
     template = imported.json()["data"]["template"]
-    assert template["manifest"]["schema"] == "parloq-promotion-template/v1"
-    assert template["manifest"]["runtime"] == "parloq-browser-bridge/v1"
+    assert template["id"].isdecimal()
+    assert "publicId" not in template
+    assert template["manifest"]["schema"] == "promotion-template/v1"
+    assert template["manifest"]["runtime"] == "promotion-browser-bridge/v1"
     assert template["manifest"]["capabilities"] == ["phone-pairing"]
     assert template["defaultLocale"] == "en"
     assert template["supportedLocales"] == ["en"]
@@ -286,12 +311,21 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
         "content-security-policy"
     ]
     assert "form-action 'none'" in preview.headers["content-security-policy"]
+    assert "frame-ancestors http://testserver" in preview.headers[
+        "content-security-policy"
+    ]
     assert "allow-same-origin" not in preview.headers["content-security-policy"]
     assert "connect-src http://testserver" in preview.headers["content-security-policy"]
     assert '"previewMode": true' in preview.text
+    assert '"previewDevice": "desktop"' in preview.text
+    assert "promotionPreviewState='code_issued'" in preview.text
+    assert "promotion-preview:set-state" in preview.text
+    assert "promotion-preview:pairing-started" in preview.text
+    assert "promotionPreviewPolls" not in preview.text
+    assert "nextPollAfterMs:1000" in preview.text
     assert '"templatePolicy": {' in preview.text
     assert '"deviceSignals": "enhanced"' in preview.text
-    assert "window.parloqSubmitPhone" in preview.text
+    assert "window.PromotionBridge" in preview.text
     assert 'addEventListener("contextmenu"' in preview.text
     assert 'e.key==="F12"' in preview.text
     assert admin_client.get(
@@ -322,22 +356,36 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
         "preview": True,
     }
 
+    landing_group = admin_client.post(
+        "/api/account-groups", json={"name": "Germany Landing Accounts"}
+    )
+    assert landing_group.status_code == 201, landing_group.text
+    landing_group_id = landing_group.json()["data"]["group"]["id"]
     channel = admin_client.post(
         "/api/promotion/channels",
         json={
             "type": "facebook",
             "name": "Germany Facebook",
             "countryCode": "DE",
-            "templatePublicId": template["id"],
-            "domainPublicId": domain_id,
-            "pixelPublicId": pixel_id,
+            "templateId": template["id"],
+            "domainId": domain_id,
+            "pixelId": pixel_id,
+            "accountGroupId": landing_group_id,
             "slug": "de-facebook-demo",
             "status": "active",
             "localeMode": "auto",
         },
     )
     assert channel.status_code == 201, channel.text
-    channel_id = channel.json()["data"]["channel"]["id"]
+    channel_row = channel.json()["data"]["channel"]
+    channel_id = channel_row["id"]
+    assert channel_id.isdecimal()
+    assert channel_row["templateId"] == template["id"]
+    assert channel_row["domainId"] == domain_id
+    assert channel_row["pixelId"] == pixel_id
+    assert channel_row["accountGroupId"] == landing_group_id
+    assert channel_row["accountGroupName"] == "Germany Landing Accounts"
+    assert not any(key.endswith("PublicId") for key in channel_row)
 
     public_config = admin_client.get("/api/public/promotion/channels/de-facebook-demo?lang=de")
     assert public_config.status_code == 200
@@ -394,7 +442,8 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     )
     assert policy.status_code == 200, policy.text
     render = admin_client.get("/api/public/promotion/channels/de-facebook-demo/render?lang=de")
-    assert "parloq-promotion-config" in render.text
+    assert "promotion-runtime-config" in render.text
+    assert "parloq" not in render.text.lower()
     assert 'src="/api/public/promotion/guard.js"' in render.text
     assert '<base href="/api/public/promotion/channels/de-facebook-demo/assets/">' in render.text
     assert render.text.index("<base ") < render.text.index("<link ")
@@ -440,18 +489,24 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     assert locale_asset.json()["title"] == "Hallo"
     tracker = admin_client.get("/api/public/promotion/tracker.js")
     assert "connect.facebook.net/en_US/fbevents.js" in tracker.text
-    assert '"track","Lead"' in tracker.text
+    assert 'fireMeta("phone_submit",eventId)' in tracker.text
+    assert "meta.eventMapping" in tracker.text
+    assert "getPairingStatus" in tracker.text
     assert "pairingStartUrl" in tracker.text
     assert "pairing_start_failed" in tracker.text
-    assert "form[data-parloq-manual]" in tracker.text
-    assert 'send("page_view",{metadata:{deviceSignals:signals()}})' in tracker.text
+    assert "form[data-promotion-manual]" in tracker.text
+    assert "parloq" not in tracker.text.lower()
+    assert 'send("page_view",{metadata:{deviceSignals:signals()}},pageEventId)' in tracker.text
     assert '"inspection_detected"' in tracker.text
     guard = admin_client.get("/api/public/promotion/guard.js")
     assert guard.status_code == 200
     assert 'addEventListener("contextmenu"' in guard.text
     assert 'e.key==="F12"' in guard.text
+    assert 'input[type="tel"]' in guard.text
+    assert 'replace(/\\+/g,"")' in guard.text
     assert 'window-gap' in guard.text
     assert 'debugger-delay' in guard.text
+    assert "parloq" not in guard.text.lower()
 
     inspection = admin_client.post(
         "/api/public/promotion/channels/de-facebook-demo/events",
@@ -504,7 +559,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     ).status_code == 401
 
 
-def test_promotion_template_v1_rejects_unknown_schema_and_source_maps(
+def test_promotion_template_rejects_unknown_schema_and_source_maps(
     admin_client: TestClient,
 ) -> None:
     unknown_schema = _zip(
@@ -512,7 +567,7 @@ def test_promotion_template_v1_rejects_unknown_schema_and_source_maps(
             "index.html": '<form><input type="tel"></form>',
             "manifest.json": json.dumps(
                 {
-                    "schema": "parloq-promotion-template/v2",
+                    "schema": "promotion-template/v3",
                     "capabilities": ["phone-pairing"],
                 }
             ),
@@ -541,6 +596,115 @@ def test_promotion_template_v1_rejects_unknown_schema_and_source_maps(
     assert "app.js.map" in rejected_map.json()["detail"]
 
 
+def test_white_label_account_link_starter_can_be_downloaded_and_imported(
+    admin_client: TestClient,
+) -> None:
+    downloaded = admin_client.get(
+        "/api/promotion/template-kits/account-link-elements-v1.zip"
+    )
+    assert downloaded.status_code == 200, downloaded.text
+    assert downloaded.headers["content-type"] == "application/zip"
+    assert (
+        downloaded.headers["content-disposition"]
+        == 'attachment; filename="account-link-capability-theme-v1.zip"'
+    )
+
+    with zipfile.ZipFile(io.BytesIO(downloaded.content)) as archive:
+        paths = set(archive.namelist())
+        assert {"index.html", "manifest.json", "assets/theme.css"} <= paths
+        manifest = json.loads(archive.read("manifest.json"))
+        assert manifest["schema"] == "promotion-template/v2"
+        assert manifest["version"] == "1.4.0"
+        assert manifest["runtime"] == "promotion-browser-bridge/v2"
+        assert (
+            manifest["requirements"]["componentKit"]
+            == "account-link-elements/v1"
+        )
+        assert manifest["supportedLocales"] == [
+            "en",
+            "zh-CN",
+            "hi",
+            "id",
+            "pt-BR",
+            "es",
+            "ru",
+            "ur",
+            "de",
+            "tr",
+            "ar",
+            "fa",
+            "bn",
+            "it",
+            "fr",
+        ]
+        assert {
+            "locales/ru.json",
+            "locales/ur.json",
+            "locales/tr.json",
+            "locales/fa.json",
+            "locales/bn.json",
+            "locales/it.json",
+        } <= paths
+        index_html = archive.read("index.html").decode()
+        assert "<account-link-flow" in index_html
+        assert "<account-link-locale-switcher" in index_html
+
+    component_runtime = admin_client.get(
+        "/api/public/promotion/account-link-elements.js"
+    )
+    assert component_runtime.status_code == 200
+    assert component_runtime.headers["access-control-allow-origin"] == "*"
+    assert "customElements" in component_runtime.text
+    assert "account-link-locale-switcher" in component_runtime.text
+    assert "Enter code on phone" in component_runtime.text
+    assert "On Android tap" in component_runtime.text
+    assert "Link with phone number instead" in component_runtime.text
+    assert "whatsapp-icon" in component_runtime.text
+    assert "android-menu-icon" in component_runtime.text
+    assert "iphone-settings-icon" in component_runtime.text
+    assert "M12 7a2 2" in component_runtime.text
+    assert ":host([hidden])" in component_runtime.text
+    assert "promotion-preview:locale-change" in component_runtime.text
+    assert "parloq" not in component_runtime.text.lower()
+
+    imported = admin_client.post(
+        "/api/promotion/templates",
+        data={"name": "White-label account linking capabilities"},
+        files={
+            "file": (
+                "account-link-capability-theme-v1.zip",
+                downloaded.content,
+                "application/zip",
+            )
+        },
+    )
+    assert imported.status_code == 201, imported.text
+    template = imported.json()["data"]["template"]
+    assert (
+        template["manifest"]["requirements"]["componentKit"]
+        == "account-link-elements/v1"
+    )
+
+    preview = admin_client.get(
+        f"/api/promotion/templates/{template['id']}/preview"
+    )
+    assert preview.status_code == 200
+    assert (
+        'src="/api/public/promotion/account-link-elements.js?preview='
+        in preview.text
+    )
+    assert "<account-link-flow" in preview.text
+
+    mobile_preview = admin_client.get(
+        f"/api/promotion/templates/{template['id']}/preview?device=mobile"
+    )
+    assert mobile_preview.status_code == 200
+    assert '"previewDevice": "mobile"' in mobile_preview.text
+    assert admin_client.get(
+        f"/api/promotion/templates/{template['id']}/preview?device=watch"
+    ).status_code == 422
+
+
 def test_personal_account_gateway_and_hyperlink_delivery(
     admin_client: TestClient, monkeypatch
 ) -> None:
@@ -561,7 +725,7 @@ def test_personal_account_gateway_and_hyperlink_delivery(
     original_create = WaGatewayClient.create
     observed_persisted_account: dict[str, bool] = {}
 
-    def create_after_account_commit(self, account_id, phone, proxy_url):
+    def create_after_account_commit(self, account_id, phone, proxy_url, **kwargs):
         with SessionLocal() as independent_db:
             observed_persisted_account[account_id] = (
                 independent_db.scalar(
@@ -571,9 +735,14 @@ def test_personal_account_gateway_and_hyperlink_delivery(
                 )
                 is not None
             )
-        return original_create(self, account_id, phone, proxy_url)
+        return original_create(self, account_id, phone, proxy_url, **kwargs)
 
     monkeypatch.setattr(WaGatewayClient, "create", create_after_account_commit)
+    landing_group = next(
+        row
+        for row in admin_client.get("/api/account-groups").json()["data"]["rows"]
+        if row["name"] == "Germany Landing Accounts"
+    )
     public_config = admin_client.get(
         "/api/public/promotion/channels/de-facebook-demo"
     ).json()["data"]
@@ -587,36 +756,63 @@ def test_personal_account_gateway_and_hyperlink_delivery(
     )
     assert landing_pair.status_code == 200, landing_pair.text
     pairing = landing_pair.json()["data"]["pairing"]
-    assert observed_persisted_account[pairing["statusUrl"].split("/")[-2]] is True
+    status_account_id = pairing["statusUrl"].split("/")[-2]
+    assert status_account_id.isdigit()
+    with SessionLocal() as db:
+        status_account = db.get(PersonalAccount, int(status_account_id))
+        assert status_account is not None
+        assert observed_persisted_account[status_account.gateway_account_id] is True
+        attempt = db.get(AccountPairingAttempt, int(pairing["attemptId"]))
+        assert attempt is not None
+        original_protocol_id = status_account.protocol_id
+        assert attempt.protocol_node_id == original_protocol_id
+        assert attempt.route_version >= 1
+        assert attempt.sync_policy_json["avatar"] is True
     assert pairing["pairingCode"] == "0000-0000"
     pairing_preflight = admin_client.options(
         pairing["statusUrl"],
         headers={
             "Origin": "null",
             "Access-Control-Request-Method": "GET",
-            "Access-Control-Request-Headers": "X-Parloq-Pairing-Token",
+            "Access-Control-Request-Headers": "Authorization",
         },
     )
     assert pairing_preflight.status_code == 204
     assert pairing_preflight.headers["access-control-allow-origin"] == "null"
     assert (
         pairing_preflight.headers["access-control-allow-headers"]
-        == "X-Parloq-Pairing-Token"
+        == "Authorization"
     )
     unrelated_preflight = admin_client.options(
         "/api/users",
         headers={
             "Origin": "null",
             "Access-Control-Request-Method": "GET",
-            "Access-Control-Request-Headers": "X-Parloq-Pairing-Token",
+            "Access-Control-Request-Headers": "Authorization",
         },
     )
     assert unrelated_preflight.status_code == 400
+    changed_group = admin_client.post(
+        "/api/account-groups", json={"name": "Future Germany Landing Accounts"}
+    ).json()["data"]["group"]
+    future_protocol = admin_client.post(
+        "/api/protocol-nodes",
+        json={"name": "Future Germany protocol"},
+    ).json()["data"]["protocol"]
+    changed_channel = admin_client.patch(
+        f"/api/promotion/channels/{public_config['channel']['id']}",
+        json={
+            "accountGroupId": changed_group["id"],
+            "protocolNodeId": future_protocol["id"],
+            "protocolPoolId": None,
+        },
+    )
+    assert changed_channel.status_code == 200, changed_channel.text
     landing_status = admin_client.get(
         pairing["statusUrl"],
         headers={
             "Origin": "null",
-            "X-Parloq-Pairing-Token": pairing["statusToken"],
+            "Authorization": f"Bearer {pairing['statusToken']}",
         },
     )
     assert landing_status.status_code == 200
@@ -626,6 +822,7 @@ def test_personal_account_gateway_and_hyperlink_delivery(
     assert status_data["accountState"] == "linked_offline"
     assert status_data["pairingStatus"] == "verified"
     assert status_data["verified"] is True
+    assert status_data["initializationStatus"] == "pending"
     assert status_data["attemptId"] == pairing["attemptId"]
     landing_account = admin_client.get(
         "/api/personal-accounts?keyword=4915123456790"
@@ -633,13 +830,78 @@ def test_personal_account_gateway_and_hyperlink_delivery(
     assert landing_account["source"] == "landing_page"
     assert landing_account["sourceRefId"] == public_config["channel"]["id"]
     assert landing_account["validationStatus"] == "ready"
+    assert landing_account["group"] == {
+        "id": landing_group["id"],
+        "name": "Germany Landing Accounts",
+    }
+    with SessionLocal() as db:
+        stored_after_switch = db.get(PersonalAccount, int(status_account_id))
+        attempt_after_switch = db.get(
+            AccountPairingAttempt, int(pairing["attemptId"])
+        )
+        assert stored_after_switch.protocol_id == original_protocol_id
+        assert attempt_after_switch.protocol_node_id == original_protocol_id
+        accounts_before_repeat = len(
+            db.scalars(
+                select(PersonalAccount).where(
+                    PersonalAccount.phone_e164 == "+4915123456790"
+                )
+            ).all()
+        )
+        attempts_before_repeat = len(
+            db.scalars(
+                select(AccountPairingAttempt).where(
+                    AccountPairingAttempt.account_id == stored_after_switch.id
+                )
+            ).all()
+        )
+
+    repeated_pairing = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/pairing/start",
+        json={
+            "phone": "+4915123456790",
+            "visitorId": "landing-repeat-visitor-0001",
+            "sessionToken": public_config["sessionToken"],
+        },
+    )
+    assert repeated_pairing.status_code == 409, repeated_pairing.text
+    assert repeated_pairing.json() == {
+        "error": {
+            "code": "account_already_linked",
+            "message": "该号码已经绑定并可用，无需重复绑定",
+            "retryable": False,
+        }
+    }
+    with SessionLocal() as db:
+        repeated_account = db.get(PersonalAccount, int(status_account_id))
+        assert repeated_account is not None
+        assert (
+            len(
+                db.scalars(
+                    select(PersonalAccount).where(
+                        PersonalAccount.phone_e164 == "+4915123456790"
+                    )
+                ).all()
+            )
+            == accounts_before_repeat
+        )
+        assert (
+            len(
+                db.scalars(
+                    select(AccountPairingAttempt).where(
+                        AccountPairingAttempt.account_id == repeated_account.id
+                    )
+                ).all()
+            )
+            == attempts_before_repeat
+        )
     account = admin_client.post(
         "/api/personal-accounts",
         json={
             "name": "US Sender",
             "phone": "+12025550111",
             "countryCode": "US",
-            "proxyPublicId": proxy_id,
+            "proxyId": proxy_id,
         },
     )
     assert account.status_code == 201, account.text
@@ -662,7 +924,8 @@ def test_personal_account_gateway_and_hyperlink_delivery(
     assert sent.status_code == 200
     delivery = sent.json()["data"]["messageDelivery"]
     assert delivery["status"] == "queued"
-    assert re.fullmatch(r"msg_\d+", delivery["messageId"])
+    assert delivery["messageId"].isdigit()
+    assert "publicId" not in delivery
     assert delivery["requestId"] == "manual-message-0001"
     assert "message" not in delivery
     assert admin_client.post(
@@ -681,9 +944,13 @@ def test_personal_account_gateway_and_hyperlink_delivery(
     assert account_detail["deliveredCount"] == 1
 
     material = admin_client.post(
-        "/api/hyperlink/materials",
+        "/api/materials",
         json={"name": "Text CTA", "type": "text", "contentJson": {"text": "offer"}},
     ).json()["data"]["material"]
+    assert any(
+        row["id"] == material["id"]
+        for row in admin_client.get("/api/hyperlink/materials").json()["data"]["rows"]
+    )
     template = admin_client.post(
         "/api/hyperlink/templates",
         json={
@@ -708,6 +975,13 @@ def test_personal_account_gateway_and_hyperlink_delivery(
         },
     ).json()["data"]["dataPackage"]
     assert package["recipientCount"] == 2
+    sender_group = admin_client.post(
+        "/api/account-groups", json={"name": "US Broadcast Senders"}
+    ).json()["data"]["group"]
+    assert admin_client.patch(
+        f"/api/personal-accounts/{account_id}",
+        json={"groupId": sender_group["id"]},
+    ).status_code == 200
     task = admin_client.post(
         "/api/hyperlink/tasks",
         json={
@@ -715,7 +989,7 @@ def test_personal_account_gateway_and_hyperlink_delivery(
             "templateId": template["id"],
             "strategyId": strategy["id"],
             "dataPackageId": package["id"],
-            "accountIds": [account_id],
+            "accountGroupId": sender_group["id"],
             "channel": "facebook",
         },
     ).json()["data"]["task"]
@@ -725,11 +999,49 @@ def test_personal_account_gateway_and_hyperlink_delivery(
     assert result["status"] == "running"
     assert result["totalCount"] == 2
     assert result["queuedCount"] == 2
-    process_task(task["id"])
+    assert result["templateName"] == "Offer Template"
+    assert result["templateContent"]["body"]["text"] == "Hello {{name}}"
+    assert result["submissionStats"] == {
+        "total": 2,
+        "waiting": 2,
+        "submitting": 0,
+        "accepted": 0,
+        "failed": 0,
+        "reconciling": 0,
+        "cancelled": 0,
+        "skipped": 0,
+    }
+    mutated = admin_client.patch(
+        f"/api/hyperlink/templates/{template['id']}",
+        json={"name": "Changed after task start"},
+    )
+    assert mutated.status_code == 200, mutated.text
+    frozen = admin_client.get(
+        f"/api/hyperlink/tasks/{task['id']}"
+    ).json()["data"]["task"]
+    assert frozen["templateName"] == "Offer Template"
+    assert frozen["templateContent"]["body"]["text"] == "Hello {{name}}"
+    task_id = task["id"]
+    process_task(task_id)
+    submitted = admin_client.get(
+        f"/api/hyperlink/tasks/{task['id']}"
+    ).json()["data"]["task"]
+    assert submitted["status"] == "running"
+    assert submitted["submissionStats"] == {
+        "total": 2,
+        "waiting": 0,
+        "submitting": 0,
+        "accepted": 2,
+        "failed": 0,
+        "reconciling": 0,
+        "cancelled": 0,
+        "skipped": 0,
+    }
+    assert submitted["sendStats"] == {"sent": 0, "delivered": 0, "failed": 0}
     messages = admin_client.get(
         f"/api/personal-accounts/{account_id}/messages"
     ).json()["data"]["rows"]
-    task_messages = [row for row in messages if row["requestId"].startswith(task["id"])]
+    task_messages = [row for row in messages if row["requestId"].startswith(task_id)]
     assert len(task_messages) == 2
     for row in task_messages:
         assert row["status"] == "queued"
@@ -738,6 +1050,15 @@ def test_personal_account_gateway_and_hyperlink_delivery(
     result = admin_client.get(f"/api/hyperlink/tasks/{task['id']}").json()["data"]["task"]
     assert result["status"] == "completed"
     assert result["deliveredCount"] == 2
+    assert result["submissionStats"]["accepted"] == 2
+    assert result["sendStats"] == {"sent": 2, "delivered": 2, "failed": 0}
+    recovered: list[str] = []
+    monkeypatch.setattr(
+        "app.task_worker.enqueue_hyperlink_task",
+        lambda queued_task_id: recovered.append(queued_task_id) or True,
+    )
+    recover_running_tasks()
+    assert task_id not in recovered
     insight = admin_client.get("/api/hyperlink/market-insights").json()["data"]
     assert insight["totals"]["sent"] >= 2
     assert insight["totals"]["delivered"] >= 2
@@ -747,7 +1068,7 @@ def test_personal_account_gateway_and_hyperlink_delivery(
     )
     with SessionLocal() as db:
         stored_account = db.scalar(
-            select(PersonalAccount).where(PersonalAccount.public_id == account_id)
+            select(PersonalAccount).where(PersonalAccount.id == int(account_id))
         )
         stored_account.status = "reauth_required"
         db.commit()
@@ -757,7 +1078,7 @@ def test_personal_account_gateway_and_hyperlink_delivery(
     assert us_row["bannedAccounts"] == 0
     with SessionLocal() as db:
         stored_account = db.scalar(
-            select(PersonalAccount).where(PersonalAccount.public_id == account_id)
+            select(PersonalAccount).where(PersonalAccount.id == int(account_id))
         )
         stored_account.status = "restricted"
         db.commit()
@@ -767,7 +1088,7 @@ def test_personal_account_gateway_and_hyperlink_delivery(
     assert us_row["banRate"] == 1.0
 
 
-def test_landing_pairing_failure_keeps_retryable_account(
+def test_landing_pairing_failure_stays_in_intake_records(
     admin_client: TestClient, monkeypatch
 ) -> None:
     public_config = admin_client.get(
@@ -791,11 +1112,15 @@ def test_landing_pairing_failure_keeps_retryable_account(
     rows = admin_client.get(
         "/api/personal-accounts?keyword=4915123456793"
     ).json()["data"]
-    assert rows["total"] == 1
-    account = rows["rows"][0]
-    assert account["status"] == "unpaired"
-    assert account["validationStatus"] == "failed"
-    assert account["lastError"] == "WhatsApp 网关请求失败（502）"
+    assert rows["total"] == 0
+    intake = admin_client.get(
+        "/api/personal-accounts/intake/attempts?keyword=4915123456793"
+    ).json()["data"]
+    assert intake["total"] == 1
+    attempt = intake["rows"][0]
+    assert attempt["status"] == "failed"
+    assert attempt["account"]["admissionStatus"] == "abandoned"
+    assert attempt["account"]["validationStatus"] == "failed"
 
 
 def test_legacy_unverified_landing_pairing_can_request_a_fresh_code(
@@ -818,12 +1143,20 @@ def test_legacy_unverified_landing_pairing_can_request_a_fresh_code(
 
     # Mock pairing deliberately leaves the same legacy shape that old
     # production releases persisted before a real connection was verified.
-    stored = admin_client.get(
+    assert admin_client.get(
         "/api/personal-accounts?keyword=4915123456794"
-    ).json()["data"]["rows"][0]
-    assert stored["status"] == "linked_offline"
-    assert stored["validationStatus"] == "validating"
-    assert stored["lastConnectedAt"] is None
+    ).json()["data"]["total"] == 0
+    with SessionLocal() as db:
+        stored = db.scalar(
+            select(PersonalAccount).where(
+                PersonalAccount.phone_e164 == "+4915123456794"
+            )
+        )
+        assert stored is not None
+        assert stored.status == "linked_offline"
+        assert stored.validation_status == "validating"
+        assert stored.admission_status == "reserved"
+        assert stored.last_connected_at is None
 
     retried = admin_client.post(
         "/api/public/promotion/channels/de-facebook-demo/pairing/start",
@@ -831,6 +1164,135 @@ def test_legacy_unverified_landing_pairing_can_request_a_fresh_code(
     )
     assert retried.status_code == 200, retried.text
     assert retried.json()["data"]["pairing"]["pairingCode"] == "0000-0000"
+
+
+def test_landing_reauthentication_preserves_account_ownership_and_enqueues_sync(
+    admin_client: TestClient, monkeypatch
+) -> None:
+    public_config = admin_client.get(
+        "/api/public/promotion/channels/de-facebook-demo"
+    ).json()["data"]
+    initial = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/pairing/start",
+        json={
+            "phone": "+4915123456796",
+            "visitorId": "initial-owner-visitor",
+            "sessionToken": public_config["sessionToken"],
+        },
+    )
+    assert initial.status_code == 200, initial.text
+    initial_pairing = initial.json()["data"]["pairing"]
+    verified = admin_client.get(
+        initial_pairing["statusUrl"],
+        headers={"Authorization": f"Bearer {initial_pairing['statusToken']}"},
+    )
+    assert verified.status_code == 200, verified.text
+    account_id = int(initial_pairing["statusUrl"].split("/")[-2])
+    process_pending_account_metadata_sync_jobs(limit=20)
+    with SessionLocal() as db:
+        initial_job = db.scalar(
+            select(AccountMetadataSyncJob).where(
+                AccountMetadataSyncJob.account_id == account_id
+            )
+        )
+        assert initial_job is not None and initial_job.status == "succeeded"
+
+    future_group = admin_client.post(
+        "/api/account-groups", json={"name": "Only Future Reauth Accounts"}
+    ).json()["data"]["group"]
+    future_protocol = admin_client.post(
+        "/api/protocol-nodes", json={"name": "Only Future Reauth Protocol"}
+    ).json()["data"]["protocol"]
+    assert admin_client.patch(
+        f"/api/promotion/channels/{public_config['channel']['id']}",
+        json={
+            "accountGroupId": future_group["id"],
+            "protocolNodeId": future_protocol["id"],
+            "protocolPoolId": None,
+        },
+    ).status_code == 200
+
+    with SessionLocal() as db:
+        account = db.get(PersonalAccount, account_id)
+        assert account is not None
+        original = {
+            "group": account.group_id,
+            "protocol": account.protocol_id,
+            "sourceType": account.source_ref_type,
+            "sourceId": account.source_ref_id,
+        }
+        binding = db.scalar(
+            select(AccountProxyBinding).where(
+                AccountProxyBinding.account_public_id == account.gateway_account_id
+            )
+        )
+        assert binding is not None
+        original_proxy_id = binding.proxy_id
+        account.status = "reauth_required"
+        account.validation_status = "failed"
+        db.commit()
+
+    observed: list[str] = []
+    original_reauthenticate = WaGatewayClient.reauthenticate
+
+    def observe_reauthenticate(self, gateway_account_id, phone):
+        observed.append(gateway_account_id)
+        return original_reauthenticate(self, gateway_account_id, phone)
+
+    monkeypatch.setattr(
+        WaGatewayClient, "reauthenticate", observe_reauthenticate
+    )
+    current_config = admin_client.get(
+        "/api/public/promotion/channels/de-facebook-demo"
+    ).json()["data"]
+    reauth = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/pairing/start",
+        json={
+            "phone": "+4915123456796",
+            "visitorId": "reauth-owner-visitor",
+            "sessionToken": current_config["sessionToken"],
+        },
+    )
+    assert reauth.status_code == 200, reauth.text
+    pairing = reauth.json()["data"]["pairing"]
+    assert len(observed) == 1
+    assert int(pairing["statusUrl"].split("/")[-2]) == account_id
+    with SessionLocal() as db:
+        attempt = db.get(AccountPairingAttempt, int(pairing["attemptId"]))
+        assert attempt is not None
+        assert attempt.attempt_type == "reauthentication"
+        assert attempt.account_group_id == original["group"]
+        assert attempt.protocol_node_id == original["protocol"]
+
+    reverified = admin_client.get(
+        pairing["statusUrl"],
+        headers={"Authorization": f"Bearer {pairing['statusToken']}"},
+    )
+    assert reverified.status_code == 200, reverified.text
+    assert reverified.json()["data"]["pairingStatus"] == "verified"
+    with SessionLocal() as db:
+        account = db.get(PersonalAccount, account_id)
+        assert account is not None
+        assert account.admission_status == "active"
+        assert account.group_id == original["group"]
+        assert account.protocol_id == original["protocol"]
+        assert account.source_ref_type == original["sourceType"]
+        assert account.source_ref_id == original["sourceId"]
+        binding = db.scalar(
+            select(AccountProxyBinding).where(
+                AccountProxyBinding.account_public_id == account.gateway_account_id
+            )
+        )
+        assert binding is not None and binding.proxy_id == original_proxy_id
+        jobs = list(
+            db.scalars(
+                select(AccountMetadataSyncJob).where(
+                    AccountMetadataSyncJob.account_id == account.id
+                )
+            ).all()
+        )
+        assert [job.status for job in jobs].count("succeeded") == 1
+        assert [job.status for job in jobs].count("pending") == 1
 
 
 def test_public_pairing_status_never_treats_unverified_offline_as_success() -> None:
@@ -876,11 +1338,21 @@ def test_public_pairing_attempt_can_be_cancelled_with_header_token(
     )
     assert started.status_code == 200, started.text
     pairing = started.json()["data"]["pairing"]
-    assert pairing["statusTokenHeader"] == "X-Parloq-Pairing-Token"
+    assert pairing["statusTokenHeader"] == "Authorization"
+    assert pairing["statusTokenScheme"] == "Bearer"
+    query_token_status = admin_client.get(
+        pairing["statusUrl"], params={"token": pairing["statusToken"]}
+    )
+    assert query_token_status.status_code == 403
+    paused = admin_client.patch(
+        f"/api/promotion/channels/{public_config['channel']['id']}",
+        json={"status": "paused"},
+    )
+    assert paused.status_code == 200, paused.text
 
     cancelled = admin_client.post(
         pairing["cancelUrl"],
-        headers={"X-Parloq-Pairing-Token": pairing["statusToken"]},
+        headers={"Authorization": f"Bearer {pairing['statusToken']}"},
     )
     assert cancelled.status_code == 200, cancelled.text
     assert cancelled.json()["data"] == {
@@ -889,11 +1361,15 @@ def test_public_pairing_attempt_can_be_cancelled_with_header_token(
     }
     status = admin_client.get(
         pairing["statusUrl"],
-        headers={"X-Parloq-Pairing-Token": pairing["statusToken"]},
+        headers={"Authorization": f"Bearer {pairing['statusToken']}"},
     )
     assert status.status_code == 200, status.text
     assert status.json()["data"]["pairingStatus"] == "cancelled"
     assert status.json()["data"]["verified"] is False
+    assert admin_client.patch(
+        f"/api/promotion/channels/{public_config['channel']['id']}",
+        json={"status": "active"},
+    ).status_code == 200
 
 
 def test_personal_account_create_rollback_and_bulk_state_sync(
@@ -918,10 +1394,12 @@ def test_personal_account_create_rollback_and_bulk_state_sync(
     )
     assert created.status_code == 201
     account_id = created.json()["data"]["account"]["id"]
+    with SessionLocal() as db:
+        gateway_account_id = db.get(PersonalAccount, int(account_id)).gateway_account_id
     monkeypatch.setattr(
         WaGatewayClient,
         "list",
-        lambda _self: [{"id": account_id, "phoneE164": "+12025551992", "state": "restricted"}],
+        lambda _self: [{"id": gateway_account_id, "phoneE164": "+12025551992", "state": "restricted"}],
     )
     synced = admin_client.get("/api/personal-accounts?sync=true&pageSize=100")
     assert synced.status_code == 200
@@ -931,7 +1409,7 @@ def test_personal_account_create_rollback_and_bulk_state_sync(
 
 def test_structured_payload_rejects_executable_html(admin_client: TestClient) -> None:
     response = admin_client.post(
-        "/api/hyperlink/materials",
+        "/api/materials",
         json={"name": "Unsafe", "type": "text", "contentJson": {"html": "<script>alert(1)</script>"}},
     )
     assert response.status_code == 422

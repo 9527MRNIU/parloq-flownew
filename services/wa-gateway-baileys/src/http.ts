@@ -3,6 +3,7 @@ import Fastify from 'fastify'
 import type { Logger } from 'pino'
 import { GatewayError } from './domain.js'
 import type { GatewayService } from './service.js'
+import type { SendMessageRequest } from './message-content.js'
 
 interface ServerOptions {
   service: GatewayService
@@ -38,15 +39,17 @@ export function buildServer(options: ServerOptions) {
   app.get('/metrics', async (_request, reply) => reply.type('text/plain; version=0.0.4; charset=utf-8').send(
     '# HELP wa_gateway_info Static gateway identity.\n# TYPE wa_gateway_info gauge\nwa_gateway_info{engine="' + options.service.engineName + '"} 1\n'))
 
-  app.post<{ Body: { id?: string; phoneE164: string; proxyUrl?: string } }>('/v1/accounts', async (request, reply) => {
+  app.post<{ Body: { id?: string; phoneE164: string; proxyUrl?: string; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: import('./domain.js').SyncPolicy } }>('/v1/accounts', async (request, reply) => {
     const data = await options.service.createAccount(request.body)
     return reply.status(201).send({ data })
   })
   app.get('/v1/accounts', async () => ({ data: await options.service.listAccounts() }))
   app.get<{ Params: { accountId: string } }>('/v1/accounts/:accountId', async (request) => ({ data: await options.service.getAccount(request.params.accountId) }))
-  app.patch<{ Params: { accountId: string }; Body: { phoneE164?: string; proxyUrl?: string; autoConnect?: boolean } }>('/v1/accounts/:accountId', async (request) => ({ data: await options.service.updateAccount(request.params.accountId, request.body) }))
+  app.patch<{ Params: { accountId: string }; Body: { phoneE164?: string; proxyUrl?: string; autoConnect?: boolean; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: import('./domain.js').SyncPolicy } }>('/v1/accounts/:accountId', async (request) => ({ data: await options.service.updateAccount(request.params.accountId, request.body) }))
   app.post<{ Params: { accountId: string }; Body: { phoneE164?: string } }>('/v1/accounts/:accountId/pairing-code', async (request) => ({ data: await options.service.requestPairingCode(request.params.accountId, request.body?.phoneE164) }))
+  app.post<{ Params: { accountId: string }; Body: { phoneE164?: string } }>('/v1/accounts/:accountId/reauthentication-code', async (request) => ({ data: await options.service.requestReauthenticationCode(request.params.accountId, request.body?.phoneE164) }))
   app.post<{ Params: { accountId: string } }>('/v1/accounts/:accountId/pairing-cancel', async (request) => ({ data: await options.service.cancelPairing(request.params.accountId) }))
+  app.post<{ Params: { accountId: string }; Body: { syncPolicy?: import('./domain.js').SyncPolicy } }>('/v1/accounts/:accountId/metadata-sync', async (request) => ({ data: await options.service.syncAccountMetadata(request.params.accountId, request.body ?? {}) }))
   app.post<{ Params: { accountId: string } }>('/v1/accounts/:accountId/connect', async (request) => ({ data: await options.service.connect(request.params.accountId) }))
   app.post<{ Params: { accountId: string } }>('/v1/accounts/:accountId/disconnect', async (request) => ({
     data: await options.service.disconnect(request.params.accountId),
@@ -66,8 +69,8 @@ export function buildServer(options: ServerOptions) {
     const result = await options.service.exportSession(_request.params.accountId)
     return { ...result, data: result }
   })
-  app.post<{ Params: { accountId: string }; Body: { messageId: string; toE164: string; text: string } }>('/v1/accounts/:accountId/messages', async (request, reply) => {
-    const data = await options.service.sendText(request.params.accountId, request.body)
+  app.post<{ Params: { accountId: string }; Body: SendMessageRequest }>('/v1/accounts/:accountId/messages', async (request, reply) => {
+    const data = await options.service.sendMessage(request.params.accountId, request.body)
     return reply.status(202).send({ data })
   })
   app.get<{ Params: { messageId: string } }>('/v1/messages/:messageId', async (request) => ({ data: await options.service.getMessage(request.params.messageId) }))

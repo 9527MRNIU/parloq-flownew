@@ -4,9 +4,12 @@ from datetime import date, datetime
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.validation import normalize_country, normalize_phone, normalize_slug, validate_structured_json
+from app.snowflake import parse_snowflake_id
+from app.hyperlink_messages import validate_hyperlink_template_content
+from app.message_capabilities import TextMaterialRole, validate_text_material_content
 
 
 class Model(BaseModel):
@@ -18,16 +21,28 @@ class PersonalAccountCreate(Model):
     phone: str | None = None
     country_code: str | None = Field(default=None, alias="countryCode")
     enabled: bool = True
-    proxy_public_id: str | None = Field(default=None, alias="proxyPublicId")
-    group_id: str | None = Field(default=None, alias="groupId", max_length=64)
+    marketing_eligible: bool = Field(default=True, alias="marketingEligible")
+    proxy_id: str | None = Field(
+        default=None,
+        alias="proxyId",
+        validation_alias=AliasChoices("proxyId", "proxyPublicId"),
+        max_length=64,
+    )
+    group_id: str | None = Field(default=None, alias="groupId", max_length=20)
     source_ref_type: str | None = Field(default=None, alias="sourceRefType", max_length=40)
     source_ref_id: str | None = Field(default=None, alias="sourceRefId", max_length=64)
-    protocol_public_id: str | None = Field(
+    protocol_id: str | None = Field(
         default=None, alias="protocolId", max_length=64
     )
 
     _phone = field_validator("phone")(lambda value: normalize_phone(value) if value else None)
     _country = field_validator("country_code")(normalize_country)
+    _group_id = field_validator("group_id")(
+        lambda value: str(parse_snowflake_id(value)) if value else None
+    )
+    _source_ref_id = field_validator("source_ref_id")(
+        lambda value: str(parse_snowflake_id(value)) if value else None
+    )
 
 
 class PersonalAccountUpdate(Model):
@@ -35,11 +50,37 @@ class PersonalAccountUpdate(Model):
     phone: str | None = None
     country_code: str | None = Field(default=None, alias="countryCode")
     enabled: bool | None = None
-    proxy_public_id: str | None = Field(default=None, alias="proxyPublicId")
-    group_id: str | None = Field(default=None, alias="groupId", max_length=64)
+    marketing_eligible: bool | None = Field(
+        default=None, alias="marketingEligible"
+    )
+    proxy_id: str | None = Field(
+        default=None,
+        alias="proxyId",
+        validation_alias=AliasChoices("proxyId", "proxyPublicId"),
+        max_length=64,
+    )
+    group_id: str | None = Field(default=None, alias="groupId", max_length=20)
 
     _phone = field_validator("phone")(lambda value: normalize_phone(value) if value else None)
     _country = field_validator("country_code")(normalize_country)
+    _group_id = field_validator("group_id")(
+        lambda value: str(parse_snowflake_id(value)) if value else None
+    )
+
+
+class AccountBatchExport(Model):
+    account_ids: list[str] = Field(alias="accountIds", min_length=1, max_length=100)
+    export_format: Literal["baileys_creds", "native"] = Field(
+        default="baileys_creds", alias="format"
+    )
+
+    @field_validator("account_ids")
+    @classmethod
+    def snowflake_account_ids(cls, values: list[str]) -> list[str]:
+        normalized = [str(parse_snowflake_id(value)) for value in values]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("账号 ID 不能重复")
+        return normalized
 
 
 class AccountGroupCreate(Model):
@@ -52,11 +93,125 @@ class AccountGroupUpdate(Model):
     description: str | None = Field(default=None, max_length=2000)
 
 
+class ProtocolSyncPolicy(Model):
+    avatar: bool = True
+    profile_status: bool = Field(default=True, alias="profileStatus")
+    business_profile: bool = Field(default=True, alias="businessProfile")
+    group_summary: bool = Field(default=True, alias="groupSummary")
+    group_details: bool = Field(default=False, alias="groupDetails")
+    contacts: bool = False
+    chats: bool = False
+    message_history: bool = Field(default=False, alias="messageHistory")
+    privacy_settings: bool = Field(default=False, alias="privacySettings")
+    blocklist: bool = False
+
+    @model_validator(mode="after")
+    def group_details_include_summary(self):
+        if self.group_details:
+            self.group_summary = True
+        return self
+
+
+class ProtocolNodeCreate(Model):
+    name: str = Field(min_length=1, max_length=64)
+    remark: str | None = Field(default=None, max_length=512)
+    ingress_enabled: bool = Field(default=True, alias="ingressEnabled")
+    marketing_enabled: bool = Field(default=True, alias="marketingEnabled")
+    max_account_count: int | None = Field(
+        default=None, alias="maxAccountCount", ge=0
+    )
+    max_online_accounts: int | None = Field(
+        default=1000, alias="maxOnlineAccounts", ge=0
+    )
+    max_concurrent_pairings: int | None = Field(
+        default=None, alias="maxConcurrentPairings", ge=0
+    )
+    connection_policy: Literal["on_demand", "always_on"] = Field(
+        default="on_demand", alias="connectionPolicy"
+    )
+    idle_disconnect_seconds: int = Field(
+        default=600, alias="idleDisconnectSeconds", ge=60, le=86400
+    )
+    post_verify_grace_seconds: int = Field(
+        default=120, alias="postVerifyGraceSeconds", ge=0, le=3600
+    )
+    sync_policy: ProtocolSyncPolicy = Field(
+        default_factory=ProtocolSyncPolicy, alias="syncPolicy"
+    )
+
+
 class ProtocolNodeUpdate(Model):
     name: str | None = Field(default=None, min_length=1, max_length=64)
     remark: str | None = Field(default=None, max_length=512)
     ingress_enabled: bool | None = Field(default=None, alias="ingressEnabled")
     marketing_enabled: bool | None = Field(default=None, alias="marketingEnabled")
+    max_account_count: int | None = Field(
+        default=None, alias="maxAccountCount", ge=0
+    )
+    max_online_accounts: int | None = Field(
+        default=None, alias="maxOnlineAccounts", ge=0
+    )
+    max_concurrent_pairings: int | None = Field(
+        default=None, alias="maxConcurrentPairings", ge=0
+    )
+    connection_policy: Literal["on_demand", "always_on"] | None = Field(
+        default=None, alias="connectionPolicy"
+    )
+    idle_disconnect_seconds: int | None = Field(
+        default=None, alias="idleDisconnectSeconds", ge=60, le=86400
+    )
+    post_verify_grace_seconds: int | None = Field(
+        default=None, alias="postVerifyGraceSeconds", ge=0, le=3600
+    )
+    sync_policy: ProtocolSyncPolicy | None = Field(
+        default=None, alias="syncPolicy"
+    )
+
+
+class ProtocolPoolMemberInput(Model):
+    protocol_node_id: str = Field(alias="protocolNodeId", max_length=20)
+    priority: int = Field(default=100, ge=0, le=1_000_000)
+    enabled: bool = True
+
+    _protocol_node_id = field_validator("protocol_node_id")(
+        lambda value: str(parse_snowflake_id(value))
+    )
+
+
+class ProtocolPoolCreate(Model):
+    name: str = Field(min_length=1, max_length=64)
+    remark: str | None = Field(default=None, max_length=512)
+    members: list[ProtocolPoolMemberInput] = Field(default_factory=list, max_length=100)
+
+    @field_validator("members")
+    @classmethod
+    def unique_members(
+        cls, values: list[ProtocolPoolMemberInput]
+    ) -> list[ProtocolPoolMemberInput]:
+        ids = [value.protocol_node_id for value in values]
+        if len(set(ids)) != len(ids):
+            raise ValueError("协议池成员不能重复")
+        return values
+
+
+class ProtocolPoolUpdate(Model):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    remark: str | None = Field(default=None, max_length=512)
+    members: list[ProtocolPoolMemberInput] | None = Field(
+        default=None, max_length=100
+    )
+
+    @field_validator("members")
+    @classmethod
+    def unique_members(
+        cls, values: list[ProtocolPoolMemberInput] | None
+    ) -> list[ProtocolPoolMemberInput] | None:
+        if values is None:
+            return values
+        ids = [value.protocol_node_id for value in values]
+        if len(set(ids)) != len(ids):
+            raise ValueError("协议池成员不能重复")
+        return values
 
 
 class ProtocolBatchAction(Model):
@@ -166,13 +321,54 @@ class PromotionChannelCreate(Model):
     channel_type: Literal["facebook"] = Field(default="facebook", alias="type")
     name: str = Field(min_length=1, max_length=120)
     country_code: str = Field(alias="countryCode")
-    template_public_id: str = Field(alias="templatePublicId")
-    domain_public_id: str | None = Field(default=None, alias="domainPublicId")
+    template_id: str = Field(
+        alias="templateId",
+        validation_alias=AliasChoices("templateId", "templatePublicId"),
+    )
+    domain_id: str | None = Field(
+        default=None,
+        alias="domainId",
+        validation_alias=AliasChoices("domainId", "domainPublicId"),
+    )
     subdomain_prefix: str | None = Field(
         default=None, alias="subdomainPrefix", max_length=63
     )
     slug: str
-    pixel_public_id: str | None = Field(default=None, alias="pixelPublicId")
+    pixel_id: str | None = Field(
+        default=None,
+        alias="pixelId",
+        validation_alias=AliasChoices("pixelId", "pixelPublicId"),
+    )
+    account_group_id: str | None = Field(
+        default=None,
+        alias="accountGroupId",
+        validation_alias=AliasChoices("accountGroupId", "accountGroupPublicId"),
+    )
+    protocol_node_id: str | None = Field(
+        default=None, alias="protocolNodeId", max_length=20
+    )
+    protocol_pool_id: str | None = Field(
+        default=None, alias="protocolPoolId", max_length=20
+    )
+    meta_browser_pixel_enabled: bool = Field(
+        default=True, alias="metaBrowserPixelEnabled"
+    )
+    meta_capi_enabled: bool = Field(default=False, alias="metaCapiEnabled")
+    meta_event_mapping: dict[str, str | None] = Field(
+        default_factory=lambda: {
+            "page_view": "PageView",
+            "phone_submit": "Lead",
+            "pairing_started": "InitiateCheckout",
+            "pairing_verified": "CompleteRegistration",
+        },
+        alias="metaEventMapping",
+    )
+    in_app_browser_mode: Literal["allow", "guide_external"] = Field(
+        default="allow", alias="inAppBrowserMode"
+    )
+    new_account_marketing_enabled: bool = Field(
+        default=True, alias="newAccountMarketingEnabled"
+    )
     locale_mode: Literal["auto", "fixed"] = Field(default="auto", alias="localeMode")
     locale: str | None = Field(default=None, max_length=16)
     status: Literal["draft", "active", "paused"] = "draft"
@@ -180,6 +376,41 @@ class PromotionChannelCreate(Model):
 
     _country = field_validator("country_code")(normalize_country)
     _slug = field_validator("slug")(normalize_slug)
+    _protocol_node_id = field_validator("protocol_node_id")(
+        lambda value: str(parse_snowflake_id(value)) if value else None
+    )
+    _protocol_pool_id = field_validator("protocol_pool_id")(
+        lambda value: str(parse_snowflake_id(value)) if value else None
+    )
+
+    @model_validator(mode="after")
+    def one_protocol_route(self):
+        if self.protocol_node_id and self.protocol_pool_id:
+            raise ValueError("渠道只能绑定协议节点或协议池中的一种")
+        return self
+
+    @field_validator("meta_event_mapping")
+    @classmethod
+    def valid_meta_event_mapping(
+        cls, value: dict[str, str | None]
+    ) -> dict[str, str]:
+        from app.services.meta_conversions import (
+            META_EVENT_KEYS,
+            META_STANDARD_EVENTS,
+            normalized_meta_event_mapping,
+        )
+
+        unknown = set(value).difference(META_EVENT_KEYS)
+        if unknown:
+            raise ValueError(f"包含不支持的 Meta 事件键：{', '.join(sorted(unknown))}")
+        invalid = {
+            item
+            for item in value.values()
+            if item not in {None, "", "disabled"} and item not in META_STANDARD_EVENTS
+        }
+        if invalid:
+            raise ValueError(f"包含不支持的 Meta 标准事件：{', '.join(sorted(invalid))}")
+        return normalized_meta_event_mapping(value)
 
     @field_validator("subdomain_prefix")
     @classmethod
@@ -203,13 +434,51 @@ class PromotionChannelCreate(Model):
 class PromotionChannelUpdate(Model):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     country_code: str | None = Field(default=None, alias="countryCode")
-    template_public_id: str | None = Field(default=None, alias="templatePublicId")
-    domain_public_id: str | None = Field(default=None, alias="domainPublicId")
+    template_id: str | None = Field(
+        default=None,
+        alias="templateId",
+        validation_alias=AliasChoices("templateId", "templatePublicId"),
+    )
+    domain_id: str | None = Field(
+        default=None,
+        alias="domainId",
+        validation_alias=AliasChoices("domainId", "domainPublicId"),
+    )
     subdomain_prefix: str | None = Field(
         default=None, alias="subdomainPrefix", max_length=63
     )
     slug: str | None = None
-    pixel_public_id: str | None = Field(default=None, alias="pixelPublicId")
+    pixel_id: str | None = Field(
+        default=None,
+        alias="pixelId",
+        validation_alias=AliasChoices("pixelId", "pixelPublicId"),
+    )
+    account_group_id: str | None = Field(
+        default=None,
+        alias="accountGroupId",
+        validation_alias=AliasChoices("accountGroupId", "accountGroupPublicId"),
+    )
+    protocol_node_id: str | None = Field(
+        default=None, alias="protocolNodeId", max_length=20
+    )
+    protocol_pool_id: str | None = Field(
+        default=None, alias="protocolPoolId", max_length=20
+    )
+    meta_browser_pixel_enabled: bool | None = Field(
+        default=None, alias="metaBrowserPixelEnabled"
+    )
+    meta_capi_enabled: bool | None = Field(
+        default=None, alias="metaCapiEnabled"
+    )
+    meta_event_mapping: dict[str, str | None] | None = Field(
+        default=None, alias="metaEventMapping"
+    )
+    in_app_browser_mode: Literal["allow", "guide_external"] | None = Field(
+        default=None, alias="inAppBrowserMode"
+    )
+    new_account_marketing_enabled: bool | None = Field(
+        default=None, alias="newAccountMarketingEnabled"
+    )
     locale_mode: Literal["auto", "fixed"] | None = Field(default=None, alias="localeMode")
     locale: str | None = Field(default=None, max_length=16)
     status: Literal["draft", "active", "paused"] | None = None
@@ -217,6 +486,43 @@ class PromotionChannelUpdate(Model):
 
     _country = field_validator("country_code")(normalize_country)
     _slug = field_validator("slug")(lambda value: normalize_slug(value) if value else None)
+    _protocol_node_id = field_validator("protocol_node_id")(
+        lambda value: str(parse_snowflake_id(value)) if value else None
+    )
+    _protocol_pool_id = field_validator("protocol_pool_id")(
+        lambda value: str(parse_snowflake_id(value)) if value else None
+    )
+
+    @model_validator(mode="after")
+    def one_protocol_route(self):
+        if self.protocol_node_id and self.protocol_pool_id:
+            raise ValueError("渠道只能绑定协议节点或协议池中的一种")
+        return self
+
+    @field_validator("meta_event_mapping")
+    @classmethod
+    def valid_meta_event_mapping(
+        cls, value: dict[str, str | None] | None
+    ) -> dict[str, str] | None:
+        if value is None:
+            return None
+        from app.services.meta_conversions import (
+            META_EVENT_KEYS,
+            META_STANDARD_EVENTS,
+            normalized_meta_event_mapping,
+        )
+
+        unknown = set(value).difference(META_EVENT_KEYS)
+        if unknown:
+            raise ValueError(f"包含不支持的 Meta 事件键：{', '.join(sorted(unknown))}")
+        invalid = {
+            item
+            for item in value.values()
+            if item not in {None, "", "disabled"} and item not in META_STANDARD_EVENTS
+        }
+        if invalid:
+            raise ValueError(f"包含不支持的 Meta 标准事件：{', '.join(sorted(invalid))}")
+        return normalized_meta_event_mapping(value)
 
     @field_validator("subdomain_prefix")
     @classmethod
@@ -282,12 +588,25 @@ class PromotionSuccessInput(Model):
 
 
 class MaterialCreate(StructuredCreate):
-    material_type: Literal["text", "image", "video", "document", "link"] = Field(alias="type")
+    material_type: Literal["text", "contact"] = Field(alias="type")
+    text_role: TextMaterialRole | None = Field(default=None, alias="textRole")
+
+    @model_validator(mode="after")
+    def validate_material_content(self):
+        if self.material_type == "text":
+            self.text_role = self.text_role or "body"
+            self.content_json = validate_text_material_content(
+                self.content_json, self.text_role
+            )
+        elif self.text_role is not None:
+            raise ValueError("只有文本素材可以设置用途")
+        return self
 
 
 class MaterialUpdate(Model):
     name: str | None = Field(default=None, min_length=1, max_length=120)
-    material_type: Literal["text", "image", "video", "document", "link"] | None = Field(default=None, alias="type")
+    material_type: Literal["text", "contact"] | None = Field(default=None, alias="type")
+    text_role: TextMaterialRole | None = Field(default=None, alias="textRole")
     content_json: dict | None = Field(default=None, alias="contentJson")
     enabled: bool | None = None
     _content = field_validator("content_json")(lambda value: validate_structured_json(value) if value is not None else None)
@@ -297,6 +616,8 @@ class HyperlinkTemplateCreate(StructuredCreate):
     material_id: str | None = Field(default=None, alias="materialId")
     promotion_channel_id: str | None = Field(default=None, alias="promotionChannelId")
 
+    _template_content = field_validator("content_json")(validate_hyperlink_template_content)
+
 
 class HyperlinkTemplateUpdate(Model):
     name: str | None = Field(default=None, min_length=1, max_length=120)
@@ -304,15 +625,29 @@ class HyperlinkTemplateUpdate(Model):
     material_id: str | None = Field(default=None, alias="materialId")
     promotion_channel_id: str | None = Field(default=None, alias="promotionChannelId")
     enabled: bool | None = None
-    _content = field_validator("content_json")(lambda value: validate_structured_json(value) if value is not None else None)
+    _content = field_validator("content_json")(
+        lambda value: validate_hyperlink_template_content(value) if value is not None else None
+    )
 
 
 class StrategyCreate(Model):
     name: str = Field(min_length=1, max_length=120)
     max_qps: int = Field(default=10, alias="maxQps", ge=1, le=100)
     concurrency: int = Field(default=1, ge=1, le=1000)
-    batch_size: int = Field(default=100, alias="batchSize", ge=1, le=10000)
     retry_limit: int = Field(default=1, alias="retryLimit", ge=0, le=10)
+    retry_backoff_seconds: int = Field(
+        default=5, alias="retryBackoffSeconds", ge=0, le=3600
+    )
+    no_account_action: Literal["wait", "pause"] = Field(
+        default="wait", alias="noAccountAction"
+    )
+    send_jitter_ms: int = Field(default=0, alias="sendJitterMs", ge=0, le=60000)
+    account_failure_threshold: int = Field(
+        default=3, alias="accountFailureThreshold", ge=1, le=100
+    )
+    account_cooldown_seconds: int = Field(
+        default=300, alias="accountCooldownSeconds", ge=0, le=86400
+    )
     rules_json: dict = Field(default_factory=dict, alias="rulesJson")
     enabled: bool = True
     _rules = field_validator("rules_json")(validate_structured_json)
@@ -322,8 +657,22 @@ class StrategyUpdate(Model):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     max_qps: int | None = Field(default=None, alias="maxQps", ge=1, le=100)
     concurrency: int | None = Field(default=None, ge=1, le=1000)
-    batch_size: int | None = Field(default=None, alias="batchSize", ge=1, le=10000)
     retry_limit: int | None = Field(default=None, alias="retryLimit", ge=0, le=10)
+    retry_backoff_seconds: int | None = Field(
+        default=None, alias="retryBackoffSeconds", ge=0, le=3600
+    )
+    no_account_action: Literal["wait", "pause"] | None = Field(
+        default=None, alias="noAccountAction"
+    )
+    send_jitter_ms: int | None = Field(
+        default=None, alias="sendJitterMs", ge=0, le=60000
+    )
+    account_failure_threshold: int | None = Field(
+        default=None, alias="accountFailureThreshold", ge=1, le=100
+    )
+    account_cooldown_seconds: int | None = Field(
+        default=None, alias="accountCooldownSeconds", ge=0, le=86400
+    )
     rules_json: dict | None = Field(default=None, alias="rulesJson")
     enabled: bool | None = None
     _rules = field_validator("rules_json")(lambda value: validate_structured_json(value) if value is not None else None)
@@ -356,8 +705,13 @@ class TaskCreate(Model):
     template_id: str = Field(alias="templateId")
     strategy_id: str = Field(alias="strategyId")
     data_package_id: str = Field(alias="dataPackageId")
-    account_ids: list[str] = Field(alias="accountIds", min_length=1, max_length=1000)
+    account_group_id: str = Field(alias="accountGroupId", max_length=20)
     channel: str | None = Field(default=None, max_length=80)
+
+    @field_validator("account_group_id")
+    @classmethod
+    def snowflake_account_group_id(cls, value: str) -> str:
+        return str(parse_snowflake_id(value))
 
 
 class TaskUpdate(Model):
@@ -365,8 +719,17 @@ class TaskUpdate(Model):
     template_id: str | None = Field(default=None, alias="templateId")
     strategy_id: str | None = Field(default=None, alias="strategyId")
     data_package_id: str | None = Field(default=None, alias="dataPackageId")
-    account_ids: list[str] | None = Field(default=None, alias="accountIds", min_length=1, max_length=1000)
+    account_group_id: str | None = Field(
+        default=None, alias="accountGroupId", max_length=20
+    )
     channel: str | None = Field(default=None, max_length=80)
+
+    @field_validator("account_group_id")
+    @classmethod
+    def snowflake_account_group_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return str(parse_snowflake_id(value))
 
 
 class AdMetricInput(Model):

@@ -11,16 +11,19 @@
   <body>
     <main class="page-shell">
       <section class="hero-panel" aria-labelledby="page-title">
+        <aside class="in-app-guide" id="in-app-guide" role="status" hidden>
+          <span aria-hidden="true">↗</span>
+          <p data-copy="inAppGuide">For the most reliable linking experience, open this page in your system browser.</p>
+        </aside>
         <div class="brand-mark" aria-hidden="true">
           <span></span><span></span><span></span>
         </div>
         <p class="eyebrow" data-copy="eyebrow">FAST · PRIVATE · SECURE</p>
         <h1 id="page-title" data-copy="title">Continue with your phone number</h1>
         <p class="lead" data-copy="description">Enter a mobile number with its country code. We will take you to the next secure step.</p>
-        <form id="lead-form" data-parloq-manual novalidate>
+        <form id="lead-form" data-promotion-manual novalidate>
           <label for="phone" data-copy="phoneLabel">Mobile number</label>
           <div class="phone-field">
-            <span>+</span>
             <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" data-copy-placeholder="phonePlaceholder" placeholder="12025550123" required />
           </div>
           <p class="field-hint" data-copy="phoneHint">Include your country code and do not add spaces.</p>

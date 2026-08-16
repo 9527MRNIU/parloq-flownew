@@ -1,24 +1,33 @@
 from __future__ import annotations
 
-from datetime import date
+from copy import deepcopy
+from datetime import date, timedelta
 
 from fastapi import APIRouter, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.business_schemas import (
     DataPackageCreate, DataPackageUpdate, HyperlinkTemplateCreate,
-    HyperlinkTemplateUpdate, MaterialCreate, MaterialUpdate,
+    HyperlinkTemplateUpdate,
     RecipientsImport, StrategyCreate, StrategyUpdate, TaskCreate, TaskUpdate,
 )
 from app.deps import CurrentUser, DbSession
-from app.snowflake import new_public_id
+from app.entity_ids import entity_id, identifier_filter
+from app.hyperlink_strategy import (
+    merge_strategy_rules,
+    normalize_strategy_rules,
+    strategy_policy,
+)
+from app.snowflake import new_public_id, parse_snowflake_id
 
 from app.models import (
-    DataPackage, DataPackageRecipient, HyperlinkMaterial,
-    HyperlinkStrategy, HyperlinkTask, HyperlinkTaskDelivery, HyperlinkTemplate,
+    AccountGroup, DataPackage, DataPackageRecipient, Material,
+    HyperlinkStrategy, HyperlinkTask, HyperlinkTaskAccountSlot,
+    HyperlinkTaskDelivery, HyperlinkTemplate,
     MessageDelivery, PersonalAccount, PromotionChannel,
 )
+from app.material_files import BINARY_MATERIAL_TYPES
 from app.security import utcnow
 from app.serializers import iso
 from app.task_queue import enqueue_hyperlink_task
@@ -27,59 +36,229 @@ from app.task_queue import enqueue_hyperlink_task
 router = APIRouter(prefix="/api/hyperlink", tags=["hyperlink"])
 
 
-def _one(db: DbSession, model: type, public_id: str, label: str, user):
-    statement = select(model).where(model.public_id == public_id, model.archived_at.is_(None))
+def _one(db: DbSession, model: type, identifier: str, label: str, user):
+    statement = select(model).where(
+        identifier_filter(model, identifier), model.archived_at.is_(None)
+    )
     if user.role != "admin": statement = statement.where(model.created_by == user.id)
     item = db.scalar(statement)
     if item is None: raise HTTPException(status_code=404, detail=f"{label}不存在")
     return item
 
 
-def _base(item) -> dict: return {"id": item.public_id, "publicId": item.public_id, "createdAt": iso(item.created_at), "updatedAt": iso(item.updated_at)}
-def material_row(x: HyperlinkMaterial) -> dict: return {**_base(x), "name": x.name, "type": x.material_type, "contentJson": x.content_json, "enabled": x.enabled}
-def strategy_row(x: HyperlinkStrategy) -> dict: return {**_base(x), "name": x.name, "maxQps": x.max_qps, "concurrency": x.concurrency, "batchSize": x.batch_size, "retryLimit": x.retry_limit, "rulesJson": x.rules_json, "enabled": x.enabled}
+def _base(item) -> dict: return {"id": entity_id(item), "createdAt": iso(item.created_at), "updatedAt": iso(item.updated_at)}
+def strategy_row(x: HyperlinkStrategy) -> dict:
+    rules = normalize_strategy_rules(x.rules_json)
+    return {
+        **_base(x),
+        "name": x.name,
+        "maxQps": x.max_qps,
+        "concurrency": x.concurrency,
+        "retryLimit": x.retry_limit,
+        **rules,
+        "enabled": x.enabled,
+    }
 
 
 def template_row(db: DbSession, x: HyperlinkTemplate) -> dict:
-    material = db.get(HyperlinkMaterial, x.material_id) if x.material_id else None; channel = db.get(PromotionChannel, x.promotion_channel_id) if x.promotion_channel_id else None
-    return {**_base(x), "name": x.name, "contentJson": x.content_json, "materialId": material.public_id if material else None, "promotionChannelId": channel.public_id if channel else None, "enabled": x.enabled}
+    material = db.get(Material, x.material_id) if x.material_id else None; channel = db.get(PromotionChannel, x.promotion_channel_id) if x.promotion_channel_id else None
+    return {**_base(x), "name": x.name, "contentJson": x.content_json, "materialId": entity_id(material) if material else None, "promotionChannelId": entity_id(channel) if channel else None, "enabled": x.enabled}
 
 
 def package_row(db: DbSession, x: DataPackage) -> dict:
-    count = int(db.scalar(select(func.count()).select_from(DataPackageRecipient).where(DataPackageRecipient.data_package_id == x.id)) or 0)
-    return {**_base(x), "name": x.name, "status": x.status, "recipientCount": count}
+    count = int(db.scalar(select(func.count()).select_from(DataPackageRecipient).where(DataPackageRecipient.data_package_id == x.id, DataPackageRecipient.removed_revision.is_(None))) or 0)
+    task_count = int(db.scalar(select(func.count()).select_from(HyperlinkTask).where(HyperlinkTask.data_package_id == x.id, HyperlinkTask.archived_at.is_(None))) or 0)
+    return {**_base(x), "name": x.name, "status": x.status, "revision": x.revision, "sealedAt": iso(x.sealed_at), "recipientCount": count, "taskCount": task_count}
 
 
-def recipient_row(x: DataPackageRecipient) -> dict: return {**_base(x), "phone": x.phone_e164, "countryCode": x.country_code, "variables": x.variables_json}
+def recipient_row(x: DataPackageRecipient) -> dict: return {**_base(x), "phone": x.phone_e164, "countryCode": x.country_code, "variables": x.variables_json, "packageRevision": x.package_revision, "removedRevision": x.removed_revision, "validationStatus": x.validation_status, "lastError": x.last_error}
+
+
+def _freeze_task_template(db: DbSession, task: HyperlinkTask) -> None:
+    if task.template_snapshot_json:
+        return
+    template = db.get(HyperlinkTemplate, task.template_id)
+    if template is None:
+        raise HTTPException(status_code=409, detail="任务模板不存在")
+    material = db.get(Material, template.material_id) if template.material_id else None
+    task.template_name_snapshot = template.name
+    task.template_snapshot_json = {
+        "templateId": entity_id(template),
+        "name": template.name,
+        "contentJson": deepcopy(template.content_json or {}),
+        "material": (
+            {
+                "id": entity_id(material),
+                "name": material.name,
+                "type": material.material_type,
+                "fileName": material.file_name,
+                "contentType": material.content_type,
+                "fileSize": material.file_size,
+                "sha256": material.file_sha256,
+            }
+            if material is not None
+            else None
+        ),
+    }
 
 
 def _sync_task_counts(db: DbSession, task: HyperlinkTask) -> None:
-    effective_status = func.coalesce(MessageDelivery.status, HyperlinkTaskDelivery.status)
-    counts = {
-        str(delivery_status): int(count)
-        for delivery_status, count in db.execute(
-            select(effective_status, func.count(HyperlinkTaskDelivery.id))
-            .outerjoin(
+    submission_counts = {
+        str(submission_status): int(count)
+        for submission_status, count in db.execute(
+            select(
+                HyperlinkTaskDelivery.submission_status,
+                func.count(HyperlinkTaskDelivery.id),
+            )
+            .where(HyperlinkTaskDelivery.task_id == task.id)
+            .group_by(HyperlinkTaskDelivery.submission_status)
+        ).all()
+    }
+    message_counts = {
+        str(message_status): int(count)
+        for message_status, count in db.execute(
+            select(MessageDelivery.status, func.count(HyperlinkTaskDelivery.id))
+            .join(
                 MessageDelivery,
                 MessageDelivery.id == HyperlinkTaskDelivery.message_delivery_id,
             )
-            .where(HyperlinkTaskDelivery.task_id == task.id)
-            .group_by(effective_status)
+            .where(
+                HyperlinkTaskDelivery.task_id == task.id,
+                HyperlinkTaskDelivery.submission_status == "accepted",
+            )
+            .group_by(MessageDelivery.status)
         ).all()
     }
-    task.total_count = sum(counts.values())
-    task.queued_count = sum(counts.get(name, 0) for name in ("queued", "sending", "retry"))
-    task.sent_count = counts.get("sent", 0)
-    task.delivered_count = counts.get("delivered", 0)
-    task.failed_count = counts.get("failed", 0)
-    if task.status == "running" and task.total_count and task.queued_count == 0:
+    task.total_count = sum(submission_counts.values())
+    task.queued_count = sum(
+        submission_counts.get(name, 0)
+        for name in ("pending", "retry", "leased")
+    )
+    task.submitting_count = submission_counts.get("submitting", 0)
+    task.accepted_count = submission_counts.get("accepted", 0)
+    task.submission_failed_count = submission_counts.get("failed", 0)
+    task.reconciling_count = submission_counts.get("reconciling", 0)
+    task.cancelled_count = submission_counts.get("cancelled", 0)
+    task.skipped_count = submission_counts.get("skipped", 0)
+    task.sent_count = message_counts.get("sent", 0)
+    task.delivered_count = message_counts.get("delivered", 0)
+    task.failed_count = message_counts.get("failed", 0)
+    accepted_pending = message_counts.get("queued", 0)
+    if (
+        task.status in {"running", "waiting_accounts"}
+        and task.total_count
+        and task.queued_count == 0
+        and task.submitting_count == 0
+        and task.reconciling_count == 0
+        and accepted_pending == 0
+    ):
         task.status = "completed"
         task.completed_at = task.completed_at or utcnow()
+        now = utcnow()
+        for slot in db.scalars(
+            select(HyperlinkTaskAccountSlot).where(
+                HyperlinkTaskAccountSlot.task_id == task.id,
+                HyperlinkTaskAccountSlot.account_id.is_not(None),
+            )
+        ).all():
+            slot.status = "released"
+            slot.account_id = None
+            slot.lease_token = None
+            slot.lease_expires_at = None
+            slot.released_at = now
+            slot.last_switch_reason = "task_completed"
 
 
 def task_row(db: DbSession, x: HyperlinkTask) -> dict:
     _sync_task_counts(db, x); tpl = db.get(HyperlinkTemplate, x.template_id); strategy = db.get(HyperlinkStrategy, x.strategy_id); package = db.get(DataPackage, x.data_package_id)
-    return {**_base(x), "name": x.name, "templateId": tpl.public_id if tpl else None, "strategyId": strategy.public_id if strategy else None, "dataPackageId": package.public_id if package else None, "accountIds": x.account_public_ids, "channel": x.channel, "status": x.status, "totalCount": x.total_count, "queuedCount": x.queued_count, "sentCount": x.sent_count, "deliveredCount": x.delivered_count, "failedCount": x.failed_count, "startedAt": iso(x.started_at), "completedAt": iso(x.completed_at)}
+    account_group = db.get(AccountGroup, x.account_group_id) if x.account_group_id else None
+    snapshot = x.template_snapshot_json if isinstance(x.template_snapshot_json, dict) else None
+    template_name = x.template_name_snapshot or (tpl.name if tpl else "")
+    template_content = (
+        snapshot.get("contentJson")
+        if snapshot and isinstance(snapshot.get("contentJson"), dict)
+        else (deepcopy(tpl.content_json or {}) if tpl else {})
+    )
+    slot_counts = {
+        str(slot_status): int(count)
+        for slot_status, count in db.execute(
+            select(
+                HyperlinkTaskAccountSlot.status,
+                func.count(HyperlinkTaskAccountSlot.id),
+            )
+            .where(HyperlinkTaskAccountSlot.task_id == x.id)
+            .group_by(HyperlinkTaskAccountSlot.status)
+        ).all()
+    }
+    active_slot_count = int(
+        db.scalar(
+            select(func.count())
+            .select_from(HyperlinkTaskAccountSlot)
+            .where(
+                HyperlinkTaskAccountSlot.task_id == x.id,
+                HyperlinkTaskAccountSlot.account_id.is_not(None),
+                HyperlinkTaskAccountSlot.status == "active",
+            )
+        )
+        or 0
+    )
+    row = {
+        **_base(x),
+        "name": x.name,
+        "templateId": entity_id(tpl) if tpl else None,
+        "templateName": template_name,
+        "templateContent": template_content,
+        "templateSnapshot": snapshot,
+        "strategyId": entity_id(strategy) if strategy else None,
+        "dataPackageId": entity_id(package) if package else None,
+        "dataPackageName": package.name if package else None,
+        "dataPackageRevision": x.data_package_revision,
+        "accountGroupId": entity_id(account_group) if account_group else None,
+        "accountGroupName": account_group.name if account_group else None,
+        "senderMode": x.sender_mode,
+        "channel": x.channel,
+        "status": x.status,
+        "totalCount": x.total_count,
+        "queuedCount": x.queued_count,
+        "submittingCount": x.submitting_count,
+        "acceptedCount": x.accepted_count,
+        "submissionFailedCount": x.submission_failed_count,
+        "reconcilingCount": x.reconciling_count,
+        "cancelledCount": x.cancelled_count,
+        "skippedCount": x.skipped_count,
+        "sentCount": x.sent_count,
+        "deliveredCount": x.delivered_count,
+        "failedCount": x.failed_count,
+        "submissionStats": {
+            "total": x.total_count,
+            "waiting": x.queued_count,
+            "submitting": x.submitting_count,
+            "accepted": x.accepted_count,
+            "failed": x.submission_failed_count,
+            "reconciling": x.reconciling_count,
+            "cancelled": x.cancelled_count,
+            "skipped": x.skipped_count,
+        },
+        "sendStats": {
+            "sent": x.sent_count + x.delivered_count,
+            "delivered": x.delivered_count,
+            "failed": x.failed_count,
+        },
+        "accountSlotStats": {
+            "total": sum(slot_counts.values()),
+            "active": active_slot_count,
+            "vacant": slot_counts.get("vacant", 0),
+            "replacing": slot_counts.get("replacing", 0),
+            "released": slot_counts.get("released", 0),
+        },
+        "startedAt": iso(x.started_at),
+        "pausedAt": iso(x.paused_at),
+        "cancelledAt": iso(x.cancelled_at),
+        "completedAt": iso(x.completed_at),
+    }
+    if x.sender_mode == "legacy_fixed":
+        row["accountIds"] = x.account_public_ids
+    return row
 
 
 def _list(db, model, user):
@@ -88,34 +267,37 @@ def _list(db, model, user):
     return db.scalars(statement.order_by(model.created_at.desc())).all()
 
 
-@router.get("/materials")
-def materials(db: DbSession, current_user: CurrentUser) -> dict:
-    rows=[material_row(x) for x in _list(db, HyperlinkMaterial, current_user)]; return {"data":{"rows":rows,"total":len(rows)}}
-@router.post("/materials", status_code=201)
-def create_material(p: MaterialCreate, db: DbSession, current_user: CurrentUser) -> dict:
-    x=HyperlinkMaterial(public_id=new_public_id("hmat"),name=p.name,material_type=p.material_type,content_json=p.content_json,enabled=p.enabled,created_by=current_user.id);db.add(x);db.commit();return {"data":{"material":material_row(x)}}
-@router.get("/materials/{pid}")
-def get_material(pid:str,db:DbSession,current_user:CurrentUser)->dict:return {"data":{"material":material_row(_one(db,HyperlinkMaterial,pid,"素材",current_user))}}
-@router.patch("/materials/{pid}")
-def update_material(pid:str,p:MaterialUpdate,db:DbSession,current_user:CurrentUser)->dict:
-    x=_one(db,HyperlinkMaterial,pid,"素材",current_user)
-    for field,attr in (("name","name"),("material_type","material_type"),("content_json","content_json"),("enabled","enabled")):
-        value=getattr(p,field); setattr(x,attr,value) if value is not None else None
-    db.commit();return {"data":{"material":material_row(x)}}
-@router.delete("/materials/{pid}")
-def delete_material(pid:str,db:DbSession,current_user:CurrentUser)->dict:
-    x=_one(db,HyperlinkMaterial,pid,"素材",current_user)
-    if db.scalar(select(func.count()).select_from(HyperlinkTemplate).where(HyperlinkTemplate.material_id==x.id,HyperlinkTemplate.archived_at.is_(None))):raise HTTPException(409,"素材仍被模板使用")
-    x.enabled=False;x.archived_at=utcnow();db.commit();return {"data":{"ok":True}}
-
-
 def _template_refs(db, user, material_id, promotion_id, current=None):
     mat=current.material_id if current else None; promo=current.promotion_channel_id if current else None
     if material_id is not None:
-        mat=_one(db,HyperlinkMaterial,material_id,"素材",user).id if material_id else None
+        mat=_one(db,Material,material_id,"素材",user).id if material_id else None
     if promotion_id is not None:
         promo=_one(db,PromotionChannel,promotion_id,"推广渠道",user).id if promotion_id else None
     return mat,promo
+
+
+def _ensure_template_media(
+    db: DbSession, content: dict, material_id: int | None
+) -> None:
+    header = content.get("header") if isinstance(content, dict) else None
+    header = header if isinstance(header, dict) else {}
+    header_type = str(header.get("type") or "none")
+    if header_type not in {"image", "video", "document"}:
+        return
+    material = db.get(Material, material_id) if material_id else None
+    if material is None or material.archived_at is not None:
+        raise HTTPException(status_code=422, detail="媒体页头需要选择已上传的关联素材")
+    if material.material_type != header_type:
+        raise HTTPException(status_code=422, detail="关联素材类型与模板页头类型不一致")
+    if (
+        material.material_type not in BINARY_MATERIAL_TYPES
+        or not material.file_sha256
+        or not material.file_size
+        or not material.content_type
+    ):
+        raise HTTPException(status_code=422, detail="关联素材尚未完成文件上传")
+    if not material.enabled:
+        raise HTTPException(status_code=422, detail="关联素材已停用")
 
 
 @router.get("/templates")
@@ -123,12 +305,22 @@ def templates(db:DbSession,current_user:CurrentUser)->dict:
     rows=[template_row(db,x) for x in _list(db,HyperlinkTemplate,current_user)];return {"data":{"rows":rows,"total":len(rows)}}
 @router.post("/templates",status_code=201)
 def create_template(p:HyperlinkTemplateCreate,db:DbSession,current_user:CurrentUser)->dict:
-    mat,promo=_template_refs(db,current_user,p.material_id,p.promotion_channel_id);x=HyperlinkTemplate(public_id=new_public_id("htpl"),name=p.name,content_json=p.content_json,material_id=mat,promotion_channel_id=promo,enabled=p.enabled,created_by=current_user.id);db.add(x);db.commit();return {"data":{"template":template_row(db,x)}}
+    mat,promo=_template_refs(db,current_user,p.material_id,p.promotion_channel_id)
+    _ensure_template_media(db,p.content_json,mat)
+    x=HyperlinkTemplate(public_id=new_public_id("htpl"),name=p.name,content_json=p.content_json,material_id=mat,promotion_channel_id=promo,enabled=p.enabled,created_by=current_user.id)
+    db.add(x);db.commit();return {"data":{"template":template_row(db,x)}}
 @router.get("/templates/{pid}")
 def get_template(pid:str,db:DbSession,current_user:CurrentUser)->dict:return {"data":{"template":template_row(db,_one(db,HyperlinkTemplate,pid,"模板",current_user))}}
 @router.patch("/templates/{pid}")
 def update_template(pid:str,p:HyperlinkTemplateUpdate,db:DbSession,current_user:CurrentUser)->dict:
-    x=_one(db,HyperlinkTemplate,pid,"模板",current_user);mat,promo=_template_refs(db,current_user,p.material_id if "material_id" in p.model_fields_set else None,p.promotion_channel_id if "promotion_channel_id" in p.model_fields_set else None,x)
+    x=_one(db,HyperlinkTemplate,pid,"模板",current_user)
+    mat=x.material_id
+    promo=x.promotion_channel_id
+    if "material_id" in p.model_fields_set:
+        mat=_one(db,Material,p.material_id,"素材",current_user).id if p.material_id else None
+    if "promotion_channel_id" in p.model_fields_set:
+        promo=_one(db,PromotionChannel,p.promotion_channel_id,"推广渠道",current_user).id if p.promotion_channel_id else None
+    _ensure_template_media(db,p.content_json if p.content_json is not None else x.content_json,mat)
     if p.name is not None:x.name=p.name
     if p.content_json is not None:x.content_json=p.content_json
     if "material_id" in p.model_fields_set:x.material_id=mat if p.material_id else None
@@ -147,14 +339,31 @@ def strategies(db:DbSession,current_user:CurrentUser)->dict:
     rows=[strategy_row(x) for x in _list(db,HyperlinkStrategy,current_user)];return {"data":{"rows":rows,"total":len(rows)}}
 @router.post("/strategies",status_code=201)
 def create_strategy(p:StrategyCreate,db:DbSession,current_user:CurrentUser)->dict:
-    x=HyperlinkStrategy(public_id=new_public_id("hstr"),name=p.name,max_qps=p.max_qps,concurrency=p.concurrency,batch_size=p.batch_size,retry_limit=p.retry_limit,rules_json=p.rules_json,enabled=p.enabled,created_by=current_user.id);db.add(x);db.commit();return {"data":{"strategy":strategy_row(x)}}
+    rules = merge_strategy_rules(
+        p.rules_json,
+        retry_backoff_seconds=p.retry_backoff_seconds if "retry_backoff_seconds" in p.model_fields_set else None,
+        no_account_action=p.no_account_action if "no_account_action" in p.model_fields_set else None,
+        send_jitter_ms=p.send_jitter_ms if "send_jitter_ms" in p.model_fields_set else None,
+        account_failure_threshold=p.account_failure_threshold if "account_failure_threshold" in p.model_fields_set else None,
+        account_cooldown_seconds=p.account_cooldown_seconds if "account_cooldown_seconds" in p.model_fields_set else None,
+    )
+    x=HyperlinkStrategy(public_id=new_public_id("hstr"),name=p.name,max_qps=p.max_qps,concurrency=p.concurrency,batch_size=2000,retry_limit=p.retry_limit,rules_json=rules,enabled=p.enabled,created_by=current_user.id);db.add(x);db.commit();return {"data":{"strategy":strategy_row(x)}}
 @router.get("/strategies/{pid}")
 def get_strategy(pid:str,db:DbSession,current_user:CurrentUser)->dict:return {"data":{"strategy":strategy_row(_one(db,HyperlinkStrategy,pid,"策略",current_user))}}
 @router.patch("/strategies/{pid}")
 def update_strategy(pid:str,p:StrategyUpdate,db:DbSession,current_user:CurrentUser)->dict:
     x=_one(db,HyperlinkStrategy,pid,"策略",current_user)
-    for f,a in (("name","name"),("max_qps","max_qps"),("concurrency","concurrency"),("batch_size","batch_size"),("retry_limit","retry_limit"),("rules_json","rules_json"),("enabled","enabled")):
+    for f,a in (("name","name"),("max_qps","max_qps"),("concurrency","concurrency"),("retry_limit","retry_limit"),("enabled","enabled")):
         v=getattr(p,f);setattr(x,a,v) if v is not None else None
+    rules_source = p.rules_json if "rules_json" in p.model_fields_set else x.rules_json
+    x.rules_json = merge_strategy_rules(
+        rules_source,
+        retry_backoff_seconds=p.retry_backoff_seconds if "retry_backoff_seconds" in p.model_fields_set else None,
+        no_account_action=p.no_account_action if "no_account_action" in p.model_fields_set else None,
+        send_jitter_ms=p.send_jitter_ms if "send_jitter_ms" in p.model_fields_set else None,
+        account_failure_threshold=p.account_failure_threshold if "account_failure_threshold" in p.model_fields_set else None,
+        account_cooldown_seconds=p.account_cooldown_seconds if "account_cooldown_seconds" in p.model_fields_set else None,
+    )
     db.commit();return {"data":{"strategy":strategy_row(x)}}
 @router.delete("/strategies/{pid}")
 def delete_strategy(pid:str,db:DbSession,current_user:CurrentUser)->dict:
@@ -163,12 +372,52 @@ def delete_strategy(pid:str,db:DbSession,current_user:CurrentUser)->dict:
     x.enabled=False;x.archived_at=utcnow();db.commit();return {"data":{"ok":True}}
 
 
-def _add_recipients(db, package, values):
-    existing=set(db.scalars(select(DataPackageRecipient.phone_e164).where(DataPackageRecipient.data_package_id==package.id)).all());created=0
-    for p in values:
-        if p.phone in existing:continue
-        db.add(DataPackageRecipient(public_id=new_public_id("hrcp"),data_package_id=package.id,phone_e164=p.phone,country_code=p.country_code,variables_json=p.variables));existing.add(p.phone);created+=1
-    db.commit();return created
+def _add_recipients(db, package, values, *, bump_revision: bool = True):
+    existing = {
+        recipient.phone_e164: recipient
+        for recipient in db.scalars(
+            select(DataPackageRecipient).where(
+                DataPackageRecipient.data_package_id == package.id
+            )
+        ).all()
+    }
+    requested = []
+    seen: set[str] = set()
+    for value in values:
+        if value.phone in seen:
+            continue
+        seen.add(value.phone)
+        current = existing.get(value.phone)
+        if current is None or current.removed_revision is not None:
+            requested.append((value, current))
+    if not requested:
+        return 0
+    target_revision = max(int(package.revision or 1), 1)
+    if bump_revision:
+        target_revision += 1
+        package.revision = target_revision
+    for value, current in requested:
+        if current is None:
+            db.add(
+                DataPackageRecipient(
+                    public_id=new_public_id("hrcp"),
+                    data_package_id=package.id,
+                    phone_e164=value.phone,
+                    country_code=value.country_code,
+                    variables_json=value.variables,
+                    package_revision=target_revision,
+                    removed_revision=None,
+                )
+            )
+        else:
+            current.country_code = value.country_code
+            current.variables_json = value.variables
+            current.package_revision = target_revision
+            current.removed_revision = None
+            current.validation_status = "valid"
+            current.last_error = None
+    db.commit()
+    return len(requested)
 
 
 @router.get("/data-packages")
@@ -176,7 +425,7 @@ def packages(db:DbSession,current_user:CurrentUser)->dict:
     rows=[package_row(db,x) for x in _list(db,DataPackage,current_user)];return {"data":{"rows":rows,"total":len(rows)}}
 @router.post("/data-packages",status_code=201)
 def create_package(p:DataPackageCreate,db:DbSession,current_user:CurrentUser)->dict:
-    x=DataPackage(public_id=new_public_id("hpkg"),name=p.name,status="ready",created_by=current_user.id);db.add(x);db.flush();_add_recipients(db,x,p.recipients);return {"data":{"dataPackage":package_row(db,x)}}
+    x=DataPackage(public_id=new_public_id("hpkg"),name=p.name,status="ready",revision=1,created_by=current_user.id);db.add(x);db.flush();_add_recipients(db,x,p.recipients,bump_revision=False);return {"data":{"dataPackage":package_row(db,x)}}
 @router.get("/data-packages/{pid}")
 def get_package(pid:str,db:DbSession,current_user:CurrentUser)->dict:return {"data":{"dataPackage":package_row(db,_one(db,DataPackage,pid,"数据包",current_user))}}
 @router.patch("/data-packages/{pid}")
@@ -189,29 +438,50 @@ def delete_package(pid:str,db:DbSession,current_user:CurrentUser)->dict:
     x.status="archived";x.archived_at=utcnow();db.commit();return {"data":{"ok":True}}
 @router.get("/data-packages/{pid}/recipients")
 def recipients(pid:str,db:DbSession,current_user:CurrentUser)->dict:
-    x=_one(db,DataPackage,pid,"数据包",current_user);rows=db.scalars(select(DataPackageRecipient).where(DataPackageRecipient.data_package_id==x.id).order_by(DataPackageRecipient.id)).all();return {"data":{"rows":[recipient_row(r) for r in rows],"total":len(rows)}}
+    x=_one(db,DataPackage,pid,"数据包",current_user);rows=db.scalars(select(DataPackageRecipient).where(DataPackageRecipient.data_package_id==x.id,DataPackageRecipient.removed_revision.is_(None)).order_by(DataPackageRecipient.id)).all();return {"data":{"rows":[recipient_row(r) for r in rows],"total":len(rows)}}
 @router.post("/data-packages/{pid}/recipients")
 def import_recipients(pid:str,p:RecipientsImport,db:DbSession,current_user:CurrentUser)->dict:
     x=_one(db,DataPackage,pid,"数据包",current_user);created=_add_recipients(db,x,p.recipients);return {"data":{"createdCount":created,"dataPackage":package_row(db,x)}}
 @router.delete("/data-packages/{pid}/recipients/{rid}")
 def delete_recipient(pid:str,rid:str,db:DbSession,current_user:CurrentUser)->dict:
-    x=_one(db,DataPackage,pid,"数据包",current_user);r=db.scalar(select(DataPackageRecipient).where(DataPackageRecipient.public_id==rid,DataPackageRecipient.data_package_id==x.id))
+    x=_one(db,DataPackage,pid,"数据包",current_user);r=db.scalar(select(DataPackageRecipient).where(identifier_filter(DataPackageRecipient,rid),DataPackageRecipient.data_package_id==x.id,DataPackageRecipient.removed_revision.is_(None)))
     if not r:raise HTTPException(404,"收件人不存在")
-    db.delete(r);db.commit();return {"data":{"ok":True}}
+    x.revision=max(int(x.revision or 1),1)+1;r.removed_revision=x.revision;db.commit();return {"data":{"ok":True,"dataPackage":package_row(db,x)}}
+
+
+def _task_group(db: DbSession, group_id: str, user) -> AccountGroup:
+    try:
+        database_id = parse_snowflake_id(group_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="账号分组不存在") from None
+    group = db.scalar(
+        select(AccountGroup).where(
+            AccountGroup.id == database_id,
+            AccountGroup.created_by == user.id,
+            AccountGroup.archived_at.is_(None),
+        )
+    )
+    if group is None:
+        raise HTTPException(status_code=404, detail="账号分组不存在")
+    return group
 
 
 def _task_refs(db,p,user,current=None):
     tpl=current.template_id if current else None;strategy=current.strategy_id if current else None;package=current.data_package_id if current else None
     if getattr(p,"template_id",None):tpl=_one(db,HyperlinkTemplate,p.template_id,"模板",user).id
-    if getattr(p,"strategy_id",None):strategy=_one(db,HyperlinkStrategy,p.strategy_id,"策略",user).id
+    if getattr(p,"strategy_id",None):
+        strategy_item=_one(db,HyperlinkStrategy,p.strategy_id,"策略",user)
+        if not strategy_item.enabled:raise HTTPException(409,"发送策略已停用")
+        strategy=strategy_item.id
     if getattr(p,"data_package_id",None):package=_one(db,DataPackage,p.data_package_id,"数据包",user).id
-    ids=getattr(p,"account_ids",None) or (current.account_public_ids if current else [])
-    from app.models import ProtocolNode
-    account_statement=select(PersonalAccount.public_id).join(ProtocolNode,ProtocolNode.id==PersonalAccount.protocol_id).where(PersonalAccount.public_id.in_(ids),PersonalAccount.archived_at.is_(None),ProtocolNode.marketing_enabled.is_(True),ProtocolNode.online_enabled.is_(True),ProtocolNode.archived_at.is_(None))
-    if user.role != "admin": account_statement=account_statement.where(PersonalAccount.created_by==user.id)
-    found=set(db.scalars(account_statement).all())
-    if set(ids)!=found:raise HTTPException(409,"部分账号不存在或所属协议未开启营销")
-    return tpl,strategy,package,ids
+    group_id = current.account_group_id if current else None
+    if "account_group_id" in p.model_fields_set:
+        if current is not None and current.sender_mode == "legacy_fixed":
+            raise HTTPException(409,"历史固定账号任务不支持变更账号分组")
+        if p.account_group_id is None:
+            raise HTTPException(422,"账号分组不能为空")
+        group_id = _task_group(db, p.account_group_id, user).id
+    return tpl,strategy,package,group_id
 
 
 @router.get("/tasks")
@@ -219,37 +489,162 @@ def tasks(db:DbSession,current_user:CurrentUser)->dict:
     items=_list(db,HyperlinkTask,current_user);rows=[task_row(db,x) for x in items];db.commit();return {"data":{"rows":rows,"total":len(rows)}}
 @router.post("/tasks",status_code=201)
 def create_task(p:TaskCreate,db:DbSession,current_user:CurrentUser)->dict:
-    tpl,s,pkg,ids=_task_refs(db,p,current_user);x=HyperlinkTask(public_id=new_public_id("htsk"),name=p.name,template_id=tpl,strategy_id=s,data_package_id=pkg,account_public_ids=ids,channel=p.channel,status="draft",created_by=current_user.id);db.add(x);db.commit();return {"data":{"task":task_row(db,x)}}
+    tpl,s,pkg,group_id=_task_refs(db,p,current_user);x=HyperlinkTask(public_id=new_public_id("htsk"),name=p.name,template_id=tpl,strategy_id=s,data_package_id=pkg,account_group_id=group_id,sender_mode="dynamic_group",account_public_ids=[],channel=p.channel,status="draft",created_by=current_user.id);db.add(x);db.commit();return {"data":{"task":task_row(db,x)}}
 @router.get("/tasks/{pid}")
 def get_task(pid:str,db:DbSession,current_user:CurrentUser)->dict:
     x=_one(db,HyperlinkTask,pid,"任务",current_user);row=task_row(db,x);db.commit();return {"data":{"task":row}}
+@router.get("/tasks/{pid}/recipients")
+def task_recipients(
+    pid: str,
+    db: DbSession,
+    current_user: CurrentUser,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, alias="pageSize", ge=1, le=200),
+) -> dict:
+    task=_one(db,HyperlinkTask,pid,"任务",current_user)
+    total = int(
+        db.scalar(
+            select(func.count())
+            .select_from(HyperlinkTaskDelivery)
+            .where(HyperlinkTaskDelivery.task_id == task.id)
+        )
+        or 0
+    )
+    rows=db.execute(
+        select(
+            HyperlinkTaskDelivery,
+            DataPackageRecipient,
+            MessageDelivery,
+            PersonalAccount,
+        )
+        .join(
+            DataPackageRecipient,
+            DataPackageRecipient.id==HyperlinkTaskDelivery.recipient_id,
+        )
+        .outerjoin(
+            MessageDelivery,
+            MessageDelivery.id==HyperlinkTaskDelivery.message_delivery_id,
+        )
+        .outerjoin(
+            PersonalAccount,
+            PersonalAccount.id==HyperlinkTaskDelivery.account_id,
+        )
+        .where(HyperlinkTaskDelivery.task_id==task.id)
+        .order_by(HyperlinkTaskDelivery.id)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "data": {
+            "rows": [
+                {
+                    "id": entity_id(delivery),
+                    "recipientId": entity_id(recipient),
+                    "phone": recipient.phone_e164,
+                    "countryCode": recipient.country_code,
+                    "variables": recipient.variables_json,
+                    "validationStatus": recipient.validation_status,
+                    "executionStatus": delivery.submission_status,
+                    "messageStatus": message.status if message else None,
+                    "accountId": entity_id(account) if account else None,
+                    "attemptCount": delivery.attempt_count,
+                    "lastError": delivery.last_error,
+                    "leasedAt": iso(delivery.leased_at),
+                    "submittedAt": iso(delivery.submitted_at),
+                    "updatedAt": iso(delivery.updated_at),
+                }
+                for delivery,recipient,message,account in rows
+            ],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+    }
 @router.patch("/tasks/{pid}")
 def update_task(pid:str,p:TaskUpdate,db:DbSession,current_user:CurrentUser)->dict:
     x=_one(db,HyperlinkTask,pid,"任务",current_user)
     if x.status not in {"draft","paused"}:raise HTTPException(409,"当前任务状态不能修改")
-    tpl,s,pkg,ids=_task_refs(db,p,current_user,x)
+    has_deliveries = bool(db.scalar(select(func.count()).select_from(HyperlinkTaskDelivery).where(HyperlinkTaskDelivery.task_id == x.id)))
+    if has_deliveries and ({"template_id", "data_package_id"} & p.model_fields_set):
+        raise HTTPException(409,"已经开始过的任务不能更换模板或数据包")
+    tpl,s,pkg,group_id=_task_refs(db,p,current_user,x)
     if p.name is not None:x.name=p.name
-    x.template_id=tpl;x.strategy_id=s;x.data_package_id=pkg;x.account_public_ids=ids
+    x.template_id=tpl;x.strategy_id=s;x.data_package_id=pkg;x.account_group_id=group_id
     if "channel" in p.model_fields_set:x.channel=p.channel
     db.commit();return {"data":{"task":task_row(db,x)}}
 @router.delete("/tasks/{pid}")
 def delete_task(pid:str,db:DbSession,current_user:CurrentUser)->dict:
     x=_one(db,HyperlinkTask,pid,"任务",current_user)
-    if x.status=="running":raise HTTPException(409,"运行中的任务不能删除")
+    if x.status in {"running","waiting_accounts"}:raise HTTPException(409,"运行中的任务不能删除")
     x.archived_at=utcnow();db.commit();return {"data":{"ok":True}}
+
+
+def _dynamic_eligible_accounts(db: DbSession, task: HyperlinkTask) -> list[PersonalAccount]:
+    from app.models import ProtocolNode
+
+    if task.account_group_id is None:
+        return []
+    return list(
+        db.scalars(
+            select(PersonalAccount)
+            .join(ProtocolNode, ProtocolNode.id == PersonalAccount.protocol_id)
+            .where(
+                PersonalAccount.group_id == task.account_group_id,
+                PersonalAccount.created_by == task.created_by,
+                PersonalAccount.enabled.is_(True),
+                PersonalAccount.archived_at.is_(None),
+                PersonalAccount.admission_status == "active",
+                PersonalAccount.validation_status == "ready",
+                PersonalAccount.status.in_(("online_idle", "sending")),
+                or_(
+                    PersonalAccount.sending_cooldown_until.is_(None),
+                    PersonalAccount.sending_cooldown_until <= utcnow(),
+                ),
+                ProtocolNode.marketing_enabled.is_(True),
+                ProtocolNode.online_enabled.is_(True),
+                ProtocolNode.archived_at.is_(None),
+            )
+            .order_by(PersonalAccount.id)
+        ).all()
+    )
 
 
 @router.post("/tasks/{pid}/start", status_code=status.HTTP_202_ACCEPTED)
 def start_task(pid:str,db:DbSession,current_user:CurrentUser)->dict:
     task=_one(db,HyperlinkTask,pid,"任务",current_user)
     if task.status in {"cancelled","completed"}:raise HTTPException(409,"任务已经结束")
-    if task.status == "running":
+    if task.status in {"running", "waiting_accounts"}:
         return {"data":{"task":task_row(db,task),"alreadyRunning":True}}
+    strategy = db.get(HyperlinkStrategy, task.strategy_id)
+    if strategy is None or strategy.archived_at is not None:
+        raise HTTPException(409,"任务发送策略不存在")
+    if not strategy.enabled:
+        raise HTTPException(409,"任务发送策略已停用")
+    policy = strategy_policy(strategy)
     from app.models import ProtocolNode
-    accounts=db.scalars(select(PersonalAccount).join(ProtocolNode,ProtocolNode.id==PersonalAccount.protocol_id).where(PersonalAccount.public_id.in_(task.account_public_ids),PersonalAccount.status.in_(("online_idle","sending")),PersonalAccount.enabled.is_(True),ProtocolNode.marketing_enabled.is_(True),ProtocolNode.online_enabled.is_(True),ProtocolNode.archived_at.is_(None))).all()
-    if not accounts:raise HTTPException(409,"没有在线可发送的个人账号")
-    recipients=db.scalars(select(DataPackageRecipient).where(DataPackageRecipient.data_package_id==task.data_package_id).order_by(DataPackageRecipient.id)).all()
+    accounts: list[PersonalAccount] = []
+    if task.sender_mode == "legacy_fixed":
+        account_ids=[]
+        for value in task.account_public_ids:
+            try:account_ids.append(parse_snowflake_id(value))
+            except ValueError:pass
+        accounts=list(db.scalars(select(PersonalAccount).join(ProtocolNode,ProtocolNode.id==PersonalAccount.protocol_id).where(PersonalAccount.id.in_(account_ids),PersonalAccount.created_by==task.created_by,PersonalAccount.status.in_(("online_idle","sending")),PersonalAccount.enabled.is_(True),PersonalAccount.admission_status=="active",PersonalAccount.archived_at.is_(None),ProtocolNode.marketing_enabled.is_(True),ProtocolNode.online_enabled.is_(True),ProtocolNode.archived_at.is_(None))).all())
+        if not accounts:raise HTTPException(409,"没有在线可发送的个人账号")
+    else:
+        if task.account_group_id is None:
+            raise HTTPException(409,"任务没有配置账号分组")
+        group = db.scalar(select(AccountGroup.id).where(AccountGroup.id==task.account_group_id,AccountGroup.created_by==task.created_by,AccountGroup.archived_at.is_(None)))
+        if group is None:raise HTTPException(409,"任务账号分组不存在")
+        accounts=_dynamic_eligible_accounts(db,task)
+    package = db.get(DataPackage, task.data_package_id)
+    if package is None:
+        raise HTTPException(409,"任务数据包不存在")
+    if task.data_package_revision is None:
+        task.data_package_revision = max(int(package.revision or 1), 1)
+        package.sealed_at = package.sealed_at or utcnow()
+    recipients=db.scalars(select(DataPackageRecipient).where(DataPackageRecipient.data_package_id==task.data_package_id,DataPackageRecipient.package_revision<=task.data_package_revision,or_(DataPackageRecipient.removed_revision.is_(None),DataPackageRecipient.removed_revision>task.data_package_revision)).order_by(DataPackageRecipient.id)).all()
     if not recipients:raise HTTPException(409,"数据包没有收件人")
+    _freeze_task_template(db, task)
     existing = {
         recipient_id
         for recipient_id in db.scalars(
@@ -260,29 +655,74 @@ def start_task(pid:str,db:DbSession,current_user:CurrentUser)->dict:
     }
     for index,recipient in enumerate(recipients):
         if recipient.id in existing:continue
-        account=accounts[index%len(accounts)]
-        db.add(HyperlinkTaskDelivery(public_id=new_public_id("htd"),task_id=task.id,recipient_id=recipient.id,account_id=account.id,status="queued",attempt_count=0))
+        account_id=(accounts[index%len(accounts)].id if task.sender_mode=="legacy_fixed" else None)
+        valid = recipient.validation_status == "valid"
+        db.add(HyperlinkTaskDelivery(public_id=new_public_id("htd"),task_id=task.id,recipient_id=recipient.id,account_id=account_id,status="queued" if valid else "skipped",submission_status="pending" if valid else "skipped",attempt_count=0,last_error=None if valid else (recipient.last_error or "号码校验未通过")))
         if (index + 1) % 500 == 0:
             db.flush()
-    task.status="running";task.started_at=task.started_at or utcnow();task.completed_at=None
+    if task.sender_mode == "dynamic_group":
+        existing_slot_indexes = set(
+            db.scalars(
+                select(HyperlinkTaskAccountSlot.slot_index).where(
+                    HyperlinkTaskAccountSlot.task_id == task.id
+                )
+            ).all()
+        )
+        for slot_index in range(policy.concurrency):
+            if slot_index not in existing_slot_indexes:
+                db.add(
+                    HyperlinkTaskAccountSlot(
+                        task_id=task.id,
+                        slot_index=slot_index,
+                        status="vacant",
+                    )
+                )
+    task.status=(
+        "running"
+        if task.sender_mode=="legacy_fixed" or accounts
+        else ("waiting_accounts" if policy.no_account_action == "wait" else "paused")
+    );task.started_at=task.started_at or utcnow();task.paused_at=None;task.completed_at=None
     db.commit()
-    try:
-        enqueue_hyperlink_task(task.public_id)
-    except Exception as exc:
-        task.status = "paused"
-        db.commit()
-        raise HTTPException(status_code=503, detail="任务队列暂不可用") from exc
-    return {"data":{"task":task_row(db,task),"queued":True}}
+    if task.status == "running":
+        try:
+            enqueue_hyperlink_task(entity_id(task))
+        except Exception as exc:
+            task.status = "paused"
+            db.commit()
+            raise HTTPException(status_code=503, detail="任务队列暂不可用") from exc
+    return {"data":{"task":task_row(db,task),"queued":task.status=="running"}}
 @router.post("/tasks/{pid}/pause")
 def pause_task(pid:str,db:DbSession,current_user:CurrentUser)->dict:
     x=_one(db,HyperlinkTask,pid,"任务",current_user)
-    if x.status!="running":raise HTTPException(409,"仅运行中的任务可暂停")
-    x.status="paused";db.commit();return {"data":{"task":task_row(db,x)}}
+    if x.status not in {"running","waiting_accounts"}:raise HTTPException(409,"仅运行中的任务可暂停")
+    now=utcnow();x.status="paused";x.paused_at=now
+    # Rows that have only been leased are safe to return immediately. Rows
+    # already submitting remain reconciling until their gateway result arrives.
+    leased=list(db.scalars(select(HyperlinkTaskDelivery).where(HyperlinkTaskDelivery.task_id==x.id,HyperlinkTaskDelivery.submission_status=="leased")).all())
+    for delivery in leased:
+        delivery.submission_status="pending";delivery.slot_id=None;delivery.account_id=None;delivery.lease_token=None;delivery.leased_at=None;delivery.lease_expires_at=None
+    submitting=list(db.scalars(select(HyperlinkTaskDelivery).where(HyperlinkTaskDelivery.task_id==x.id,HyperlinkTaskDelivery.submission_status=="submitting")).all())
+    for delivery in submitting:
+        delivery.submission_status="reconciling";delivery.lease_token=None;delivery.lease_expires_at=None;delivery.last_error="任务暂停时消息已进入网关，等待状态核对"
+    slots=list(db.scalars(select(HyperlinkTaskAccountSlot).where(HyperlinkTaskAccountSlot.task_id==x.id)).all())
+    for slot in slots:
+        slot.status="released";slot.account_id=None;slot.lease_token=None;slot.lease_expires_at=None;slot.released_at=now;slot.last_switch_reason="task_paused"
+    db.commit();return {"data":{"task":task_row(db,x)}}
 @router.post("/tasks/{pid}/cancel")
 def cancel_task(pid:str,db:DbSession,current_user:CurrentUser)->dict:
     x=_one(db,HyperlinkTask,pid,"任务",current_user)
     if x.status in {"completed","cancelled"}:raise HTTPException(409,"任务已经结束")
-    x.status="cancelled";db.commit();return {"data":{"task":task_row(db,x)}}
+    now=utcnow();x.status="cancelled";x.cancelled_at=now
+    cancellable=list(db.scalars(select(HyperlinkTaskDelivery).where(HyperlinkTaskDelivery.task_id==x.id,HyperlinkTaskDelivery.submission_status.in_(("pending","retry","leased")))).all())
+    for delivery in cancellable:
+        delivery.submission_status="cancelled";delivery.status="cancelled";delivery.slot_id=None;delivery.account_id=None;delivery.lease_token=None;delivery.leased_at=None;delivery.lease_expires_at=None
+    submitting=list(db.scalars(select(HyperlinkTaskDelivery).where(HyperlinkTaskDelivery.task_id==x.id,HyperlinkTaskDelivery.submission_status=="submitting")).all())
+    for delivery in submitting:
+        delivery.submission_status="reconciling";delivery.lease_token=None;delivery.lease_expires_at=None;delivery.last_error="任务取消时消息已进入网关，等待状态核对"
+    slots=list(db.scalars(select(HyperlinkTaskAccountSlot).where(HyperlinkTaskAccountSlot.task_id==x.id)).all())
+    for slot in slots:
+        slot.status="released";slot.account_id=None;slot.lease_token=None;slot.lease_expires_at=None;slot.released_at=now;slot.last_switch_reason="task_cancelled"
+    db.commit();return {"data":{"task":task_row(db,x)}}
 
 
 def _rate(numerator: int, denominator: int) -> float:

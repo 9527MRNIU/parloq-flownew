@@ -30,8 +30,12 @@ def _request_token(request: Request) -> str | None:
 
 
 def _request_permission(method: str, path: str) -> tuple[str, bool] | None:
+    if path == "/api/personal-accounts/intake/attempts":
+        return "resources.account_intake.read", False
     if path == "/api/personal-accounts/import":
         return "resources.accounts.import", True
+    if path == "/api/personal-accounts/export/batch":
+        return "resources.accounts.export", True
     if path.startswith("/api/personal-accounts/") and path.endswith("/export"):
         return "resources.accounts.export", True
     rules = (
@@ -47,11 +51,12 @@ def _request_permission(method: str, path: str) -> tuple[str, bool] | None:
         ("/api/personal-accounts", "resources.accounts.read", "resources.accounts.manage"),
         ("/api/account-groups", "resources.account_groups.read", "resources.accounts.manage"),
         ("/api/protocol-nodes", "resources.protocol.read", "resources.protocol.manage"),
+        ("/api/materials", "resources.materials.read", "resources.materials.manage"),
         ("/api/hyperlink/tasks", "marketing.hyperlink_tasks.read", "marketing.hyperlink_tasks.manage"),
         ("/api/hyperlink/data-packages", "marketing.data_packages.read", "marketing.data_packages.manage"),
         ("/api/hyperlink/templates", "marketing.hyperlink_templates.read", "marketing.hyperlink_templates.manage"),
         ("/api/hyperlink/strategies", "marketing.hyperlink_strategies.read", "marketing.hyperlink_strategies.manage"),
-        ("/api/hyperlink/materials", "marketing.materials.read", "marketing.materials.manage"),
+        ("/api/hyperlink/materials", "resources.materials.read", "resources.materials.manage"),
         ("/api/hyperlink/market-insights", "marketing.insights.read", None),
         ("/api/direct-short-links", "marketing.direct_short_links.read", "marketing.direct_short_links.manage"),
     )

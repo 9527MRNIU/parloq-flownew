@@ -89,6 +89,7 @@ def seed_initial_data(db: Session) -> None:
             or menu.public_id in {
                 "menu_resources_operations",
                 "menu_resources_protocol",
+                "menu_resources_materials",
             }
             or menu.public_id.startswith(
                 ("menu_resources_account", "menu_promotion", "menu_marketing")
@@ -111,7 +112,7 @@ def seed_initial_data(db: Session) -> None:
         "marketing.data_packages.manage",
         "marketing.hyperlink_templates.manage",
         "marketing.hyperlink_strategies.manage",
-        "marketing.materials.manage",
+        "resources.materials.manage",
         "marketing.direct_short_links.manage",
     }
     admin_actions = operator_actions | {"resources.ip.manage"}

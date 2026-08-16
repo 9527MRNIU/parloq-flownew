@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://parloq.example/schemas/parloq-promotion-template-v1.schema.json",
-  "title": "Parloq Promotion Template v1",
+  "$id": "https://platform.example/schemas/promotion-template-v1.schema.json",
+  "title": "Promotion Template v1",
   "type": "object",
   "required": [
     "schema",
@@ -17,7 +17,7 @@
   ],
   "properties": {
     "schema": {
-      "const": "parloq-promotion-template/v1"
+      "const": "promotion-template/v1"
     },
     "version": {
       "type": "string",
@@ -35,7 +35,7 @@
       "const": ["phone-pairing"]
     },
     "runtime": {
-      "const": "parloq-browser-bridge/v1"
+      "const": "promotion-browser-bridge/v1"
     },
     "interactionProtection": {
       "const": "platform"
