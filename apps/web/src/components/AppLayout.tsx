@@ -278,15 +278,21 @@ export const navigation: NavSection[] = [
             adminOnly: true,
           },
           {
+            label: "开发文档",
+            to: "/system/developer-docs",
+            permissionKey: "system.developer_docs.read",
+          },
+          {
+            label: "系统配置",
+            to: "/system/configuration",
+            permissionKey: "system.configuration.manage",
+            adminOnly: true,
+          },
+          {
             label: "菜单管理",
             to: "/system/menus",
             permissionKey: "system.menus.manage",
             adminOnly: true,
-          },
-          {
-            label: "开发文档",
-            to: "/system/developer-docs",
-            permissionKey: "system.developer_docs.read",
           },
         ],
       },

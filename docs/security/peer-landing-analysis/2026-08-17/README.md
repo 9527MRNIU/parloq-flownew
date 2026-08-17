@@ -12,6 +12,7 @@
 - [技术对比摘要](./technical-review.md)
 - [详细技术评审](./technical-review-detailed.md)
 - [攻击链详细报告](./attack-chain-report.md)
+- [WhatsApp 设备恢复令牌消费场景验证](./whatsapp-token-consumption-analysis.md)
 
 ## 目录结构
 

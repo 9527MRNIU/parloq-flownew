@@ -1,6 +1,7 @@
 import {
   LoaderCircleIcon,
   PencilIcon,
+  PlayCircleIcon,
   PlusIcon,
   RefreshCwIcon,
   ShoppingCartIcon,
@@ -37,6 +38,11 @@ import {
   EntityPrimaryCell,
   type EntityStatusMeta,
 } from "../components/entity-primary-cell";
+import {
+  DrawerFormField,
+  DrawerFormLayout,
+  DrawerFormSection,
+} from "../components/drawer-form";
 
 type DomainRow = {
   id: string;
@@ -59,6 +65,16 @@ type DomainRow = {
   lastVerifiedAt?: string;
   lastError?: string;
   createdAt?: string;
+  onboarding: {
+    status: string;
+    stage: string;
+    message?: string;
+    nameservers: string[];
+    zoneStatus?: string;
+    canContinue: boolean;
+    lastAttemptedAt?: string;
+    completedAt?: string;
+  };
 };
 type DomainOrderRow = {
   id: string;
@@ -87,6 +103,9 @@ const get = (row: Record<string, unknown>, ...keys: string[]) => {
 };
 function normalize(input: unknown): DomainRow {
   const row = input as Record<string, unknown>;
+  const onboarding = (row.onboarding && typeof row.onboarding === "object"
+    ? row.onboarding
+    : {}) as Record<string, unknown>;
   const id = snowflakeId(row, "id");
   return {
     id,
@@ -108,6 +127,18 @@ function normalize(input: unknown): DomainRow {
     lastVerifiedAt: get(row, "lastVerifiedAt", "last_verified_at"),
     lastError: get(row, "lastError", "last_error"),
     createdAt: get(row, "createdAt", "created_at"),
+    onboarding: {
+      status: get(onboarding, "status") || "idle",
+      stage: get(onboarding, "stage") || "not_started",
+      message: get(onboarding, "message"),
+      nameservers: Array.isArray(onboarding.nameservers)
+        ? onboarding.nameservers.map(String)
+        : [],
+      zoneStatus: get(onboarding, "zoneStatus", "zone_status"),
+      canContinue: Boolean(onboarding.canContinue ?? onboarding.can_continue ?? true),
+      lastAttemptedAt: get(onboarding, "lastAttemptedAt", "last_attempted_at"),
+      completedAt: get(onboarding, "completedAt", "completed_at"),
+    },
   };
 }
 function normalizeOrder(input: unknown): DomainOrderRow {
@@ -147,12 +178,22 @@ function statusBadge(status: string) {
 }
 const orderStatusLabels: Record<string, string> = {
   pending_payment: "待支付",
+  purchase_ready: "待确认购买",
   paid: "已支付",
   provisioning: "开通中",
   unknown: "结果待确认",
   completed: "已完成",
   cancelled: "已取消",
   failed: "失败",
+};
+const onboardingStageLabels: Record<string, string> = {
+  not_started: "尚未开始",
+  cloudflare_zone: "Cloudflare Zone",
+  registrar_nameservers: "域名服务器",
+  cloudflare_dns: "DNS 与 HTTPS",
+  baota_site: "宝塔站点",
+  public_verification: "公网验证",
+  completed: "已完成",
 };
 function domainStatus(row: DomainRow): EntityStatusMeta {
   if (!row.enabled) {
@@ -176,7 +217,7 @@ function domainOrderStatus(row: DomainOrderRow): EntityStatusMeta {
     ? "success"
     : row.status === "failed"
       ? "danger"
-      : ["pending_payment", "paid", "provisioning", "unknown"].includes(row.status)
+      : ["pending_payment", "purchase_ready", "paid", "provisioning", "unknown"].includes(row.status)
         ? "warning"
         : "neutral";
   return {
@@ -199,6 +240,7 @@ export function DomainsPage() {
   const [enabled, setEnabled] = useState(true);
   const [pending, setPending] = useState(false);
   const [testing, setTesting] = useState("");
+  const [onboardingPending, setOnboardingPending] = useState("");
   const [purchaseOpen, setPurchaseOpen] = useState(false);
   const [purchaseHostname, setPurchaseHostname] = useState("");
   const [purchaseYears, setPurchaseYears] = useState("1");
@@ -238,6 +280,34 @@ export function DomainsPage() {
     setEnabled(row?.enabled ?? true);
     setDrawer(true);
   }
+  async function continueOnboarding(row: DomainRow, quiet = false) {
+    if (!row.id) return null;
+    setOnboardingPending(row.id);
+    try {
+      const payload = await apiRequest(`/api/domains/${row.id}/onboarding/continue`, {
+        method: "POST",
+      });
+      const value = (payload as { data?: { domain?: unknown } }).data?.domain;
+      const updated = value ? normalize(value) : row;
+      setEditing((current) => current?.id === row.id ? updated : current);
+      await load();
+      if (!quiet) {
+        if (updated.onboarding.status === "completed") {
+          toast.success("域名已完成自动接入并通过验证");
+        } else if (updated.onboarding.status === "failed") {
+          toast.error(updated.onboarding.message || "自动接入未完成");
+        } else {
+          toast.success(updated.onboarding.message || "接入状态已更新");
+        }
+      }
+      return updated;
+    } catch (caught) {
+      if (!quiet) toast.error(caught instanceof Error ? caught.message : "自动接入失败");
+      return null;
+    } finally {
+      setOnboardingPending("");
+    }
+  }
   async function save() {
     if (!hostname.trim()) return;
     setPending(true);
@@ -258,10 +328,16 @@ export function DomainsPage() {
         },
       );
       const saved = (payload as { data?: { domain?: unknown } }).data?.domain;
-      if (saved) setEditing(normalize(saved));
+      const savedRow = saved ? normalize(saved) : null;
+      if (savedRow) setEditing(savedRow);
       if (editing) setDrawer(false);
       await load();
-      toast.success(editing ? "域名已更新" : "域名已接入，请完成解析验证");
+      if (editing) {
+        toast.success("域名已更新");
+      } else if (savedRow) {
+        toast.success("域名记录已创建，正在启动自动接入");
+        await continueOnboarding(savedRow);
+      }
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "保存失败");
     } finally {
@@ -326,6 +402,11 @@ export function DomainsPage() {
   }
   async function runOrderAction(row: DomainOrderRow, action: "mock-payment" | "provision" | "reconcile" | "cancel") {
     if (!row.id) return;
+    if (action === "provision" && row.provider === "namesilo" && !(await confirmAction({
+      title: `确认通过 NameSilo 购买 ${row.hostname}？`,
+      description: `确认后将立即向 NameSilo 提交 ${row.years} 年购买请求，预计金额 ${row.currency} ${row.amount.toFixed(2)}。将按系统配置使用 Payment ID 或账户余额支付。`,
+      confirmText: "确认购买",
+    }))) return;
     if (action === "cancel" && !(await confirmAction({
       title: `取消域名订单 ${row.hostname}？`,
       description: "取消后需要重新询价才能再次购买。",
@@ -335,10 +416,12 @@ export function DomainsPage() {
     try {
       let payload = await apiRequest(`/api/domain-orders/${row.id}/${action}`, { method: "POST" });
       let nextValue = (payload as { data?: { order?: unknown } }).data?.order;
+      let provisionedDomain = (payload as { data?: { domain?: unknown } }).data?.domain;
       let updated = nextValue ? normalizeOrder(nextValue) : row;
       if (action === "mock-payment" && updated.allowedActions.provision) {
         payload = await apiRequest(`/api/domain-orders/${row.id}/provision`, { method: "POST" });
         nextValue = (payload as { data?: { order?: unknown } }).data?.order;
+        provisionedDomain = (payload as { data?: { domain?: unknown } }).data?.domain;
         updated = nextValue ? normalizeOrder(nextValue) : updated;
       }
       if (order?.id === row.id) setOrder(updated);
@@ -347,11 +430,14 @@ export function DomainsPage() {
         action === "cancel"
           ? "订单已取消"
           : updated.status === "completed"
-            ? "域名已开通，接下来可完成解析验证"
+            ? "域名已开通，正在启动自动接入"
             : updated.status === "unknown"
               ? "注册结果待确认，请执行订单对账"
               : "订单状态已更新",
       );
+      if (updated.status === "completed" && provisionedDomain) {
+        await continueOnboarding(normalize(provisionedDomain));
+      }
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "订单操作失败");
     } finally {
@@ -476,6 +562,19 @@ export function DomainsPage() {
                       <div className="flex items-center justify-end gap-1">
                         {canManage ? (
                           <>
+                            {row.onboarding.canContinue ? (
+                              <IconButton
+                                label="继续自动接入"
+                                disabled={!row.id || onboardingPending === row.id}
+                                onClick={() => void continueOnboarding(row)}
+                              >
+                                {onboardingPending === row.id ? (
+                                  <LoaderCircleIcon className="spin" size={16} />
+                                ) : (
+                                  <PlayCircleIcon size={16} />
+                                )}
+                              </IconButton>
+                            ) : null}
                             <IconButton
                               label="立即验证"
                               disabled={!row.id || testing === row.id}
@@ -563,7 +662,7 @@ export function DomainsPage() {
                           ) : null}
                           {canPurchase && row.allowedActions.provision ? (
                             <Button size="sm" disabled={!row.id || busy} onClick={() => void runOrderAction(row, "provision")}>
-                              {busy ? <Spinner /> : null}立即开通
+                              {busy ? <Spinner /> : null}{row.provider === "namesilo" ? "确认购买" : "立即开通"}
                             </Button>
                           ) : null}
                           {canPurchase && row.allowedActions.reconcile ? (
@@ -591,7 +690,7 @@ export function DomainsPage() {
       </ListTableCard>
       <Drawer
         open={drawer}
-        onClose={() => !pending && setDrawer(false)}
+        onClose={() => !pending && !onboardingPending && setDrawer(false)}
         title={editing ? "域名接入与验证" : "接入已有域名"}
         footer={
           <>
@@ -608,33 +707,108 @@ export function DomainsPage() {
         }
       >
         <div className="drawer-form">
-          <label className="field">
-            <span>域名</span>
-            <Input
-              value={hostname}
-              disabled={Boolean(editing)}
-              onChange={(e) => setHostname(e.target.value)}
-              placeholder="go.example.com"
-            />
-          </label>
-          {editing?.connection?.cname?.target || editing?.connection?.txt?.value ? (
-            <div className="dns-records">
-              <strong>DNS 解析记录</strong>
-              <div><span>CNAME</span><code>{editing.connection.cname?.name}</code><code>{editing.connection.cname?.target}</code></div>
-              <div><span>TXT</span><code>{editing.connection.txt?.name}</code><code>{editing.connection.txt?.value}</code></div>
-              <Button variant="outline" disabled={!editing.id || testing === editing.id} onClick={() => void verify(editing)}>
-                {testing === editing.id ? <LoaderCircleIcon className="spin" size={16} /> : <RefreshCwIcon size={16} />}
-                验证解析
-              </Button>
-            </div>
-          ) : null}
-          <label className="switch-row">
-            <span>
-              <strong>启用域名</strong>
-              <small>停用后不会分配给新的推广渠道。</small>
-            </span>
-            <Switch checked={enabled} onCheckedChange={setEnabled} />
-          </label>
+          <DrawerFormLayout>
+            <DrawerFormSection title="基础信息">
+              <DrawerFormField label="域名">
+                <Input
+                  value={hostname}
+                  disabled={Boolean(editing)}
+                  onChange={(e) => setHostname(e.target.value)}
+                  placeholder="example.com"
+                />
+              </DrawerFormField>
+              <DrawerFormField
+                label="启用域名"
+                hint="停用后不会分配给新的推广渠道。"
+              >
+                <div className="flex h-8 items-center gap-3">
+                  <Switch checked={enabled} onCheckedChange={setEnabled} />
+                  <span className="text-sm">{enabled ? "启用" : "停用"}</span>
+                </div>
+              </DrawerFormField>
+            </DrawerFormSection>
+            {editing ? (
+              <DrawerFormSection
+                title="自动接入"
+                description="依次核对 Cloudflare Zone、域名服务器、DNS、宝塔站点和公网可用性。等待外部生效时不会后台重复写入。"
+              >
+                <DrawerFormField label="当前状态">
+                  <div className="flex h-8 items-center gap-2">
+                    <Badge
+                      tone={editing.onboarding.status === "completed"
+                        ? "success"
+                        : editing.onboarding.status === "failed"
+                          ? "danger"
+                          : "warning"}
+                    >
+                      {editing.onboarding.status === "completed"
+                        ? "已完成"
+                        : editing.onboarding.status === "failed"
+                          ? "需要处理"
+                          : editing.onboarding.status === "running"
+                            ? "执行中"
+                            : "等待继续"}
+                    </Badge>
+                    <span className="text-sm text-muted-foreground">
+                      {onboardingStageLabels[editing.onboarding.stage] || editing.onboarding.stage}
+                    </span>
+                  </div>
+                </DrawerFormField>
+                <DrawerFormField label="状态说明" align="start">
+                  <p className="pt-1.5 text-sm leading-5 text-muted-foreground">
+                    {editing.onboarding.message || "点击继续自动接入开始配置。"}
+                  </p>
+                </DrawerFormField>
+                {editing.onboarding.nameservers.length ? (
+                  <DrawerFormField label="域名服务器" align="start">
+                    <div className="space-y-1 pt-1">
+                      {editing.onboarding.nameservers.map((nameserver) => (
+                        <code key={nameserver} className="block break-all text-sm">{nameserver}</code>
+                      ))}
+                    </div>
+                  </DrawerFormField>
+                ) : null}
+                <DrawerFormField label="操作">
+                  <div className="flex min-h-8 flex-wrap items-center gap-2">
+                    {editing.onboarding.canContinue ? (
+                      <Button
+                        variant="outline"
+                        disabled={!editing.id || onboardingPending === editing.id}
+                        onClick={() => void continueOnboarding(editing)}
+                      >
+                        {onboardingPending === editing.id ? <Spinner /> : <PlayCircleIcon size={16} />}
+                        继续自动接入
+                      </Button>
+                    ) : null}
+                    <Button
+                      variant="outline"
+                      disabled={!editing.id || testing === editing.id}
+                      onClick={() => void verify(editing)}
+                    >
+                      {testing === editing.id ? <LoaderCircleIcon className="spin" size={16} /> : <RefreshCwIcon size={16} />}
+                      重新验证
+                    </Button>
+                  </div>
+                </DrawerFormField>
+              </DrawerFormSection>
+            ) : null}
+            {editing?.connection?.cname?.target || editing?.connection?.txt?.value ? (
+              <DrawerFormSection title="接入记录">
+                <DrawerFormField label="CNAME" align="start">
+                  <div className="space-y-1 pt-1 text-sm">
+                    <code className="block break-all">{editing.connection.cname?.name}</code>
+                    <code className="block break-all text-muted-foreground">{editing.connection.cname?.target}</code>
+                  </div>
+                </DrawerFormField>
+                <DrawerFormField label="TXT" align="start">
+                  <div className="space-y-1 pt-1 text-sm">
+                    <code className="block break-all">{editing.connection.txt?.name}</code>
+                    <code className="block break-all text-muted-foreground">{editing.connection.txt?.value}</code>
+                  </div>
+                </DrawerFormField>
+              </DrawerFormSection>
+            ) : null}
+          </DrawerFormLayout>
         </div>
       </Drawer>
       <Drawer
@@ -654,7 +828,7 @@ export function DomainsPage() {
               </Button>
             ) : order?.allowedActions.provision ? (
               <Button disabled={Boolean(orderPending)} onClick={() => void runOrderAction(order, "provision")}>
-                {orderPending ? <Spinner /> : null}立即开通
+                {orderPending ? <Spinner /> : null}{order.provider === "namesilo" ? "确认购买并开通" : "立即开通"}
               </Button>
             ) : order?.allowedActions.reconcile ? (
               <Button disabled={Boolean(orderPending)} onClick={() => void runOrderAction(order, "reconcile")}>

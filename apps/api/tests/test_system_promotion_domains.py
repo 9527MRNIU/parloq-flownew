@@ -13,7 +13,7 @@ from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.main import app
-from app.models import DomainOrder
+from app.models import DomainOrder, DomainRecord
 from app.routers import domains as domains_router
 
 
@@ -301,6 +301,79 @@ def test_connected_domain_verification_requires_issued_txt_and_cname(
         "/api/domains/public-verification/"
     )
     assert verified.json()["data"]["domain"]["channelSelectable"] is True
+
+
+def test_domain_onboarding_continuation_claims_and_returns_progress(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
+    created = admin_client.post(
+        "/api/domains", json={"hostname": "automatic-onboarding.example"}
+    )
+    assert created.status_code == 201
+    domain = created.json()["data"]["domain"]
+
+    calls: list[str] = []
+
+    def complete_onboarding(db, item: DomainRecord) -> DomainRecord:
+        calls.append(item.hostname)
+        assert item.onboarding_status == "running"
+        assert item.onboarding_attempted_at is not None
+        item.onboarding_status = "completed"
+        item.onboarding_stage = "completed"
+        item.onboarding_message = "域名已自动接入并通过公网验证"
+        item.registration_status = "active"
+        item.dns_status = "verified"
+        item.ssl_status = "verified"
+        item.hosting_status = "active"
+        db.commit()
+        db.refresh(item)
+        return item
+
+    monkeypatch.setattr(
+        domains_router,
+        "continue_domain_onboarding",
+        complete_onboarding,
+    )
+    continued = admin_client.post(
+        f"/api/domains/{domain['id']}/onboarding/continue"
+    )
+    assert continued.status_code == 200, continued.text
+    result = continued.json()["data"]["domain"]
+    assert calls == ["automatic-onboarding.example"]
+    assert result["onboarding"]["status"] == "completed"
+    assert result["onboarding"]["stage"] == "completed"
+    assert result["channelSelectable"] is True
+
+    repeated = admin_client.post(
+        f"/api/domains/{domain['id']}/onboarding/continue"
+    )
+    assert repeated.status_code == 200
+    assert calls == ["automatic-onboarding.example"]
+
+
+def test_domain_onboarding_rejects_an_active_duplicate_run(
+    admin_client: TestClient,
+) -> None:
+    domain = admin_client.post(
+        "/api/domains", json={"hostname": "onboarding-lease.example"}
+    ).json()["data"]["domain"]
+    with SessionLocal() as db:
+        item = db.get(DomainRecord, int(domain["id"]))
+        assert item is not None
+        item.onboarding_status = "running"
+        item.onboarding_attempted_at = datetime.now(UTC)
+        db.commit()
+
+    active = admin_client.get(f"/api/domains/{domain['id']}")
+    assert active.status_code == 200
+    assert active.json()["data"]["domain"]["onboarding"]["canContinue"] is False
+
+    duplicate = admin_client.post(
+        f"/api/domains/{domain['id']}/onboarding/continue"
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == "域名接入流程正在执行，请勿重复提交"
 
 
 def test_connected_domain_exposes_host_scoped_routing_proof(

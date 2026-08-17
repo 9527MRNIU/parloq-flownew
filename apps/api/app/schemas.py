@@ -102,6 +102,14 @@ class MenuUpdate(ApiModel):
     visible: bool | None = None
 
 
+class SystemPlatformConfigurationUpdate(ApiModel):
+    value: str | None = Field(default=None, min_length=8, max_length=8192)
+    enabled: bool | None = None
+    payment_id: str | None = Field(default=None, alias="paymentId", max_length=64)
+    account_id: str | None = Field(default=None, alias="accountId", max_length=64)
+    base_url: str | None = Field(default=None, alias="baseUrl", max_length=2048)
+
+
 class BitlyAccountCreate(ApiModel):
     name: str = Field(min_length=1, max_length=120)
     access_token: str | None = Field(default=None, alias="accessToken", max_length=2048)

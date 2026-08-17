@@ -30,6 +30,7 @@ from app.routers import (
     promotion_policy,
     protocol_nodes,
     system,
+    system_configuration,
     users,
     wa_gateway_events,
 )
@@ -76,6 +77,7 @@ app.include_router(domains.order_router)
 app.include_router(promotion.router)
 app.include_router(promotion_policy.router)
 app.include_router(system.router)
+app.include_router(system_configuration.router)
 app.include_router(hyperlink.router)
 app.include_router(wa_gateway_events.router)
 

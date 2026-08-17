@@ -70,6 +70,7 @@ def _request_permission(method: str, path: str) -> tuple[str | None, bool] | Non
             "/api/user-groups",
             "/api/system/roles",
             "/api/system/menus",
+            "/api/system/configuration",
         )
     ):
         # These routes have their own AdminUser dependency. Marking them as

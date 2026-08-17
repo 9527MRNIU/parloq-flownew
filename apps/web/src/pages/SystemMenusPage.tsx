@@ -63,8 +63,9 @@ const menuPresets: MenuPreset[] = [
   { presetKey: "system-management", parentPresetKey: "", name: "系统管理", type: "目录", path: "", permission: "", sortOrder: 90, enabled: true, visible: true, builtin: true },
   { presetKey: "system-users", parentPresetKey: "system-management", name: "用户管理", type: "页面", path: "/system/users", permission: "system.users.manage", sortOrder: 10, enabled: true, visible: true, builtin: true },
   { presetKey: "system-roles", parentPresetKey: "system-management", name: "角色管理", type: "页面", path: "/system/roles", permission: "system.roles.manage", sortOrder: 20, enabled: true, visible: true, builtin: true },
-  { presetKey: "system-menus", parentPresetKey: "system-management", name: "菜单管理", type: "页面", path: "/system/menus", permission: "system.menus.manage", sortOrder: 30, enabled: true, visible: true, builtin: true },
-  { presetKey: "system-developer-docs", parentPresetKey: "system-management", name: "开发文档", type: "页面", path: "/system/developer-docs", permission: "system.developer_docs.read", sortOrder: 40, enabled: true, visible: true, builtin: true },
+  { presetKey: "system-developer-docs", parentPresetKey: "system-management", name: "开发文档", type: "页面", path: "/system/developer-docs", permission: "system.developer_docs.read", sortOrder: 30, enabled: true, visible: true, builtin: true },
+  { presetKey: "system-configuration", parentPresetKey: "system-management", name: "系统配置", type: "页面", path: "/system/configuration", permission: "system.configuration.manage", sortOrder: 40, enabled: true, visible: true, builtin: true },
+  { presetKey: "system-menus", parentPresetKey: "system-management", name: "菜单管理", type: "页面", path: "/system/menus", permission: "system.menus.manage", sortOrder: 50, enabled: true, visible: true, builtin: true },
 ];
 
 const defaultRows: MenuRow[] = menuPresets.map(({ presetKey, parentPresetKey, ...row }) => ({

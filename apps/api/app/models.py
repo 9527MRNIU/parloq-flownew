@@ -157,6 +157,50 @@ class RoleActionPermission(Base, TimestampMixin):
     role: Mapped[UserGroup] = relationship(back_populates="action_permissions")
 
 
+class SystemCredential(Base, TimestampMixin):
+    __tablename__ = "system_credentials"
+    __table_args__ = (
+        UniqueConstraint(
+            "platform_key",
+            "credential_key",
+            name="uq_system_credentials_platform_credential",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
+    platform_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    credential_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    value_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    value_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    value_last4: Mapped[str] = mapped_column(String(4), default="", nullable=False)
+    updated_by: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("user_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+
+
+class SystemPlatformConfiguration(Base, TimestampMixin):
+    __tablename__ = "system_platform_configurations"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
+    platform_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    settings_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    last_test_status: Mapped[str] = mapped_column(
+        String(24), default="untested", nullable=False, index=True
+    )
+    last_test_message: Mapped[str | None] = mapped_column(Text)
+    last_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_by: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("user_accounts.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+
 class BitlyProviderAccount(Base, TimestampMixin):
     __tablename__ = "bitly_provider_accounts"
 
@@ -606,6 +650,14 @@ class DomainRecord(Base, TimestampMixin):
             "hosting_status IN ('pending', 'active', 'failed')",
             name="ck_domains_hosting_status",
         ),
+        CheckConstraint(
+            "onboarding_status IN ('idle', 'running', 'waiting', 'failed', 'completed')",
+            name="ck_domains_onboarding_status",
+        ),
+        CheckConstraint(
+            "onboarding_stage IN ('not_started', 'cloudflare_zone', 'registrar_nameservers', 'cloudflare_dns', 'baota_site', 'public_verification', 'completed')",
+            name="ck_domains_onboarding_stage",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
@@ -635,6 +687,18 @@ class DomainRecord(Base, TimestampMixin):
     ssl_status: Mapped[str] = mapped_column(String(16), default="untested", index=True)
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
+    onboarding_status: Mapped[str] = mapped_column(
+        String(16), default="idle", server_default="idle", nullable=False, index=True
+    )
+    onboarding_stage: Mapped[str] = mapped_column(
+        String(32), default="not_started", server_default="not_started", nullable=False
+    )
+    onboarding_state_json: Mapped[dict] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False
+    )
+    onboarding_message: Mapped[str | None] = mapped_column(Text)
+    onboarding_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,

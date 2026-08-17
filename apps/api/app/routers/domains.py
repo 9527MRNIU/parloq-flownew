@@ -20,19 +20,67 @@ from app.deps import CurrentUser, DbSession
 from app.entity_ids import entity_id, identifier_filter
 from app.snowflake import new_public_id
 
-from app.models import DomainOrder, DomainQuote, DomainRecord, PromotionChannel
-from app.security import utcnow
+from app.models import (
+    DomainOrder,
+    DomainQuote,
+    DomainRecord,
+    PromotionChannel,
+    SystemCredential,
+    SystemPlatformConfiguration,
+)
+from app.security import decrypt_secret, utcnow
 from app.serializers import iso
 from app.services.domain_verify import DomainVerifyError, verify_public_domain
+from app.services.domain_onboarding import continue_domain_onboarding
 from app.services.domain_registrar import (
     DomainRegistrarError,
     DomainRegistrarUnknownError,
     MockDomainRegistrar,
+    NameSiloDomainRegistrar,
 )
 
 
 router = APIRouter(prefix="/api/domains", tags=["domains"])
 order_router = APIRouter(prefix="/api/domain-orders", tags=["domain-orders"])
+
+
+def _registrar(
+    db: DbSession,
+    *,
+    provider: str | None = None,
+) -> MockDomainRegistrar | NameSiloDomainRegistrar:
+    if get_settings().domain_registrar_mock:
+        if provider not in {None, "mock"}:
+            raise HTTPException(status_code=409, detail="订单注册商与当前配置不一致")
+        return MockDomainRegistrar()
+    if provider not in {None, "namesilo"}:
+        raise HTTPException(status_code=409, detail="订单注册商与当前配置不一致")
+    config = db.scalar(
+        select(SystemPlatformConfiguration).where(
+            SystemPlatformConfiguration.platform_key == "namesilo"
+        )
+    )
+    credential = db.scalar(
+        select(SystemCredential).where(
+            SystemCredential.platform_key == "namesilo",
+            SystemCredential.credential_key == "api_key",
+        )
+    )
+    if config is None or not config.enabled or credential is None:
+        raise HTTPException(status_code=503, detail="NameSilo 尚未启用或未配置凭据")
+    try:
+        api_key = decrypt_secret(credential.value_ciphertext)
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail="NameSilo 凭据无法读取，请重新配置") from exc
+    return NameSiloDomainRegistrar(
+        api_key,
+        payment_id=str((config.settings_json or {}).get("paymentId") or "") or None,
+    )
+
+
+def _close_registrar(registrar: MockDomainRegistrar | NameSiloDomainRegistrar) -> None:
+    if isinstance(registrar, NameSiloDomainRegistrar):
+        registrar.close()
 
 
 def _domain(db: DbSession, identifier: str, user) -> DomainRecord:
@@ -57,6 +105,17 @@ def domain_row(db: DbSession, item: DomainRecord) -> dict:
         and item.hosting_status == "active"
     )
     settings = get_settings()
+    onboarding_state = dict(item.onboarding_state_json or {})
+    onboarding_attempted_at = item.onboarding_attempted_at
+    if onboarding_attempted_at is not None:
+        onboarding_attempted_at = onboarding_attempted_at.replace(
+            tzinfo=onboarding_attempted_at.tzinfo or UTC
+        )
+    onboarding_can_continue = item.onboarding_status != "completed" and (
+        item.onboarding_status != "running"
+        or onboarding_attempted_at is None
+        or onboarding_attempted_at <= utcnow() - timedelta(minutes=5)
+    )
     return {
         "id": entity_id(item),
         "hostname": item.hostname,
@@ -74,6 +133,16 @@ def domain_row(db: DbSession, item: DomainRecord) -> dict:
         "sslStatus": item.ssl_status,
         "lastVerifiedAt": iso(item.last_verified_at),
         "lastError": item.last_error,
+        "onboarding": {
+            "status": item.onboarding_status,
+            "stage": item.onboarding_stage,
+            "message": item.onboarding_message,
+            "nameservers": onboarding_state.get("cloudflareNameservers", []),
+            "zoneStatus": onboarding_state.get("cloudflareZoneStatus"),
+            "canContinue": onboarding_can_continue,
+            "lastAttemptedAt": iso(item.onboarding_attempted_at),
+            "completedAt": iso(item.onboarding_completed_at),
+        },
         "boundChannelCount": count,
         "channelSelectable": selectable,
         "connection": {
@@ -124,9 +193,9 @@ def _order_row(db: DbSession, item: DomainOrder) -> dict:
         "domainId": entity_id(domain) if domain else None,
         "allowedActions": {
             "mockPayment": item.status == "pending_payment" and get_settings().domain_registrar_mock,
-            "provision": item.status == "paid",
+            "provision": item.status in {"paid", "purchase_ready"},
             "reconcile": can_reconcile,
-            "cancel": item.status in {"pending_payment", "paid"},
+            "cancel": item.status in {"pending_payment", "paid", "purchase_ready"},
         },
         "createdAt": iso(item.created_at),
         "updatedAt": iso(item.updated_at),
@@ -158,7 +227,14 @@ def _hostname_occupied(db: DbSession, hostname: str) -> bool:
             select(func.count()).select_from(DomainOrder).where(
                 DomainOrder.hostname == hostname,
                 DomainOrder.status.in_(
-                    ["pending_payment", "paid", "provisioning", "unknown", "completed"]
+                    [
+                        "pending_payment",
+                        "paid",
+                        "purchase_ready",
+                        "provisioning",
+                        "unknown",
+                        "completed",
+                    ]
                 ),
             )
         )
@@ -209,16 +285,23 @@ def domain_availability(
         raise HTTPException(status_code=422, detail="域名格式不正确") from exc
     if _hostname_occupied(db, normalized):
         return {"data": {"hostname": normalized, "available": False, "quote": None}}
-    if not get_settings().domain_registrar_mock:
-        return {
-            "data": {
+    try:
+        registrar = _registrar(db)
+    except HTTPException as exc:
+        if exc.status_code == 503:
+            return {"data": {
                 "hostname": normalized,
                 "available": None,
                 "quote": None,
                 "registrarIntegrationConfigured": False,
-            }
-        }
-    quote = MockDomainRegistrar().quote(normalized, years)
+            }}
+        raise
+    try:
+        quote = registrar.quote(normalized, years)
+    except DomainRegistrarError as exc:
+        raise HTTPException(status_code=502, detail="域名注册商询价失败") from exc
+    finally:
+        _close_registrar(registrar)
     return {
         "data": {
             "hostname": normalized,
@@ -240,11 +323,15 @@ def domain_availability(
 def create_domain_quote(
     payload: DomainQuoteRequest, db: DbSession, current_user: CurrentUser
 ) -> dict:
-    if not get_settings().domain_registrar_mock:
-        raise HTTPException(status_code=503, detail="生产注册商适配器尚未配置")
     if _hostname_occupied(db, payload.hostname):
         raise HTTPException(status_code=409, detail="域名不可购买或已有进行中的订单")
-    registrar_quote = MockDomainRegistrar().quote(payload.hostname, payload.years)
+    registrar = _registrar(db)
+    try:
+        registrar_quote = registrar.quote(payload.hostname, payload.years)
+    except DomainRegistrarError as exc:
+        raise HTTPException(status_code=502, detail="NameSilo 询价失败") from exc
+    finally:
+        _close_registrar(registrar)
     if not registrar_quote.available:
         raise HTTPException(status_code=409, detail="域名已被注册")
     item = DomainQuote(
@@ -317,8 +404,6 @@ def list_domain_orders(db: DbSession, current_user: CurrentUser) -> dict:
 def create_domain_order(
     payload: DomainOrderCreate, db: DbSession, current_user: CurrentUser
 ) -> dict:
-    if not get_settings().domain_registrar_mock:
-        raise HTTPException(status_code=503, detail="生产注册商适配器尚未配置")
     quote = db.scalar(
         select(DomainQuote).where(
             identifier_filter(DomainQuote, payload.quote_id),
@@ -339,7 +424,7 @@ def create_domain_order(
         years=quote.years,
         amount=quote.amount,
         currency=quote.currency,
-        status="pending_payment",
+        status=("pending_payment" if quote.provider == "mock" else "purchase_ready"),
         provider=quote.provider,
         auto_renew=payload.auto_renew,
         created_by=current_user.id,
@@ -400,6 +485,8 @@ def _complete_order(db: DbSession, item: DomainOrder, provider_order_ref: str) -
     item.provider_order_ref = provider_order_ref
     item.domain_id = domain.id
     item.status = "completed"
+    if item.paid_at is None:
+        item.paid_at = now
     item.completed_at = now
     return domain
 
@@ -409,23 +496,38 @@ def provision_domain_order(
     order_id: str, db: DbSession, current_user: CurrentUser
 ) -> dict:
     item = _order(db, order_id, current_user)
-    if item.provider != "mock" or not get_settings().domain_registrar_mock:
-        raise HTTPException(status_code=503, detail="注册商异步开通尚未配置")
+    registrar = _registrar(db, provider=item.provider)
     transitioned = db.execute(
         update(DomainOrder)
-        .where(DomainOrder.id == item.id, DomainOrder.status == "paid")
+        .where(
+            DomainOrder.id == item.id,
+            DomainOrder.status.in_(("paid", "purchase_ready")),
+        )
         .values(status="provisioning", updated_at=utcnow())
         .execution_options(synchronize_session=False)
     )
     if transitioned.rowcount != 1:
         db.rollback()
+        _close_registrar(registrar)
         raise HTTPException(status_code=409, detail="只有已支付订单可以开通")
     db.commit()
     db.refresh(item)
     provider_order_ref: str | None = None
     try:
-        result = MockDomainRegistrar().register(item.hostname, item.years)
+        current_quote = registrar.quote(item.hostname, item.years)
+        if not current_quote.available:
+            raise DomainRegistrarError("域名已不可购买")
+        if current_quote.amount != item.amount:
+            raise DomainRegistrarError("域名价格已变化，请重新询价")
+        result = registrar.register(
+            item.hostname,
+            item.years,
+            private=True,
+            auto_renew=item.auto_renew,
+        )
         provider_order_ref = result.provider_order_ref
+        if result.amount is not None:
+            item.amount = result.amount
         domain = _complete_order(db, item, result.provider_order_ref)
         db.commit()
     except DomainRegistrarUnknownError as exc:
@@ -454,9 +556,11 @@ def provision_domain_order(
         db.rollback()
         failed = _order(db, order_id, current_user)
         failed.status = "failed"
-        failed.failure_reason = "域名开通失败，请稍后重试或联系管理员"
+        failed.failure_reason = str(exc)[:1000]
         db.commit()
         raise HTTPException(status_code=502, detail=failed.failure_reason) from exc
+    finally:
+        _close_registrar(registrar)
     db.refresh(item)
     return {
         "data": {
@@ -476,8 +580,7 @@ def reconcile_domain_order(
     stale_provisioning = item.status == "provisioning" and updated_at <= stale_before
     if item.status != "unknown" and not stale_provisioning:
         raise HTTPException(status_code=409, detail="只有结果未知或开通租约超时的订单需要对账")
-    if item.provider != "mock" or not get_settings().domain_registrar_mock:
-        raise HTTPException(status_code=503, detail="注册商对账适配器尚未配置")
+    registrar = _registrar(db, provider=item.provider)
     transitioned = db.execute(
         update(DomainOrder)
         .where(
@@ -495,11 +598,12 @@ def reconcile_domain_order(
     )
     if transitioned.rowcount != 1:
         db.rollback()
+        _close_registrar(registrar)
         raise HTTPException(status_code=409, detail="订单正在被其他对账任务处理")
     db.commit()
     db.refresh(item)
     try:
-        result = MockDomainRegistrar().reconcile(item.provider_order_ref, item.hostname)
+        result = registrar.reconcile(item.provider_order_ref, item.hostname)
         domain = _complete_order(db, item, result.provider_order_ref)
         db.commit()
     except (DomainRegistrarError, IntegrityError) as exc:
@@ -510,6 +614,8 @@ def reconcile_domain_order(
         unknown.last_reconciled_at = utcnow()
         db.commit()
         raise HTTPException(status_code=502, detail="注册商对账失败，订单仍保持未知状态") from exc
+    finally:
+        _close_registrar(registrar)
     return {"data": {"order": _order_row(db, item), "domain": domain_row(db, domain)}}
 
 
@@ -522,7 +628,7 @@ def cancel_domain_order(
         update(DomainOrder)
         .where(
             DomainOrder.id == item.id,
-            DomainOrder.status.in_(("pending_payment", "paid")),
+            DomainOrder.status.in_(("pending_payment", "paid", "purchase_ready")),
         )
         .values(status="cancelled", updated_at=utcnow())
         .execution_options(synchronize_session=False)
@@ -547,6 +653,7 @@ def update_domain(domain_id: str, payload: DomainUpdate, db: DbSession, current_
         if item.acquisition_type == "purchased":
             raise HTTPException(status_code=400, detail="已购买域名不能修改名称")
         item.hostname = payload.hostname; item.registration_status = "pending"; item.dns_status = "untested"; item.ssl_status = "untested"; item.hosting_status = "pending"; item.last_verified_at = None
+        item.onboarding_status = "idle"; item.onboarding_stage = "not_started"; item.onboarding_state_json = {}; item.onboarding_message = None; item.onboarding_attempted_at = None; item.onboarding_completed_at = None
     if payload.enabled is not None: item.enabled = payload.enabled
     if payload.management_mode is not None: item.management_mode = payload.management_mode
     if payload.auto_renew is not None:
@@ -555,6 +662,43 @@ def update_domain(domain_id: str, payload: DomainUpdate, db: DbSession, current_
     try: db.commit()
     except IntegrityError:
         db.rollback(); raise HTTPException(status_code=409, detail="域名已存在") from None
+    return {"data": {"domain": domain_row(db, item)}}
+
+
+@router.post("/{domain_id}/onboarding/continue")
+def continue_onboarding(
+    domain_id: str,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    item = _domain(db, domain_id, current_user)
+    if item.onboarding_status == "completed":
+        return {"data": {"domain": domain_row(db, item)}}
+    stale_before = utcnow() - timedelta(minutes=5)
+    claimed = db.execute(
+        update(DomainRecord)
+        .where(
+            DomainRecord.id == item.id,
+            or_(
+                DomainRecord.onboarding_status != "running",
+                DomainRecord.onboarding_attempted_at.is_(None),
+                DomainRecord.onboarding_attempted_at <= stale_before,
+            ),
+        )
+        .values(
+            onboarding_status="running",
+            onboarding_attempted_at=utcnow(),
+            onboarding_message="正在核对平台配置",
+            updated_at=utcnow(),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="域名接入流程正在执行，请勿重复提交")
+    db.commit()
+    db.refresh(item)
+    item = continue_domain_onboarding(db, item)
     return {"data": {"domain": domain_row(db, item)}}
 
 
@@ -574,6 +718,8 @@ def verify_domain(domain_id: str, db: DbSession, current_user: CurrentUser) -> d
                 ),
             )
         item.registration_status = "active"; item.dns_status = "verified"; item.ssl_status = "verified"; item.hosting_status = "active"; item.last_error = None
+        if item.onboarding_status != "idle":
+            item.onboarding_status = "completed"; item.onboarding_stage = "completed"; item.onboarding_message = "域名已通过公网验证"; item.onboarding_completed_at = utcnow()
     except DomainVerifyError as exc:
         item.registration_status = "pending"; item.dns_status = "failed"; item.ssl_status = "failed"; item.hosting_status = "failed"; item.last_error = str(exc)
     db.commit()

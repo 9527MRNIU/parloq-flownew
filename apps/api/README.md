@@ -63,13 +63,19 @@ checks pause/cancel between batches, and renders message text only in memory.
   `/api/promotion/data-center/channels` and
   `/api/promotion/data-center/trends`. Facebook daily spend, other cost,
   impressions, and clicks remain editable at `/api/promotion/ad-metrics`.
-- Domain purchase is deliberately local-only until a production registrar
-  adapter is configured: create an expiring quote at
-  `/api/domain-orders/quote`, create the order with its `quoteId`, then use the
-  mock payment/provision actions. An uncertain provider response moves the
-  order to `unknown`; only `/reconcile` may advance it, so purchase is never
-  blindly retried. Connected domains expose CNAME/TXT instructions and are not
-  selectable by a channel until hostname, TLS, and hosting are active.
+- Domain purchase uses the local registrar fixture when `DOMAIN_REGISTRAR_MOCK`
+  is enabled. In production it uses the enabled NameSilo configuration saved
+  under System Configuration, including the optional Payment ID. Create an
+  expiring quote at `/api/domain-orders/quote`, create the order with its
+  `quoteId`, then explicitly confirm the purchase through `/provision`. An
+  uncertain provider response moves the order to `unknown`; only `/reconcile`
+  may advance it, so purchase is never blindly retried. Connected domains
+  expose CNAME/TXT instructions and are not selectable by a channel until
+  hostname, TLS, and hosting are active. The authenticated
+  `POST /api/domains/{id}/onboarding/continue` action advances the lightweight
+  NameSilo → Cloudflare → BaoTa → public-verification workflow. It pauses with
+  an operator-facing status when DNS or another external change is still
+  pending; it does not schedule background retries.
 - Roles and the complete single-system menu tree are persisted under
   `/api/system/roles` and `/api/system/menus`; `/api/system/menus/me` returns
   the current user's permitted tree.

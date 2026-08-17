@@ -46,6 +46,15 @@ def _head_revision() -> str:
     return ScriptDirectory.from_config(config).get_current_head()
 
 
+def test_revision_ids_fit_postgresql_alembic_version_column() -> None:
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "alembic"))
+    revisions = ScriptDirectory.from_config(config).walk_revisions()
+
+    assert all(len(revision.revision) <= 32 for revision in revisions)
+
+
 def test_custom_role_is_not_expanded_by_forward_repairs(tmp_path: Path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'custom-role-upgrade.db'}"
     _alembic(database_url, "0005_system_promotion_domains")
@@ -889,3 +898,95 @@ def test_pairing_rate_limit_default_migration_preserves_custom_rules(
         "maxRequests": 80,
         "windowSeconds": 120,
     }
+
+
+def test_system_configuration_migration_adds_admin_only_menu_and_storage(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'system-configuration.db'}"
+    _alembic(database_url, "0037_pairing_rate_defaults")
+    engine = sa.create_engine(database_url)
+    assert "system_credentials" not in sa.inspect(engine).get_table_names()
+    # Production databases can retain this legacy sibling-order constraint.
+    # Keep it in the migration fixture so reordering must be collision-safe.
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                "CREATE UNIQUE INDEX uq_system_menu_parent_order_test "
+                "ON system_menus(parent_id, sort_order)"
+            )
+        )
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    assert "system_credentials" in inspector.get_table_names()
+    assert "system_platform_configurations" in inspector.get_table_names()
+    assert {
+        "id",
+        "platform_key",
+        "credential_key",
+        "value_ciphertext",
+        "value_fingerprint",
+        "value_last4",
+        "updated_by",
+    } <= {
+        column["name"] for column in inspector.get_columns("system_credentials")
+    }
+    assert {
+        "id",
+        "platform_key",
+        "enabled",
+        "settings_json",
+        "last_test_status",
+        "last_test_message",
+        "last_test_at",
+        "updated_by",
+    } <= {
+        column["name"]
+        for column in inspector.get_columns("system_platform_configurations")
+    }
+    with engine.connect() as connection:
+        menu_rows = connection.execute(
+            sa.text(
+                "SELECT public_id, sort_order FROM system_menus "
+                "WHERE public_id IN "
+                "('menu_system_developer_docs', 'menu_system_configuration', "
+                "'menu_system_menus') ORDER BY sort_order"
+            )
+        ).all()
+        assert menu_rows == [
+            ("menu_system_developer_docs", 903),
+            ("menu_system_configuration", 904),
+            ("menu_system_menus", 905),
+        ]
+        assigned_roles = connection.execute(
+            sa.text(
+                "SELECT g.system_key FROM role_menu_permissions AS permission "
+                "JOIN user_groups AS g ON g.id = permission.role_id "
+                "JOIN system_menus AS menu ON menu.id = permission.menu_id "
+                "WHERE menu.public_id = 'menu_system_configuration'"
+            )
+        ).scalars().all()
+        assert assigned_roles == ["admin"]
+    engine.dispose()
+
+    _alembic_downgrade(database_url, "0037_pairing_rate_defaults")
+    engine = sa.create_engine(database_url)
+    assert "system_credentials" not in sa.inspect(engine).get_table_names()
+    assert "system_platform_configurations" not in sa.inspect(engine).get_table_names()
+    with engine.connect() as connection:
+        restored_menu_rows = connection.execute(
+            sa.text(
+                "SELECT public_id, sort_order FROM system_menus "
+                "WHERE public_id IN "
+                "('menu_system_developer_docs', 'menu_system_configuration', "
+                "'menu_system_menus') ORDER BY sort_order"
+            )
+        ).all()
+    engine.dispose()
+    assert restored_menu_rows == [
+        ("menu_system_menus", 903),
+        ("menu_system_developer_docs", 904),
+    ]

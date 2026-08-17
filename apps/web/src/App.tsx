@@ -29,6 +29,7 @@ const HyperlinkMarketInsightsPage = lazy(() => import("./pages/HyperlinkMarketIn
 const UserGroupsPage = lazy(() => import("./pages/UserGroupsPage").then((module) => ({ default: module.UserGroupsPage })));
 const UsersPage = lazy(() => import("./pages/UsersPage").then((module) => ({ default: module.UsersPage })));
 const SystemMenusPage = lazy(() => import("./pages/SystemMenusPage").then((module) => ({ default: module.SystemMenusPage })));
+const SystemConfigurationPage = lazy(() => import("./pages/SystemConfigurationPage").then((module) => ({ default: module.SystemConfigurationPage })));
 const AccountExportPage = lazy(() => import("./pages/AccountCenterPages").then((module) => ({ default: module.AccountExportPage })));
 const AccountGroupsPage = lazy(() => import("./pages/AccountCenterPages").then((module) => ({ default: module.AccountGroupsPage })));
 const AccountIntakePage = lazy(() => import("./pages/AccountCenterPages").then((module) => ({ default: module.AccountIntakePage })));
@@ -220,6 +221,14 @@ export default function App() {
             }
           />
           <Route path="/system/developer-docs" element={<DeveloperDocsPage />} />
+          <Route
+            path="/system/configuration"
+            element={
+              <AdminOnly>
+                <SystemConfigurationPage />
+              </AdminOnly>
+            }
+          />
         </Route>
         <Route
           path="*"
