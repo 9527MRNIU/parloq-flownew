@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
+import tempfile
 import unittest
 
 
@@ -61,6 +64,50 @@ class BaoTaDeploymentTests(unittest.TestCase):
                 status_file="/tmp/parloq-status.json",
                 compose_content="services:\n  api:\n    image: parloq-api:a\n",
             )
+
+    def test_security_configuration_script_updates_only_security_keys(self) -> None:
+        script = BAOTA.security_configuration_script(
+            security_file="/tmp/security.env",
+            checksum="b" * 64,
+            status_file="/tmp/security-status.json",
+            configuration_id="1786900000",
+        )
+        for key in BAOTA.SECURITY_ENV_KEYS:
+            self.assertIn(key, script)
+        self.assertIn('cp -p "${env_file}" "${backup}"', script)
+        self.assertIn('docker compose --env-file "${candidate}"', script)
+        self.assertNotIn("PARLOQ_API_IMAGE", script)
+        self.assertNotIn("docker compose up", script)
+        self.assertNotIn("/data/waba", script)
+
+    def test_load_security_settings_accepts_valid_keyring(self) -> None:
+        encoded_key = base64.urlsafe_b64encode(b"k" * 32).decode()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "security.env"
+            path.write_text(
+                "TURNSTILE_SITE_KEY=site-key-value\n"
+                "TURNSTILE_SECRET_KEY=secret-key-value\n"
+                "DATA_ENCRYPTION_ACTIVE_KEY_ID=primary-2026-08\n"
+                f"DATA_ENCRYPTION_KEYS={json.dumps({'primary-2026-08': encoded_key})}\n",
+                encoding="utf-8",
+            )
+            values = BAOTA.load_security_settings(path)
+        self.assertEqual(values["DATA_ENCRYPTION_ACTIVE_KEY_ID"], "primary-2026-08")
+
+    def test_load_security_settings_rejects_unexpected_keys(self) -> None:
+        encoded_key = base64.urlsafe_b64encode(b"k" * 32).decode()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "security.env"
+            path.write_text(
+                "TURNSTILE_SITE_KEY=site-key-value\n"
+                "TURNSTILE_SECRET_KEY=secret-key-value\n"
+                "DATA_ENCRYPTION_ACTIVE_KEY_ID=primary\n"
+                f"DATA_ENCRYPTION_KEYS={json.dumps({'primary': encoded_key})}\n"
+                "POSTGRES_PASSWORD=must-not-be-accepted\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(BAOTA.BaoTaError):
+                BAOTA.load_security_settings(path)
 
 
 if __name__ == "__main__":

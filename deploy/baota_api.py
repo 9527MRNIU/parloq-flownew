@@ -21,6 +21,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Iterator, Mapping
 import urllib.error
@@ -34,6 +35,12 @@ COMPOSE_FILE = f"{REMOTE_DIR}/docker-compose.yaml"
 ENV_FILE = f"{REMOTE_DIR}/.env"
 RELEASE_DIR = f"{REMOTE_DIR}/releases"
 SITE_NAME = "center.parloq.com"
+SECURITY_ENV_KEYS = (
+    "TURNSTILE_SITE_KEY",
+    "TURNSTILE_SECRET_KEY",
+    "DATA_ENCRYPTION_ACTIVE_KEY_ID",
+    "DATA_ENCRYPTION_KEYS",
+)
 
 
 class BaoTaError(RuntimeError):
@@ -77,6 +84,43 @@ def resolve_token_hash(settings: Mapping[str, str]) -> str:
     if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{32}", token_hash):
         raise BaoTaError("could not read the BaoTa API token hash through the read-only SSH channel")
     return token_hash
+
+
+def load_security_settings(path: Path) -> dict[str, str]:
+    values = load_env(path)
+    unexpected = sorted(set(values) - set(SECURITY_ENV_KEYS))
+    missing = [key for key in SECURITY_ENV_KEYS if not values.get(key)]
+    if unexpected:
+        raise BaoTaError("security file contains unsupported keys")
+    if missing:
+        raise BaoTaError("security file is missing required keys")
+
+    for key in ("TURNSTILE_SITE_KEY", "TURNSTILE_SECRET_KEY"):
+        value = values[key]
+        if not 10 <= len(value) <= 200 or any(char.isspace() for char in value):
+            raise BaoTaError(f"{key} has an invalid format")
+
+    active_key_id = values["DATA_ENCRYPTION_ACTIVE_KEY_ID"]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", active_key_id):
+        raise BaoTaError("DATA_ENCRYPTION_ACTIVE_KEY_ID has an invalid format")
+    try:
+        keyring = json.loads(values["DATA_ENCRYPTION_KEYS"])
+    except json.JSONDecodeError as exc:
+        raise BaoTaError("DATA_ENCRYPTION_KEYS must be a JSON object") from exc
+    if not isinstance(keyring, dict) or active_key_id not in keyring:
+        raise BaoTaError("DATA_ENCRYPTION_KEYS must contain the active key")
+    for key_id, encoded_key in keyring.items():
+        if not isinstance(key_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", key_id):
+            raise BaoTaError("DATA_ENCRYPTION_KEYS contains an invalid key id")
+        if not isinstance(encoded_key, str):
+            raise BaoTaError("DATA_ENCRYPTION_KEYS contains an invalid key")
+        try:
+            decoded_key = base64.urlsafe_b64decode(encoded_key.encode())
+        except (ValueError, TypeError) as exc:
+            raise BaoTaError("DATA_ENCRYPTION_KEYS contains an invalid key") from exc
+        if len(decoded_key) != 32:
+            raise BaoTaError("DATA_ENCRYPTION_KEYS contains an invalid key")
+    return values
 
 
 @contextmanager
@@ -374,6 +418,94 @@ write_status '{{"status":"success","commit":"'"${{commit}}"'","backup":"'"${{bac
 """
 
 
+def security_configuration_script(
+    *, security_file: str, checksum: str, status_file: str, configuration_id: str,
+) -> str:
+    if not re.fullmatch(r"[0-9]{10,20}", configuration_id):
+        raise BaoTaError("invalid security configuration id")
+    if not re.fullmatch(r"[0-9a-f]{64}", checksum):
+        raise BaoTaError("invalid security configuration checksum")
+    q = shlex.quote
+    return f"""#!/usr/bin/env bash
+set -Eeuo pipefail
+security_file={q(security_file)}
+checksum={q(checksum)}
+configuration_id={q(configuration_id)}
+remote_dir={q(REMOTE_DIR)}
+compose_file={q(COMPOSE_FILE)}
+env_file={q(ENV_FILE)}
+status_file={q(status_file)}
+backup="${{env_file}}.backup-security-${{configuration_id}}"
+candidate="${{env_file}}.candidate-security-${{configuration_id}}"
+switched=0
+write_status() {{
+  mkdir -p "$(dirname "${{status_file}}")"
+  printf '%s\n' "$1" >"${{status_file}}"
+}}
+rollback() {{
+  code=$?
+  rollback_succeeded=0
+  rm -f "${{candidate}}"
+  if [ "${{switched}}" = 1 ] && [ -f "${{backup}}" ]; then
+    if cp -p "${{backup}}" "${{env_file}}"; then
+      rollback_succeeded=1
+    fi
+  fi
+  write_status '{{"status":"failed","exitCode":'"${{code}}"',"rollbackAttempted":'"${{switched}}"',"rollbackSucceeded":'"${{rollback_succeeded}}"'}}'
+  exit "${{code}}"
+}}
+trap rollback ERR
+printf '%s  %s\n' "${{checksum}}" "${{security_file}}" | sha256sum -c -
+[ -f "${{compose_file}}" ]
+[ -f "${{env_file}}" ]
+cp -p "${{env_file}}" "${{backup}}"
+cp -p "${{env_file}}" "${{candidate}}"
+python3 - "${{candidate}}" "${{security_file}}" <<'PY'
+from pathlib import Path
+import sys
+
+required = (
+    "TURNSTILE_SITE_KEY",
+    "TURNSTILE_SECRET_KEY",
+    "DATA_ENCRYPTION_ACTIVE_KEY_ID",
+    "DATA_ENCRYPTION_KEYS",
+)
+candidate = Path(sys.argv[1])
+fragment = Path(sys.argv[2])
+
+updates = {{}}
+for raw_line in fragment.read_text(encoding="utf-8").splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    updates[key.strip()] = value.strip()
+if set(updates) != set(required) or any(not updates[key] for key in required):
+    raise SystemExit("invalid security configuration fragment")
+
+remaining = dict(updates)
+result = []
+for raw_line in candidate.read_text(encoding="utf-8").splitlines():
+    key = raw_line.split("=", 1)[0].strip() if "=" in raw_line else ""
+    if key in remaining:
+        result.append(f"{{key}}={{remaining.pop(key)}}")
+    else:
+        result.append(raw_line)
+for key in required:
+    if key in remaining:
+        result.append(f"{{key}}={{remaining.pop(key)}}")
+candidate.write_text("\n".join(result) + "\n", encoding="utf-8")
+PY
+chmod 600 "${{candidate}}"
+cd "${{remote_dir}}"
+docker compose --env-file "${{candidate}}" -f "${{compose_file}}" config --quiet
+mv "${{candidate}}" "${{env_file}}"
+switched=1
+trap - ERR
+write_status '{{"status":"success","backup":"'"${{backup}}"'","configuredKeys":["TURNSTILE_SITE_KEY","TURNSTILE_SECRET_KEY","DATA_ENCRYPTION_ACTIVE_KEY_ID","DATA_ENCRYPTION_KEYS"]}}'
+"""
+
+
 def command_status(client: BaoTaClient) -> None:
     sites = client.post(
         "/data?action=getData&table=sites",
@@ -434,6 +566,55 @@ def command_release(client: BaoTaClient, args: argparse.Namespace) -> None:
     }))
 
 
+def command_configure_security(client: BaoTaClient, args: argparse.Namespace) -> None:
+    values = load_security_settings(Path(args.secrets_file).resolve())
+    configuration_id = str(int(time.time()))
+    status_file = f"{RELEASE_DIR}/status-security-{configuration_id}.json"
+    task_id: int | None = None
+    remote_fragment: str | None = None
+    with tempfile.TemporaryDirectory(prefix="parloq-security-") as temp_dir:
+        local_fragment = Path(temp_dir) / f"security-{configuration_id}.env"
+        serialized = "".join(f"{key}={values[key]}\n" for key in SECURITY_ENV_KEYS)
+        local_fragment.write_text(serialized, encoding="utf-8")
+        local_fragment.chmod(0o600)
+        checksum = hashlib.sha256(local_fragment.read_bytes()).hexdigest()
+        try:
+            remote_fragment = client.upload(local_fragment, RELEASE_DIR)
+            script = security_configuration_script(
+                security_file=remote_fragment,
+                checksum=checksum,
+                status_file=status_file,
+                configuration_id=configuration_id,
+            )
+            task_id = client.add_shell_task(f"parloq-security-{configuration_id}", script)
+            result = client.wait_status(status_file, timeout_seconds=300)
+            if result.get("status") != "success":
+                raise BaoTaError(
+                    "production security configuration failed "
+                    f"(exit={result.get('exitCode')}, rollback={result.get('rollbackAttempted')})"
+                )
+            print(json.dumps({
+                "status": "success",
+                "backup": result.get("backup"),
+                "configuredKeys": result.get("configuredKeys"),
+            }))
+        finally:
+            if task_id is not None:
+                try:
+                    client.delete_task(task_id)
+                except BaoTaError:
+                    pass
+            if remote_fragment is not None:
+                try:
+                    client.delete_file(remote_fragment)
+                except BaoTaError:
+                    pass
+            try:
+                client.delete_file(status_file)
+            except BaoTaError:
+                pass
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     result.add_argument(
@@ -443,6 +624,8 @@ def parser() -> argparse.ArgumentParser:
     )
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
+    configure_security = commands.add_parser("configure-security")
+    configure_security.add_argument("--secrets-file", required=True, type=Path)
     release = commands.add_parser("release")
     release.add_argument("--archive", required=True)
     release.add_argument("--checksum", required=True)
@@ -464,6 +647,8 @@ def main() -> int:
             client = BaoTaClient(base_url, token_hash)
             if args.command == "status":
                 command_status(client)
+            elif args.command == "configure-security":
+                command_configure_security(client, args)
             else:
                 command_release(client, args)
         return 0
