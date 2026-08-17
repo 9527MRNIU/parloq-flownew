@@ -754,3 +754,59 @@ def test_protocol_pairing_rate_limit_policy_migration_is_reversible(
         for column in sa.inspect(engine).get_columns("protocol_nodes")
     }
     engine.dispose()
+
+
+def test_sticky_delivery_schema_repair_fills_columns_after_stamped_drift(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'sticky-delivery-repair.db'}"
+    _alembic(database_url, "0035_developer_docs")
+    engine = sa.create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text("DROP INDEX ix_personal_accounts_sending_cooldown_until")
+        )
+        connection.execute(
+            sa.text("ALTER TABLE personal_accounts DROP COLUMN sending_cooldown_until")
+        )
+        connection.execute(
+            sa.text("DROP INDEX ix_data_package_recipients_package_revision")
+        )
+        connection.execute(
+            sa.text("DROP INDEX ix_data_package_recipients_removed_revision")
+        )
+        connection.execute(
+            sa.text("ALTER TABLE data_package_recipients DROP COLUMN package_revision")
+        )
+        connection.execute(
+            sa.text("ALTER TABLE data_package_recipients DROP COLUMN removed_revision")
+        )
+        connection.execute(
+            sa.text("ALTER TABLE hyperlink_tasks DROP COLUMN skipped_count")
+        )
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    assert "sending_cooldown_until" in {
+        column["name"] for column in inspector.get_columns("personal_accounts")
+    }
+    assert {"package_revision", "removed_revision"} <= {
+        column["name"]
+        for column in inspector.get_columns("data_package_recipients")
+    }
+    assert "skipped_count" in {
+        column["name"] for column in inspector.get_columns("hyperlink_tasks")
+    }
+    assert {
+        "ix_data_package_recipients_package_revision",
+        "ix_data_package_recipients_removed_revision",
+    } <= {
+        index["name"]
+        for index in inspector.get_indexes("data_package_recipients")
+    }
+    assert "ix_personal_accounts_sending_cooldown_until" in {
+        index["name"] for index in inspector.get_indexes("personal_accounts")
+    }
+    engine.dispose()
