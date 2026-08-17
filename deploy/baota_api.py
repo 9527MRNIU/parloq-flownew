@@ -494,7 +494,7 @@ for raw_line in candidate.read_text(encoding="utf-8").splitlines():
 for key in required:
     if key in remaining:
         result.append(f"{{key}}={{remaining.pop(key)}}")
-candidate.write_text("\n".join(result) + "\n", encoding="utf-8")
+candidate.write_text("\\n".join(result) + "\\n", encoding="utf-8")
 PY
 chmod 600 "${{candidate}}"
 cd "${{remote_dir}}"

@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
 
@@ -79,6 +80,9 @@ class BaoTaDeploymentTests(unittest.TestCase):
         self.assertNotIn("PARLOQ_API_IMAGE", script)
         self.assertNotIn("docker compose up", script)
         self.assertNotIn("/data/waba", script)
+        embedded_python = re.search(r"<<'PY'\n(.*?)\nPY\n", script, re.DOTALL)
+        self.assertIsNotNone(embedded_python)
+        compile(embedded_python.group(1), "<security-configuration>", "exec")
 
     def test_load_security_settings_accepts_valid_keyring(self) -> None:
         encoded_key = base64.urlsafe_b64encode(b"k" * 32).decode()
