@@ -34,6 +34,7 @@ data/
 tmp/
 *.log
 
-# Peer landing-page forensic artifacts (malicious JS, do not execute or commit)
+# Local forensic capture staging and repository archives
 .peer-analysis/
 .peer-analysis.zip
+/parloq-flow.zip
