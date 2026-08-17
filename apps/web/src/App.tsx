@@ -41,6 +41,7 @@ import {
 import { AccountStatisticsPage } from "./pages/AccountStatisticsPage";
 import { ProtocolManagementPage } from "./pages/ProtocolManagementPage";
 import { HomePage } from "./pages/HomePage";
+import { DeveloperDocsPage } from "./pages/DeveloperDocsPage";
 import {
   GroupMarketingConstructionPage,
   type GroupMarketingPageKind,
@@ -219,6 +220,7 @@ export default function App() {
               </AdminOnly>
             }
           />
+          <Route path="/system/developer-docs" element={<DeveloperDocsPage />} />
         </Route>
         <Route
           path="*"

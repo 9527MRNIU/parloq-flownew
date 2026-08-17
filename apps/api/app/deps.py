@@ -30,6 +30,8 @@ def _request_token(request: Request) -> str | None:
 
 
 def _request_permission(method: str, path: str) -> tuple[str, bool] | None:
+    if path.startswith("/api/developer-docs"):
+        return "system.developer_docs.read", False
     if path == "/api/personal-accounts/intake/attempts":
         return "resources.account_intake.read", False
     if path == "/api/personal-accounts/import":

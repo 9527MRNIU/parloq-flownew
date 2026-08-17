@@ -14,6 +14,7 @@ from app.routers import (
     auth,
     bitly_accounts,
     direct_short_links,
+    developer_docs,
     groups,
     domains,
     hyperlink,
@@ -55,6 +56,7 @@ app.include_router(groups.router)
 app.include_router(users.router)
 app.include_router(bitly_accounts.router)
 app.include_router(direct_short_links.router)
+app.include_router(developer_docs.router)
 app.include_router(meta_pixels.router)
 app.include_router(materials.router)
 app.include_router(materials.legacy_router)

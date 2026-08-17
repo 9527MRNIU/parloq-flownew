@@ -194,6 +194,407 @@ body {
   }
 }
 
+/* Authenticated in-app documentation workspace. */
+.developer-docs-shell {
+  height: calc(100svh - 5.5rem);
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 252px minmax(0, 1fr) 210px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+.developer-docs-sidebar {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: color-mix(in oklab, var(--card) 94%, var(--muted));
+}
+.developer-docs-sidebar-head {
+  display: grid;
+  gap: 14px;
+  padding: 18px 14px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.developer-docs-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.developer-docs-brand > span {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-content: center;
+  border-radius: 9px;
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+.developer-docs-brand > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.developer-docs-brand strong {
+  font-size: 14px;
+}
+.developer-docs-brand small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.developer-docs-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.developer-docs-search > svg {
+  position: absolute;
+  left: 10px;
+  z-index: 1;
+  color: var(--muted-foreground);
+  pointer-events: none;
+}
+.developer-docs-search input {
+  height: 34px;
+  padding-left: 32px;
+  font-size: 12px;
+  background: var(--background);
+}
+.developer-docs-navigation {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 10px 28px;
+}
+.developer-docs-nav-section {
+  display: grid;
+  gap: 2px;
+  margin-bottom: 16px;
+}
+.developer-docs-nav-section > strong {
+  padding: 0 9px 6px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+.developer-docs-nav-section button {
+  width: 100%;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--foreground);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+}
+.developer-docs-nav-section button svg {
+  flex: none;
+  color: var(--muted-foreground);
+}
+.developer-docs-nav-section button:hover {
+  background: var(--muted);
+}
+.developer-docs-nav-section button.active {
+  color: var(--primary);
+  background: var(--primary-soft);
+  font-weight: 600;
+}
+.developer-docs-nav-section button.active svg {
+  color: currentColor;
+}
+.developer-docs-loading,
+.developer-docs-empty {
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.developer-docs-article {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+  scroll-padding-top: 28px;
+}
+.developer-docs-document {
+  width: min(100%, 800px);
+  margin: 0 auto;
+  padding: 46px 56px 72px;
+  color: var(--foreground);
+  font-size: 14px;
+  line-height: 1.8;
+}
+.developer-docs-title {
+  padding-bottom: 28px;
+  margin-bottom: 30px;
+  border-bottom: 1px solid var(--border);
+}
+.developer-docs-title > span {
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 650;
+}
+.developer-docs-title h1 {
+  margin: 8px 0 8px;
+  font-size: clamp(26px, 3vw, 34px);
+  line-height: 1.25;
+  letter-spacing: -0.025em;
+}
+.developer-docs-title > p {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 15px;
+}
+.developer-docs-title dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  margin: 20px 0 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--muted-2);
+}
+.developer-docs-title dl > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.developer-docs-title dt {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.developer-docs-title dd {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 550;
+}
+.developer-docs-document h2,
+.developer-docs-document h3 {
+  scroll-margin-top: 28px;
+  line-height: 1.4;
+}
+.developer-docs-document h2 {
+  margin: 38px 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 21px;
+}
+.developer-docs-document h3 {
+  margin: 28px 0 10px;
+  font-size: 16px;
+}
+.developer-docs-document p {
+  margin: 11px 0;
+}
+.developer-docs-document ul,
+.developer-docs-document ol {
+  margin: 10px 0;
+  padding-left: 24px;
+}
+.developer-docs-document li + li {
+  margin-top: 5px;
+}
+.developer-docs-document a {
+  color: var(--primary);
+  font-weight: 550;
+  text-decoration: none;
+}
+.developer-docs-document a:hover {
+  text-decoration: underline;
+}
+.developer-docs-document :not(pre) > code {
+  padding: 2px 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--muted);
+  font-size: 0.88em;
+}
+.developer-docs-document pre {
+  overflow-x: auto;
+  margin: 16px 0;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--foreground) 7%, var(--card));
+  font-size: 12px;
+  line-height: 1.65;
+}
+.dark .developer-docs-document pre {
+  background: #151515;
+}
+.developer-docs-document blockquote {
+  margin: 16px 0;
+  padding: 11px 14px;
+  border-left: 3px solid var(--primary);
+  border-radius: 0 7px 7px 0;
+  color: var(--muted-foreground);
+  background: var(--primary-soft);
+}
+.developer-docs-document blockquote p {
+  margin: 0;
+}
+.developer-docs-document table {
+  width: 100%;
+  margin: 18px 0;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.developer-docs-document th,
+.developer-docs-document td {
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.developer-docs-document th {
+  background: var(--table-head);
+  font-weight: 650;
+}
+.developer-docs-document hr {
+  height: 1px;
+  margin: 32px 0;
+  border: 0;
+  background: var(--border);
+}
+.developer-docs-page-state {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+.developer-docs-pager {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 52px;
+  padding-top: 22px;
+  border-top: 1px solid var(--border);
+}
+.developer-docs-pager button {
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 13px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--foreground);
+  background: var(--card);
+  cursor: pointer;
+  text-align: left;
+}
+.developer-docs-pager button:hover {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+.developer-docs-pager button.next {
+  justify-content: flex-end;
+  text-align: right;
+}
+.developer-docs-pager button span {
+  display: grid;
+  gap: 2px;
+}
+.developer-docs-pager button small {
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+.developer-docs-pager button strong {
+  font-size: 12px;
+}
+.developer-docs-toc {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 32px 20px;
+  border-left: 1px solid var(--border);
+}
+.developer-docs-toc > strong {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.developer-docs-toc a {
+  display: block;
+  padding: 5px 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.45;
+  text-decoration: none;
+}
+.developer-docs-toc a:hover {
+  color: var(--primary);
+}
+.developer-docs-toc a.nested {
+  padding-left: 12px;
+}
+.developer-docs-mobile-tools {
+  display: none;
+}
+
+@media (max-width: 1180px) {
+  .developer-docs-shell {
+    grid-template-columns: 238px minmax(0, 1fr);
+  }
+  .developer-docs-toc {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .developer-docs-shell {
+    height: auto;
+    min-height: calc(100svh - 5.5rem);
+    display: flex;
+    flex-direction: column;
+    overflow: visible;
+  }
+  .developer-docs-sidebar {
+    display: none;
+  }
+  .developer-docs-mobile-tools {
+    display: grid;
+    gap: 8px;
+    padding: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .developer-docs-mobile-tools select {
+    width: 100%;
+    height: 36px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--foreground);
+    background: var(--background);
+  }
+  .developer-docs-article {
+    overflow: visible;
+  }
+  .developer-docs-document {
+    padding: 30px 20px 52px;
+  }
+  .developer-docs-title dl {
+    display: grid;
+  }
+  .developer-docs-pager {
+    grid-template-columns: 1fr;
+  }
+}
+
 .field {
   display: grid;
   gap: 7px;

@@ -86,6 +86,7 @@ def seed_initial_data(db: Session) -> None:
             admin_group.menu_permissions.append(RoleMenuPermission(menu_id=menu.id))
         operator_menu = (
             menu.public_id == "menu_resources"
+            or menu.public_id in {"menu_system", "menu_system_developer_docs"}
             or menu.public_id in {
                 "menu_resources_operations",
                 "menu_resources_protocol",

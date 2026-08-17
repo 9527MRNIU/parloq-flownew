@@ -52,6 +52,7 @@ type NavChild = {
   to: string;
   icon?: LucideIcon;
   permissionKey?: string;
+  adminOnly?: boolean;
 };
 type NavItem = {
   label: string;
@@ -263,22 +264,29 @@ export const navigation: NavSection[] = [
       {
         label: "系统管理",
         icon: SettingsIcon,
-        adminOnly: true,
         children: [
           {
             label: "用户管理",
             to: "/system/users",
             permissionKey: "system.users.manage",
+            adminOnly: true,
           },
           {
             label: "角色管理",
             to: "/system/roles",
             permissionKey: "system.roles.manage",
+            adminOnly: true,
           },
           {
             label: "菜单管理",
             to: "/system/menus",
             permissionKey: "system.menus.manage",
+            adminOnly: true,
+          },
+          {
+            label: "开发文档",
+            to: "/system/developer-docs",
+            permissionKey: "system.developer_docs.read",
           },
         ],
       },
@@ -375,6 +383,7 @@ function SidebarNav() {
         .flatMap((item) => {
           const override = overrideFor(item.permissionKey, item.to);
           const children = item.children
+            ?.filter((child) => !child.adminOnly || user?.isAdmin)
             ?.map((child, index) => ({
               child,
               index,
