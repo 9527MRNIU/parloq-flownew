@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
+import re
 import secrets
 from datetime import UTC, timedelta
+from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+from redis.exceptions import RedisError
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
@@ -13,6 +17,7 @@ from app.business_schemas import (
     DomainCreate,
     DomainOrderCreate,
     DomainQuoteRequest,
+    DomainSearchRequest,
     DomainUpdate,
 )
 from app.config import get_settings
@@ -30,11 +35,13 @@ from app.models import (
 )
 from app.security import decrypt_secret, utcnow
 from app.serializers import iso
+from app.task_queue import redis_client
 from app.services.domain_verify import DomainVerifyError, verify_public_domain
 from app.services.domain_onboarding import continue_domain_onboarding
 from app.services.domain_registrar import (
     DomainRegistrarError,
     DomainRegistrarUnknownError,
+    DomainSearchReport,
     MockDomainRegistrar,
     NameSiloDomainRegistrar,
 )
@@ -42,6 +49,8 @@ from app.services.domain_registrar import (
 
 router = APIRouter(prefix="/api/domains", tags=["domains"])
 order_router = APIRouter(prefix="/api/domain-orders", tags=["domain-orders"])
+DOMAIN_SEARCH_KEY_PREFIX = "parloq:domain-search:"
+DOMAIN_SEARCH_TTL_SECONDS = 15 * 60
 
 
 def _registrar(
@@ -241,6 +250,123 @@ def _hostname_occupied(db: DbSession, hostname: str) -> bool:
     )
 
 
+def _search_state(
+    search_id: str,
+    owner_user_id: int,
+    label: str,
+    years: int,
+    report: DomainSearchReport,
+    *,
+    status_value: str,
+    occupied_hostnames: frozenset[str] = frozenset(),
+    error: str | None = None,
+) -> dict:
+    options = [
+        {
+            "domain": item.domain,
+            "registrationPrice": float(item.registration_price * years),
+            "renewalPrice": (
+                float(item.renewal_price) if item.renewal_price is not None else None
+            ),
+            "currency": "USD",
+            "years": years,
+        }
+        for item in report.options
+        if item.domain not in occupied_hostnames
+    ]
+    return {
+        "searchId": search_id,
+        "ownerUserId": str(owner_user_id),
+        "label": label,
+        "years": years,
+        "currency": "USD",
+        "options": options,
+        "status": status_value,
+        "partial": report.partial,
+        "searchedCount": report.searched_count,
+        "skippedCount": report.skipped_count,
+        "candidateCount": report.candidate_count,
+        "error": error,
+        "updatedAt": iso(utcnow()),
+    }
+
+
+def _public_search_state(state: dict) -> dict:
+    return {key: value for key, value in state.items() if key != "ownerUserId"}
+
+
+def _store_search_state(client, state: dict) -> None:
+    client.setex(
+        f"{DOMAIN_SEARCH_KEY_PREFIX}{state['searchId']}",
+        DOMAIN_SEARCH_TTL_SECONDS,
+        json.dumps(state, ensure_ascii=False),
+    )
+
+
+def _run_domain_search(
+    registrar: NameSiloDomainRegistrar,
+    *,
+    search_id: str,
+    owner_user_id: int,
+    label: str,
+    years: int,
+    occupied_hostnames: frozenset[str],
+) -> None:
+    client = redis_client()
+    latest = DomainSearchReport(options=(), searched_count=0, candidate_count=0)
+
+    def publish(report: DomainSearchReport) -> None:
+        nonlocal latest
+        latest = report
+        _store_search_state(
+            client,
+            _search_state(
+                search_id,
+                owner_user_id,
+                label,
+                years,
+                report,
+                status_value="running",
+                occupied_hostnames=occupied_hostnames,
+            ),
+        )
+
+    try:
+        latest = registrar.search(label, on_progress=publish)
+        _store_search_state(
+            client,
+            _search_state(
+                search_id,
+                owner_user_id,
+                label,
+                years,
+                latest,
+                status_value="completed",
+                occupied_hostnames=occupied_hostnames,
+            ),
+        )
+    except (DomainRegistrarError, RedisError, OSError) as exc:
+        try:
+            _store_search_state(
+                client,
+                _search_state(
+                    search_id,
+                    owner_user_id,
+                    label,
+                    years,
+                    latest,
+                    status_value="failed",
+                    occupied_hostnames=occupied_hostnames,
+                    error=str(exc)[:500],
+                ),
+            )
+        except (RedisError, OSError):
+            pass
+    finally:
+        registrar.close()
+        client.close()
+
+
 @router.get("")
 def list_domains(db: DbSession, current_user: CurrentUser) -> dict:
     statement = select(DomainRecord).where(DomainRecord.archived_at.is_(None))
@@ -317,6 +443,98 @@ def domain_availability(
             "provider": quote.provider,
         }
     }
+
+
+@order_router.post("/search", status_code=status.HTTP_202_ACCEPTED)
+def search_domains(
+    payload: DomainSearchRequest,
+    background_tasks: BackgroundTasks,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    registrar = _registrar(db)
+    search_id = uuid4().hex
+    occupied_hostnames = frozenset(
+        db.scalars(
+            select(DomainRecord.hostname).where(DomainRecord.archived_at.is_(None))
+        ).all()
+    ) | frozenset(
+        db.scalars(
+            select(DomainOrder.hostname).where(
+                DomainOrder.status.in_(
+                    (
+                        "pending_payment",
+                        "paid",
+                        "purchase_ready",
+                        "provisioning",
+                        "unknown",
+                        "completed",
+                    )
+                )
+            )
+        ).all()
+    )
+    if isinstance(registrar, MockDomainRegistrar):
+        state = _search_state(
+            search_id,
+            current_user.id,
+            payload.label,
+            payload.years,
+            registrar.search(payload.label),
+            status_value="completed",
+            occupied_hostnames=occupied_hostnames,
+        )
+        return {"data": {"search": _public_search_state(state)}}
+
+    state = _search_state(
+        search_id,
+        current_user.id,
+        payload.label,
+        payload.years,
+        DomainSearchReport(options=(), searched_count=0, candidate_count=0),
+        status_value="running",
+        occupied_hostnames=occupied_hostnames,
+    )
+    client = redis_client()
+    try:
+        _store_search_state(client, state)
+    except (RedisError, OSError) as exc:
+        registrar.close()
+        raise HTTPException(status_code=503, detail="域名查询任务暂时不可用") from exc
+    finally:
+        client.close()
+    background_tasks.add_task(
+        _run_domain_search,
+        registrar,
+        search_id=search_id,
+        owner_user_id=current_user.id,
+        label=payload.label,
+        years=payload.years,
+        occupied_hostnames=occupied_hostnames,
+    )
+    return {"data": {"search": _public_search_state(state)}}
+
+
+@order_router.get("/search/{search_id}")
+def get_domain_search(search_id: str, current_user: CurrentUser) -> dict:
+    if re.fullmatch(r"[0-9a-f]{32}", search_id) is None:
+        raise HTTPException(status_code=404, detail="域名查询不存在或已过期")
+    client = redis_client()
+    try:
+        raw = client.get(f"{DOMAIN_SEARCH_KEY_PREFIX}{search_id}")
+    except (RedisError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="域名查询任务暂时不可用") from exc
+    finally:
+        client.close()
+    if not raw:
+        raise HTTPException(status_code=404, detail="域名查询不存在或已过期")
+    try:
+        state = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=503, detail="域名查询状态无法读取") from exc
+    if str(state.get("ownerUserId")) != str(current_user.id):
+        raise HTTPException(status_code=404, detail="域名查询不存在或已过期")
+    return {"data": {"search": _public_search_state(state)}}
 
 
 @order_router.post("/quote", status_code=status.HTTP_201_CREATED)

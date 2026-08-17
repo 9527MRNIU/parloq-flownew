@@ -167,6 +167,45 @@ def test_domain_quote_order_unknown_reconcile_and_channel_options(
     assert reconciled.json()["data"]["order"]["status"] == "completed"
 
 
+def test_domain_search_returns_suffix_options_before_quote(
+    admin_client: TestClient,
+) -> None:
+    response = admin_client.post(
+        "/api/domain-orders/search",
+        json={"label": "suffix-search", "years": 2},
+    )
+    assert response.status_code == 202, response.text
+    search = response.json()["data"]["search"]
+    assert search["status"] == "completed"
+    assert search["label"] == "suffix-search"
+    assert search["years"] == 2
+    assert search["candidateCount"] == 5
+    assert search["searchedCount"] == 5
+    assert search["skippedCount"] == 0
+    assert search["partial"] is False
+    assert [option["domain"] for option in search["options"]] == [
+        "suffix-search.xyz",
+        "suffix-search.org",
+        "suffix-search.com",
+        "suffix-search.net",
+        "suffix-search.io",
+    ]
+    assert search["options"][0] == {
+        "domain": "suffix-search.xyz",
+        "registrationPrice": 6.0,
+        "renewalPrice": 3.0,
+        "currency": "USD",
+        "years": 2,
+    }
+    assert "ownerUserId" not in search
+
+    invalid = admin_client.post(
+        "/api/domain-orders/search",
+        json={"label": "-invalid", "years": 1},
+    )
+    assert invalid.status_code == 422
+
+
 def test_domain_manage_cannot_bypass_purchase_permission(
     admin_client: TestClient,
 ) -> None:
@@ -217,6 +256,10 @@ def test_domain_manage_cannot_bypass_purchase_permission(
         assert manager.post(
             "/api/domain-orders/quote",
             json={"hostname": "forbidden-purchase.example", "years": 1},
+        ).status_code == 403
+        assert manager.post(
+            "/api/domain-orders/search",
+            json={"label": "forbidden-purchase", "years": 1},
         ).status_code == 403
         assert manager.post(
             "/api/domain-orders", json={"quoteId": admin_quote["quoteId"]}

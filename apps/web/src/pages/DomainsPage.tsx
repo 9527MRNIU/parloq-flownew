@@ -97,6 +97,25 @@ type DomainOrderRow = {
   createdAt?: string;
   updatedAt?: string;
 };
+type DomainSearchOption = {
+  domain: string;
+  registrationPrice: number;
+  renewalPrice: number | null;
+  currency: string;
+  years: number;
+};
+type DomainSearchState = {
+  searchId: string;
+  label: string;
+  years: number;
+  status: "running" | "completed" | "failed";
+  options: DomainSearchOption[];
+  partial: boolean;
+  searchedCount: number;
+  skippedCount: number;
+  candidateCount: number;
+  error?: string;
+};
 const get = (row: Record<string, unknown>, ...keys: string[]) => {
   for (const key of keys) if (row[key] != null) return String(row[key]);
   return "";
@@ -169,6 +188,34 @@ function normalizeOrder(input: unknown): DomainOrderRow {
     updatedAt: get(row, "updatedAt", "updated_at"),
   };
 }
+function normalizeSearch(input: unknown): DomainSearchState {
+  const row = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const options = Array.isArray(row.options) ? row.options : [];
+  return {
+    searchId: get(row, "searchId", "search_id"),
+    label: get(row, "label"),
+    years: Number(row.years || 1),
+    status: ["running", "completed", "failed"].includes(String(row.status))
+      ? String(row.status) as DomainSearchState["status"]
+      : "failed",
+    options: options.map((value) => {
+      const option = value as Record<string, unknown>;
+      const renewal = option.renewalPrice ?? option.renewal_price;
+      return {
+        domain: get(option, "domain"),
+        registrationPrice: Number(option.registrationPrice ?? option.registration_price ?? 0),
+        renewalPrice: renewal == null ? null : Number(renewal),
+        currency: get(option, "currency") || "USD",
+        years: Number(option.years || row.years || 1),
+      };
+    }),
+    partial: Boolean(row.partial),
+    searchedCount: Number(row.searchedCount ?? row.searched_count ?? 0),
+    skippedCount: Number(row.skippedCount ?? row.skipped_count ?? 0),
+    candidateCount: Number(row.candidateCount ?? row.candidate_count ?? 0),
+    error: get(row, "error") || undefined,
+  };
+}
 function statusBadge(status: string) {
   if (["verified", "active", "ready", "valid"].includes(status))
     return <Badge tone="success">正常</Badge>;
@@ -233,6 +280,7 @@ export function DomainsPage() {
   const [rows, setRows] = useState<DomainRow[]>([]);
   const [orders, setOrders] = useState<DomainOrderRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [activeList, setActiveList] = useState<"domains" | "orders">("domains");
   const [keyword, setKeyword] = useState("");
   const [drawer, setDrawer] = useState(false);
   const [editing, setEditing] = useState<DomainRow | null>(null);
@@ -242,8 +290,11 @@ export function DomainsPage() {
   const [testing, setTesting] = useState("");
   const [onboardingPending, setOnboardingPending] = useState("");
   const [purchaseOpen, setPurchaseOpen] = useState(false);
+  const [purchaseLabel, setPurchaseLabel] = useState("");
   const [purchaseHostname, setPurchaseHostname] = useState("");
   const [purchaseYears, setPurchaseYears] = useState("1");
+  const [resultKeyword, setResultKeyword] = useState("");
+  const [domainSearch, setDomainSearch] = useState<DomainSearchState | null>(null);
   const [autoRenew, setAutoRenew] = useState(false);
   const [quote, setQuote] = useState<Record<string, unknown> | null>(null);
   const [order, setOrder] = useState<DomainOrderRow | null>(null);
@@ -274,6 +325,47 @@ export function DomainsPage() {
       ? rows.filter((row) => row.hostname.toLowerCase().includes(search))
       : rows;
   }, [keyword, rows]);
+  const visibleOrders = useMemo(() => {
+    const search = keyword.trim().toLowerCase();
+    return search
+      ? orders.filter((row) => row.hostname.toLowerCase().includes(search))
+      : orders;
+  }, [keyword, orders]);
+  const visibleDomainOptions = useMemo(() => {
+    const search = resultKeyword.trim().toLowerCase();
+    return (domainSearch?.options || []).filter((option) =>
+      !search || option.domain.toLowerCase().includes(search),
+    );
+  }, [domainSearch, resultKeyword]);
+  useEffect(() => {
+    const searchId = domainSearch?.searchId;
+    if (!purchaseOpen || domainSearch?.status !== "running" || !searchId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const payload = await apiRequest(`/api/domain-orders/search/${searchId}`);
+        if (cancelled) return;
+        const value = (payload as { data?: { search?: unknown } }).data?.search;
+        const next = normalizeSearch(value);
+        setDomainSearch(next);
+        if (next.status === "failed") {
+          toast.error(next.error || "域名后缀查询失败");
+        } else if (next.status === "running") {
+          timer = setTimeout(() => void poll(), 1000);
+        }
+      } catch (caught) {
+        if (cancelled) return;
+        setDomainSearch((current) => current ? { ...current, status: "failed" } : current);
+        toast.error(caught instanceof Error ? caught.message : "域名查询状态读取失败");
+      }
+    };
+    timer = setTimeout(() => void poll(), 500);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [domainSearch?.searchId, domainSearch?.status, purchaseOpen]);
   function open(row?: DomainRow) {
     setEditing(row || null);
     setHostname(row?.hostname || "");
@@ -342,6 +434,36 @@ export function DomainsPage() {
       toast.error(caught instanceof Error ? caught.message : "保存失败");
     } finally {
       setPending(false);
+    }
+  }
+  async function requestDomainSearch() {
+    if (!purchaseLabel.trim()) return;
+    setPurchasePending(true);
+    setPurchaseHostname("");
+    setQuote(null);
+    setOrder(null);
+    setResultKeyword("");
+    try {
+      const payload = await apiRequest("/api/domain-orders/search", {
+        method: "POST",
+        body: JSON.stringify({
+          label: purchaseLabel.trim().toLowerCase(),
+          years: Number(purchaseYears),
+        }),
+      });
+      const value = (payload as { data?: { search?: unknown } }).data?.search;
+      const next = normalizeSearch(value);
+      setDomainSearch(next);
+      if (next.status === "failed") {
+        toast.error(next.error || "域名后缀查询失败");
+      } else if (next.status === "completed" && !next.options.length) {
+        toast.error("没有找到可购买的域名后缀");
+      }
+    } catch (caught) {
+      setDomainSearch(null);
+      toast.error(caught instanceof Error ? caught.message : "域名后缀查询失败");
+    } finally {
+      setPurchasePending(false);
     }
   }
   async function requestQuote() {
@@ -468,16 +590,40 @@ export function DomainsPage() {
         search={{
           value: keyword,
           onChange: setKeyword,
-          placeholder: "搜索域名",
+          placeholder: activeList === "domains" ? "搜索域名" : "搜索购买记录",
         }}
-        meta={`${visible.length} 个域名`}
+        filters={
+          <div className="flex items-center gap-2">
+            <Button
+              variant={activeList === "domains" ? "secondary" : "outline"}
+              aria-pressed={activeList === "domains"}
+              onClick={() => {
+                setActiveList("domains");
+                setKeyword("");
+              }}
+            >
+              域名列表
+            </Button>
+            <Button
+              variant={activeList === "orders" ? "secondary" : "outline"}
+              aria-pressed={activeList === "orders"}
+              onClick={() => {
+                setActiveList("orders");
+                setKeyword("");
+              }}
+            >
+              购买记录
+            </Button>
+          </div>
+        }
+        meta={activeList === "domains" ? `${visible.length} 个域名` : `${visibleOrders.length} 条记录`}
         actions={
           <>
             <Button variant="outline" onClick={() => void load()}>
               <RefreshCwIcon size={16} />
               刷新
             </Button>
-            {canManage ? (
+            {canManage && activeList === "domains" ? (
               <Button variant="outline" onClick={() => open()}>
                 <PlusIcon size={17} />
                 接入已有域名
@@ -485,8 +631,11 @@ export function DomainsPage() {
             ) : null}
             {canPurchase ? (
               <Button onClick={() => {
+                setPurchaseLabel("");
                 setPurchaseHostname("");
                 setPurchaseYears("1");
+                setResultKeyword("");
+                setDomainSearch(null);
                 setAutoRenew(false);
                 setQuote(null);
                 setOrder(null);
@@ -499,7 +648,8 @@ export function DomainsPage() {
           </>
         }
       />
-      <ListTableCard>
+      {activeList === "domains" ? (
+        <ListTableCard>
         {loading ? (
           <div className="loading-state">
             <Spinner />
@@ -613,11 +763,12 @@ export function DomainsPage() {
             description="添加推广域名并完成 DNS、SSL 验证。"
           />
         )}
-      </ListTableCard>
-      <ListTableCard>
+        </ListTableCard>
+      ) : (
+        <ListTableCard>
         {loading ? (
           <div className="loading-state"><Spinner /></div>
-        ) : orders.length ? (
+        ) : visibleOrders.length ? (
           <div className="table-scroll">
             <Table>
               <TableHeader>
@@ -631,7 +782,7 @@ export function DomainsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {orders.map((row) => {
+                {visibleOrders.map((row) => {
                   const busy = Boolean(row.id) && orderPending.startsWith(`${row.id}:`);
                   return (
                     <TableRow key={row.readKey}>
@@ -656,22 +807,22 @@ export function DomainsPage() {
                       <TableCell>
                         <div className="flex items-center justify-end gap-1">
                           {canPurchase && row.allowedActions.mockPayment ? (
-                            <Button size="sm" disabled={!row.id || busy} onClick={() => void runOrderAction(row, "mock-payment")}>
+                            <Button disabled={!row.id || busy} onClick={() => void runOrderAction(row, "mock-payment")}>
                               {busy ? <Spinner /> : null}确认支付并开通
                             </Button>
                           ) : null}
                           {canPurchase && row.allowedActions.provision ? (
-                            <Button size="sm" disabled={!row.id || busy} onClick={() => void runOrderAction(row, "provision")}>
+                            <Button disabled={!row.id || busy} onClick={() => void runOrderAction(row, "provision")}>
                               {busy ? <Spinner /> : null}{row.provider === "namesilo" ? "确认购买" : "立即开通"}
                             </Button>
                           ) : null}
                           {canPurchase && row.allowedActions.reconcile ? (
-                            <Button size="sm" variant="outline" disabled={!row.id || busy} onClick={() => void runOrderAction(row, "reconcile")}>
+                            <Button variant="outline" disabled={!row.id || busy} onClick={() => void runOrderAction(row, "reconcile")}>
                               {busy ? <Spinner /> : null}订单对账
                             </Button>
                           ) : null}
                           {canPurchase && row.allowedActions.cancel ? (
-                            <Button size="sm" variant="ghost" className="danger" disabled={!row.id || busy} onClick={() => void runOrderAction(row, "cancel")}>
+                            <Button variant="ghost" className="danger" disabled={!row.id || busy} onClick={() => void runOrderAction(row, "cancel")}>
                               取消
                             </Button>
                           ) : null}
@@ -687,7 +838,8 @@ export function DomainsPage() {
         ) : (
           <EmptyState title="暂无域名订单" description="购买域名时，报价和订单进度会显示在这里。" />
         )}
-      </ListTableCard>
+        </ListTableCard>
+      )}
       <Drawer
         open={drawer}
         onClose={() => !pending && !onboardingPending && setDrawer(false)}
@@ -835,41 +987,195 @@ export function DomainsPage() {
                 {orderPending ? <Spinner /> : null}订单对账
               </Button>
             ) : order ? null : (
-              <Button onClick={() => void requestQuote()} disabled={purchasePending || !purchaseHostname.trim()}>
-                {purchasePending ? <Spinner /> : null}查询价格
+              <Button
+                onClick={() => void (purchaseHostname ? requestQuote() : requestDomainSearch())}
+                disabled={
+                  purchasePending
+                  || domainSearch?.status === "running"
+                  || (!purchaseHostname && !purchaseLabel.trim())
+                }
+              >
+                {purchasePending || domainSearch?.status === "running" ? <Spinner /> : null}
+                {purchaseHostname ? "确认所选域名" : domainSearch ? "重新查询后缀" : "查询可购买域名"}
               </Button>
             )}
           </>
         }
       >
         <div className="drawer-form">
-          <label className="field">
-            <span>完整域名</span>
-            <Input value={purchaseHostname} disabled={Boolean(quote || order)} onChange={(event) => setPurchaseHostname(event.target.value)} placeholder="example.com" />
-          </label>
-          <label className="field">
-            <span>购买年限</span>
-            <Input type="number" min="1" max="10" value={purchaseYears} disabled={Boolean(quote || order)} onChange={(event) => setPurchaseYears(event.target.value)} />
-          </label>
-          {quote ? (
-            <div className="quote-card">
-              <span>当前报价</span>
-              <strong>{String(quote.currency || "USD")} {Number(quote.amount || 0).toFixed(2)}</strong>
-              <small>{String(quote.years || purchaseYears)} 年 · 报价有效期至 {formatDateTime(String(quote.expiresAt || ""))}</small>
-            </div>
-          ) : null}
-          {order ? (
-            <div className="quote-card order-status-card">
-              <span>订单已创建</span>
-              <strong>{order.hostname || purchaseHostname}</strong>
-              <small>状态：{orderStatusLabels[order.status] || order.status} · {order.id || "等待 ID 迁移"}</small>
-              {order.failureReason ? <small className="danger-text">{order.failureReason}</small> : null}
-            </div>
-          ) : null}
-          <label className="switch-row">
-            <span><strong>自动续费</strong><small>注册商支持且续费能力启用后生效。</small></span>
-            <Switch checked={autoRenew} disabled={Boolean(order)} onCheckedChange={setAutoRenew} />
-          </label>
+          <DrawerFormLayout>
+            <DrawerFormSection
+              title="查询条件"
+              description="输入域名主体后，系统会读取 NameSilo 当前后缀价格，并分批查询可注册状态。"
+            >
+              <DrawerFormField label="域名主体" htmlFor="domain-purchase-label">
+                <Input
+                  id="domain-purchase-label"
+                  value={purchaseLabel}
+                  disabled={Boolean(quote || order) || domainSearch?.status === "running"}
+                  onChange={(event) => {
+                    setPurchaseLabel(event.target.value);
+                    setPurchaseHostname("");
+                    setDomainSearch(null);
+                    setQuote(null);
+                  }}
+                  placeholder="例如：brand 或 brand.shop"
+                />
+              </DrawerFormField>
+              <DrawerFormField label="购买年限" htmlFor="domain-purchase-years">
+                <Input
+                  id="domain-purchase-years"
+                  type="number"
+                  min="1"
+                  max="10"
+                  value={purchaseYears}
+                  disabled={Boolean(quote || order) || domainSearch?.status === "running"}
+                  onChange={(event) => {
+                    setPurchaseYears(event.target.value);
+                    setPurchaseHostname("");
+                    setDomainSearch(null);
+                    setQuote(null);
+                  }}
+                />
+              </DrawerFormField>
+              <DrawerFormField
+                label="自动续费"
+                hint="域名购买完成后，由注册商按账户支付设置执行续费。"
+              >
+                <div className="flex h-8 items-center gap-3">
+                  <Switch checked={autoRenew} disabled={Boolean(order)} onCheckedChange={setAutoRenew} />
+                  <span className="text-sm">{autoRenew ? "启用" : "关闭"}</span>
+                </div>
+              </DrawerFormField>
+            </DrawerFormSection>
+
+            {domainSearch ? (
+              <DrawerFormSection title="可购买后缀">
+                <DrawerFormField label="查询进度" align="start">
+                  <div className="flex min-h-8 flex-wrap items-center gap-x-3 gap-y-1 pt-1 text-sm">
+                    {domainSearch.status === "running" ? <Spinner /> : null}
+                    <span>
+                      已查询 {domainSearch.searchedCount}
+                      {domainSearch.candidateCount ? ` / ${domainSearch.candidateCount}` : ""} 个后缀
+                    </span>
+                    <span className="text-muted-foreground">
+                      找到 {domainSearch.options.length} 个可购买域名
+                    </span>
+                    {domainSearch.skippedCount ? (
+                      <span className="text-[var(--warning)]">跳过 {domainSearch.skippedCount} 个</span>
+                    ) : null}
+                  </div>
+                </DrawerFormField>
+                {domainSearch.options.length ? (
+                  <>
+                    <DrawerFormField label="筛选结果" htmlFor="domain-result-filter">
+                      <Input
+                        id="domain-result-filter"
+                        value={resultKeyword}
+                        onChange={(event) => setResultKeyword(event.target.value)}
+                        placeholder="搜索后缀或完整域名"
+                      />
+                    </DrawerFormField>
+                    <div className="md:col-span-2">
+                      <div className="grid grid-cols-[minmax(0,1fr)_100px_100px] gap-3 border-y px-3 py-2 text-xs font-medium text-muted-foreground">
+                        <span>域名 / 后缀</span>
+                        <span className="text-right">注册费用</span>
+                        <span className="text-right">续费 / 年</span>
+                      </div>
+                      <div className="max-h-80 overflow-y-auto border-b">
+                        {visibleDomainOptions.map((option) => {
+                          const selected = purchaseHostname === option.domain;
+                          return (
+                            <button
+                              key={option.domain}
+                              type="button"
+                              aria-pressed={selected}
+                              className={`grid w-full grid-cols-[minmax(0,1fr)_100px_100px] items-center gap-3 px-3 py-2.5 text-left text-sm transition-colors hover:bg-muted/60 ${selected ? "bg-primary/5" : ""}`}
+                              onClick={() => {
+                                setPurchaseHostname(option.domain);
+                                setQuote(null);
+                                setOrder(null);
+                              }}
+                            >
+                              <span className="flex min-w-0 items-center gap-2">
+                                <span className={`flex size-4 shrink-0 items-center justify-center rounded-full border ${selected ? "border-primary bg-primary" : "border-input"}`}>
+                                  {selected ? <span className="size-1.5 rounded-full bg-primary-foreground" /> : null}
+                                </span>
+                                <span className="min-w-0">
+                                  <strong className="block truncate font-medium">{option.domain}</strong>
+                                  <span className="text-xs text-muted-foreground">.{option.domain.slice(domainSearch.label.length + 1)}</span>
+                                </span>
+                              </span>
+                              <span className="text-right tabular-nums">
+                                {option.currency} {option.registrationPrice.toFixed(2)}
+                              </span>
+                              <span className="text-right tabular-nums text-muted-foreground">
+                                {option.renewalPrice == null ? "-" : `${option.currency} ${option.renewalPrice.toFixed(2)}`}
+                              </span>
+                            </button>
+                          );
+                        })}
+                        {!visibleDomainOptions.length ? (
+                          <div className="px-3 py-8 text-center text-sm text-muted-foreground">没有匹配的后缀</div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </>
+                ) : domainSearch.status === "completed" ? (
+                  <DrawerFormField label="查询结果">
+                    <div className="flex h-8 items-center text-sm text-muted-foreground">没有找到可购买的域名后缀</div>
+                  </DrawerFormField>
+                ) : null}
+                {domainSearch.error ? (
+                  <DrawerFormField label="失败原因" align="start">
+                    <p className="pt-1.5 text-sm text-destructive">{domainSearch.error}</p>
+                  </DrawerFormField>
+                ) : null}
+              </DrawerFormSection>
+            ) : null}
+
+            {quote ? (
+              <DrawerFormSection title="报价确认">
+                <DrawerFormField label="域名">
+                  <div className="flex h-8 items-center text-sm font-medium">{String(quote.hostname || purchaseHostname)}</div>
+                </DrawerFormField>
+                <DrawerFormField label="当前报价">
+                  <div className="flex h-8 items-center text-sm">
+                    <strong className="font-medium tabular-nums">
+                      {String(quote.currency || "USD")} {Number(quote.amount || 0).toFixed(2)}
+                    </strong>
+                    <span className="ml-2 text-muted-foreground">{String(quote.years || purchaseYears)} 年</span>
+                  </div>
+                </DrawerFormField>
+                <DrawerFormField label="有效期">
+                  <div className="flex h-8 items-center text-sm text-muted-foreground">
+                    {formatDateTime(String(quote.expiresAt || ""))}
+                  </div>
+                </DrawerFormField>
+              </DrawerFormSection>
+            ) : null}
+
+            {order ? (
+              <DrawerFormSection title="订单状态">
+                <DrawerFormField label="域名">
+                  <div className="flex h-8 items-center text-sm font-medium">{order.hostname || purchaseHostname}</div>
+                </DrawerFormField>
+                <DrawerFormField label="当前状态">
+                  <div className="flex h-8 items-center gap-2 text-sm">
+                    <Badge tone={order.status === "completed" ? "success" : order.status === "failed" ? "danger" : "warning"}>
+                      {orderStatusLabels[order.status] || order.status}
+                    </Badge>
+                    <span className="text-muted-foreground">{order.id}</span>
+                  </div>
+                </DrawerFormField>
+                {order.failureReason ? (
+                  <DrawerFormField label="状态说明" align="start">
+                    <p className="pt-1.5 text-sm text-destructive">{order.failureReason}</p>
+                  </DrawerFormField>
+                ) : null}
+              </DrawerFormSection>
+            ) : null}
+          </DrawerFormLayout>
         </div>
       </Drawer>
     </StandardListPage>

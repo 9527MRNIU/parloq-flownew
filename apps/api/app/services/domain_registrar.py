@@ -26,6 +26,25 @@ class DomainQuote:
 
 
 @dataclass(frozen=True, slots=True)
+class DomainSearchOption:
+    domain: str
+    registration_price: Decimal
+    renewal_price: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class DomainSearchReport:
+    options: tuple[DomainSearchOption, ...]
+    searched_count: int
+    candidate_count: int
+    skipped_count: int = 0
+
+    @property
+    def partial(self) -> bool:
+        return self.skipped_count > 0
+
+
+@dataclass(frozen=True, slots=True)
 class RegistrationResult:
     provider_order_ref: str
     amount: Decimal | None = None
@@ -35,6 +54,9 @@ class DomainRegistrar:
     """Registrar boundary. Production adapters can implement this contract later."""
 
     def quote(self, hostname: str, years: int = 1) -> DomainQuote:
+        raise NotImplementedError
+
+    def search(self, label: str, *, on_progress=None) -> DomainSearchReport:
         raise NotImplementedError
 
     def register(
@@ -66,6 +88,26 @@ class MockDomainRegistrar(DomainRegistrar):
         # Deterministic local-only unavailable fixtures are useful for UI/tests.
         available = not hostname.startswith(("taken.", "unavailable."))
         return DomainQuote(available=available, amount=annual * years)
+
+    def search(self, label: str, *, on_progress=None) -> DomainSearchReport:
+        options = tuple(
+            DomainSearchOption(
+                domain=f"{label}.{tld}",
+                registration_price=price,
+                renewal_price=price,
+            )
+            for tld, price in sorted(
+                self._annual_prices.items(), key=lambda item: (item[1], item[0])
+            )
+        )
+        report = DomainSearchReport(
+            options=options,
+            searched_count=len(options),
+            candidate_count=len(options),
+        )
+        if on_progress is not None:
+            on_progress(report)
+        return report
 
     def register(
         self,
@@ -111,6 +153,35 @@ class NameSiloDomainRegistrar(DomainRegistrar):
             amount=(annual_amount or Decimal("0")) * years,
             provider="namesilo",
         )
+
+    def search(self, label: str, *, on_progress=None) -> DomainSearchReport:
+        def normalize(provider_report) -> DomainSearchReport:
+            return DomainSearchReport(
+                options=tuple(
+                    DomainSearchOption(
+                        domain=item.domain,
+                        registration_price=item.registration_price,
+                        renewal_price=item.renewal_price,
+                    )
+                    for item in provider_report.options
+                ),
+                searched_count=provider_report.searched_count,
+                candidate_count=provider_report.candidate_count,
+                skipped_count=provider_report.skipped_count,
+            )
+
+        try:
+            provider_report = self._client.search_available_domains(
+                label,
+                on_progress=(
+                    (lambda report: on_progress(normalize(report)))
+                    if on_progress is not None
+                    else None
+                ),
+            )
+        except PlatformClientError as exc:
+            raise DomainRegistrarError(str(exc)) from exc
+        return normalize(provider_report)
 
     def register(
         self,

@@ -65,6 +65,125 @@ def test_namesilo_quote_and_purchase_parameters_match_the_old_integration() -> N
     assert purchase_query["key"] == "secret-key"
 
 
+def test_namesilo_searches_the_price_catalogue_then_checks_availability() -> None:
+    requests: list[httpx.Request] = []
+    progress = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        operation = request.url.path.rsplit("/", 1)[-1]
+        if operation == "getPrices":
+            return httpx.Response(
+                200,
+                json={
+                    "reply": {
+                        "code": 300,
+                        "detail": "success",
+                        "com": {"registration": "12.00", "renew": "15.00"},
+                        "xyz": {"registration": "3.00", "renew": "4.00"},
+                        "invalid": {"registration": "not-a-price"},
+                    }
+                },
+            )
+        if operation == "checkRegisterAvailability":
+            assert request.url.params["domains"] == "brand.xyz,brand.com"
+            return httpx.Response(
+                200,
+                json={
+                    "reply": {
+                        "code": 300,
+                        "available": {
+                            "domain": [
+                                {
+                                    "domain": "brand.xyz",
+                                    "price": "2.50",
+                                    "renew": "3.50",
+                                },
+                                {"domain": "brand.com"},
+                            ]
+                        },
+                    }
+                },
+            )
+        raise AssertionError(f"unexpected operation {operation}")
+
+    client = NameSiloClient(
+        "secret-key",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    client.batch_request_interval_seconds = 0
+    report = client.search_available_domains("brand", on_progress=progress.append)
+
+    assert [request.url.path for request in requests] == [
+        "/apibatch/getPrices",
+        "/apibatch/checkRegisterAvailability",
+    ]
+    assert report.searched_count == 2
+    assert report.candidate_count == 2
+    assert report.skipped_count == 0
+    assert [option.domain for option in report.options] == ["brand.xyz", "brand.com"]
+    assert report.options[0].registration_price == Decimal("2.50")
+    assert report.options[0].renewal_price == Decimal("3.50")
+    assert report.options[1].registration_price == Decimal("12.00")
+    assert report.options[1].renewal_price == Decimal("15.00")
+    assert progress[0].candidate_count == 2
+    assert progress[0].searched_count == 0
+    assert progress[-1] == report
+
+
+def test_namesilo_search_splits_timed_out_batches_without_losing_progress() -> None:
+    availability_calls: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        operation = request.url.path.rsplit("/", 1)[-1]
+        if operation == "getPrices":
+            return httpx.Response(
+                200,
+                json={
+                    "reply": {
+                        "code": 300,
+                        **{
+                            f"tld{index}": {
+                                "registration": str(index + 1),
+                                "renew": str(index + 2),
+                            }
+                            for index in range(11)
+                        },
+                    }
+                },
+            )
+        if operation == "checkRegisterAvailability":
+            domains = request.url.params["domains"].split(",")
+            availability_calls.append(domains)
+            if len(availability_calls) == 1:
+                raise httpx.ReadTimeout("timeout", request=request)
+            return httpx.Response(
+                200,
+                json={
+                    "reply": {
+                        "code": 300,
+                        "available": {
+                            "domain": [{"domain": domain} for domain in domains]
+                        },
+                    }
+                },
+            )
+        raise AssertionError(f"unexpected operation {operation}")
+
+    client = NameSiloClient(
+        "secret-key",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    client.batch_request_interval_seconds = 0
+    report = client.search_available_domains("brand")
+
+    assert [len(domains) for domains in availability_calls] == [11, 5, 6]
+    assert report.searched_count == 11
+    assert report.candidate_count == 11
+    assert report.skipped_count == 0
+    assert len(report.options) == 11
+
+
 def test_namesilo_purchase_timeout_is_marked_unknown_for_reconciliation() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("timeout", request=request)

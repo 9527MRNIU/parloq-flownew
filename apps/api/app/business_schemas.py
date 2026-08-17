@@ -351,6 +351,25 @@ class DomainQuoteRequest(Model):
         return hostname
 
 
+class DomainSearchRequest(Model):
+    label: str = Field(min_length=1, max_length=189)
+    years: int = Field(default=1, ge=1, le=10)
+
+    @field_validator("label")
+    @classmethod
+    def domain_label(cls, value: str) -> str:
+        label = value.lower().strip().rstrip(".")
+        parts = label.split(".")
+        if any(
+            not part
+            or len(part) > 63
+            or re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", part) is None
+            for part in parts
+        ):
+            raise ValueError("域名主体格式不正确")
+        return label
+
+
 class DomainOrderCreate(Model):
     quote_id: str = Field(alias="quoteId", min_length=1, max_length=64)
     auto_renew: bool = Field(default=False, alias="autoRenew")

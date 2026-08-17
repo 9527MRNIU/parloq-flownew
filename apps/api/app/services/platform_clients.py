@@ -4,8 +4,10 @@ import hashlib
 import json
 import re
 import time
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Mapping
+from threading import Lock
+from typing import Callable, Mapping
 
 import httpx
 
@@ -17,10 +19,31 @@ class PlatformClientError(RuntimeError):
         *,
         code: str = "",
         outcome_unknown: bool = False,
+        retryable: bool = False,
     ):
         super().__init__(message)
         self.code = code
         self.outcome_unknown = outcome_unknown
+        self.retryable = retryable
+
+
+@dataclass(frozen=True, slots=True)
+class NameSiloDomainOption:
+    domain: str
+    registration_price: Decimal
+    renewal_price: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class NameSiloDomainSearchReport:
+    options: tuple[NameSiloDomainOption, ...]
+    searched_count: int
+    candidate_count: int
+    skipped_count: int = 0
+
+    @property
+    def partial(self) -> bool:
+        return self.skipped_count > 0
 
 
 def _mapping(value: object) -> dict[str, object]:
@@ -59,6 +82,12 @@ def _decimal(value: object) -> Decimal | None:
 
 class NameSiloClient:
     base_url = "https://www.namesilo.com/api"
+    batch_base_url = "https://www.namesilo.com/apibatch"
+    availability_batch_size = 40
+    minimum_split_size = 10
+    batch_request_interval_seconds = 1.0
+    _batch_request_lock = Lock()
+    _last_batch_request_at = 0.0
 
     def __init__(
         self,
@@ -84,22 +113,34 @@ class NameSiloClient:
         *,
         success_codes: frozenset[str] = frozenset({"300"}),
         mutation: bool = False,
+        batch: bool = False,
         **params: object,
     ) -> dict[str, object]:
+        if batch:
+            client_type = type(self)
+            with client_type._batch_request_lock:
+                elapsed = time.monotonic() - client_type._last_batch_request_at
+                if elapsed < self.batch_request_interval_seconds:
+                    time.sleep(self.batch_request_interval_seconds - elapsed)
+                client_type._last_batch_request_at = time.monotonic()
         try:
             response = self._client.get(
-                f"{self.base_url}/{operation}",
+                f"{self.batch_base_url if batch else self.base_url}/{operation}",
                 params={"version": "1", "type": "json", "key": self._api_key, **params},
             )
         except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.TimeoutException):
             raise PlatformClientError(
                 "NameSilo 响应超时",
+                code="timeout",
                 outcome_unknown=mutation,
+                retryable=True,
             ) from None
         except httpx.HTTPError:
             raise PlatformClientError(
                 "NameSilo 连接失败",
+                code="connection_error",
                 outcome_unknown=mutation,
+                retryable=True,
             ) from None
         try:
             payload = _mapping(response.json())
@@ -115,10 +156,132 @@ class NameSiloClient:
             detail = detail.replace(self._api_key, "[redacted]").split("?", 1)[0]
             raise PlatformClientError(
                 detail,
-                code=code,
+                code=code or str(response.status_code),
                 outcome_unknown=mutation and response.status_code >= 500,
+                retryable=response.status_code == 429 or response.status_code >= 500,
             )
         return reply
+
+    def _tld_prices(self) -> list[tuple[str, Decimal, Decimal | None]]:
+        reply = self._request("getPrices", batch=True)
+        prices: list[tuple[str, Decimal, Decimal | None]] = []
+        for raw_tld, raw_price in reply.items():
+            tld = str(raw_tld).strip().lower().lstrip(".")
+            price = _mapping(raw_price)
+            registration = _decimal(price.get("registration"))
+            if not tld or registration is None:
+                continue
+            prices.append((tld, registration, _decimal(price.get("renew"))))
+        return sorted(
+            prices,
+            key=lambda item: (
+                item[1],
+                item[2] if item[2] is not None else Decimal("Infinity"),
+                item[0],
+            ),
+        )
+
+    def search_available_domains(
+        self,
+        label: str,
+        *,
+        deadline_seconds: float = 180.0,
+        on_progress: Callable[[NameSiloDomainSearchReport], None] | None = None,
+    ) -> NameSiloDomainSearchReport:
+        """Return purchasable label/TLD combinations using NameSilo's batch APIs.
+
+        NameSilo's price feed is the suffix catalogue. Availability is checked
+        separately in batches, exactly as in the legacy management system.
+        Timed-out requests are split down to small batches so one slow suffix
+        group does not discard the whole result set. Other transient failures
+        are counted as skipped and surfaced as a partial result.
+        """
+
+        started_at = time.monotonic()
+        prices = self._tld_prices()
+        price_by_domain = {
+            f"{label}.{tld}": (registration, renewal)
+            for tld, registration, renewal in prices
+        }
+        candidates = list(price_by_domain)
+        candidate_count = len(candidates)
+        searched_count = 0
+        skipped_count = 0
+        options: list[NameSiloDomainOption] = []
+
+        def report() -> NameSiloDomainSearchReport:
+            value = NameSiloDomainSearchReport(
+                options=tuple(options),
+                searched_count=searched_count,
+                candidate_count=candidate_count,
+                skipped_count=skipped_count,
+            )
+            if on_progress is not None:
+                on_progress(value)
+            return value
+
+        def check_batch(domains: list[str]) -> None:
+            nonlocal searched_count, skipped_count
+            if not domains:
+                return
+            if time.monotonic() - started_at >= deadline_seconds:
+                skipped_count += len(domains)
+                searched_count += len(domains)
+                report()
+                return
+            try:
+                reply = self._request(
+                    "checkRegisterAvailability",
+                    batch=True,
+                    domains=",".join(domains),
+                )
+            except PlatformClientError as exc:
+                if exc.code == "timeout" and len(domains) > self.minimum_split_size:
+                    midpoint = len(domains) // 2
+                    check_batch(domains[:midpoint])
+                    check_batch(domains[midpoint:])
+                    return
+                if exc.retryable:
+                    skipped_count += len(domains)
+                    searched_count += len(domains)
+                    report()
+                    return
+                raise
+
+            available_rows = {
+                str(row.get("domain") or "").strip().lower(): row
+                for row in _domain_rows(reply.get("available"))
+            }
+            for domain in domains:
+                row = available_rows.get(domain)
+                if row is None:
+                    continue
+                fallback_registration, renewal = price_by_domain[domain]
+                registration = _decimal(row.get("price")) or fallback_registration
+                renewal = _decimal(row.get("renew")) or renewal
+                options.append(
+                    NameSiloDomainOption(
+                        domain=domain,
+                        registration_price=registration,
+                        renewal_price=renewal,
+                    )
+                )
+            searched_count += len(domains)
+            report()
+
+        report()
+        for offset in range(0, candidate_count, self.availability_batch_size):
+            check_batch(candidates[offset : offset + self.availability_batch_size])
+        options.sort(
+            key=lambda item: (
+                item.registration_price,
+                item.renewal_price
+                if item.renewal_price is not None
+                else Decimal("Infinity"),
+                item.domain,
+            )
+        )
+        return report()
 
     def verify_connection(self) -> None:
         self._request("listDomains", page=1, pageSize=1)
