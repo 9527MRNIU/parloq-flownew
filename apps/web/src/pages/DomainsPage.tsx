@@ -585,7 +585,7 @@ export function DomainsPage() {
     }
   }
   return (
-    <StandardListPage>
+    <StandardListPage viewport>
       <ListToolbar
         search={{
           value: keyword,
