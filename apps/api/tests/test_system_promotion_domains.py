@@ -16,6 +16,7 @@ from app.main import app
 from app.models import DomainOrder, DomainQuote, DomainRecord, UserAccount
 from app.routers import domains as domains_router
 from app.security import utcnow
+from app.services.domain_registrar import DomainRegistrarError, MockDomainRegistrar
 from app.snowflake import new_public_id
 
 
@@ -167,6 +168,59 @@ def test_domain_quote_order_unknown_reconcile_and_channel_options(
     )
     assert reconciled.status_code == 200, reconciled.text
     assert reconciled.json()["data"]["order"]["status"] == "completed"
+
+
+def test_definitive_provider_rejection_can_be_safely_retried_once(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
+    quote = admin_client.post(
+        "/api/domain-orders/quote",
+        json={"hostname": "definitive-rejection.example", "years": 1},
+    ).json()["data"]["quote"]
+    order = admin_client.post(
+        "/api/domain-orders", json={"quoteId": quote["quoteId"]}
+    ).json()["data"]["order"]
+    assert admin_client.post(
+        f"/api/domain-orders/{order['id']}/mock-payment"
+    ).status_code == 200
+
+    class FailingOnceRegistrar(MockDomainRegistrar):
+        attempts = 0
+
+        def register(self, *args, **kwargs):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise DomainRegistrarError("注册商明确拒绝了支付方式")
+            return super().register(*args, **kwargs)
+
+    registrar = FailingOnceRegistrar()
+    monkeypatch.setattr(domains_router, "_registrar", lambda _db, provider=None: registrar)
+
+    rejected = admin_client.post(f"/api/domain-orders/{order['id']}/provision")
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"] == "注册商明确拒绝了支付方式"
+
+    failed_row = next(
+        row
+        for row in admin_client.get("/api/domain-orders").json()["data"]["rows"]
+        if row["id"] == order["id"]
+    )
+    assert failed_row["status"] == "failed"
+    assert failed_row["allowedActions"]["provision"] is True
+    with SessionLocal() as db:
+        persisted_order = db.get(DomainOrder, int(order["id"]))
+        assert persisted_order is not None
+        assert persisted_order.provider_order_ref is None
+
+    completed = admin_client.post(f"/api/domain-orders/{order['id']}/provision")
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["data"]["order"]["status"] == "completed"
+    assert registrar.attempts == 2
+
+    duplicate = admin_client.post(f"/api/domain-orders/{order['id']}/provision")
+    assert duplicate.status_code == 409
+    assert registrar.attempts == 2
 
 
 def test_real_registrar_quote_creates_purchase_ready_order(

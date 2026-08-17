@@ -46,6 +46,10 @@ from app.services.domain_registrar import (
     MockDomainRegistrar,
     NameSiloDomainRegistrar,
 )
+from app.services.platform_clients import (
+    NAMESILO_PAYMENT_VERIFIED_CARD,
+    namesilo_payment_mode,
+)
 
 
 router = APIRouter(prefix="/api/domains", tags=["domains"])
@@ -104,10 +108,16 @@ def _registrar(
         api_key = decrypt_secret(credential.value_ciphertext)
     except ValueError as exc:
         raise HTTPException(status_code=503, detail="NameSilo 凭据无法读取，请重新配置") from exc
-    return NameSiloDomainRegistrar(
-        api_key,
-        payment_id=str((config.settings_json or {}).get("paymentId") or "") or None,
-    )
+    settings = dict(config.settings_json or {})
+    payment_id = None
+    if namesilo_payment_mode(settings.get("paymentMode")) == NAMESILO_PAYMENT_VERIFIED_CARD:
+        payment_id = str(settings.get("paymentId") or "").strip() or None
+        if payment_id is None:
+            raise HTTPException(
+                status_code=503,
+                detail="NameSilo 已选择信用卡支付，但尚未配置 Payment ID",
+            )
+    return NameSiloDomainRegistrar(api_key, payment_id=payment_id)
 
 
 def _close_registrar(registrar: MockDomainRegistrar | NameSiloDomainRegistrar) -> None:
@@ -225,7 +235,9 @@ def _order_row(db: DbSession, item: DomainOrder) -> dict:
         "domainId": entity_id(domain) if domain else None,
         "allowedActions": {
             "mockPayment": item.status == "pending_payment" and get_settings().domain_registrar_mock,
-            "provision": item.status in {"paid", "purchase_ready"},
+            "provision": item.status in {"paid", "purchase_ready"} or (
+                item.status == "failed" and item.provider_order_ref is None
+            ),
             "reconcile": can_reconcile,
             "cancel": item.status in {"pending_payment", "paid", "purchase_ready"},
         },
@@ -748,15 +760,22 @@ def provision_domain_order(
         update(DomainOrder)
         .where(
             DomainOrder.id == item.id,
-            DomainOrder.status.in_(("paid", "purchase_ready")),
+            DomainOrder.status.in_(("paid", "purchase_ready", "failed")),
+            or_(
+                DomainOrder.status != "failed",
+                DomainOrder.provider_order_ref.is_(None),
+            ),
         )
-        .values(status="provisioning", updated_at=utcnow())
+        .values(status="provisioning", failure_reason=None, updated_at=utcnow())
         .execution_options(synchronize_session=False)
     )
     if transitioned.rowcount != 1:
         db.rollback()
         _close_registrar(registrar)
-        raise HTTPException(status_code=409, detail="只有已支付订单可以开通")
+        raise HTTPException(
+            status_code=409,
+            detail="只有待购买或确定失败且未生成注册商订单号的订单可以开通",
+        )
     db.commit()
     db.refresh(item)
     provider_order_ref: str | None = None
@@ -805,7 +824,7 @@ def provision_domain_order(
         failed.status = "failed"
         failed.failure_reason = str(exc)[:1000]
         db.commit()
-        raise HTTPException(status_code=502, detail=failed.failure_reason) from exc
+        raise HTTPException(status_code=422, detail=failed.failure_reason) from exc
     finally:
         _close_registrar(registrar)
     db.refresh(item)

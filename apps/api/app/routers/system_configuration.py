@@ -15,8 +15,11 @@ from app.serializers import iso
 from app.services.platform_clients import (
     BaoTaClient,
     CloudflareClient,
+    NAMESILO_PAYMENT_ACCOUNT_BALANCE,
+    NAMESILO_PAYMENT_VERIFIED_CARD,
     NameSiloClient,
     PlatformClientError,
+    namesilo_payment_mode,
 )
 
 
@@ -94,6 +97,9 @@ def _platform_row(db: DbSession, platform_key: str, definition: PlatformDefiniti
         credential.updated_by if credential else None
     )
     actor = db.get(UserAccount, actor_id) if actor_id else None
+    settings = dict(config.settings_json or {}) if config else {}
+    if platform_key == "namesilo":
+        settings["paymentMode"] = namesilo_payment_mode(settings.get("paymentMode"))
     return {
         "key": platform_key,
         "name": definition.name,
@@ -102,7 +108,7 @@ def _platform_row(db: DbSession, platform_key: str, definition: PlatformDefiniti
         "configured": credential is not None,
         "maskedValue": f"••••{credential.value_last4}" if credential and credential.value_last4 else None,
         "enabled": bool(config.enabled) if config else False,
-        "settings": dict(config.settings_json or {}) if config else {},
+        "settings": settings,
         "lastTestStatus": config.last_test_status if config else "untested",
         "lastTestMessage": config.last_test_message if config else None,
         "lastTestAt": iso(config.last_test_at) if config else None,
@@ -122,11 +128,23 @@ def _normalized_settings(
     current: dict,
 ) -> dict:
     settings = dict(current)
-    if platform_key == "namesilo" and payload.payment_id is not None:
-        payment_id = payload.payment_id.strip()
-        if payment_id and not re.fullmatch(r"[0-9]{1,64}", payment_id):
-            raise HTTPException(status_code=422, detail="NameSilo 支付 ID 只能包含数字")
-        settings["paymentId"] = payment_id
+    if platform_key == "namesilo":
+        payment_mode = (
+            payload.payment_mode
+            if payload.payment_mode is not None
+            else namesilo_payment_mode(settings.get("paymentMode"))
+        )
+        if payload.payment_id is not None:
+            payment_id = payload.payment_id.strip()
+            if payment_id and not re.fullmatch(r"[0-9]{1,64}", payment_id):
+                raise HTTPException(status_code=422, detail="NameSilo 支付 ID 只能包含数字")
+            settings["paymentId"] = payment_id
+        if payment_mode == NAMESILO_PAYMENT_VERIFIED_CARD and not settings.get("paymentId"):
+            raise HTTPException(
+                status_code=422,
+                detail="使用已验证信用卡支付时必须填写 NameSilo Payment ID",
+            )
+        settings["paymentMode"] = payment_mode
     elif platform_key == "cloudflare" and payload.account_id is not None:
         settings["accountId"] = payload.account_id.strip()
     elif platform_key == "baota" and payload.base_url is not None:
@@ -226,9 +244,19 @@ def test_system_configuration(
     try:
         secret = decrypt_secret(credential.value_ciphertext)
         if platform_key == "namesilo":
-            client = NameSiloClient(secret, payment_id=settings.get("paymentId"))
+            payment_mode = namesilo_payment_mode(settings.get("paymentMode"))
+            payment_id = (
+                settings.get("paymentId")
+                if payment_mode == NAMESILO_PAYMENT_VERIFIED_CARD
+                else None
+            )
+            client = NameSiloClient(secret, payment_id=payment_id)
             client.verify_connection()
-            message = "NameSilo 连接成功"
+            if payment_mode == NAMESILO_PAYMENT_ACCOUNT_BALANCE:
+                balance = client.get_account_balance()
+                message = f"NameSilo 连接成功，账户余额 USD {balance:.2f}"
+            else:
+                message = "NameSilo 连接成功；信用卡 Payment ID 将在实际购买时由 NameSilo 校验"
         elif platform_key == "cloudflare":
             client = CloudflareClient(secret)
             accounts = client.verify_connection()

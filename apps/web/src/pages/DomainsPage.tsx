@@ -526,7 +526,7 @@ export function DomainsPage() {
     if (!row.id) return;
     if (action === "provision" && row.provider === "namesilo" && !(await confirmAction({
       title: `确认通过 NameSilo 购买 ${row.hostname}？`,
-      description: `确认后将立即向 NameSilo 提交 ${row.years} 年购买请求，预计金额 ${row.currency} ${row.amount.toFixed(2)}。将按系统配置使用 Payment ID 或账户余额支付。`,
+      description: `确认后将立即向 NameSilo 提交 ${row.years} 年购买请求，预计金额 ${row.currency} ${row.amount.toFixed(2)}。将使用系统配置中已明确选择的 NameSilo 支付方式。`,
       confirmText: "确认购买",
     }))) return;
     if (action === "cancel" && !(await confirmAction({
@@ -561,6 +561,7 @@ export function DomainsPage() {
         await continueOnboarding(normalize(provisionedDomain));
       }
     } catch (caught) {
+      await load().catch(() => undefined);
       toast.error(caught instanceof Error ? caught.message : "订单操作失败");
     } finally {
       setOrderPending("");

@@ -12,6 +12,7 @@ from app.services.platform_clients import (
     NameSiloClient,
     PlatformClientError,
 )
+from app.services.domain_registrar import DomainRegistrarError, NameSiloDomainRegistrar
 
 
 def test_namesilo_quote_and_purchase_parameters_match_the_old_integration() -> None:
@@ -245,6 +246,46 @@ def test_namesilo_connection_test_is_read_only() -> None:
     client.verify_connection()
 
     assert operations == ["listDomains"]
+
+
+def test_namesilo_reads_account_balance_for_payment_readiness() -> None:
+    operations: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        operation = request.url.path.rsplit("/", 1)[-1]
+        operations.append(operation)
+        assert operation == "getAccountBalance"
+        return httpx.Response(
+            200,
+            json={"reply": {"code": 300, "balance": "42.37"}},
+        )
+
+    client = NameSiloClient(
+        "secret-key",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert client.get_account_balance() == Decimal("42.37")
+    assert operations == ["getAccountBalance"]
+
+
+def test_namesilo_mit_payment_rejection_has_actionable_message() -> None:
+    class RejectingClient:
+        def register_domain(self, *args, **kwargs):
+            raise PlatformClientError(
+                "MIT charge requires mitIdentifier for CheckoutProfile",
+                code="280",
+            )
+
+    registrar = NameSiloDomainRegistrar.__new__(NameSiloDomainRegistrar)
+    registrar._client = RejectingClient()
+
+    with pytest.raises(DomainRegistrarError) as raised:
+        registrar.register("example.com", 1)
+
+    assert "缺少自动扣款授权" in str(raised.value)
+    assert "改用账户余额" in str(raised.value)
+    assert raised.value.code == "280"
 
 
 def test_namesilo_reads_nested_nameservers_and_updates_all_slots() -> None:

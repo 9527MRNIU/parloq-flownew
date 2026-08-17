@@ -8,7 +8,10 @@ from app.services.platform_clients import NameSiloClient, PlatformClientError
 
 
 class DomainRegistrarError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str = "", retryable: bool = False):
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
 
 
 class DomainRegistrarUnknownError(DomainRegistrarError):
@@ -202,7 +205,17 @@ class NameSiloDomainRegistrar(DomainRegistrar):
         except PlatformClientError as exc:
             if exc.outcome_unknown:
                 raise DomainRegistrarUnknownError(str(exc), reference) from exc
-            raise DomainRegistrarError(str(exc)) from exc
+            message = str(exc)
+            if "mit charge requires mitidentifier" in message.lower():
+                message = (
+                    "NameSilo 已拒绝当前信用卡支付资料（缺少自动扣款授权）。"
+                    "请在系统配置中改用账户余额，或更换可用于 API 的 Payment ID。"
+                )
+            raise DomainRegistrarError(
+                message,
+                code=exc.code,
+                retryable=exc.retryable,
+            ) from exc
         return RegistrationResult(provider_order_ref=reference, amount=amount)
 
     def reconcile(

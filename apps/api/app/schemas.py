@@ -105,6 +105,9 @@ class MenuUpdate(ApiModel):
 class SystemPlatformConfigurationUpdate(ApiModel):
     value: str | None = Field(default=None, min_length=8, max_length=8192)
     enabled: bool | None = None
+    payment_mode: Literal["account_balance", "verified_card"] | None = Field(
+        default=None, alias="paymentMode"
+    )
     payment_id: str | None = Field(default=None, alias="paymentId", max_length=64)
     account_id: str | None = Field(default=None, alias="accountId", max_length=64)
     base_url: str | None = Field(default=None, alias="baseUrl", max_length=2048)

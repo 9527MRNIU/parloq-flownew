@@ -27,6 +27,25 @@ class PlatformClientError(RuntimeError):
         self.retryable = retryable
 
 
+NAMESILO_PAYMENT_ACCOUNT_BALANCE = "account_balance"
+NAMESILO_PAYMENT_VERIFIED_CARD = "verified_card"
+
+
+def namesilo_payment_mode(value: object) -> str:
+    """Return a safe NameSilo payment mode for persisted configuration.
+
+    Configurations created before payment modes were explicit may contain a
+    Payment ID. Treating that legacy value as authorization to charge a saved
+    card is unsafe, so the compatibility default is always account balance.
+    """
+
+    return (
+        NAMESILO_PAYMENT_VERIFIED_CARD
+        if str(value or "").strip() == NAMESILO_PAYMENT_VERIFIED_CARD
+        else NAMESILO_PAYMENT_ACCOUNT_BALANCE
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class NameSiloDomainOption:
     domain: str
@@ -285,6 +304,14 @@ class NameSiloClient:
 
     def verify_connection(self) -> None:
         self._request("listDomains", page=1, pageSize=1)
+
+    def get_account_balance(self) -> Decimal:
+        reply = self._request("getAccountBalance")
+        for key in ("balance", "account_balance", "accountBalance"):
+            amount = _decimal(reply.get(key))
+            if amount is not None:
+                return amount
+        raise PlatformClientError("NameSilo 未返回有效账户余额")
 
     def check_availability(self, domain: str) -> tuple[bool, Decimal | None]:
         reply = self._request("checkRegisterAvailability", domains=domain)
