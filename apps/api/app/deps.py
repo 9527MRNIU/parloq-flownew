@@ -29,7 +29,53 @@ def _request_token(request: Request) -> str | None:
     return request.cookies.get(get_settings().auth_cookie_name)
 
 
-def _request_permission(method: str, path: str) -> tuple[str, bool] | None:
+def _validate_cookie_request_origin(request: Request) -> None:
+    """Reject cross-origin browser writes that authenticate with a cookie.
+
+    Bearer clients do not rely on ambient browser credentials and therefore do
+    not need this check. Requests without an Origin header are retained for
+    non-browser clients and internal health/admin tooling.
+    """
+
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, bearer = authorization.partition(" ")
+    if scheme.lower() == "bearer" and bearer.strip():
+        return
+    origin = request.headers.get("Origin")
+    if not origin:
+        return
+    allowed_origins = {item.rstrip("/") for item in get_settings().cors_origins}
+    if origin.rstrip("/") not in allowed_origins:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="跨站请求已拒绝",
+        )
+
+
+def _request_permission(method: str, path: str) -> tuple[str | None, bool] | None:
+    # These endpoints intentionally require only a valid session. Every other
+    # CurrentUser endpoint must be mapped below or non-admin users fail closed.
+    if path in {
+        "/api/auth/me",
+        "/api/auth/logout",
+        "/api/system/metrics",
+        "/api/system/menus/me",
+    }:
+        return None, False
+    if path.startswith(
+        (
+            "/api/users",
+            "/api/user-groups",
+            "/api/system/roles",
+            "/api/system/menus",
+        )
+    ):
+        # These routes have their own AdminUser dependency. Marking them as
+        # authenticated-only here lets that dependency provide the final
+        # administrator check and its specific error response.
+        return None, False
     if path.startswith("/api/developer-docs"):
         return "system.developer_docs.read", False
     if path == "/api/personal-accounts/intake/attempts":
@@ -41,6 +87,11 @@ def _request_permission(method: str, path: str) -> tuple[str, bool] | None:
     if path.startswith("/api/personal-accounts/") and path.endswith("/export"):
         return "resources.accounts.export", True
     rules = (
+        ("/api/account-statistics", "resources.account_statistics.read", None),
+        ("/api/protocol-pools", "resources.protocol.read", "resources.protocol.manage"),
+        ("/api/bitly-accounts", "marketing.direct_short_links.read", "marketing.direct_short_links.manage"),
+        ("/api/direct-short-links/accounts", "marketing.direct_short_links.read", "marketing.direct_short_links.manage"),
+        ("/api/promotion/template-kits", "promotion.templates.read", None),
         ("/api/promotion/data-center/trends", "promotion.trends.read", None),
         ("/api/promotion/data-center", "promotion.statistics.read", None),
         ("/api/promotion/ad-metrics", "promotion.statistics.read", "promotion.statistics.manage"),
@@ -62,6 +113,12 @@ def _request_permission(method: str, path: str) -> tuple[str, bool] | None:
         ("/api/hyperlink/market-insights", "marketing.insights.read", None),
         ("/api/direct-short-links", "marketing.direct_short_links.read", "marketing.direct_short_links.manage"),
     )
+    if path.startswith(
+        ("/api/ip-allocation-policy", "/api/ip-proxies", "/api/ip-proxy-bindings")
+    ):
+        if method == "GET":
+            return None, False
+        return "resources.ip.manage", True
     for prefix, read_permission, write_permission in rules:
         if path.startswith(prefix):
             if method == "GET":
@@ -74,6 +131,7 @@ def get_current_user(request: Request, db: DbSession) -> UserAccount:
     token = _request_token(request)
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未登录")
+    _validate_cookie_request_origin(request)
     auth_session = db.scalar(
         select(AuthSession).where(
             AuthSession.token_hash == secret_fingerprint(token),
@@ -87,8 +145,16 @@ def get_current_user(request: Request, db: DbSession) -> UserAccount:
     if user is None or not user.is_active or not user.group.enabled:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账号已停用")
     required_permission = _request_permission(request.method, request.url.path)
-    if user.role != "admin" and required_permission:
+    if user.role != "admin":
+        if required_permission is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="该接口未配置访问权限",
+            )
         permission_key, is_action = required_permission
+        if permission_key is None:
+            request.state.auth_session = auth_session
+            return user
         if is_action:
             allowed = db.scalar(
                 select(RoleActionPermission.id).where(

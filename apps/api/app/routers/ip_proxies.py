@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 
@@ -29,6 +30,7 @@ from app.services.wa_gateway import GatewayError, WaGatewayClient
 
 
 router = APIRouter(tags=["ip-proxies"])
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -227,6 +229,30 @@ def _sync_account_proxy(db: DbSession, account_public_id: str) -> None:
     from app.routers.personal_accounts import _proxy_url
 
     WaGatewayClient().update_proxy(account_public_id, _proxy_url(db, account_public_id))
+
+
+def _reconcile_account_proxy_best_effort(account_public_id: str) -> None:
+    """Restore the gateway from the database's final, persisted binding.
+
+    This is deliberately synchronous and best-effort. It only runs after the
+    normal binding transaction fails, covering both a definite rollback and an
+    ambiguous commit outcome without introducing a durable retry subsystem.
+    """
+    from app.database import SessionLocal
+
+    try:
+        with SessionLocal() as reconcile_db:
+            _sync_account_proxy(reconcile_db, account_public_id)
+    except Exception:
+        logger.exception(
+            "Failed to reconcile the persisted proxy binding for gateway account %s",
+            account_public_id,
+        )
+
+
+def _rollback_and_reconcile(db: DbSession, account_public_id: str) -> None:
+    db.rollback()
+    _reconcile_account_proxy_best_effort(account_public_id)
 
 
 def _binding_account(db: DbSession, identifier: str) -> PersonalAccount | None:
@@ -572,11 +598,14 @@ def create_binding(
         _sync_account_proxy(db, binding.account_public_id)
         db.commit()
     except GatewayError as exc:
-        db.rollback()
+        _rollback_and_reconcile(db, binding.account_public_id)
         raise HTTPException(status_code=502, detail=str(exc)) from None
     except IntegrityError:
-        db.rollback()
+        _rollback_and_reconcile(db, binding.account_public_id)
         raise HTTPException(status_code=409, detail="该个人账号已绑定代理") from None
+    except Exception:
+        _rollback_and_reconcile(db, binding.account_public_id)
+        raise
     db.refresh(binding)
     return {"data": {"binding": _binding_row(db, binding)}}
 
@@ -603,8 +632,11 @@ def update_binding(
         _sync_account_proxy(db, binding.account_public_id)
         db.commit()
     except GatewayError as exc:
-        db.rollback()
+        _rollback_and_reconcile(db, binding.account_public_id)
         raise HTTPException(status_code=502, detail=str(exc)) from None
+    except Exception:
+        _rollback_and_reconcile(db, binding.account_public_id)
+        raise
     db.refresh(binding)
     return {"data": {"binding": _binding_row(db, binding)}}
 
@@ -619,6 +651,9 @@ def delete_binding(binding_id: str, db: DbSession, _admin: AdminUser) -> dict:
         _sync_account_proxy(db, account_public_id)
         db.commit()
     except GatewayError as exc:
-        db.rollback()
+        _rollback_and_reconcile(db, account_public_id)
         raise HTTPException(status_code=502, detail=str(exc)) from None
+    except Exception:
+        _rollback_and_reconcile(db, account_public_id)
+        raise
     return {"data": {"ok": True}}

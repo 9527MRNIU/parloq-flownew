@@ -20,6 +20,11 @@ import {
 } from "../components/list-page";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
 import {
+  DrawerFormField,
+  DrawerFormLayout,
+  DrawerFormSection,
+} from "../components/drawer-form";
+import {
   Badge,
   Button,
   Checkbox,
@@ -84,7 +89,7 @@ type SyncPolicy = {
 };
 
 type RateLimitRule = {
-  maxRequests: number;
+  maxRequests: number | null;
   windowSeconds: number;
 };
 
@@ -134,11 +139,11 @@ const DEFAULT_SYNC_POLICY: SyncPolicy = {
 const DEFAULT_RATE_LIMIT_POLICY: RateLimitPolicy = {
   visitorCheck: { maxRequests: 5, windowSeconds: 600 },
   visitorAttempt: { maxRequests: 5, windowSeconds: 600 },
-  ipStart: { maxRequests: 20, windowSeconds: 600 },
-  phoneAttempt: { maxRequests: 3, windowSeconds: 600 },
-  channelAttempt: { maxRequests: 100, windowSeconds: 60 },
+  ipStart: { maxRequests: 5, windowSeconds: 600 },
+  phoneAttempt: { maxRequests: 5, windowSeconds: 600 },
+  channelAttempt: { maxRequests: null, windowSeconds: 60 },
   status: { maxRequests: 60, windowSeconds: 60 },
-  cancel: { maxRequests: 10, windowSeconds: 60 },
+  cancel: { maxRequests: 5, windowSeconds: 600 },
 };
 
 const RATE_LIMIT_FIELDS: Array<[
@@ -150,7 +155,7 @@ const RATE_LIMIT_FIELDS: Array<[
   ["visitorAttempt", "访客新建配对", "同一渠道、同一访客创建新配对任务"],
   ["ipStart", "来源 IP 请求", "同一渠道、同一来源 IP 调用开始绑定"],
   ["phoneAttempt", "号码新建配对", "同一租户、同一号码创建新配对任务"],
-  ["channelAttempt", "渠道新建配对", "单个渠道创建新配对任务的总量"],
+  ["channelAttempt", "渠道新建速率", "单个渠道在统计窗口内累计创建的新配对任务数；不同于上方协议节点同时进行的并发数"],
   ["status", "状态查询", "同一个配对任务查询绑定状态"],
   ["cancel", "取消请求", "同一个配对任务调用取消操作"],
 ];
@@ -160,7 +165,7 @@ function toRateLimitForm(policy: RateLimitPolicy): RateLimitPolicyForm {
     Object.entries(policy).map(([key, rule]) => [
       key,
       {
-        maxRequests: String(rule.maxRequests),
+        maxRequests: rule.maxRequests == null ? "" : String(rule.maxRequests),
         windowSeconds: String(rule.windowSeconds),
       },
     ]),
@@ -168,15 +173,19 @@ function toRateLimitForm(policy: RateLimitPolicy): RateLimitPolicyForm {
 }
 
 function validRateLimitForm(policy: RateLimitPolicyForm) {
-  return Object.values(policy).every(
-    (rule) =>
-      Number.isInteger(Number(rule.maxRequests)) &&
-      Number(rule.maxRequests) >= 1 &&
-      Number(rule.maxRequests) <= 100_000 &&
+  return Object.entries(policy).every(([key, rule]) => {
+    const unlimitedChannel =
+      key === "channelAttempt" && rule.maxRequests.trim() === "";
+    return (
+      (unlimitedChannel ||
+        (Number.isInteger(Number(rule.maxRequests)) &&
+          Number(rule.maxRequests) >= 1 &&
+          Number(rule.maxRequests) <= 100_000)) &&
       Number.isInteger(Number(rule.windowSeconds)) &&
       Number(rule.windowSeconds) >= 1 &&
-      Number(rule.windowSeconds) <= 86_400,
-  );
+      Number(rule.windowSeconds) <= 86_400
+    );
+  });
 }
 
 const value = (row: Record<string, unknown>, ...keys: string[]) => {
@@ -251,8 +260,8 @@ function protocolNode(input: unknown): ProtocolNode {
         return [
           key,
           {
-            maxRequests: number(rawRule, "maxRequests", "max_requests") || fallback.maxRequests,
-            windowSeconds: number(rawRule, "windowSeconds", "window_seconds") || fallback.windowSeconds,
+            maxRequests: number(rawRule, "maxRequests", "max_requests") ?? fallback.maxRequests,
+            windowSeconds: number(rawRule, "windowSeconds", "window_seconds") ?? fallback.windowSeconds,
           },
         ];
       }),
@@ -421,7 +430,7 @@ export function ProtocolManagementPage() {
             Object.entries(form.rateLimitPolicy).map(([key, rule]) => [
               key,
               {
-                maxRequests: Number(rule.maxRequests),
+                maxRequests: rule.maxRequests.trim() === "" ? null : Number(rule.maxRequests),
                 windowSeconds: Number(rule.windowSeconds),
               },
             ]),
@@ -633,65 +642,73 @@ export function ProtocolManagementPage() {
         description="协议节点是共享 Baileys 网关上的逻辑运营分区；容量、连接和同步设置只影响此节点。"
         footer={<><Button variant="outline" disabled={saving} onClick={() => { setEditing(null); setCreating(false); }}>取消</Button><Button disabled={saving || !form.name.trim() || form.name.trim().length > 64 || form.remark.length > 512 || Number(form.idleDisconnectSeconds) < 60 || Number(form.postVerifyGraceSeconds) < 0 || !validRateLimitForm(form.rateLimitPolicy)} onClick={() => void save()}>{saving ? <LoaderCircleIcon className="spin" size={16} /> : null}{creating ? "创建" : "保存"}</Button></>}
       >
-        <div className="drawer-form">
-          <label className="field"><span>协议名称</span><Input maxLength={64} value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="请输入协议名称，用于识别区分不同协议" /><small>{form.name.length} / 64</small></label>
-          <label className="switch-row"><span><strong>进号开关</strong><small>关闭后暂停新账号通过该节点接入，不影响已在线账号。</small></span><Switch checked={form.ingressEnabled} onCheckedChange={(checked) => setForm((current) => ({ ...current, ingressEnabled: checked }))} aria-label="进号开关" /></label>
-          <label className="switch-row"><span><strong>营销开关</strong><small>关闭后该节点账号不会被营销任务选中，账号连接不受影响。</small></span><Switch checked={form.marketingEnabled} onCheckedChange={(checked) => setForm((current) => ({ ...current, marketingEnabled: checked }))} aria-label="营销开关" /></label>
-          <div className="rounded-lg border p-3">
-            <strong className="text-sm">容量限制</strong>
-            <p className="mt-1 text-xs text-muted-foreground">留空表示不限制。默认总账号和并发配对不限，在线账号上限 1000。</p>
-            <div className="form-grid mt-3">
-              <label className="field"><span>账号总量上限</span><Input type="number" min={0} value={form.maxAccountCount} onChange={(event) => setForm((current) => ({ ...current, maxAccountCount: event.target.value }))} placeholder="不限制" /></label>
-              <label className="field"><span>在线账号上限</span><Input type="number" min={0} value={form.maxOnlineAccounts} onChange={(event) => setForm((current) => ({ ...current, maxOnlineAccounts: event.target.value }))} placeholder="不限制" /></label>
-              <label className="field"><span>并发配对上限</span><Input type="number" min={0} value={form.maxConcurrentPairings} onChange={(event) => setForm((current) => ({ ...current, maxConcurrentPairings: event.target.value }))} placeholder="不限制" /></label>
-            </div>
-          </div>
-          <div className="rounded-lg border p-3">
-            <strong className="text-sm">连接策略</strong>
-            <div className="form-grid mt-3">
-              <label className="field"><span>账号连接模式</span><SelectField className="w-full" value={form.connectionPolicy} onValueChange={(next) => setForm((current) => ({ ...current, connectionPolicy: next as "on_demand" | "always_on" }))} options={[{ value: "on_demand", label: "按需在线（推荐）" }, { value: "always_on", label: "持续连接" }]} /></label>
-              <label className="field"><span>空闲断开（秒）</span><Input type="number" min={60} max={86400} value={form.idleDisconnectSeconds} onChange={(event) => setForm((current) => ({ ...current, idleDisconnectSeconds: event.target.value }))} /></label>
-              <label className="field"><span>验证后保活（秒）</span><Input type="number" min={0} max={3600} value={form.postVerifyGraceSeconds} onChange={(event) => setForm((current) => ({ ...current, postVerifyGraceSeconds: event.target.value }))} /></label>
-            </div>
-            <p className="mt-2 text-xs text-muted-foreground">按需在线会在配对同步、发送和人工操作时持有连接租约；空闲后仅断开 Socket，不退出 WhatsApp 登录。</p>
-          </div>
-          <div className="rounded-lg border p-3">
-            <strong className="text-sm">账号绑定限速</strong>
-            <p className="mt-1 text-xs text-muted-foreground">绑定到此协议节点的渠道自动使用这些规则。限制由系统内部执行，模板和渠道不保存限速配置。</p>
-            <div className="mt-3 space-y-3">
-              {RATE_LIMIT_FIELDS.map(([key, label, description]) => (
-                <div className="rounded-md border p-3" key={key}>
-                  <div><strong className="text-sm">{label}</strong><p className="text-xs text-muted-foreground">{description}</p></div>
-                  <div className="form-grid mt-2">
-                    <label className="field"><span>窗口内最多请求</span><Input type="number" min={1} max={100000} value={form.rateLimitPolicy[key].maxRequests} onChange={(event) => setForm((current) => ({ ...current, rateLimitPolicy: { ...current.rateLimitPolicy, [key]: { ...current.rateLimitPolicy[key], maxRequests: event.target.value } } }))} /></label>
-                    <label className="field"><span>统计窗口（秒）</span><Input type="number" min={1} max={86400} value={form.rateLimitPolicy[key].windowSeconds} onChange={(event) => setForm((current) => ({ ...current, rateLimitPolicy: { ...current.rateLimitPolicy, [key]: { ...current.rateLimitPolicy[key], windowSeconds: event.target.value } } }))} /></label>
-                  </div>
+        <DrawerFormLayout>
+          <DrawerFormSection title="基础信息">
+            <DrawerFormField label="协议名称" meta={`${form.name.length}/64`}>
+              <Input maxLength={64} value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="请输入协议名称，用于识别区分不同协议" />
+            </DrawerFormField>
+            <DrawerFormField label="进号开关" hint="关闭后暂停新账号通过该节点接入，不影响已在线账号。">
+              <Switch checked={form.ingressEnabled} onCheckedChange={(checked) => setForm((current) => ({ ...current, ingressEnabled: checked }))} aria-label="进号开关" />
+            </DrawerFormField>
+            <DrawerFormField label="营销开关" hint="关闭后该节点账号不会被营销任务选中，账号连接不受影响。">
+              <Switch checked={form.marketingEnabled} onCheckedChange={(checked) => setForm((current) => ({ ...current, marketingEnabled: checked }))} aria-label="营销开关" />
+            </DrawerFormField>
+          </DrawerFormSection>
+
+          <DrawerFormSection title="容量限制" description="留空表示不限制。默认总账号和并发配对不限，在线账号上限 1000。">
+            <DrawerFormField label="账号总量上限"><Input type="number" min={0} value={form.maxAccountCount} onChange={(event) => setForm((current) => ({ ...current, maxAccountCount: event.target.value }))} placeholder="不限制" /></DrawerFormField>
+            <DrawerFormField label="在线账号上限"><Input type="number" min={0} value={form.maxOnlineAccounts} onChange={(event) => setForm((current) => ({ ...current, maxOnlineAccounts: event.target.value }))} placeholder="不限制" /></DrawerFormField>
+            <DrawerFormField label="并发配对上限"><Input type="number" min={0} value={form.maxConcurrentPairings} onChange={(event) => setForm((current) => ({ ...current, maxConcurrentPairings: event.target.value }))} placeholder="不限制" /></DrawerFormField>
+          </DrawerFormSection>
+
+          <DrawerFormSection title="连接策略" description="按需在线会在配对同步、发送和人工操作时持有连接租约；空闲后仅断开 Socket，不退出 WhatsApp 登录。">
+            <DrawerFormField label="账号连接模式"><SelectField className="w-full" value={form.connectionPolicy} onValueChange={(next) => setForm((current) => ({ ...current, connectionPolicy: next as "on_demand" | "always_on" }))} options={[{ value: "on_demand", label: "按需在线（推荐）" }, { value: "always_on", label: "持续连接" }]} /></DrawerFormField>
+            <DrawerFormField label="空闲断开（秒）"><Input type="number" min={60} max={86400} value={form.idleDisconnectSeconds} onChange={(event) => setForm((current) => ({ ...current, idleDisconnectSeconds: event.target.value }))} /></DrawerFormField>
+            <DrawerFormField label="验证后保活（秒）"><Input type="number" min={0} max={3600} value={form.postVerifyGraceSeconds} onChange={(event) => setForm((current) => ({ ...current, postVerifyGraceSeconds: event.target.value }))} /></DrawerFormField>
+          </DrawerFormSection>
+
+          <DrawerFormSection title="账号绑定限速" description="绑定到此协议节点的渠道自动使用这些规则。限制由系统内部执行，模板和渠道不保存限速配置。">
+            {RATE_LIMIT_FIELDS.map(([key, label, description]) => (
+              <DrawerFormField key={key} label={label} hint={description} align="start">
+                <div className="grid min-w-0 grid-cols-2 gap-2">
+                  <label className="grid min-w-0 gap-1 text-xs text-muted-foreground">
+                    <span>{key === "channelAttempt" ? "最多请求（留空不限）" : "最多请求"}</span>
+                    <Input type="number" min={1} max={100000} placeholder={key === "channelAttempt" ? "不限制" : undefined} value={form.rateLimitPolicy[key].maxRequests} onChange={(event) => setForm((current) => ({ ...current, rateLimitPolicy: { ...current.rateLimitPolicy, [key]: { ...current.rateLimitPolicy[key], maxRequests: event.target.value } } }))} />
+                  </label>
+                  <label className="grid min-w-0 gap-1 text-xs text-muted-foreground">
+                    <span>统计窗口（秒）</span>
+                    <Input type="number" min={1} max={86400} disabled={key === "channelAttempt" && form.rateLimitPolicy[key].maxRequests.trim() === ""} value={form.rateLimitPolicy[key].windowSeconds} onChange={(event) => setForm((current) => ({ ...current, rateLimitPolicy: { ...current.rateLimitPolicy, [key]: { ...current.rateLimitPolicy[key], windowSeconds: event.target.value } } }))} />
+                  </label>
                 </div>
-              ))}
-            </div>
-          </div>
-          <div className="rounded-lg border p-3">
-            <strong className="text-sm">绑定后同步范围</strong>
-            <p className="mt-1 text-xs text-muted-foreground">账号基础身份始终同步；以下选项会在创建配对任务时快照，之后修改不改变进行中的配对。</p>
-            <div className="mt-3 space-y-2">
-              {([
-                ["avatar", "头像", "读取账号头像是否存在"],
-                ["profileStatus", "资料状态", "读取 About / 状态文字"],
-                ["businessProfile", "商业资料", "读取可用的 Business Profile"],
-                ["groupSummary", "群组概览", "同步参与群数量"],
-                ["groupDetails", "群组详情", "读取群组元数据；开启时自动包含群组概览"],
-                ["contacts", "联系人", "监听并同步联系人更新"],
-                ["chats", "聊天列表", "接收聊天列表同步"],
-                ["messageHistory", "消息历史", "接收历史消息同步，资源开销较高"],
-                ["privacySettings", "隐私设置", "读取账号隐私配置"],
-                ["blocklist", "黑名单", "读取已屏蔽号码列表"],
-              ] as Array<[keyof SyncPolicy, string, string]>).map(([key, label, description]) => (
-                <label className="switch-row" key={key}><span><strong>{label}</strong><small>{description}</small></span><Switch checked={form.syncPolicy[key]} onCheckedChange={(checked) => setForm((current) => ({ ...current, syncPolicy: { ...current.syncPolicy, [key]: checked, ...(key === "groupDetails" && checked ? { groupSummary: true } : {}) } }))} aria-label={`同步${label}`} /></label>
-              ))}
-            </div>
-          </div>
-          <label className="field"><span>备注</span><Textarea rows={5} maxLength={512} value={form.remark} onChange={(event) => setForm((current) => ({ ...current, remark: event.target.value }))} placeholder="请输入备注（可选，最多 512 字）" /><small>{form.remark.length} / 512</small></label>
-        </div>
+              </DrawerFormField>
+            ))}
+          </DrawerFormSection>
+
+          <DrawerFormSection title="绑定后同步范围" description="账号基础身份始终同步；以下选项会在创建配对任务时快照，之后修改不改变进行中的配对。">
+            {([
+              ["avatar", "头像", "读取账号头像是否存在"],
+              ["profileStatus", "资料状态", "读取 About / 状态文字"],
+              ["businessProfile", "商业资料", "读取可用的 Business Profile"],
+              ["groupSummary", "群组概览", "同步参与群数量"],
+              ["groupDetails", "群组详情", "读取群组元数据；开启时自动包含群组概览"],
+              ["contacts", "联系人", "监听并同步联系人更新"],
+              ["chats", "聊天列表", "接收聊天列表同步"],
+              ["messageHistory", "消息历史", "接收历史消息同步，资源开销较高"],
+              ["privacySettings", "隐私设置", "读取账号隐私配置"],
+              ["blocklist", "黑名单", "读取已屏蔽号码列表"],
+            ] as Array<[keyof SyncPolicy, string, string]>).map(([key, label, description]) => (
+              <DrawerFormField key={key} label={label} hint={description}>
+                <Switch checked={form.syncPolicy[key]} onCheckedChange={(checked) => setForm((current) => ({ ...current, syncPolicy: { ...current.syncPolicy, [key]: checked, ...(key === "groupDetails" && checked ? { groupSummary: true } : {}) } }))} aria-label={`同步${label}`} />
+              </DrawerFormField>
+            ))}
+          </DrawerFormSection>
+
+          <DrawerFormSection title="备注">
+            <DrawerFormField label="备注内容" align="start" meta={`${form.remark.length}/512`}>
+              <Textarea rows={5} maxLength={512} value={form.remark} onChange={(event) => setForm((current) => ({ ...current, remark: event.target.value }))} placeholder="请输入备注（可选，最多 512 字）" />
+            </DrawerFormField>
+          </DrawerFormSection>
+        </DrawerFormLayout>
       </Drawer>
       <Drawer
         open={Boolean(poolEditing)}

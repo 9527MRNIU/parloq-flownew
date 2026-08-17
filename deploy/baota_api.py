@@ -360,7 +360,7 @@ docker compose --env-file "${{env_file}}" -f "${{compose_file}}" up -d postgres 
 docker compose --profile migration --env-file "${{env_file}}" -f "${{compose_file}}" run --interactive=false -T --rm migrate
 docker compose --env-file "${{env_file}}" -f "${{compose_file}}" up -d --no-deps wa-gateway api api-worker web
 for attempt in $(seq 1 60); do
-  curl -fsS http://127.0.0.1:18100/healthz >/dev/null && break
+  curl -fsS http://127.0.0.1:18100/readyz >/dev/null && break
   [ "${{attempt}}" -lt 60 ] || false
   sleep 2
 done

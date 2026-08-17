@@ -47,12 +47,14 @@ from app.services.wa_gateway import GatewayError, WaGatewayClient
 from app.snowflake import new_public_id, parse_snowflake_id
 from app.task_queue import (
     QUEUE_KEY,
+    QUEUE_ENQUEUED_AT_KEY,
     dispatch_due_hyperlink_tasks,
     enqueue_hyperlink_task,
     redis_client,
     schedule_hyperlink_task,
     task_queue_marker,
 )
+from app.worker_health import start_worker_heartbeat
 
 
 logger = logging.getLogger("parloq.task-worker")
@@ -978,6 +980,7 @@ def _renew_lock(
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     client = redis_client()
+    start_worker_heartbeat(client)
     gateway = WaGatewayClient()
     last_recovery = 0.0
     while True:
@@ -1013,6 +1016,7 @@ def main() -> None:
         if not item:
             continue
         _, task_id = item
+        client.zrem(QUEUE_ENQUEUED_AT_KEY, task_id)
         client.delete(task_queue_marker(task_id))
         lock_key = f"parloq:hyperlink:task-lock:{task_id}"
         token = secrets.token_urlsafe(24)

@@ -810,3 +810,82 @@ def test_sticky_delivery_schema_repair_fills_columns_after_stamped_drift(
         index["name"] for index in inspector.get_indexes("personal_accounts")
     }
     engine.dispose()
+
+
+def test_pairing_rate_limit_default_migration_preserves_custom_rules(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'pairing-rate-defaults.db'}"
+    _alembic(database_url, "0036_sticky_delivery_repair")
+    engine = sa.create_engine(database_url)
+    metadata = sa.MetaData()
+    protocols = sa.Table("protocol_nodes", metadata, autoload_with=engine)
+    old_policy = {
+        "ipStart": {"maxRequests": 20, "windowSeconds": 600},
+        "phoneAttempt": {"maxRequests": 3, "windowSeconds": 600},
+        "channelAttempt": {"maxRequests": 100, "windowSeconds": 60},
+        "cancel": {"maxRequests": 10, "windowSeconds": 60},
+    }
+    custom_policy = {
+        **old_policy,
+        "ipStart": {"maxRequests": 7, "windowSeconds": 700},
+        "channelAttempt": {"maxRequests": 80, "windowSeconds": 120},
+    }
+    with engine.begin() as connection:
+        original = connection.execute(sa.select(protocols).limit(1)).mappings().one()
+        original_id = original["id"]
+        connection.execute(
+            protocols.update()
+            .where(protocols.c.id == original_id)
+            .values(rate_limit_policy_json=old_policy)
+        )
+        custom_id = connection.execute(sa.select(sa.func.max(protocols.c.id))).scalar_one() + 1
+        custom_row = dict(original)
+        custom_row.update(
+            id=custom_id,
+            public_id="proto_custom_pairing_defaults",
+            name="Custom pairing defaults",
+            rate_limit_policy_json=custom_policy,
+        )
+        connection.execute(protocols.insert().values(**custom_row))
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    protocols = sa.Table("protocol_nodes", sa.MetaData(), autoload_with=engine)
+    with engine.connect() as connection:
+        migrated = connection.execute(
+            sa.select(protocols.c.rate_limit_policy_json).where(
+                protocols.c.id == original_id
+            )
+        ).scalar_one()
+        customized = connection.execute(
+            sa.select(protocols.c.rate_limit_policy_json).where(
+                protocols.c.id == custom_id
+            )
+        ).scalar_one()
+    engine.dispose()
+
+    assert migrated["ipStart"] == {"maxRequests": 5, "windowSeconds": 600}
+    assert migrated["phoneAttempt"] == {
+        "maxRequests": 5,
+        "windowSeconds": 600,
+    }
+    assert migrated["cancel"] == {"maxRequests": 5, "windowSeconds": 600}
+    assert migrated["channelAttempt"] == {
+        "maxRequests": None,
+        "windowSeconds": 60,
+    }
+    assert customized["ipStart"] == {"maxRequests": 7, "windowSeconds": 700}
+    assert customized["phoneAttempt"] == {
+        "maxRequests": 5,
+        "windowSeconds": 600,
+    }
+    assert customized["cancel"] == {
+        "maxRequests": 5,
+        "windowSeconds": 600,
+    }
+    assert customized["channelAttempt"] == {
+        "maxRequests": 80,
+        "windowSeconds": 120,
+    }

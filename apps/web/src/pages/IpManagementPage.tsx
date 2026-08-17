@@ -19,6 +19,11 @@ import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { ListToolbar, StandardListPage } from "../components/list-page";
 import {
+  DrawerFormField,
+  DrawerFormLayout,
+  DrawerFormSection,
+} from "../components/drawer-form";
+import {
   EntityPrimaryCell,
   type EntityStatusMeta,
 } from "../components/entity-primary-cell";
@@ -1010,7 +1015,6 @@ export function IpManagementPage() {
         onClose={() => !policySaving && setPolicyDrawerOpen(false)}
         title="账号 IP 分配策略"
         description="设置账号首次分配代理时的隔离程度、国家匹配、容量限制和健康保护。"
-        wide
         footer={
           <>
             <Button
@@ -1040,7 +1044,7 @@ export function IpManagementPage() {
             正在加载分配策略…
           </div>
         ) : (
-          <div className="drawer-form">
+          <DrawerFormLayout>
             {policyError ? (
               <div className="flex flex-col items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive md:flex-row md:items-center md:justify-between">
                 <span>{policyError}</span>
@@ -1053,9 +1057,8 @@ export function IpManagementPage() {
                 </Button>
               </div>
             ) : null}
-            <div className="form-grid">
-              <label className="field">
-                <span>分配模式</span>
+            <DrawerFormSection title="分配规则">
+              <DrawerFormField label="分配模式" hint={allocationDescriptions[policy.allocationMode]}>
                 <SelectField
                   ariaLabel="IP 分配模式"
                   className="w-full"
@@ -1078,10 +1081,8 @@ export function IpManagementPage() {
                     { value: "manual", label: "仅手动分配" },
                   ]}
                 />
-                <small>{allocationDescriptions[policy.allocationMode]}</small>
-              </label>
-              <label className="field">
-                <span>国家匹配</span>
+              </DrawerFormField>
+              <DrawerFormField label="国家匹配" hint={countryDescriptions[policy.countryMatch]}>
                 <SelectField
                   ariaLabel="国家匹配策略"
                   className="w-full"
@@ -1099,10 +1100,11 @@ export function IpManagementPage() {
                     { value: "off", label: "关闭匹配" },
                   ]}
                 />
-                <small>{countryDescriptions[policy.countryMatch]}</small>
-              </label>
-              <label className="field form-span-2">
-                <span>每个 IP 最多账号数</span>
+              </DrawerFormField>
+              <DrawerFormField
+                label="每个 IP 最多账号数"
+                hint={policy.allocationMode === "strict_one_to_one" ? "严格 1:1 模式固定按 1 个账号执行。" : "达到上限的 IP 不再参与自动分配。"}
+              >
                 <Input
                   type="number"
                   min="1"
@@ -1124,19 +1126,10 @@ export function IpManagementPage() {
                     }))
                   }
                 />
-                <small>
-                  {policy.allocationMode === "strict_one_to_one"
-                    ? "严格 1:1 模式固定按 1 个账号执行。"
-                    : "达到上限的 IP 不再参与自动分配。"}
-                </small>
-              </label>
-            </div>
-            <div className="grid gap-3">
-              <label className="switch-row">
-                <span>
-                  <strong>避开异常 IP</strong>
-                  <small>自动分配时排除健康检测异常或已停用的代理。</small>
-                </span>
+              </DrawerFormField>
+            </DrawerFormSection>
+            <DrawerFormSection title="健康与绑定">
+              <DrawerFormField label="避开异常 IP" hint="自动分配时排除健康检测异常或已停用的代理。">
                 <Switch
                   checked={policy.avoidUnhealthy}
                   disabled={!canManage || policySaving || Boolean(policyError)}
@@ -1148,12 +1141,8 @@ export function IpManagementPage() {
                   }
                   aria-label="避开异常 IP"
                 />
-              </label>
-              <label className="switch-row">
-                <span>
-                  <strong>保持固定绑定</strong>
-                  <small>账号成功分配后持续使用同一 IP，除非管理员手动解绑。</small>
-                </span>
+              </DrawerFormField>
+              <DrawerFormField label="保持固定绑定" hint="账号成功分配后持续使用同一 IP，除非管理员手动解绑。">
                 <Switch
                   checked={policy.stickyBinding}
                   disabled={!canManage || policySaving || Boolean(policyError)}
@@ -1165,9 +1154,9 @@ export function IpManagementPage() {
                   }
                   aria-label="保持固定绑定"
                 />
-              </label>
-            </div>
-          </div>
+              </DrawerFormField>
+            </DrawerFormSection>
+          </DrawerFormLayout>
         )}
       </Drawer>
 
@@ -1176,7 +1165,6 @@ export function IpManagementPage() {
         onClose={() => !bulkPending && setBulkDrawerOpen(false)}
         title="批量添加 IP 代理"
         description="每行一个代理，整批共用下方默认设置；代理凭证会加密保存。"
-        wide
         footer={
           <>
             <Button
@@ -1227,7 +1215,7 @@ export function IpManagementPage() {
             </small>
           </label>
 
-          <div className="grid gap-3 sm:grid-cols-3">
+          <div className="form-grid">
             <label className="field">
               <span>默认协议</span>
               <SelectField

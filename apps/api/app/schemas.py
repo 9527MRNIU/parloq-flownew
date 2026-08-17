@@ -12,6 +12,9 @@ class ApiModel(BaseModel):
 class LoginRequest(ApiModel):
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=1, max_length=512)
+    turnstile_token: str | None = Field(
+        default=None, alias="turnstileToken", max_length=4096
+    )
 
 
 class UserCreate(ApiModel):

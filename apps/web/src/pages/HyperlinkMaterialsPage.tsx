@@ -1023,7 +1023,7 @@ export function MaterialsPage() {
               {MATERIAL_TYPES.map((item) => {
                 const Icon = item.icon;
                 return (
-                  <button key={item.value} type="button" disabled={Boolean(editing) || pending} className={cn("flex h-10 items-center justify-center gap-2 rounded-lg border border-border bg-background text-sm font-medium transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60", form.type === item.value && "border-primary bg-primary/5 text-primary")} onClick={() => { resetBatchUpload(); setForm({ ...blankForm(item.value, item.value === "text" && activeTextRole !== "all" ? activeTextRole : "body"), name: form.name, enabled: form.enabled }); }}>
+                  <button key={item.value} type="button" disabled={Boolean(editing) || pending} className={cn("flex h-8 items-center justify-center gap-2 rounded-lg border border-border bg-background text-sm font-medium transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60", form.type === item.value && "border-primary bg-primary/5 text-primary")} onClick={() => { resetBatchUpload(); setForm({ ...blankForm(item.value, item.value === "text" && activeTextRole !== "all" ? activeTextRole : "body"), name: form.name, enabled: form.enabled }); }}>
                     <Icon size={16} />{item.label}
                   </button>
                 );
@@ -1043,7 +1043,7 @@ export function MaterialsPage() {
                       key={role.value}
                       type="button"
                       className={cn(
-                        "h-10 rounded-lg border border-border bg-background text-sm font-medium transition-colors hover:bg-muted",
+                        "h-8 rounded-lg border border-border bg-background text-sm font-medium transition-colors hover:bg-muted",
                         form.textRole === role.value && "border-primary bg-primary/5 text-primary",
                       )}
                       onClick={() => setForm({
@@ -1100,7 +1100,7 @@ export function MaterialsPage() {
                       type="button"
                       disabled={pending}
                       className={cn(
-                        "h-10 rounded-lg border border-border bg-background px-3 text-sm font-medium transition-colors hover:bg-muted disabled:opacity-60",
+                        "h-8 rounded-lg border border-border bg-background px-3 text-sm font-medium transition-colors hover:bg-muted disabled:opacity-60",
                         batchNamingMode === option.value && "border-primary bg-primary/5 text-primary",
                       )}
                       onClick={() => changeBatchNamingMode(option.value)}

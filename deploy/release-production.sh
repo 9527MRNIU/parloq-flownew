@@ -54,5 +54,5 @@ python3 "${SCRIPT_DIR}/baota_api.py" --env-file "${BAOTA_ENV_FILE}" release \
   --gateway-image "${gateway_image}" \
   --compose-file "${SCRIPT_DIR}/docker-compose.production.yml"
 
-curl -fsS --max-time 20 https://center.parloq.com/healthz >/dev/null
+curl -fsS --max-time 20 https://center.parloq.com/readyz >/dev/null
 printf '[parloq-release] release %s completed through BaoTa APIs\n' "${head_sha}"

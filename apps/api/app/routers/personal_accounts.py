@@ -1275,7 +1275,15 @@ def connect(account_id: str, db: DbSession, current_user: CurrentUser) -> dict:
     if item.status in {"unpaired", "disabled"}:
         raise HTTPException(status_code=409, detail="账号尚未配对或已停用")
     try:
-        result = WaGatewayClient().connect(item.gateway_account_id)
+        client = WaGatewayClient()
+        result = (
+            client.connect(item.gateway_account_id)
+            if item.status in {"warming", "online_idle", "sending", "draining"}
+            else client.connect(
+                item.gateway_account_id,
+                _proxy_url(db, item.gateway_account_id),
+            )
+        )
     except GatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from None
     _apply_gateway_account(item, result or {"state": "online_idle"})

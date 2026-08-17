@@ -112,6 +112,13 @@ def update_user(
         )
         if not other_admins:
             raise HTTPException(status_code=400, detail="不能停用最后一个管理员")
+    security_changed = bool(
+        payload.password
+        or (payload.username is not None and payload.username != user.username)
+        or group.id != user.group_id
+        or next_role != user.role
+        or next_active != user.is_active
+    )
     if payload.username is not None:
         user.username = payload.username
     if "display_name" in payload.model_fields_set:
@@ -121,6 +128,15 @@ def update_user(
     user.group_id = group.id
     user.role = next_role
     user.is_active = next_active
+    if security_changed:
+        db.execute(
+            update(AuthSession)
+            .where(
+                AuthSession.user_id == user.id,
+                AuthSession.revoked_at.is_(None),
+            )
+            .values(revoked_at=utcnow())
+        )
     try:
         db.commit()
     except IntegrityError:

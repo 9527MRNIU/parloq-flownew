@@ -1,7 +1,9 @@
 export type ApiEnvelope<T> = { data: T }
 export type ListEnvelope<T> = { data: { rows: T[]; total: number } }
 
-let bearerToken = window.sessionStorage.getItem('parloq-token') || ''
+// Browser authentication is cookie-only. Remove tokens left by older builds so
+// script-readable credentials do not survive an upgrade in sessionStorage.
+window.sessionStorage.removeItem('parloq-token')
 
 function apiErrorMessage(payload: unknown, status: number): string {
   if (!payload || typeof payload !== 'object') return `请求失败（${status}）`
@@ -27,12 +29,6 @@ function apiErrorMessage(payload: unknown, status: number): string {
   return `请求失败（${status}）`
 }
 
-export function setBearerToken(token: string | null) {
-  bearerToken = token || ''
-  if (bearerToken) window.sessionStorage.setItem('parloq-token', bearerToken)
-  else window.sessionStorage.removeItem('parloq-token')
-}
-
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
   // Let the browser attach the multipart boundary for FormData and preserve
@@ -41,8 +37,6 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   if (typeof init.body === 'string' && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
-  if (bearerToken && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${bearerToken}`)
-
   const response = await fetch(path, {
     ...init,
     credentials: 'include',
@@ -50,7 +44,6 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   })
 
   if (response.status === 401 && path !== '/api/auth/login') {
-    setBearerToken(null)
     window.dispatchEvent(new Event('parloq:unauthorized'))
   }
 
@@ -67,15 +60,12 @@ export async function apiDownload(path: string, init: RequestInit = {}) {
   if (typeof init.body === 'string' && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
-  if (bearerToken && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${bearerToken}`)
-
   const response = await fetch(path, {
     ...init,
     credentials: 'include',
     headers,
   })
   if (response.status === 401) {
-    setBearerToken(null)
     window.dispatchEvent(new Event('parloq:unauthorized'))
   }
   if (!response.ok) {

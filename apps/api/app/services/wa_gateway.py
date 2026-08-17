@@ -186,7 +186,13 @@ class WaGatewayClient:
         )
         return value if isinstance(value, dict) else {}
 
-    def connect(self, account_id: str, proxy_url: str | None = None) -> dict[str, Any]:
+    def connect(
+        self,
+        account_id: str,
+        proxy_url: str | None | object = _UNSET,
+    ) -> dict[str, Any]:
+        if proxy_url is not _UNSET:
+            self.update_proxy(account_id, proxy_url)
         value = self._post(f"/v1/accounts/{account_id}/connect")
         return value if isinstance(value, dict) else {}
 

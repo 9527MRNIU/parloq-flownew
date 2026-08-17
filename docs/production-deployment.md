@@ -115,7 +115,7 @@ bash deploy/release-production.sh
 7. 切换前后均校验 Compose，运行一次迁移，再更新四个应用服务；
 8. 验证回环健康和四个应用容器的镜像 revision；
 9. 客户端轮询宝塔状态文件，成功后删除临时任务、归档和状态文件；
-10. 最后验证公网 `https://center.parloq.com/healthz`。
+10. 最后验证公网 `https://center.parloq.com/healthz` 和 `https://center.parloq.com/readyz`。
 
 任何步骤失败都会写入明确状态；若已经切换配置，任务会恢复 `.env` 与 Compose
 备份并尝试重建上一版应用服务。数据库和 Redis 不会重建，也不会删除任何数据。失败的任务保留
@@ -129,6 +129,7 @@ bash deploy/release-production.sh
 - 网站 → `center.parloq.com` 的反代为 `parloq-flow`；
 - SSL 证书已部署且 HTTPS 有效；
 - `https://center.parloq.com/healthz` 返回 `{"status":"ok"}`；
+- `https://center.parloq.com/readyz` 返回 `{"status":"ready", ...}`，且数据库、Redis、Worker 检查均通过；
 - 旧 `waba` 的 21 个常驻容器数量没有变化。
 
 回滚使用发布前的 `.env.backup-<commit>-<UTC>`，只恢复三个镜像变量并通过

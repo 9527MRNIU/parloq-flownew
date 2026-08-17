@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.deps import AdminUser, CurrentUser, DbSession
@@ -15,12 +15,14 @@ from app.entity_ids import (
 from app.snowflake import new_public_id
 
 from app.models import (
+    AuthSession,
     RoleActionPermission,
     RoleMenuPermission,
     SystemMenu,
     UserAccount,
     UserGroup,
 )
+from app.security import utcnow
 from app.schemas import MenuCreate, MenuUpdate, RoleCreate, RoleUpdate
 from app.serializers import iso
 from app.services.system_metrics import system_resource_metrics
@@ -32,6 +34,7 @@ ACTION_PERMISSION_KEYS = {
     "resources.accounts.manage",
     "resources.accounts.import",
     "resources.accounts.export",
+    "resources.protocol.manage",
     "promotion.templates.manage",
     "promotion.channels.manage",
     "promotion.domain.manage",
@@ -221,6 +224,21 @@ def update_role(
         _replace_permissions(db, role, payload.menu_ids)
     if payload.permission_keys is not None:
         _replace_action_permissions(db, role, payload.permission_keys)
+    security_changed = bool(
+        payload.enabled is not None
+        or payload.menu_ids is not None
+        or payload.permission_keys is not None
+    )
+    if security_changed:
+        user_ids = select(UserAccount.id).where(UserAccount.group_id == role.id)
+        db.execute(
+            update(AuthSession)
+            .where(
+                AuthSession.user_id.in_(user_ids),
+                AuthSession.revoked_at.is_(None),
+            )
+            .values(revoked_at=utcnow())
+        )
     try:
         db.commit()
     except IntegrityError:

@@ -3,12 +3,16 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.middleware.public_pairing_cors import PublicPairingCorsMiddleware
 
 from app.config import get_settings
-from app.database import init_database
+from app.database import engine, init_database
+from app.task_queue import redis_client
+from app.worker_health import worker_status
 from app.routers import (
     account_statistics,
     auth,
@@ -79,3 +83,33 @@ app.include_router(wa_gateway_events.router)
 @app.get("/healthz", tags=["system"])
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/readyz", tags=["system"])
+def readyz() -> JSONResponse:
+    checks: dict[str, str] = {}
+    worker: dict = {"healthy": False, "heartbeatAgeSeconds": None}
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception:
+        checks["database"] = "unavailable"
+    try:
+        client = redis_client()
+        client.ping()
+        checks["redis"] = "ok"
+        worker = worker_status(client)
+    except Exception:
+        checks["redis"] = "unavailable"
+    ready = all(value == "ok" for value in checks.values()) and bool(
+        worker.get("healthy")
+    )
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={
+            "status": "ready" if ready else "not_ready",
+            "checks": checks,
+            "worker": worker,
+        },
+    )

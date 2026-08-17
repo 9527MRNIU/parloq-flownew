@@ -108,16 +108,24 @@ def consume_pairing_rate_limits(
     policy = normalized_rate_limit_policy(protocol.rate_limit_policy_json)
     keys: list[str] = []
     arguments: list[int] = []
+    active_requests: list[PairingRateLimitRequest] = []
     for request in requests:
         rule = policy.get(request.policy_key)
         if rule is None:
             raise ValueError(f"unknown pairing rate-limit policy: {request.policy_key}")
+        max_requests = rule["maxRequests"]
+        if max_requests is None:
+            continue
         partition = request.partition or f"protocol:{protocol.id}"
+        active_requests.append(request)
         keys.append(
             f"{RATE_LIMIT_KEY_PREFIX}:{partition}:{request.policy_key}:"
             f"{_subject_digest(request.subject)}"
         )
-        arguments.extend((rule["maxRequests"], rule["windowSeconds"]))
+        arguments.extend((max_requests, int(rule["windowSeconds"] or 1)))
+
+    if not active_requests:
+        return PairingRateLimitDecision(allowed=True)
 
     try:
         value = (client or redis_client()).eval(
@@ -137,13 +145,13 @@ def consume_pairing_rate_limits(
     if int(value[0]) == 1:
         return PairingRateLimitDecision(allowed=True)
     blocked_index = int(value[1]) - 1
-    if blocked_index < 0 or blocked_index >= len(requests):
+    if blocked_index < 0 or blocked_index >= len(active_requests):
         raise PairingRateLimitUnavailable(
             "public pairing rate-limit store returned an invalid index"
         )
     return PairingRateLimitDecision(
         allowed=False,
         retry_after_seconds=max(int(value[3]), 1),
-        policy_key=requests[blocked_index].policy_key,
+        policy_key=active_requests[blocked_index].policy_key,
         limit=int(value[4]),
     )

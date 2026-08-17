@@ -1,14 +1,13 @@
 import {
-  CopyIcon,
   FileTextIcon,
   ImageIcon,
-  LinkIcon,
-  ListIcon,
-  PhoneIcon,
-  ReplyIcon,
   VideoIcon,
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
+import {
+  MessageTemplateButtonIcon,
+  type MessageTemplateButtonType,
+} from "./message-template-buttons";
 
 export type MessagePreviewHeaderType =
   | "none"
@@ -17,12 +16,7 @@ export type MessagePreviewHeaderType =
   | "video"
   | "document";
 
-export type MessagePreviewButtonType =
-  | "quick_reply"
-  | "url"
-  | "call"
-  | "copy"
-  | "single_select";
+export type MessagePreviewButtonType = MessageTemplateButtonType;
 
 export type MessagePreviewButton = {
   id: string;
@@ -85,14 +79,6 @@ function richText(value: string) {
 
   if (cursor < value.length) nodes.push(value.slice(cursor));
   return nodes.length ? nodes : value;
-}
-
-function buttonIcon(type: MessagePreviewButtonType) {
-  if (type === "url") return <LinkIcon />;
-  if (type === "call") return <PhoneIcon />;
-  if (type === "copy") return <CopyIcon />;
-  if (type === "single_select") return <ListIcon />;
-  return <ReplyIcon />;
 }
 
 function safeButtonHref(button: MessagePreviewButton) {
@@ -163,17 +149,17 @@ export function MessageTemplatePreview({
                 </svg>
 
                 {hasMedia ? (
-                  <div className="mb-2 overflow-hidden rounded-md bg-[#f0f2f5]">
+                  <div className="mb-2 overflow-hidden rounded-md">
                     {headerType === "image" && mediaUrl ? (
                       <img
                         src={mediaUrl}
                         alt="模板图片预览"
-                        className="h-40 w-full object-cover"
+                        className="mx-auto block h-auto max-h-56 w-auto max-w-full rounded-md object-contain"
                       />
                     ) : headerType === "video" && mediaUrl ? (
                       <video
                         src={mediaUrl}
-                        className="h-40 w-full bg-black object-cover"
+                        className="mx-auto block h-auto max-h-56 w-auto max-w-full rounded-md object-contain"
                         controls
                         muted
                       />
@@ -208,9 +194,7 @@ export function MessageTemplatePreview({
                   <div className="whitespace-pre-wrap text-sm leading-relaxed">
                     {richText(body.trim())}
                   </div>
-                ) : (
-                  <div className="text-sm text-[#667781]">在这里预览正文内容…</div>
-                )}
+                ) : null}
                 {footer.trim() ? (
                   <div className="mt-1 text-xs leading-relaxed text-[#667781]">{footer.trim()}</div>
                 ) : null}
@@ -221,13 +205,26 @@ export function MessageTemplatePreview({
                     {buttons.map((button) => {
                       const href = safeButtonHref(button);
                       const content = (
-                        <>
-                          <span className="[&_svg]:size-4">{buttonIcon(button.type)}</span>
-                          <span className="min-w-0 truncate">{button.text}</span>
-                        </>
+                        <span className="inline-flex max-w-full items-center justify-center gap-2">
+                          <span
+                            className="flex size-4 shrink-0 items-center justify-center"
+                            data-preview-button-icon
+                          >
+                            <MessageTemplateButtonIcon
+                              type={button.type}
+                              className="block size-4 shrink-0 stroke-[1.75]"
+                            />
+                          </span>
+                          <span
+                            className="min-w-0 truncate leading-5"
+                            data-preview-button-label
+                          >
+                            {button.text}
+                          </span>
+                        </span>
                       );
                       const className =
-                        "flex min-h-11 items-center justify-center gap-1.5 px-3 transition-colors hover:bg-black/5";
+                        "flex min-h-11 items-center justify-center px-3 text-center transition-colors hover:bg-black/5";
                       return href ? (
                         <a
                           key={button.id}
@@ -235,11 +232,16 @@ export function MessageTemplatePreview({
                           target="_blank"
                           rel="noopener noreferrer"
                           className={className}
+                          data-preview-button-type={button.type}
                         >
                           {content}
                         </a>
                       ) : (
-                        <div key={button.id} className={className}>
+                        <div
+                          key={button.id}
+                          className={className}
+                          data-preview-button-type={button.type}
+                        >
                           {content}
                         </div>
                       );

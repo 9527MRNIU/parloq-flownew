@@ -1,5 +1,5 @@
 import { CheckIcon, ChevronsUpDownIcon, SearchIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { cn } from "../../lib/utils";
 import { Button } from "./button";
 import { Input } from "./input";
@@ -9,6 +9,8 @@ export type SearchableSelectOption = {
   value: string;
   label: string;
   keywords?: string;
+  description?: string;
+  preview?: ReactNode;
   disabled?: boolean;
 };
 
@@ -48,6 +50,7 @@ export function SearchableSelect({
 
   return (
     <Popover
+      modal
       open={open}
       onOpenChange={(next) => {
         setOpen(next);
@@ -87,7 +90,11 @@ export function SearchableSelect({
             className="pl-8"
           />
         </div>
-        <div className="max-h-72 overflow-y-auto" role="listbox">
+        <div
+          className="max-h-72 min-h-0 touch-pan-y overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
+          role="listbox"
+          onWheel={(event) => event.stopPropagation()}
+        >
           {visible.length ? (
             visible.map((option) => (
               <button
@@ -96,7 +103,7 @@ export function SearchableSelect({
                 role="option"
                 aria-selected={option.value === value}
                 disabled={option.disabled}
-                className="flex min-h-9 w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none hover:bg-accent focus-visible:bg-accent disabled:pointer-events-none disabled:opacity-50"
+                className="flex min-h-9 w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none hover:bg-accent focus-visible:bg-accent disabled:pointer-events-none disabled:opacity-50"
                 onClick={() => {
                   onValueChange(option.value);
                   setOpen(false);
@@ -110,7 +117,19 @@ export function SearchableSelect({
                     option.value === value ? "opacity-100" : "opacity-0",
                   )}
                 />
-                <span>{option.label}</span>
+                {option.preview ? (
+                  <span className="flex h-14 w-20 shrink-0 items-center justify-center">
+                    {option.preview}
+                  </span>
+                ) : null}
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate">{option.label}</span>
+                  {option.description ? (
+                    <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                      {option.description}
+                    </span>
+                  ) : null}
+                </span>
               </button>
             ))
           ) : (

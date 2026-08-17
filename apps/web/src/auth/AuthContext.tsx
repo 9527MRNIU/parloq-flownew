@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { apiRequest, setBearerToken, type ApiEnvelope } from '../api/client'
+import { apiRequest, type ApiEnvelope } from '../api/client'
 
 export type AuthUser = {
   id?: string | number
@@ -13,7 +13,7 @@ type AuthValue = {
   loading: boolean
   actionPermissions: ReadonlySet<string>
   can: (permissionKey: string) => boolean
-  login: (username: string, password: string) => Promise<void>
+  login: (username: string, password: string, turnstileToken?: string) => Promise<void>
   logout: () => Promise<void>
 }
 
@@ -75,12 +75,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => { cancelled = true }
   }, [user])
 
-  async function login(username: string, password: string) {
+  async function login(username: string, password: string, turnstileToken?: string) {
     const response = await apiRequest<ApiEnvelope<{ token?: string; access_token?: string; user?: AuthUser }>>('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, turnstileToken }),
     })
-    setBearerToken(response.data.token || response.data.access_token || null)
     if (response.data.user) setUser(normalizeUser(response.data.user))
     else await loadMe()
   }
@@ -89,7 +88,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await apiRequest('/api/auth/logout', { method: 'POST' })
     } finally {
-      setBearerToken(null)
       setUser(null)
       setActionPermissions(new Set())
     }

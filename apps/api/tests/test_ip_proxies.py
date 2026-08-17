@@ -4,7 +4,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.database import SessionLocal
-from app.models import ProxyEndpoint
+from app.models import PersonalAccount, ProxyEndpoint
+from app.routers.ip_proxies import _reconcile_account_proxy_best_effort
+from app.services.wa_gateway import WaGatewayClient
 
 
 def test_ip_proxy_and_binding_lifecycle(admin_client: TestClient) -> None:
@@ -102,6 +104,56 @@ def test_ip_proxy_and_binding_lifecycle(admin_client: TestClient) -> None:
     assert admin_client.delete(f"/api/ip-proxy-bindings/{binding_one['id']}").status_code == 200
     assert admin_client.delete(f"/api/ip-proxy-bindings/{binding_two['id']}").status_code == 200
     assert admin_client.delete(f"/api/ip-proxies/{proxy['id']}").status_code == 200
+
+
+def test_proxy_reconciliation_uses_the_persisted_binding(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
+    account_response = admin_client.post(
+        "/api/personal-accounts",
+        json={"name": "Proxy reconcile account", "phone": "+12025550063"},
+    )
+    assert account_response.status_code == 201, account_response.text
+    account = account_response.json()["data"]["account"]
+    if account["proxyBinding"] is not None:
+        assert admin_client.delete(
+            f"/api/ip-proxy-bindings/{account['proxyBinding']['bindingId']}"
+        ).status_code == 200
+    proxy_response = admin_client.post(
+        "/api/ip-proxies",
+        json={
+            "name": "Reconcile proxy",
+            "protocol": "socks5",
+            "host": "proxy-reconcile.example.test",
+            "port": 1080,
+        },
+    )
+    assert proxy_response.status_code == 201, proxy_response.text
+    proxy = proxy_response.json()["data"]["proxy"]
+    binding_response = admin_client.post(
+        "/api/ip-proxy-bindings",
+        json={"accountId": account["id"], "proxyId": proxy["id"]},
+    )
+    assert binding_response.status_code == 201, binding_response.text
+
+    with SessionLocal() as db:
+        stored_account = db.get(PersonalAccount, int(account["id"]))
+        assert stored_account is not None
+        gateway_account_id = stored_account.gateway_account_id
+
+    updates = []
+
+    def record_update(self, account_id, proxy_url):
+        updates.append((account_id, proxy_url))
+        return {"id": account_id, "state": "linked_offline"}
+
+    monkeypatch.setattr(WaGatewayClient, "update_proxy", record_update)
+    _reconcile_account_proxy_best_effort(gateway_account_id)
+
+    assert updates == [
+        (gateway_account_id, "socks5://proxy-reconcile.example.test:1080")
+    ]
 
 
 def test_password_can_be_cleared_without_ever_being_returned(admin_client: TestClient) -> None:

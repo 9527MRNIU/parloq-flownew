@@ -43,6 +43,13 @@ router = APIRouter(prefix="/api/protocol-nodes", tags=["protocol-nodes"])
 pool_router = APIRouter(prefix="/api/protocol-pools", tags=["protocol-pools"])
 
 _ONLINE_STATES = {"warming", "online_idle", "sending", "draining"}
+
+
+def _account_proxy_url(db: DbSession, account_id: str) -> str | None:
+    # Import lazily so the two API routers do not depend on import order.
+    from app.routers.personal_accounts import _proxy_url
+
+    return _proxy_url(db, account_id)
 _INVALID_STATES = {
     "unpaired",
     "pairing",
@@ -517,7 +524,14 @@ def _batch(
                 continue
             try:
                 result = (
-                    client.connect(account.gateway_account_id)
+                    (
+                        client.connect(account.gateway_account_id)
+                        if already_online
+                        else client.connect(
+                            account.gateway_account_id,
+                            _account_proxy_url(db, account.gateway_account_id),
+                        )
+                    )
                     if online
                     else client.disconnect(account.gateway_account_id)
                 )

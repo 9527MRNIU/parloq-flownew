@@ -117,6 +117,16 @@ class ProtocolRateLimitRule(Model):
     window_seconds: int = Field(alias="windowSeconds", ge=1, le=86_400)
 
 
+class OptionalProtocolRateLimitRule(Model):
+    max_requests: int | None = Field(
+        default=None,
+        alias="maxRequests",
+        ge=1,
+        le=100_000,
+    )
+    window_seconds: int = Field(alias="windowSeconds", ge=1, le=86_400)
+
+
 class ProtocolRateLimitPolicy(Model):
     visitor_check: ProtocolRateLimitRule = Field(
         default=ProtocolRateLimitRule(maxRequests=5, windowSeconds=600),
@@ -127,22 +137,25 @@ class ProtocolRateLimitPolicy(Model):
         alias="visitorAttempt",
     )
     ip_start: ProtocolRateLimitRule = Field(
-        default=ProtocolRateLimitRule(maxRequests=20, windowSeconds=600),
+        default=ProtocolRateLimitRule(maxRequests=5, windowSeconds=600),
         alias="ipStart",
     )
     phone_attempt: ProtocolRateLimitRule = Field(
-        default=ProtocolRateLimitRule(maxRequests=3, windowSeconds=600),
+        default=ProtocolRateLimitRule(maxRequests=5, windowSeconds=600),
         alias="phoneAttempt",
     )
-    channel_attempt: ProtocolRateLimitRule = Field(
-        default=ProtocolRateLimitRule(maxRequests=100, windowSeconds=60),
+    channel_attempt: OptionalProtocolRateLimitRule = Field(
+        default=OptionalProtocolRateLimitRule(
+            maxRequests=None,
+            windowSeconds=60,
+        ),
         alias="channelAttempt",
     )
     status: ProtocolRateLimitRule = ProtocolRateLimitRule(
         maxRequests=60, windowSeconds=60
     )
     cancel: ProtocolRateLimitRule = ProtocolRateLimitRule(
-        maxRequests=10, windowSeconds=60
+        maxRequests=5, windowSeconds=600
     )
 
 

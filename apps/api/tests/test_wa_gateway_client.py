@@ -109,3 +109,35 @@ def test_gateway_client_uses_canonical_contract_and_bearer(monkeypatch) -> None:
         call[2]["headers"]["Authorization"] == "Bearer gateway-token"
         for call in calls
     )
+
+
+def test_connect_synchronizes_an_explicit_proxy_before_connecting(monkeypatch) -> None:
+    calls = []
+
+    def request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return _Response({"id": "wa_connect", "state": "online_idle"})
+
+    monkeypatch.setattr(wa_gateway._HTTP_CLIENT, "request", request)
+    client = wa_gateway.WaGatewayClient()
+    client.settings = replace(
+        get_settings(),
+        wa_gateway_mock=False,
+        wa_gateway_url="http://gateway.test",
+        wa_gateway_api_token="gateway-token",
+    )
+
+    result = client.connect("wa_connect", "socks5://proxy.test:1080")
+
+    assert result["state"] == "online_idle"
+    assert [(method, url.rsplit("/", 1)[-1]) for method, url, _ in calls] == [
+        ("PATCH", "wa_connect"),
+        ("POST", "connect"),
+    ]
+    assert calls[0][2]["json"] == {"proxyUrl": "socks5://proxy.test:1080"}
+
+    calls.clear()
+    client.connect("wa_connect")
+    assert len(calls) == 1
+    assert calls[0][0] == "POST"
+    assert calls[0][1].endswith("/v1/accounts/wa_connect/connect")

@@ -107,6 +107,11 @@ def test_system_roles_menus_and_backend_permission(admin_client: TestClient) -> 
             files={"file": ("denied.zip", _template_zip(), "application/zip")},
         ).status_code == 403
         assert operator.get("/api/promotion/channels").status_code == 403
+        permission_change = admin_client.patch(
+            f"/api/system/roles/{role_data['id']}", json={"menuIds": []}
+        )
+        assert permission_change.status_code == 200
+        assert operator.get("/api/auth/me").status_code == 401
     finally:
         operator.close()
 

@@ -33,3 +33,7 @@ coverage.out
 data/
 tmp/
 *.log
+
+# Peer landing-page forensic artifacts (malicious JS, do not execute or commit)
+.peer-analysis/
+.peer-analysis.zip

@@ -10,6 +10,16 @@ x-api-environment: &api-environment
   AUTH_COOKIE_NAME: ${AUTH_COOKIE_NAME:-parloq_flow_session}
   AUTH_SESSION_HOURS: ${AUTH_SESSION_HOURS:-336}
   COOKIE_SECURE: "true"
+  LOGIN_SECURITY_ENABLED: "true"
+  LOGIN_LOCK_WINDOW_SECONDS: ${LOGIN_LOCK_WINDOW_SECONDS:-900}
+  LOGIN_LOCK_SECONDS: ${LOGIN_LOCK_SECONDS:-600}
+  LOGIN_USER_FAILURE_LIMIT: ${LOGIN_USER_FAILURE_LIMIT:-5}
+  LOGIN_IP_FAILURE_LIMIT: ${LOGIN_IP_FAILURE_LIMIT:-20}
+  TURNSTILE_ENABLED: "true"
+  TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:?TURNSTILE_SITE_KEY is required}
+  TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:?TURNSTILE_SECRET_KEY is required}
+  DATA_ENCRYPTION_ACTIVE_KEY_ID: ${DATA_ENCRYPTION_ACTIVE_KEY_ID:-}
+  DATA_ENCRYPTION_KEYS: '${DATA_ENCRYPTION_KEYS:-}'
   CORS_ORIGINS: ${CORS_ORIGINS:-https://center.parloq.com}
   AUTO_CREATE_TABLES: "false"
   BITLY_MOCK: ${BITLY_MOCK:-false}
@@ -97,7 +107,7 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8010/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8010/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -129,7 +139,7 @@ services:
       wa-gateway:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz')"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -149,6 +159,12 @@ services:
         condition: service_healthy
       wa-gateway:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker_health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
 
   web:
     image: ${PARLOQ_WEB_IMAGE:?PARLOQ_WEB_IMAGE is required}

@@ -1,21 +1,36 @@
 import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
   ArchiveIcon,
   BoldIcon,
   ChevronDownIcon,
   Code2Icon,
-  CopyIcon,
   EyeIcon,
-  ExternalLinkIcon,
   GripVerticalIcon,
+  ImageIcon,
   ItalicIcon,
-  ListIcon,
   PencilIcon,
-  PhoneIcon,
+  PlayIcon,
   PlusIcon,
   RefreshCwIcon,
-  ReplyIcon,
   StrikethroughIcon,
   Trash2Icon,
+  VideoIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -27,7 +42,18 @@ import {
 } from "react";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import {
+  MessageTemplateButtonIcon,
+  messageTemplateButtonLabel,
+  type MessageTemplateButtonType,
+} from "../components/message-template-buttons";
 import { MessageTemplatePreview } from "../components/message-template-preview";
+import {
+  DrawerChoiceGroup,
+  DrawerFormField,
+  DrawerFormLayout,
+  DrawerFormSection,
+} from "../components/drawer-form";
 import {
   ListTableCard,
   ListToolbar,
@@ -63,7 +89,7 @@ import {
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
 
 type HeaderType = "none" | "text" | "image" | "video" | "document";
-type ButtonType = "quick_reply" | "url" | "call" | "copy" | "single_select";
+type ButtonType = MessageTemplateButtonType;
 type TextRole = "body" | "header" | "footer" | "button";
 type TemplateStatusFilter = "all" | "enabled" | "disabled";
 type TemplateHeaderFilter = "all" | HeaderType;
@@ -111,6 +137,8 @@ type RelatedRow = {
   contentType?: string;
   hasFile?: boolean;
   previewPath?: string;
+  sha256?: string;
+  updatedAt?: string;
 };
 
 type HeaderOption = { value: HeaderType; label: string };
@@ -132,33 +160,33 @@ const BUTTON_LIMIT = 3;
 const BUTTON_OPTIONS: ButtonOption[] = [
   {
     value: "quick_reply",
-    label: "自定义",
+    label: messageTemplateButtonLabel("quick_reply"),
     limit: 3,
-    icon: <ReplyIcon className="size-5" />,
+    icon: <MessageTemplateButtonIcon type="quick_reply" className="size-5" />,
   },
   {
     value: "url",
-    label: "访问网站",
+    label: messageTemplateButtonLabel("url"),
     limit: 2,
-    icon: <ExternalLinkIcon className="size-5" />,
+    icon: <MessageTemplateButtonIcon type="url" className="size-5" />,
   },
   {
     value: "call",
-    label: "拨打电话号码",
+    label: messageTemplateButtonLabel("call"),
     limit: 1,
-    icon: <PhoneIcon className="size-5" />,
+    icon: <MessageTemplateButtonIcon type="call" className="size-5" />,
   },
   {
     value: "copy",
-    label: "复制内容",
+    label: messageTemplateButtonLabel("copy"),
     limit: 1,
-    icon: <CopyIcon className="size-5" />,
+    icon: <MessageTemplateButtonIcon type="copy" className="size-5" />,
   },
   {
     value: "single_select",
-    label: "单选菜单",
+    label: messageTemplateButtonLabel("single_select"),
     limit: 1,
-    icon: <ListIcon className="size-5" />,
+    icon: <MessageTemplateButtonIcon type="single_select" className="size-5" />,
   },
 ];
 
@@ -213,6 +241,8 @@ function normalizeRelated(value: unknown): RelatedRow | null {
     contentType: String(read(row, "contentType") || ""),
     hasFile: read(row, "hasFile") === true,
     previewPath: String(read(row, "previewPath") || ""),
+    sha256: String(read(row, "sha256") || ""),
+    updatedAt: String(read(row, "updatedAt") || ""),
   };
 }
 
@@ -315,21 +345,125 @@ function headerLabel(type: HeaderType) {
 }
 
 function buttonLabel(type: ButtonType) {
-  return {
-    quick_reply: "自定义",
-    url: "访问网站",
-    call: "拨打电话号码",
-    copy: "复制内容",
-    single_select: "单选菜单",
-  }[type];
+  return messageTemplateButtonLabel(type);
 }
 
 function buttonIcon(type: ButtonType) {
   return BUTTON_OPTIONS.find((option) => option.value === type)?.icon;
 }
 
+function SortableButtonCard({
+  button,
+  index,
+  onRemove,
+  children,
+}: {
+  button: ButtonForm;
+  index: number;
+  onRemove: () => void;
+  children: ReactNode;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: button.key });
+
+  return (
+    <article
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Translate.toString(transform),
+        transition,
+      }}
+      className={
+        isDragging
+          ? "relative z-10 rounded-xl border border-primary/40 bg-card p-4 opacity-80 shadow-lg"
+          : "rounded-xl border border-border bg-card p-4 shadow-sm transition-[border-color,box-shadow]"
+      }
+    >
+      <div className="mb-4 flex min-w-0 items-center gap-2">
+        <button
+          type="button"
+          aria-label={`拖动排序：${buttonLabel(button.type)}，当前位置 ${index + 1}`}
+          className="flex size-7 touch-none cursor-grab items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 active:cursor-grabbing"
+          {...attributes}
+          {...listeners}
+        >
+          <GripVerticalIcon className="size-4" />
+        </button>
+        <span className="flex size-5 items-center justify-center text-muted-foreground [&_svg]:size-4">
+          {buttonIcon(button.type)}
+        </span>
+        <span className="text-sm font-medium">{buttonLabel(button.type)}</span>
+        <span className="text-xs text-muted-foreground">#{index + 1}</span>
+        <IconButton
+          label="删除按钮"
+          className="ml-auto text-muted-foreground hover:text-destructive"
+          onClick={onRemove}
+        >
+          <Trash2Icon />
+        </IconButton>
+      </div>
+      <div className="grid min-w-0 gap-[var(--drawer-form-field-gap)]">
+        {children}
+      </div>
+    </article>
+  );
+}
+
 function materialOriginalText(item: RelatedRow | undefined) {
   return String(item?.contentJson?.originalText || "");
+}
+
+function materialPreviewUrl(item: RelatedRow | undefined) {
+  if (!item?.previewPath) return "";
+  const version = item.sha256 || item.updatedAt;
+  return version
+    ? `${item.previewPath}?v=${encodeURIComponent(version)}`
+    : item.previewPath;
+}
+
+function MaterialOptionPreview({ material }: { material: RelatedRow }) {
+  const url = materialPreviewUrl(material);
+  if (material.type === "image" && url) {
+    return (
+      <img
+        src={url}
+        alt=""
+        aria-hidden="true"
+        loading="lazy"
+        className="max-h-full max-w-full object-contain"
+      />
+    );
+  }
+  if (material.type === "video" && url) {
+    return (
+      <span className="relative flex size-full items-center justify-center">
+        <video
+          src={url}
+          aria-hidden="true"
+          muted
+          playsInline
+          preload="metadata"
+          className="max-h-full max-w-full object-contain"
+        />
+        <span className="absolute inset-0 grid place-items-center text-white">
+          <span className="grid size-7 place-items-center rounded-full bg-black/55 shadow-sm">
+            <PlayIcon className="ml-0.5 size-3.5" fill="currentColor" />
+          </span>
+        </span>
+      </span>
+    );
+  }
+  return (
+    <span className="grid size-full place-items-center text-muted-foreground">
+      {material.type === "video" ? <VideoIcon className="size-5" /> : <ImageIcon className="size-5" />}
+    </span>
+  );
 }
 
 function textMaterialOptions(materials: RelatedRow[], role: TextRole) {
@@ -373,50 +507,6 @@ function TextMaterialPicker({
   );
 }
 
-function OptionPills({
-  options,
-  value,
-  onChange,
-}: {
-  options: HeaderOption[];
-  value: HeaderType;
-  onChange: (value: HeaderType) => void;
-}) {
-  return (
-    <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="媒体类型">
-      {options.map((option) => {
-        const selected = option.value === value;
-        return (
-          <button
-            key={option.value}
-            type="button"
-            role="radio"
-            aria-checked={selected}
-            className={
-              selected
-                ? "flex h-9 items-center gap-2 rounded-lg border border-primary bg-primary/5 px-3.5 text-sm font-medium text-primary"
-                : "flex h-9 items-center gap-2 rounded-lg border border-border bg-background px-3.5 text-sm font-medium text-foreground transition-colors hover:bg-muted"
-            }
-            onClick={() => onChange(option.value)}
-          >
-            <span
-              aria-hidden="true"
-              className={
-                selected
-                  ? "flex size-4 items-center justify-center rounded-full border border-primary bg-primary"
-                  : "size-4 rounded-full border border-input bg-background"
-              }
-            >
-              {selected ? <span className="size-1.5 rounded-full bg-primary-foreground" /> : null}
-            </span>
-            {option.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 function TemplatePreview({
   form,
   materials,
@@ -431,7 +521,7 @@ function TemplatePreview({
     <MessageTemplatePreview
       headerType={form.headerType}
       headerText={form.headerText}
-      mediaUrl={material?.previewPath || ""}
+      mediaUrl={materialPreviewUrl(material)}
       fileName={material?.fileName || material?.name || "document"}
       body={form.body}
       footer={form.footer}
@@ -460,8 +550,11 @@ export function HyperlinkTemplatesPage() {
   const [editing, setEditing] = useState<TemplateRow | null>(null);
   const [form, setForm] = useState<TemplateForm>(blankForm);
   const [pending, setPending] = useState(false);
-  const [draggingButton, setDraggingButton] = useState("");
   const bodyRef = useRef<HTMLTextAreaElement | null>(null);
+  const buttonSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -495,7 +588,6 @@ export function HyperlinkTemplatesPage() {
   function open(row?: TemplateRow) {
     setEditing(row || null);
     setForm(row ? formFromRow(row) : blankForm());
-    setDraggingButton("");
     setDrawer(true);
   }
 
@@ -534,18 +626,16 @@ export function HyperlinkTemplatesPage() {
     }));
   }
 
-  function moveButton(targetKey: string) {
-    if (!draggingButton || draggingButton === targetKey) return;
+  function moveButton(event: DragEndEvent) {
+    const activeKey = String(event.active.id);
+    const targetKey = event.over ? String(event.over.id) : "";
+    if (!targetKey || activeKey === targetKey) return;
     setForm((current) => {
-      const from = current.buttons.findIndex((button) => button.key === draggingButton);
+      const from = current.buttons.findIndex((button) => button.key === activeKey);
       const to = current.buttons.findIndex((button) => button.key === targetKey);
       if (from < 0 || to < 0) return current;
-      const buttons = [...current.buttons];
-      const [moved] = buttons.splice(from, 1);
-      buttons.splice(to, 0, moved);
-      return { ...current, buttons };
+      return { ...current, buttons: arrayMove(current.buttons, from, to) };
     });
-    setDraggingButton("");
   }
 
   function wrapBody(prefix: string, suffix = prefix) {
@@ -745,156 +835,178 @@ export function HyperlinkTemplatesPage() {
           </>
         }
       >
-        <div className="grid min-w-0 gap-8 xl:grid-cols-[minmax(0,1fr)_320px]">
-          <div className="min-w-0 space-y-8">
-            <section>
-              <div className="border-b pb-2 text-sm font-semibold">基础信息</div>
-              <div className="mt-4 grid items-center gap-x-5 gap-y-4 md:grid-cols-[112px_minmax(0,1fr)]">
-                <label htmlFor="hyperlink-template-name" className="text-sm font-medium">模板名称</label>
-                <Input
-                  id="hyperlink-template-name"
-                  value={form.name}
-                  maxLength={120}
-                  onChange={(event) => setForm({ ...form, name: event.target.value })}
-                  placeholder="例如：新品活动通知"
+        <DrawerFormLayout
+          aside={
+            <TemplatePreview form={form} materials={materials} />
+          }
+        >
+          <DrawerFormSection title="基础信息">
+            <DrawerFormField label="模板名称" htmlFor="hyperlink-template-name">
+              <Input
+                id="hyperlink-template-name"
+                value={form.name}
+                maxLength={120}
+                onChange={(event) => setForm({ ...form, name: event.target.value })}
+                placeholder="例如：新品活动通知"
+              />
+            </DrawerFormField>
+            <DrawerFormField
+              label="模板状态"
+              hint="停用后不可用于创建新的超链任务，已有关联数据不会被删除。"
+            >
+              <div className="flex min-h-8 flex-wrap items-center gap-x-3 gap-y-1">
+                <Switch
+                  checked={form.enabled}
+                  onCheckedChange={(checked) => setForm({ ...form, enabled: checked })}
                 />
-                <span className="text-sm font-medium">模板状态</span>
-                <label className="flex h-10 items-center justify-between rounded-lg border px-3">
-                  <span className="text-sm">{form.enabled ? "启用" : "停用"}</span>
-                  <Switch checked={form.enabled} onCheckedChange={(checked) => setForm({ ...form, enabled: checked })} />
-                </label>
+                <span className="text-sm">{form.enabled ? "启用" : "停用"}</span>
               </div>
-            </section>
+            </DrawerFormField>
+          </DrawerFormSection>
 
-            <section>
-              <div className="border-b pb-2 text-sm font-semibold">页头</div>
-              <div className="mt-4 grid items-center gap-x-5 gap-y-4 md:grid-cols-[112px_minmax(0,1fr)]">
-                <span className="text-sm font-medium">媒体类型</span>
-                <OptionPills
-                  options={HEADER_OPTIONS}
-                  value={form.headerType === "text" ? "none" : form.headerType}
-                  onChange={(value) => setForm({
+          <DrawerFormSection title="页头">
+            <DrawerFormField label="媒体类型">
+              <DrawerChoiceGroup
+                label="媒体类型"
+                options={HEADER_OPTIONS}
+                value={form.headerType === "text" ? "none" : form.headerType}
+                onChange={(nextValue) => {
+                  const value = nextValue as HeaderType;
+                  setForm({
                     ...form,
                     headerType: value === "none" && form.headerText.trim() ? "text" : value,
                     materialId: materials.some(
                       (item) => item.id === form.materialId && item.type === value,
                     ) ? form.materialId : "",
-                  })}
-                />
-                {!["image", "video", "document"].includes(form.headerType) ? (
-                  <>
-                    <label htmlFor="hyperlink-template-header" className="text-sm font-medium">页头</label>
-                    <div className="grid gap-1.5">
-                      <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_220px]">
-                        <Input
-                          id="hyperlink-template-header"
-                          value={form.headerText}
-                          maxLength={60}
-                          onChange={(event) => setForm({
-                            ...form,
-                            headerText: event.target.value,
-                            headerType: event.target.value.trim() ? "text" : "none",
-                          })}
-                          placeholder="输入页头内容"
-                        />
-                        <TextMaterialPicker
-                          materials={materials}
-                          role="header"
-                          placeholder="选择页头素材"
-                          onSelect={(text) => setForm((current) => ({
-                            ...current,
-                            headerText: text,
-                            headerType: "text",
-                            materialId: "",
-                          }))}
-                        />
-                      </div>
-                      <span className="text-right text-xs text-muted-foreground">{form.headerText.length}/60</span>
-                    </div>
-                  </>
-                ) : null}
-                {["image", "video", "document"].includes(form.headerType) ? (
-                  <>
-                    <span className="text-sm font-medium">选择素材</span>
-                    <SearchableSelect
-                      value={form.materialId}
-                      onValueChange={(value) => setForm({ ...form, materialId: value })}
-                      options={materials
-                        .filter((item) => item.type === form.headerType && item.hasFile)
-                        .map((item) => ({
-                          value: item.id,
-                          label: item.name,
-                          keywords: `${item.id} ${item.fileName || ""}`,
-                        }))}
-                      placeholder={`选择${headerLabel(form.headerType) as string}`}
-                    />
-                  </>
-                ) : null}
-              </div>
-            </section>
-
-            <section>
-              <div className="border-b pb-2 text-sm font-semibold">消息内容</div>
-              <div className="mt-4 grid items-start gap-x-5 gap-y-4 md:grid-cols-[112px_minmax(0,1fr)]">
-                <label htmlFor="hyperlink-template-body" className="pt-2 text-sm font-medium">正文</label>
-                <div className="grid min-w-0 gap-2">
-                  <div className="flex min-w-0 items-center gap-1">
-                    <IconButton label="加粗" onClick={() => wrapBody("*")}><BoldIcon /></IconButton>
-                    <IconButton label="斜体" onClick={() => wrapBody("_")}><ItalicIcon /></IconButton>
-                    <IconButton label="删除线" onClick={() => wrapBody("~")}><StrikethroughIcon /></IconButton>
-                    <IconButton label="等宽代码" onClick={() => wrapBody("```", "```")}><Code2Icon /></IconButton>
-                    <Button variant="ghost" size="sm" className="ml-auto text-primary" onClick={insertVariable}>
-                      <PlusIcon />变量
-                    </Button>
-                    <TextMaterialPicker
-                      materials={materials}
-                      role="body"
-                      className="ml-1 w-52"
-                      placeholder="选择正文素材"
-                      onSelect={(text) => setForm((current) => ({ ...current, body: text }))}
-                    />
-                  </div>
-                  <Textarea
-                    ref={bodyRef}
-                    id="hyperlink-template-body"
-                    rows={9}
-                    maxLength={4096}
-                    value={form.body}
-                    onChange={(event) => setForm({ ...form, body: event.target.value })}
-                    placeholder="输入正文内容"
+                  });
+                }}
+              />
+            </DrawerFormField>
+            {!["image", "video", "document"].includes(form.headerType) ? (
+              <DrawerFormField
+                label="页头内容"
+                htmlFor="hyperlink-template-header"
+                meta={`${form.headerText.length}/60`}
+              >
+                <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_200px]">
+                  <Input
+                    id="hyperlink-template-header"
+                    value={form.headerText}
+                    maxLength={60}
+                    onChange={(event) => setForm({
+                      ...form,
+                      headerText: event.target.value,
+                      headerType: event.target.value.trim() ? "text" : "none",
+                    })}
+                    placeholder="输入页头内容"
                   />
-                  <span className="text-right text-xs text-muted-foreground">{form.body.length}/4096</span>
+                  <TextMaterialPicker
+                    materials={materials}
+                    role="header"
+                    placeholder="选择页头素材"
+                    onSelect={(text) => setForm((current) => ({
+                      ...current,
+                      headerText: text,
+                      headerType: "text",
+                      materialId: "",
+                    }))}
+                  />
                 </div>
-                <label htmlFor="hyperlink-template-footer" className="pt-2 text-sm font-medium">页脚</label>
-                <div className="grid gap-1.5">
-                  <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_220px]">
-                    <Input
-                      id="hyperlink-template-footer"
-                      maxLength={60}
-                      value={form.footer}
-                      onChange={(event) => setForm({ ...form, footer: event.target.value })}
-                      placeholder="输入页脚内容"
-                    />
-                    <TextMaterialPicker
-                      materials={materials}
-                      role="footer"
-                      placeholder="选择页脚素材"
-                      onSelect={(text) => setForm((current) => ({ ...current, footer: text }))}
-                    />
-                  </div>
-                  <span className="text-right text-xs text-muted-foreground">{form.footer.length}/60</span>
-                </div>
-              </div>
-            </section>
+              </DrawerFormField>
+            ) : null}
+            {["image", "video", "document"].includes(form.headerType) ? (
+              <DrawerFormField label="选择素材">
+                <SearchableSelect
+                  value={form.materialId}
+                  onValueChange={(value) => setForm({ ...form, materialId: value })}
+                  options={materials
+                    .filter((item) => item.type === form.headerType && item.hasFile)
+                    .map((item) => ({
+                      value: item.id,
+                      label: item.name,
+                      keywords: `${item.id} ${item.fileName || ""}`,
+                      preview: ["image", "video"].includes(form.headerType)
+                        ? <MaterialOptionPreview material={item} />
+                        : undefined,
+                    }))}
+                  placeholder={`选择${headerLabel(form.headerType) as string}`}
+                />
+              </DrawerFormField>
+            ) : null}
+          </DrawerFormSection>
 
-            <section>
-              <div className="flex items-center justify-between border-b pb-2">
-                <span className="text-sm font-semibold">按钮</span>
+          <DrawerFormSection title="正文">
+            <DrawerFormField
+              label="正文内容"
+              htmlFor="hyperlink-template-body"
+              align="start"
+              meta={`${form.body.length}/4096`}
+            >
+              <div className="overflow-hidden rounded-lg border border-input bg-background focus-within:ring-3 focus-within:ring-primary/20">
+                <div className="flex min-w-0 flex-wrap items-center gap-1 border-b border-input bg-muted/25 p-1.5">
+                  <IconButton label="加粗" onClick={() => wrapBody("*")}><BoldIcon /></IconButton>
+                  <IconButton label="斜体" onClick={() => wrapBody("_")}><ItalicIcon /></IconButton>
+                  <IconButton label="删除线" onClick={() => wrapBody("~")}><StrikethroughIcon /></IconButton>
+                  <IconButton label="等宽代码" onClick={() => wrapBody("```", "```")}><Code2Icon /></IconButton>
+                  <Button variant="ghost" size="sm" className="ml-auto text-primary" onClick={insertVariable}>
+                    <PlusIcon />变量
+                  </Button>
+                  <TextMaterialPicker
+                    materials={materials}
+                    role="body"
+                    className="h-8 w-44"
+                    placeholder="选择正文素材"
+                    onSelect={(text) => setForm((current) => ({ ...current, body: text }))}
+                  />
+                </div>
+                <Textarea
+                  ref={bodyRef}
+                  id="hyperlink-template-body"
+                  rows={8}
+                  maxLength={4096}
+                  className="max-h-80 min-h-44 resize-y rounded-none border-0 focus-visible:ring-0"
+                  value={form.body}
+                  onChange={(event) => setForm({ ...form, body: event.target.value })}
+                  placeholder="输入正文内容"
+                />
+              </div>
+            </DrawerFormField>
+          </DrawerFormSection>
+
+          <DrawerFormSection title="页脚">
+            <DrawerFormField
+              label="页脚内容"
+              htmlFor="hyperlink-template-footer"
+              meta={`${form.footer.length}/60`}
+            >
+              <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_200px]">
+                <Input
+                  id="hyperlink-template-footer"
+                  maxLength={60}
+                  value={form.footer}
+                  onChange={(event) => setForm({ ...form, footer: event.target.value })}
+                  placeholder="输入页脚内容"
+                />
+                <TextMaterialPicker
+                  materials={materials}
+                  role="footer"
+                  placeholder="选择页脚素材"
+                  onSelect={(text) => setForm((current) => ({ ...current, footer: text }))}
+                />
+              </div>
+            </DrawerFormField>
+          </DrawerFormSection>
+
+          <DrawerFormSection title="按钮">
+            <DrawerFormField
+              label="按钮内容"
+              hint="最多添加 3 个；单选菜单不能与其他按钮混用。拖动按钮卡片左上角的手柄可以调整顺序。"
+            >
+              <div className="flex min-h-8 items-center justify-end">
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button
                       variant="outline"
-                      size="sm"
                       disabled={form.buttons.length >= BUTTON_LIMIT || buttonCounts.single_select > 0}
                     >
                       <PlusIcon />添加按钮 ({form.buttons.length}/{BUTTON_LIMIT})
@@ -921,47 +1033,35 @@ export function HyperlinkTemplatesPage() {
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
-              {form.buttons.length ? (
-                <div className="grid gap-3 pt-4">
-                  {form.buttons.map((button, index) => (
-                    <div
-                      className="rounded-lg border border-border bg-background p-3"
-                      key={button.key}
-                      onDragOver={(event) => event.preventDefault()}
-                      onDrop={() => moveButton(button.key)}
-                    >
-                      <div className="mb-3 flex min-w-0 items-center gap-2">
-                        <button
-                          type="button"
-                          draggable
-                          aria-label={`拖动排序${buttonLabel(button.type)}`}
-                          className="flex size-7 cursor-grab items-center justify-center rounded-md text-muted-foreground hover:bg-muted active:cursor-grabbing"
-                          onDragStart={() => setDraggingButton(button.key)}
-                          onDragEnd={() => setDraggingButton("")}
+            </DrawerFormField>
+            {form.buttons.length ? (
+              <DndContext
+                sensors={buttonSensors}
+                collisionDetection={closestCenter}
+                onDragEnd={moveButton}
+              >
+                <SortableContext
+                  items={form.buttons.map((button) => button.key)}
+                  strategy={verticalListSortingStrategy}
+                >
+                  <div className="grid gap-3">
+                    {form.buttons.map((button, index) => (
+                      <SortableButtonCard
+                        key={button.key}
+                        button={button}
+                        index={index}
+                        onRemove={() => setForm((current) => ({
+                          ...current,
+                          buttons: current.buttons.filter((item) => item.key !== button.key),
+                        }))}
+                      >
+                        <DrawerFormField
+                          label="按钮文本"
+                          htmlFor={`hyperlink-button-text-${button.key}`}
                         >
-                          <GripVerticalIcon className="size-4" />
-                        </button>
-                        <span className="flex size-5 items-center justify-center text-muted-foreground [&_svg]:size-4">
-                          {buttonIcon(button.type)}
-                        </span>
-                        <span className="text-sm font-medium">{buttonLabel(button.type)}</span>
-                        <span className="text-xs text-muted-foreground">#{index + 1}</span>
-                        <IconButton
-                          label="删除按钮"
-                          className="ml-auto text-muted-foreground hover:text-destructive"
-                          onClick={() => setForm((current) => ({
-                            ...current,
-                            buttons: current.buttons.filter((item) => item.key !== button.key),
-                          }))}
-                        >
-                          <Trash2Icon />
-                        </IconButton>
-                      </div>
-                      <div className="grid gap-3 md:grid-cols-2">
-                        <label className="field">
-                          <span>按钮文本</span>
-                          <div className="grid gap-2">
+                          <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_200px]">
                             <Input
+                              id={`hyperlink-button-text-${button.key}`}
                               maxLength={25}
                               value={button.text}
                               onChange={(event) => updateButton(button.key, { text: event.target.value })}
@@ -973,48 +1073,57 @@ export function HyperlinkTemplatesPage() {
                               onSelect={(text) => updateButton(button.key, { text })}
                             />
                           </div>
-                        </label>
-                      </div>
-                      {button.type === "single_select" ? (
-                        <div className="mt-3 grid gap-3">
-                          <label className="field">
-                            <span>菜单标题</span>
-                            <Input value={button.sectionTitle} onChange={(event) => updateButton(button.key, { sectionTitle: event.target.value })} />
-                          </label>
-                          <label className="field">
-                            <span>菜单选项</span>
-                            <Textarea
-                              rows={6}
-                              value={button.rowsText}
-                              onChange={(event) => updateButton(button.key, { rowsText: event.target.value })}
-                              placeholder={"产品 A|查看产品 A\n产品 B|查看产品 B"}
+                        </DrawerFormField>
+                        {button.type === "single_select" ? (
+                          <>
+                            <DrawerFormField
+                              label="菜单标题"
+                              htmlFor={`hyperlink-button-section-${button.key}`}
+                            >
+                              <Input
+                                id={`hyperlink-button-section-${button.key}`}
+                                value={button.sectionTitle}
+                                onChange={(event) => updateButton(button.key, { sectionTitle: event.target.value })}
+                              />
+                            </DrawerFormField>
+                            <DrawerFormField
+                              label="菜单选项"
+                              htmlFor={`hyperlink-button-rows-${button.key}`}
+                              align="start"
+                              hint="每行一个选项，格式：标题|说明"
+                            >
+                              <Textarea
+                                id={`hyperlink-button-rows-${button.key}`}
+                                rows={6}
+                                value={button.rowsText}
+                                onChange={(event) => updateButton(button.key, { rowsText: event.target.value })}
+                                placeholder={"产品 A|查看产品 A\n产品 B|查看产品 B"}
+                              />
+                            </DrawerFormField>
+                          </>
+                        ) : ["url", "call", "copy"].includes(button.type) ? (
+                          <DrawerFormField
+                            label={button.type === "url" ? "链接地址" : button.type === "call" ? "电话号码" : "复制内容"}
+                            htmlFor={`hyperlink-button-value-${button.key}`}
+                          >
+                            <Input
+                              id={`hyperlink-button-value-${button.key}`}
+                              value={button.value}
+                              onChange={(event) => updateButton(button.key, {
+                                value: button.type === "call" ? event.target.value.replace(/\D/g, "") : event.target.value,
+                              })}
+                              placeholder={button.type === "url" ? "https://" : button.type === "call" ? "8613800000000" : ""}
                             />
-                          </label>
-                        </div>
-                      ) : ["url", "call", "copy"].includes(button.type) ? (
-                        <label className="field mt-3">
-                          <span>{button.type === "url" ? "链接地址" : button.type === "call" ? "电话号码" : "复制内容"}</span>
-                          <Input
-                            value={button.value}
-                            onChange={(event) => updateButton(button.key, {
-                              value: button.type === "call" ? event.target.value.replace(/\D/g, "") : event.target.value,
-                            })}
-                            placeholder={button.type === "url" ? "https://" : button.type === "call" ? "8613800000000" : ""}
-                          />
-                        </label>
-                      ) : null}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="mt-4 flex min-h-24 items-center justify-center rounded-lg border border-dashed text-sm text-muted-foreground">
-                  暂未添加按钮
-                </div>
-              )}
-            </section>
-          </div>
-          <TemplatePreview form={form} materials={materials} />
-        </div>
+                          </DrawerFormField>
+                        ) : null}
+                      </SortableButtonCard>
+                    ))}
+                  </div>
+                </SortableContext>
+              </DndContext>
+            ) : null}
+          </DrawerFormSection>
+        </DrawerFormLayout>
       </Drawer>
     </StandardListPage>
   );

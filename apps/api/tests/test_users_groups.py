@@ -122,3 +122,41 @@ def test_user_delete_soft_disables_revokes_sessions_and_keeps_owned_resources(
             assert resource is not None and resource.created_by == user.id
     finally:
         owner.close()
+
+
+def test_password_change_revokes_existing_sessions(admin_client: TestClient) -> None:
+    groups = admin_client.get("/api/user-groups").json()["data"]["rows"]
+    operator = next(group for group in groups if group["systemKey"] == "operator")
+    created = admin_client.post(
+        "/api/users",
+        json={
+            "username": "password-rotation-user",
+            "password": "secure-pass-123",
+            "groupId": operator["id"],
+        },
+    )
+    assert created.status_code == 201
+    user_id = created.json()["data"]["user"]["id"]
+    owner = TestClient(app)
+    try:
+        assert owner.post(
+            "/api/auth/login",
+            json={"username": "password-rotation-user", "password": "secure-pass-123"},
+        ).status_code == 200
+        assert owner.get("/api/auth/me").status_code == 200
+
+        changed = admin_client.patch(
+            f"/api/users/{user_id}", json={"password": "new-secure-pass-456"}
+        )
+        assert changed.status_code == 200
+        assert owner.get("/api/auth/me").status_code == 401
+        assert owner.post(
+            "/api/auth/login",
+            json={"username": "password-rotation-user", "password": "secure-pass-123"},
+        ).status_code == 401
+        assert owner.post(
+            "/api/auth/login",
+            json={"username": "password-rotation-user", "password": "new-secure-pass-456"},
+        ).status_code == 200
+    finally:
+        owner.close()

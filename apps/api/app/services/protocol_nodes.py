@@ -33,14 +33,14 @@ DEFAULT_SYNC_POLICY: dict[str, bool] = {
     "blocklist": False,
 }
 
-DEFAULT_RATE_LIMIT_POLICY: dict[str, dict[str, int]] = {
+DEFAULT_RATE_LIMIT_POLICY: dict[str, dict[str, int | None]] = {
     "visitorCheck": {"maxRequests": 5, "windowSeconds": 600},
     "visitorAttempt": {"maxRequests": 5, "windowSeconds": 600},
-    "ipStart": {"maxRequests": 20, "windowSeconds": 600},
-    "phoneAttempt": {"maxRequests": 3, "windowSeconds": 600},
-    "channelAttempt": {"maxRequests": 100, "windowSeconds": 60},
+    "ipStart": {"maxRequests": 5, "windowSeconds": 600},
+    "phoneAttempt": {"maxRequests": 5, "windowSeconds": 600},
+    "channelAttempt": {"maxRequests": None, "windowSeconds": 60},
     "status": {"maxRequests": 60, "windowSeconds": 60},
-    "cancel": {"maxRequests": 10, "windowSeconds": 60},
+    "cancel": {"maxRequests": 5, "windowSeconds": 600},
 }
 
 ONLINE_ACCOUNT_STATES = {"warming", "online_idle", "sending", "draining"}
@@ -78,7 +78,9 @@ def normalized_sync_policy(value: dict | None) -> dict[str, bool]:
     return result
 
 
-def normalized_rate_limit_policy(value: dict | None) -> dict[str, dict[str, int]]:
+def normalized_rate_limit_policy(
+    value: dict | None,
+) -> dict[str, dict[str, int | None]]:
     source = value if isinstance(value, dict) else {}
     snake_aliases = {
         "visitorCheck": "visitor_check",
@@ -87,7 +89,7 @@ def normalized_rate_limit_policy(value: dict | None) -> dict[str, dict[str, int]
         "phoneAttempt": "phone_attempt",
         "channelAttempt": "channel_attempt",
     }
-    result: dict[str, dict[str, int]] = {}
+    result: dict[str, dict[str, int | None]] = {}
     for key, defaults in DEFAULT_RATE_LIMIT_POLICY.items():
         raw = source.get(key, source.get(snake_aliases.get(key, ""), {}))
         rule = raw if isinstance(raw, dict) else {}

@@ -8,6 +8,7 @@ from app.config import get_settings
 
 
 QUEUE_KEY = "parloq:hyperlink:task-queue"
+QUEUE_ENQUEUED_AT_KEY = "parloq:hyperlink:task-queue:enqueued-at"
 QUEUE_MARKER_PREFIX = "parloq:hyperlink:task-queued:"
 QUEUE_MARKER_TTL_SECONDS = 15 * 60
 DELAYED_QUEUE_KEY = "parloq:hyperlink:task-delayed"
@@ -43,13 +44,16 @@ def enqueue_hyperlink_task(task_id: str) -> bool:
         end
         redis.call('set', KEYS[1], '1', 'EX', ARGV[2])
         redis.call('rpush', KEYS[2], ARGV[1])
+        redis.call('zadd', KEYS[3], ARGV[3], ARGV[1])
         return 1
         """,
-        2,
+        3,
         marker,
         QUEUE_KEY,
+        QUEUE_ENQUEUED_AT_KEY,
         task_id,
         QUEUE_MARKER_TTL_SECONDS,
+        time.time(),
     )
     return bool(queued)
 

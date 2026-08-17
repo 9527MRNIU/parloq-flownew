@@ -970,7 +970,7 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
                   options={item.options || dynamicOptions[item.key] || []}
                 />
               ) : item.type === "switch" ? (
-                <div className="flex min-h-10 items-center justify-between rounded-md border px-3">
+                <div className="flex min-h-8 items-center justify-between rounded-lg border border-input px-2.5">
                   <span className="text-sm text-muted-foreground">
                     {form[item.key] === "true" ? "已启用" : "已关闭"}
                   </span>
@@ -997,7 +997,6 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
         </div>
       </Drawer>
       <Drawer
-        wide
         open={Boolean(detailTask)}
         onClose={() => setDetailTask(null)}
         title="任务明细"

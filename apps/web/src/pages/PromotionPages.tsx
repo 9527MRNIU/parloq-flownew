@@ -63,6 +63,7 @@ import {
   StandardListPage,
 } from "../components/list-page";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
+import { DrawerFormSection } from "../components/drawer-form";
 import { useAuth } from "../auth/AuthContext";
 import { countryOptions } from "../lib/countries";
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
@@ -1062,7 +1063,6 @@ export function PromotionTemplatesPage() {
         onClose={() => setPreviewing(null)}
         title={previewing ? `模拟预览 · ${previewing.name}` : "模拟预览"}
         description="快捷切换预览视口；只影响管理端模拟效果，不会改变模板文件或真实渠道页面。"
-        wide
       >
         {previewing ? (
           <TemplatePreviewWorkspace template={previewing} />
@@ -1073,7 +1073,6 @@ export function PromotionTemplatesPage() {
         onClose={() => setDesignSpecDrawer(false)}
         title="推广模板设计规范"
         description="面向设计、开发和 AI 生成的 v2 白标组件主题标准。可下载能力主题或复制完整 AI 提示词。"
-        wide
         footer={
           <>
             <Button
@@ -2024,6 +2023,7 @@ export function PromotionChannelsPage() {
         }
       >
         <div className="drawer-form">
+          <DrawerFormSection title="基础信息">
           <label className="field">
             <span>渠道名称</span>
             <Input
@@ -2084,10 +2084,12 @@ export function PromotionChannelsPage() {
               通过此渠道成功链接的账号会自动进入该分组；发送任务实时使用分组内当前可用账号。
             </small>
           </label>
-          <div className="rounded-lg border p-3">
-            <strong className="text-sm">新账号协议路由</strong>
-            <p className="mt-1 text-xs text-muted-foreground">切换只影响之后新建的接入任务；存量账号和进行中的配对保持原节点。直接节点不可用时默认拒绝，只有选择协议池才按优先级回退。</p>
-            <div className="form-grid mt-3">
+          </DrawerFormSection>
+          <DrawerFormSection
+            title="新账号协议路由"
+            description="切换只影响之后新建的接入任务；存量账号和进行中的配对保持原节点。直接节点不可用时默认拒绝，只有选择协议池才按优先级回退。"
+          >
+            <div className="form-grid">
               <label className="field">
                 <span>路由类型</span>
                 <SelectField className="w-full" value={form.protocolRouteType} onValueChange={(value) => {
@@ -2116,7 +2118,8 @@ export function PromotionChannelsPage() {
                 模板声明 {selectedTemplate?.pairingContract || "-"}；保存时后端会校验协议路由兼容性。{selectedRoute?.healthReason ? ` 当前原因：${selectedRoute.healthReason}` : ""}
               </span>
             </div>
-          </div>
+          </DrawerFormSection>
+          <DrawerFormSection title="访问与语言">
           <div className="form-grid">
             <label className="field">
               <span>语言模式</span>
@@ -2233,12 +2236,12 @@ export function PromotionChannelsPage() {
               </small>
             </label>
           </div>
-          <div className="rounded-lg border p-3">
-            <strong className="text-sm">Meta 事件与投放归因</strong>
-            <p className="mt-1 text-xs text-muted-foreground">
-              浏览器 Pixel 与服务端 CAPI 共用 eventId 去重。模板不携带 Pixel ID、Token 或事件 SDK，全部由渠道运行时注入。
-            </p>
-            <label className="field mt-3">
+          </DrawerFormSection>
+          <DrawerFormSection
+            title="Meta 事件与投放归因"
+            description="浏览器 Pixel 与服务端 CAPI 共用 eventId 去重。模板不携带 Pixel ID、Token 或事件 SDK，全部由渠道运行时注入。"
+          >
+            <label className="field">
               <span>Meta Pixel / Dataset（可选）</span>
               <SelectField
                 className="w-full"
@@ -2320,7 +2323,8 @@ export function PromotionChannelsPage() {
                 </label>
               ))}
             </div>
-          </div>
+          </DrawerFormSection>
+          <DrawerFormSection title="发布设置">
           <label className="field">
             <span>Facebook / Instagram 内置浏览器</span>
             <SelectField
@@ -2374,6 +2378,7 @@ export function PromotionChannelsPage() {
               }
             />
           </label>
+          </DrawerFormSection>
         </div>
       </Drawer>
       <Drawer

@@ -85,6 +85,19 @@ def test_multiple_pairing_limits_are_consumed_atomically() -> None:
     assert all("203.0.113" not in key and "visitor:abc" not in key for key in redis.values)
 
 
+def test_unlimited_channel_attempt_does_not_consume_a_counter() -> None:
+    redis = StubRedis()
+    protocol = _protocol()
+    decision = consume_pairing_rate_limits(
+        protocol,
+        [PairingRateLimitRequest("channelAttempt", "channel:1")],
+        client=redis,
+    )
+
+    assert decision.allowed is True
+    assert redis.values == {}
+
+
 def test_public_request_ip_prefers_valid_forwarded_ingress_address() -> None:
     request = Request(
         {

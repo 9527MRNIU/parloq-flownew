@@ -1,4 +1,4 @@
-import { type ReactNode } from "react";
+import { lazy, Suspense, type ReactNode } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth/AuthContext";
 import { AppLayout } from "./components/AppLayout";
@@ -8,44 +8,35 @@ import {
   Toaster,
   TooltipProvider,
 } from "./components/ui";
-import { DirectShortLinksPage } from "./pages/DirectShortLinksPage";
-import { LoginPage } from "./pages/LoginPage";
-import { IpManagementPage } from "./pages/IpManagementPage";
-import { PersonalAccountsPage } from "./pages/PersonalAccountsPage";
-import {
-  PromotionTemplatePreviewPage,
-  PromotionChannelsPage,
-  PromotionTemplatesPage,
-} from "./pages/PromotionPages";
-import { DomainsPage } from "./pages/DomainsPage";
-import {
-  PromotionChannelStatisticsPage,
-  PromotionTrendPage,
-} from "./pages/PromotionDataPages";
-import {
-  HyperlinkDataPackagesPage,
-  HyperlinkStrategiesPage,
-  HyperlinkTasksPage,
-  HyperlinkTemplatesPage,
-} from "./pages/HyperlinkResourcePages";
-import { MaterialsPage } from "./pages/HyperlinkMaterialsPage";
-import { HyperlinkMarketInsightsPage } from "./pages/HyperlinkMarketInsightsPage";
-import { UserGroupsPage } from "./pages/UserGroupsPage";
-import { UsersPage } from "./pages/UsersPage";
-import { SystemMenusPage } from "./pages/SystemMenusPage";
-import {
-  AccountExportPage,
-  AccountGroupsPage,
-  AccountIntakePage,
-} from "./pages/AccountCenterPages";
-import { AccountStatisticsPage } from "./pages/AccountStatisticsPage";
-import { ProtocolManagementPage } from "./pages/ProtocolManagementPage";
-import { HomePage } from "./pages/HomePage";
-import { DeveloperDocsPage } from "./pages/DeveloperDocsPage";
-import {
-  GroupMarketingConstructionPage,
-  type GroupMarketingPageKind,
-} from "./pages/GroupMarketingPages";
+import type { GroupMarketingPageKind } from "./pages/GroupMarketingPages";
+
+const DirectShortLinksPage = lazy(() => import("./pages/DirectShortLinksPage").then((module) => ({ default: module.DirectShortLinksPage })));
+const LoginPage = lazy(() => import("./pages/LoginPage").then((module) => ({ default: module.LoginPage })));
+const IpManagementPage = lazy(() => import("./pages/IpManagementPage").then((module) => ({ default: module.IpManagementPage })));
+const PersonalAccountsPage = lazy(() => import("./pages/PersonalAccountsPage").then((module) => ({ default: module.PersonalAccountsPage })));
+const PromotionTemplatePreviewPage = lazy(() => import("./pages/PromotionPages").then((module) => ({ default: module.PromotionTemplatePreviewPage })));
+const PromotionChannelsPage = lazy(() => import("./pages/PromotionPages").then((module) => ({ default: module.PromotionChannelsPage })));
+const PromotionTemplatesPage = lazy(() => import("./pages/PromotionPages").then((module) => ({ default: module.PromotionTemplatesPage })));
+const DomainsPage = lazy(() => import("./pages/DomainsPage").then((module) => ({ default: module.DomainsPage })));
+const PromotionChannelStatisticsPage = lazy(() => import("./pages/PromotionDataPages").then((module) => ({ default: module.PromotionChannelStatisticsPage })));
+const PromotionTrendPage = lazy(() => import("./pages/PromotionDataPages").then((module) => ({ default: module.PromotionTrendPage })));
+const HyperlinkDataPackagesPage = lazy(() => import("./pages/HyperlinkResourcePages").then((module) => ({ default: module.HyperlinkDataPackagesPage })));
+const HyperlinkStrategiesPage = lazy(() => import("./pages/HyperlinkResourcePages").then((module) => ({ default: module.HyperlinkStrategiesPage })));
+const HyperlinkTasksPage = lazy(() => import("./pages/HyperlinkResourcePages").then((module) => ({ default: module.HyperlinkTasksPage })));
+const HyperlinkTemplatesPage = lazy(() => import("./pages/HyperlinkResourcePages").then((module) => ({ default: module.HyperlinkTemplatesPage })));
+const MaterialsPage = lazy(() => import("./pages/HyperlinkMaterialsPage").then((module) => ({ default: module.MaterialsPage })));
+const HyperlinkMarketInsightsPage = lazy(() => import("./pages/HyperlinkMarketInsightsPage").then((module) => ({ default: module.HyperlinkMarketInsightsPage })));
+const UserGroupsPage = lazy(() => import("./pages/UserGroupsPage").then((module) => ({ default: module.UserGroupsPage })));
+const UsersPage = lazy(() => import("./pages/UsersPage").then((module) => ({ default: module.UsersPage })));
+const SystemMenusPage = lazy(() => import("./pages/SystemMenusPage").then((module) => ({ default: module.SystemMenusPage })));
+const AccountExportPage = lazy(() => import("./pages/AccountCenterPages").then((module) => ({ default: module.AccountExportPage })));
+const AccountGroupsPage = lazy(() => import("./pages/AccountCenterPages").then((module) => ({ default: module.AccountGroupsPage })));
+const AccountIntakePage = lazy(() => import("./pages/AccountCenterPages").then((module) => ({ default: module.AccountIntakePage })));
+const AccountStatisticsPage = lazy(() => import("./pages/AccountStatisticsPage").then((module) => ({ default: module.AccountStatisticsPage })));
+const ProtocolManagementPage = lazy(() => import("./pages/ProtocolManagementPage").then((module) => ({ default: module.ProtocolManagementPage })));
+const HomePage = lazy(() => import("./pages/HomePage").then((module) => ({ default: module.HomePage })));
+const DeveloperDocsPage = lazy(() => import("./pages/DeveloperDocsPage").then((module) => ({ default: module.DeveloperDocsPage })));
+const GroupMarketingConstructionPage = lazy(() => import("./pages/GroupMarketingPages").then((module) => ({ default: module.GroupMarketingConstructionPage })));
 
 const groupMarketingPages: Array<{ path: string; title: GroupMarketingPageKind }> = [
   { path: "/group-marketing/blast/tasks", title: "拉群任务-炸群" },
@@ -95,7 +86,15 @@ function ProtectedPage({ children }: { children: ReactNode }) {
 export default function App() {
   return (
     <TooltipProvider>
-      <Routes>
+      <Suspense
+        fallback={
+          <div className="boot-screen">
+            <Spinner />
+            <span>正在加载页面…</span>
+          </div>
+        }
+      >
+        <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route
           path="/promotion/templates/:templateId/preview"
@@ -226,7 +225,8 @@ export default function App() {
           path="*"
           element={<Navigate to="/" replace />}
         />
-      </Routes>
+        </Routes>
+      </Suspense>
       <Toaster />
       <ConfirmDialogHost />
     </TooltipProvider>

@@ -60,6 +60,16 @@ services:
       SEED_ADMIN_USERNAME: ${SEED_ADMIN_USERNAME:-admin}
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-admin}
       APP_SECRET_KEY: ${APP_SECRET_KEY:-local-only-change-before-shared-environment}
+      LOGIN_SECURITY_ENABLED: ${LOGIN_SECURITY_ENABLED:-false}
+      LOGIN_LOCK_WINDOW_SECONDS: ${LOGIN_LOCK_WINDOW_SECONDS:-900}
+      LOGIN_LOCK_SECONDS: ${LOGIN_LOCK_SECONDS:-600}
+      LOGIN_USER_FAILURE_LIMIT: ${LOGIN_USER_FAILURE_LIMIT:-5}
+      LOGIN_IP_FAILURE_LIMIT: ${LOGIN_IP_FAILURE_LIMIT:-20}
+      TURNSTILE_ENABLED: ${TURNSTILE_ENABLED:-false}
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
+      DATA_ENCRYPTION_ACTIVE_KEY_ID: ${DATA_ENCRYPTION_ACTIVE_KEY_ID:-}
+      DATA_ENCRYPTION_KEYS: '${DATA_ENCRYPTION_KEYS:-}'
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
       AUTO_CREATE_TABLES: ${AUTO_CREATE_TABLES:-true}
       BITLY_MOCK: ${BITLY_MOCK:-true}
@@ -91,7 +101,7 @@ services:
         - CMD
         - python
         - -c
-        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz')
       interval: 10s
       timeout: 5s
       retries: 12
@@ -125,6 +135,8 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://parloq:parloq-local@postgres:5432/parloq_flow}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       APP_SECRET_KEY: ${APP_SECRET_KEY:-local-only-change-before-shared-environment}
+      DATA_ENCRYPTION_ACTIVE_KEY_ID: ${DATA_ENCRYPTION_ACTIVE_KEY_ID:-}
+      DATA_ENCRYPTION_KEYS: '${DATA_ENCRYPTION_KEYS:-}'
       WA_GATEWAY_BASE_URL: http://wa-gateway:8010
       WA_GATEWAY_API_TOKEN: ${WA_GATEWAY_API_TOKEN:-local-wa-gateway-token-change-before-shared-environment}
       WA_GATEWAY_MOCK: ${WA_GATEWAY_MOCK:-false}
@@ -145,6 +157,12 @@ services:
         condition: service_healthy
       wa-gateway:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker_health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
 
   wa-gateway:
     build:
@@ -174,7 +192,7 @@ services:
         - CMD
         - node
         - -e
-        - fetch('http://127.0.0.1:8010/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+        - fetch('http://127.0.0.1:8010/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
       interval: 10s
       timeout: 5s
       retries: 12

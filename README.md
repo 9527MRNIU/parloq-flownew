@@ -29,6 +29,7 @@ Local services:
 | Web console | <http://localhost:5173> |
 | API | <http://localhost:8000> |
 | API health | <http://localhost:8000/healthz> |
+| API readiness | <http://localhost:8000/readyz> |
 | WhatsApp gateway health | <http://localhost:8010/healthz> |
 | WhatsApp gateway readiness | <http://localhost:8010/readyz> |
 | PostgreSQL | `localhost:5432` |

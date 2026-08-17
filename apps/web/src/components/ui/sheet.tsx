@@ -56,7 +56,10 @@ export function SheetHeader({
   return (
     <header
       data-slot="sheet-header"
-      className={cn("flex flex-col gap-1 border-b px-6 py-5 pr-14", className)}
+      className={cn(
+        "flex flex-col gap-1 border-b px-[var(--drawer-padding-inline)] py-[var(--drawer-header-padding-block)] pr-14",
+        className,
+      )}
       {...props}
     />
   );
@@ -68,7 +71,10 @@ export function SheetBody({
   return (
     <div
       data-slot="sheet-body"
-      className={cn("min-h-0 flex-1 overflow-y-auto px-6 py-5", className)}
+      className={cn(
+        "min-h-0 flex-1 overflow-y-auto px-[var(--drawer-padding-inline)] py-[var(--drawer-body-padding-block)]",
+        className,
+      )}
       {...props}
     />
   );
@@ -81,7 +87,7 @@ export function SheetFooter({
     <footer
       data-slot="sheet-footer"
       className={cn(
-        "mt-auto flex flex-row justify-end gap-2 border-t px-6 py-4",
+        "mt-auto flex flex-row justify-end gap-2 border-t px-[var(--drawer-padding-inline)] py-[var(--drawer-footer-padding-block)]",
         className,
       )}
       {...props}

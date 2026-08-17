@@ -227,8 +227,9 @@ export function PhonePairingModal({
         </>
       }
     >
-      {!pairing ? (
-        <>
+      <div className="drawer-form">
+        {!pairing ? (
+          <>
           <div className="phone-fields">
             <label className="field country-code-field">
               <span>国家区号</span>
@@ -297,9 +298,9 @@ export function PhonePairingModal({
             )}
             生成配对码
           </Button>
-        </>
-      ) : (
-        <>
+          </>
+        ) : (
+          <>
           <PairingCode
             code={pairing.code}
             status={pairing.status}
@@ -316,8 +317,9 @@ export function PhonePairingModal({
               {error}
             </div>
           ) : null}
-        </>
-      )}
+          </>
+        )}
+      </div>
     </Drawer>
   );
 }

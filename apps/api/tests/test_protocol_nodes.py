@@ -130,7 +130,18 @@ def test_protocol_node_create_pool_and_template_contract(
         "maxRequests": 7,
         "windowSeconds": 600,
     }
-    assert node["rateLimitPolicy"]["phoneAttempt"]["maxRequests"] == 3
+    assert node["rateLimitPolicy"]["ipStart"] == {
+        "maxRequests": 5,
+        "windowSeconds": 600,
+    }
+    assert node["rateLimitPolicy"]["phoneAttempt"] == {
+        "maxRequests": 5,
+        "windowSeconds": 600,
+    }
+    assert node["rateLimitPolicy"]["cancel"] == {
+        "maxRequests": 5,
+        "windowSeconds": 600,
+    }
 
     updated = admin_client.patch(
         f"/api/protocol-nodes/{node['id']}",
