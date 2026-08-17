@@ -13,8 +13,10 @@ from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.main import app
-from app.models import DomainOrder, DomainRecord
+from app.models import DomainOrder, DomainQuote, DomainRecord, UserAccount
 from app.routers import domains as domains_router
+from app.security import utcnow
+from app.snowflake import new_public_id
 
 
 def _template_zip() -> bytes:
@@ -165,6 +167,66 @@ def test_domain_quote_order_unknown_reconcile_and_channel_options(
     )
     assert reconciled.status_code == 200, reconciled.text
     assert reconciled.json()["data"]["order"]["status"] == "completed"
+
+
+def test_real_registrar_quote_creates_purchase_ready_order(
+    admin_client: TestClient,
+) -> None:
+    with SessionLocal() as db:
+        admin = db.scalar(select(UserAccount).where(UserAccount.username == "admin"))
+        assert admin is not None
+        quote = DomainQuote(
+            public_id=new_public_id("dquote"),
+            hostname="real-registrar-order.example",
+            years=1,
+            amount=1.88,
+            currency="USD",
+            provider="namesilo",
+            expires_at=utcnow() + timedelta(minutes=15),
+            created_by=admin.id,
+        )
+        db.add(quote)
+        db.commit()
+        quote_id = str(quote.id)
+
+    response = admin_client.post(
+        "/api/domain-orders",
+        json={"quoteId": quote_id, "autoRenew": False},
+    )
+    assert response.status_code == 201, response.text
+    order = response.json()["data"]["order"]
+    assert order["quoteId"] == quote_id
+    assert order["provider"] == "namesilo"
+    assert order["status"] == "purchase_ready"
+    assert order["allowedActions"]["provision"] is True
+    assert order["allowedActions"]["mockPayment"] is False
+
+    with SessionLocal() as db:
+        stored_quote = db.get(DomainQuote, int(quote_id))
+        assert stored_quote is not None
+        assert stored_quote.consumed_at is not None
+
+
+def test_domain_order_integrity_error_classification() -> None:
+    class Diagnostic:
+        constraint_name = "domain_orders_quote_id_key"
+
+    class DatabaseError(Exception):
+        diag = Diagnostic()
+
+    duplicate = domains_router.IntegrityError(
+        "INSERT INTO domain_orders",
+        {},
+        DatabaseError("duplicate key value violates unique constraint"),
+    )
+    unrelated = domains_router.IntegrityError(
+        "INSERT INTO domain_orders",
+        {},
+        Exception("violates check constraint ck_domain_orders_status"),
+    )
+
+    assert domains_router._is_duplicate_quote_order_error(duplicate) is True
+    assert domains_router._is_duplicate_quote_order_error(unrelated) is False
 
 
 def test_domain_search_returns_suffix_options_before_quote(

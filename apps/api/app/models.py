@@ -728,7 +728,7 @@ class DomainOrder(Base, TimestampMixin):
     __tablename__ = "domain_orders"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending_payment', 'paid', 'provisioning', 'unknown', 'completed', 'failed', 'cancelled')",
+            "status IN ('pending_payment', 'paid', 'purchase_ready', 'provisioning', 'unknown', 'completed', 'failed', 'cancelled')",
             name="ck_domain_orders_status",
         ),
         CheckConstraint("years >= 1 AND years <= 10", name="ck_domain_orders_years"),

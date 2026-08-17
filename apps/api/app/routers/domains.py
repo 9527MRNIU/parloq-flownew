@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import secrets
 from datetime import UTC, timedelta
@@ -49,8 +50,30 @@ from app.services.domain_registrar import (
 
 router = APIRouter(prefix="/api/domains", tags=["domains"])
 order_router = APIRouter(prefix="/api/domain-orders", tags=["domain-orders"])
+logger = logging.getLogger(__name__)
 DOMAIN_SEARCH_KEY_PREFIX = "parloq:domain-search:"
 DOMAIN_SEARCH_TTL_SECONDS = 15 * 60
+
+
+def _is_duplicate_quote_order_error(exc: IntegrityError) -> bool:
+    """Return whether an integrity error is the quote/order uniqueness conflict."""
+
+    diagnostic = getattr(exc.orig, "diag", None)
+    constraint_name = str(
+        getattr(diagnostic, "constraint_name", "") or ""
+    ).lower()
+    if constraint_name in {"domain_orders_quote_id_key", "ix_domain_orders_quote_id"}:
+        return True
+
+    message = str(exc.orig).lower()
+    return (
+        "unique constraint failed: domain_orders.quote_id" in message
+        or (
+            "duplicate key" in message
+            and "domain_orders" in message
+            and "quote_id" in message
+        )
+    )
 
 
 def _registrar(
@@ -651,9 +674,15 @@ def create_domain_order(
     quote.consumed_at = utcnow()
     try:
         db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(status_code=409, detail="报价已被使用，请勿重复创建订单") from None
+        if _is_duplicate_quote_order_error(exc):
+            raise HTTPException(
+                status_code=409,
+                detail="报价已被使用，请勿重复创建订单",
+            ) from None
+        logger.exception("Unexpected integrity error while creating a domain order")
+        raise HTTPException(status_code=500, detail="创建订单失败，请稍后重试") from exc
     db.refresh(item)
     return {"data": {"order": _order_row(db, item)}}
 
