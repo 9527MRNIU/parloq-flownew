@@ -850,9 +850,13 @@ class PromotionIntegration(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    source_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    entrypoints_json: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     version: Mapped[str] = mapped_column(String(40), default="1", nullable=False)
-    integrity: Mapped[str | None] = mapped_column(String(255))
+    manifest_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    asset_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    package_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    integrities_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
@@ -861,6 +865,29 @@ class PromotionIntegration(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
+
+
+class PromotionIntegrationAsset(Base, TimestampMixin):
+    __tablename__ = "promotion_integration_assets"
+    __table_args__ = (
+        UniqueConstraint(
+            "integration_id",
+            "path",
+            name="uq_promotion_integration_asset_path",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
+    integration_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("promotion_integrations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
 
 
 class PromotionTemplateIntegration(Base, TimestampMixin):

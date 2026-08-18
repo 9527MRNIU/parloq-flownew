@@ -117,7 +117,7 @@ type RuntimeIntegrationOption = {
   id: string;
   name: string;
   type: "script" | "iframe";
-  sourceUrl: string;
+  entryCount: number;
   enabled: boolean;
 };
 type TemplatePreviewDevice = "desktop" | "tablet" | "mobile";
@@ -384,11 +384,12 @@ function templateRow(input: unknown): PromotionTemplate {
 function runtimeIntegrationRow(input: unknown): RuntimeIntegrationOption {
   const row = object(input);
   const id = snowflakeId(row, "id");
+  const entryPaths = row.entryPaths || row.entry_paths;
   return {
     id,
     name: field(row, "name"),
     type: field(row, "type") === "script" ? "script" : "iframe",
-    sourceUrl: field(row, "sourceUrl", "source_url"),
+    entryCount: Array.isArray(entryPaths) ? entryPaths.length : 0,
     enabled: row.enabled !== false && row.domainReady !== false,
   };
 }
@@ -406,7 +407,7 @@ function RuntimeIntegrationSwitches({
   return (
     <DrawerFormSection
       title="运行时集成"
-      description="由平台统一注入。iframe 会挂载到 body 末尾，外部脚本按登记地址加载。"
+      description="由平台统一托管并注入。iframe 会挂载到 body 末尾，脚本按包内入口顺序加载。"
     >
       {integrations.length ? (
         integrations.map((integration) => (
@@ -415,7 +416,7 @@ function RuntimeIntegrationSwitches({
               <strong>{integration.name}</strong>
               <small>
                 {integration.type === "iframe" ? "iframe" : "JavaScript"} ·{" "}
-                {integration.sourceUrl}
+                {integration.entryCount} 个入口
               </small>
             </span>
             <Switch

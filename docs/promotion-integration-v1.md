@@ -1,62 +1,92 @@
 # 推广运行时集成规范 v1
 
-本规范定义推广模板之外的平台统一注入能力。模板包保持自包含，外部
-JavaScript 和 iframe 由“集成管理”登记源域名、资源路径和版本，再按模板绑定。
+本规范定义推广模板之外、由平台统一托管和注入的 JavaScript 与 iframe
+资源包。模板包继续保持自包含；运行时集成以 ZIP 导入、绑定已验证源域名，
+再按模板启用。
 
-## 1. 集成来源
+## 1. ZIP 文件结构
 
-- 每个集成必须绑定域名管理中已经完成注册、DNS、SSL 和托管验证的域名。
-- 集成只保存源域名引用和站内绝对资源路径，不保存可绕过域名绑定的完整 URL。
-- 最终资源地址固定使用 `https://源域名/资源路径`。
-- 源域名或集成被停用后，所有模板立即停止注入该集成。
+平台不要求固定目录名，允许文件位于 ZIP 根目录、任意子目录，或统一包在一层
+外部目录中。系统会忽略 macOS 生成的 `__MACOSX` 和 `.DS_Store`。
 
-## 2. 支持类型
+没有 `integration.json` 时自动识别：
 
-第一版支持：
+- 找到唯一 `index.html`，或 ZIP 中只有一个 HTML 文件：识别为 iframe 集成；
+- 没有 HTML、但存在一个或多个 `.js` / `.mjs`：识别为 script 集成，所有脚本
+  按规范化路径稳定排序后依次注入；
+- iframe 包可包含任意数量的 JavaScript、CSS、图片和字体，由 HTML 使用相对路径
+  引用，不会被额外注入到父页面；
+- 多个 HTML 无法确定入口时拒绝导入，并提示使用可选清单指定入口。
 
-- `script`：外部 JavaScript，使用 `defer` 加载；可选配置 SRI 完整性校验。
-- `iframe`：静态内联 iframe，由平台挂载到模板 `body` 末尾。
+单个或多个纯 JavaScript 文件都可以直接压缩为 ZIP 导入，不需要为了满足格式
+额外创建 HTML 或清单。
 
-## 3. iframe 输出
+## 2. 可选 integration.json
 
-iframe 不由 JavaScript 动态创建，不添加 `id` 或 `class`。平台在业务挂载点之后、
-`</body>` 之前输出：
+仅在需要明确类型、版本、HTML 入口或脚本加载顺序时提供清单。清单可使用单个
+`entry`，也可使用有序的 `entries`：
 
-```html
-<iframe
-  src="https://integration.example.com/runtime/frame"
-  style="
-    position: fixed;
-    top: 0;
-    left: -1000px;
-    width: 0;
-    height: 0;
-    border: 0;
-  "
-></iframe>
+```json
+{
+  "schemaVersion": 1,
+  "type": "script",
+  "version": "2.0.0",
+  "entries": [
+    "scripts/bootstrap.js",
+    { "path": "scripts/runtime.mjs", "scriptType": "module" }
+  ]
+}
 ```
 
-隐藏方式固定为移出视口、零尺寸和无边框，不使用 `display: none`，保证浏览器加载
-iframe 内容。
+- `type` 支持 `script` 和 `iframe`；
+- script 支持多个 `.js` / `.mjs` 入口，数组顺序就是注入顺序；
+- `scriptType` 支持 `classic` 和 `module`，省略时 `.mjs` 自动识别为 module；
+- iframe 只能指定一个 `.html` / `.htm` 入口，包内其他脚本由 HTML 自行引用；
+- `version` 可省略，平台会使用 ZIP 的 SHA-256 摘要生成稳定版本。
 
-## 4. 注入与 CSP
+## 3. 托管和资源地址
 
-- 平台先注入外部 JavaScript，再注入 iframe，iframe 保持在 `body` 末尾。
-- 后台预览、公开渠道页和裂变页使用同一份模板集成绑定。
-- CSP 根据当前模板实际生效的集成动态增加 `script-src`、`frame-src` 和
-  `connect-src` 源域名。
-- 公开渠道仅在存在生效集成时为 CSP sandbox 增加 `allow-same-origin`，使 iframe
-  和外部脚本可以使用各自来源的 Worker 与 storage；后台预览仍保持不透明来源隔离。
-- 未绑定 iframe 的模板继续使用 `frame-src 'none'`。
-- 模板 HTML 中自行携带的外部脚本或 iframe 不属于平台集成，不应被放行。
+- 每个集成必须选择已经完成注册、DNS、SSL 和托管验证的源域名；
+- ZIP 解压后的文件存入平台资源表，不需要人工部署目录或填写资源路径；
+- 平台按集成 ID、版本和包内路径生成不可变资源地址：
 
-## 5. 生效条件
+```text
+https://源域名/api/public/promotion/integrations/{集成ID}/{版本}/{包内路径}
+```
+
+- 资源只允许从所选源域名读取，使用错误 Host、旧版本、已停用集成或不可用域名
+  时返回 404；
+- 版本 URL 使用一年不可变缓存。上传新版本时先完整校验 ZIP，再在一个数据库事务
+  中替换资源，失败不会影响当前版本；
+- 手工设置 `version` 时，不同内容不能复用当前版本号，避免不可变缓存继续命中旧文件；
+- script 入口由平台逐个计算 SHA-384 SRI，管理端不需要手工填写完整性摘要。
+
+## 4. 包限制
+
+- ZIP 最大 20 MB；
+- 解压后总量最大 50 MB；
+- 最多 500 个文件；
+- 单文件最大 5 MB；
+- 禁止绝对路径、`..` 路径穿越、符号链接、重复路径和未允许的文件扩展名。
+
+## 5. 注入与 CSP
+
+- 平台先按集成及入口顺序注入全部 script，再注入 iframe；
+- classic script 使用 `defer` 并保持声明顺序，module 入口使用 `type="module"`；
+- iframe 仍以静态标签挂载在模板 `body` 末尾，使用移出视口、零尺寸和无边框的
+  隐藏方式；
+- 后台预览、公开渠道页和裂变页使用同一份模板集成绑定；
+- CSP 根据实际生效的集成源域名动态增加 `script-src`、`frame-src` 和
+  `connect-src`；
+- 模板 HTML 自行携带的外部脚本或 iframe 不属于平台集成，不会被额外放行。
+
+## 6. 生效条件
 
 一个集成只有同时满足以下条件才会注入：
 
 1. 集成已启用且未归档；
 2. 模板绑定已启用；
-3. 源域名已启用且注册、DNS、SSL、托管状态全部有效。
+3. 源域名已启用且注册、DNS、SSL、托管状态全部有效；
+4. 当前资源包存在至少一个有效入口。
 
-模板替换版本时保留当前集成绑定；导入和替换抽屉可以同步调整绑定。集成管理中的
-全局停用是即时停止分发的总开关。
+模板替换版本时保留当前集成绑定。集成管理中的全局停用是即时停止分发的总开关。

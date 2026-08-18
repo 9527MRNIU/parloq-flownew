@@ -297,46 +297,17 @@ def _validate_integration_key(value: str) -> str:
     return normalized
 
 
-def _validate_integration_source_path(value: str) -> str:
-    normalized = value.strip()
-    path = normalized.split("?", 1)[0]
-    if (
-        not normalized.startswith("/")
-        or normalized.startswith("//")
-        or "\\" in normalized
-        or any(part == ".." for part in path.split("/"))
-        or re.search(r"[\x00-\x20]", normalized)
-    ):
-        raise ValueError("资源路径必须是安全的站内绝对路径")
-    return normalized
-
-
-def _validate_integration_integrity(value: str | None) -> str | None:
-    if value is None or not value.strip():
-        return None
-    normalized = value.strip()
-    if not re.fullmatch(r"sha(?:256|384|512)-[A-Za-z0-9+/]+={0,2}", normalized):
-        raise ValueError("完整性校验必须使用标准 SRI sha256/384/512 格式")
-    return normalized
-
-
 class PromotionIntegrationCreate(Model):
     integration_key: str = Field(alias="integrationKey", min_length=1, max_length=80)
     name: str = Field(min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
-    integration_type: Literal["script", "iframe"] = Field(alias="type")
     domain_id: str = Field(alias="domainId", min_length=1, max_length=20)
-    source_path: str = Field(alias="sourcePath", min_length=1, max_length=1024)
-    version: str = Field(default="1", min_length=1, max_length=40)
-    integrity: str | None = Field(default=None, max_length=255)
     enabled: bool = True
 
     _key = field_validator("integration_key")(_validate_integration_key)
     _domain_id = field_validator("domain_id")(
         lambda value: str(parse_snowflake_id(value))
     )
-    _source_path = field_validator("source_path")(_validate_integration_source_path)
-    _integrity = field_validator("integrity")(_validate_integration_integrity)
 
 
 class PromotionIntegrationUpdate(Model):
@@ -345,15 +316,7 @@ class PromotionIntegrationUpdate(Model):
     )
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
-    integration_type: Literal["script", "iframe"] | None = Field(
-        default=None, alias="type"
-    )
     domain_id: str | None = Field(default=None, alias="domainId", max_length=20)
-    source_path: str | None = Field(
-        default=None, alias="sourcePath", min_length=1, max_length=1024
-    )
-    version: str | None = Field(default=None, min_length=1, max_length=40)
-    integrity: str | None = Field(default=None, max_length=255)
     enabled: bool | None = None
 
     _key = field_validator("integration_key")(
@@ -362,12 +325,6 @@ class PromotionIntegrationUpdate(Model):
     _domain_id = field_validator("domain_id")(
         lambda value: str(parse_snowflake_id(value)) if value is not None else None
     )
-    _source_path = field_validator("source_path")(
-        lambda value: _validate_integration_source_path(value)
-        if value is not None
-        else None
-    )
-    _integrity = field_validator("integrity")(_validate_integration_integrity)
 
 
 class PromotionTemplateIntegrationsUpdate(Model):

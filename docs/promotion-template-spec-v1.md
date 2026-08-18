@@ -14,7 +14,7 @@
 - 模板通过 `promotion-browser-bridge/v1` 完成号码提交和配对。
 - 模板必须同时支持真实渠道渲染和无副作用的后台预览。
 - 模板 ZIP 必须自包含。字体、图片、CSS、JavaScript 和语言包都随包提供。
-- 模板 ZIP 不得自行加入第三方统计、隐藏 iframe、指纹采集或外部脚本；平台可通过集成管理按模板统一注入已经登记并绑定源域名的 iframe、JavaScript、设备识别与匿名关联组件。
+- 模板 ZIP 不得自行加入第三方统计、隐藏 iframe、指纹采集或外部脚本；平台可通过集成管理按模板统一注入已经上传 ZIP 资源包并绑定源域名的 iframe、JavaScript、设备识别与匿名关联组件。
 - “禁右键/快捷键”只用于降低普通访问者的随手查看成本，不能作为凭据或源码保护手段。
 
 ## 2. ZIP 目录
@@ -262,7 +262,7 @@ window.PromotionBridge.submitPhone(
 
 ## 10. 禁止事项
 
-- 模板自行携带的外部 JavaScript、未知第三方 SDK、隐藏 iframe 或跨域数据回传；通过集成管理登记、绑定已验证源域名并由平台渲染管线统一注入的组件除外；
+- 模板自行携带的外部 JavaScript、未知第三方 SDK、隐藏 iframe 或跨域数据回传；通过集成管理上传 ZIP 资源包、绑定已验证源域名并由平台渲染管线统一注入的组件除外；
 - source map、明文密钥、访问令牌、固定渠道签名；
 - 把号码写入 URL、日志、localStorage、sessionStorage 或 analytics metadata；
 - 绕过 `PromotionBridge.submitPhone` 直接调用账号/网关 API；
