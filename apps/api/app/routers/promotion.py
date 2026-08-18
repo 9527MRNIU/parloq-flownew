@@ -35,6 +35,7 @@ from app.business_schemas import (
     PromotionEventInput,
     PromotionPairingStart,
     PromotionSuccessInput,
+    PromotionTemplateIntegrationsUpdate,
     PromotionTemplateUpdate,
 )
 from app.config import get_settings
@@ -53,8 +54,10 @@ from app.models import (
     PromotionChannel,
     PromotionEvent,
     PromotionLead,
+    PromotionIntegration,
     PersonalAccount,
     PromotionTemplate,
+    PromotionTemplateIntegration,
     PromotionTemplatePolicy,
     ProtocolNode,
     ProtocolPool,
@@ -63,6 +66,12 @@ from app.models import (
 )
 from app.security import utcnow
 from app.serializers import iso
+from app.services.promotion_integrations import (
+    ActivePromotionIntegration,
+    active_template_integrations,
+    inject_runtime_integrations,
+    integration_csp_sources,
+)
 from app.validation import parse_public_datetime, validate_structured_json
 
 
@@ -300,9 +309,21 @@ def _channel(db: DbSession, identifier: str, user) -> PromotionChannel:
     return item
 
 
-def template_row(item: PromotionTemplate) -> dict:
+def _template_integration_ids(db: DbSession, template_id: int) -> list[str]:
+    ids = db.scalars(
+        select(PromotionTemplateIntegration.integration_id)
+        .where(
+            PromotionTemplateIntegration.template_id == template_id,
+            PromotionTemplateIntegration.enabled.is_(True),
+        )
+        .order_by(PromotionTemplateIntegration.integration_id)
+    ).all()
+    return [str(value) for value in ids]
+
+
+def template_row(db: DbSession, item: PromotionTemplate) -> dict:
     manifest = item.manifest_json or {}
-    return {"id": entity_id(item), "name": item.name, "description": item.description, "version": item.version, "status": item.status, "manifest": manifest, "defaultLocale": manifest.get("defaultLocale"), "supportedLocales": manifest.get("supportedLocales", []), "i18n": manifest.get("i18n"), "assetCount": item.asset_count, "totalSize": item.total_size, "createdAt": iso(item.created_at), "updatedAt": iso(item.updated_at)}
+    return {"id": entity_id(item), "name": item.name, "description": item.description, "version": item.version, "status": item.status, "manifest": manifest, "defaultLocale": manifest.get("defaultLocale"), "supportedLocales": manifest.get("supportedLocales", []), "i18n": manifest.get("i18n"), "assetCount": item.asset_count, "totalSize": item.total_size, "integrationIds": _template_integration_ids(db, item.id), "createdAt": iso(item.created_at), "updatedAt": iso(item.updated_at)}
 
 
 def _channel_hostname(item: PromotionChannel, domain: DomainRecord | None) -> str:
@@ -544,6 +565,56 @@ def _replace_bundle(db: DbSession, item: PromotionTemplate, raw: bytes) -> None:
     for path, content_type, content in assets: db.add(PromotionAsset(template_id=item.id, path=path, content_type=content_type, size=len(content), content=content))
 
 
+def _form_integration_ids(value: str | None) -> list[str] | None:
+    if value is None:
+        return None
+    try:
+        parsed = json.loads(value)
+        payload = PromotionTemplateIntegrationsUpdate(integrationIds=parsed)
+    except (json.JSONDecodeError, ValidationError, TypeError):
+        raise HTTPException(status_code=422, detail="模板集成配置格式不正确") from None
+    return payload.integration_ids
+
+
+def _set_template_integrations(
+    db: DbSession,
+    item: PromotionTemplate,
+    integration_ids: list[str],
+    user,
+) -> None:
+    integration_pks = [parse_snowflake_id(value) for value in integration_ids]
+    integrations: list[PromotionIntegration] = []
+    if integration_pks:
+        statement = select(PromotionIntegration).where(
+            PromotionIntegration.id.in_(integration_pks),
+            PromotionIntegration.archived_at.is_(None),
+        )
+        if user.role != "admin":
+            statement = statement.where(PromotionIntegration.created_by == user.id)
+        integrations = list(db.scalars(statement).all())
+        if {value.id for value in integrations} != set(integration_pks):
+            raise HTTPException(status_code=404, detail="包含不可用的集成")
+    selected = {value.id for value in integrations}
+    existing = {
+        value.integration_id: value
+        for value in db.scalars(
+            select(PromotionTemplateIntegration).where(
+                PromotionTemplateIntegration.template_id == item.id
+            )
+        ).all()
+    }
+    for integration_id, binding in existing.items():
+        binding.enabled = integration_id in selected
+    for integration_id in selected.difference(existing):
+        db.add(
+            PromotionTemplateIntegration(
+                template_id=item.id,
+                integration_id=integration_id,
+                enabled=True,
+            )
+        )
+
+
 def _inject_after_head_open(html: str, markup: str) -> str:
     """Place base markup before the browser discovers any relative resource."""
     pattern = re.compile(r"<head\b[^>]*>", re.I)
@@ -566,25 +637,43 @@ def _request_origin(request: Request) -> str:
     return f"{scheme}://{host}"
 
 
-def _sandbox_csp(request: Request, *, preview: bool = False) -> str:
+def _sandbox_csp(
+    request: Request,
+    *,
+    preview: bool = False,
+    integrations: list[ActivePromotionIntegration] | None = None,
+) -> str:
     origin = _request_origin(request)
+    active_integrations = integrations or []
+    sandbox = "sandbox allow-scripts allow-forms"
+    if not preview and active_integrations:
+        sandbox += " allow-same-origin"
+    sandbox += " allow-top-navigation-by-user-activation"
+    script_origins, frame_origins, connect_origins = integration_csp_sources(
+        active_integrations
+    )
+    external_scripts = "".join(f" {value}" for value in sorted(script_origins))
+    external_connections = "".join(
+        f" {value}" for value in sorted(connect_origins)
+    )
+    frames = " ".join(sorted(frame_origins)) or "'none'"
     if preview:
         return (
-            f"sandbox allow-scripts allow-forms allow-top-navigation-by-user-activation; default-src 'none'; base-uri {origin}; "
-            f"script-src 'unsafe-inline' {origin}; "
+            f"{sandbox}; default-src 'none'; base-uri {origin}; "
+            f"script-src 'unsafe-inline' {origin}{external_scripts}; "
             f"style-src 'unsafe-inline' {origin} data:; "
             f"img-src {origin} data: blob:; font-src {origin} data:; "
-            f"media-src {origin} data: blob:; connect-src {origin}; "
-            "worker-src blob:; object-src 'none'; frame-src 'none'; "
+            f"media-src {origin} data: blob:; connect-src {origin}{external_connections}; "
+            f"worker-src blob:; object-src 'none'; frame-src {frames}; "
             f"form-action 'none'; frame-ancestors {origin}"
         )
     return (
-        f"sandbox allow-scripts allow-forms allow-top-navigation-by-user-activation; default-src 'none'; base-uri {origin}; "
-        f"script-src {origin} https://connect.facebook.net; "
-        f"connect-src {origin} https://connect.facebook.net https://www.facebook.com; "
+        f"{sandbox}; default-src 'none'; base-uri {origin}; "
+        f"script-src {origin} https://connect.facebook.net{external_scripts}; "
+        f"connect-src {origin} https://connect.facebook.net https://www.facebook.com{external_connections}; "
         f"img-src {origin} data: blob: https://www.facebook.com; "
         f"style-src 'unsafe-inline' {origin}; font-src {origin} data:; "
-        "media-src 'none'; object-src 'none'; frame-src 'none'; "
+        f"media-src 'none'; object-src 'none'; frame-src {frames}; "
         f"form-action {origin}; frame-ancestors 'none'"
     )
 
@@ -718,28 +807,33 @@ def download_account_link_starter(_current_user: CurrentUser) -> Response:
 def list_templates(db: DbSession, current_user: CurrentUser) -> dict:
     statement = select(PromotionTemplate).where(PromotionTemplate.archived_at.is_(None))
     if current_user.role != "admin": statement = statement.where(PromotionTemplate.created_by == current_user.id)
-    items = db.scalars(statement.order_by(PromotionTemplate.created_at.desc())).all(); return {"data": {"rows": [template_row(x) for x in items], "total": len(items)}}
+    items = db.scalars(statement.order_by(PromotionTemplate.created_at.desc())).all(); return {"data": {"rows": [template_row(db, x) for x in items], "total": len(items)}}
 
 
 @router.post("/api/promotion/templates", status_code=status.HTTP_201_CREATED)
-def import_template(db: DbSession, current_user: CurrentUser, file: UploadFile = File(...), name: str = Form(..., min_length=1, max_length=120), description: str | None = Form(default=None, max_length=2000)) -> dict:
+def import_template(db: DbSession, current_user: CurrentUser, file: UploadFile = File(...), name: str = Form(..., min_length=1, max_length=120), description: str | None = Form(default=None, max_length=2000), integration_ids: str | None = Form(default=None, alias="integrationIds")) -> dict:
     if not file.filename or not file.filename.lower().endswith(".zip"): raise HTTPException(status_code=422, detail="请选择 ZIP 模板包")
     manifest, html, assets, total = _safe_bundle(file.file.read(MAX_ZIP + 1))
     item = PromotionTemplate(public_id=new_public_id("ptpl"), name=name, description=description, version=str(manifest.get("version") or "1")[:40], status="active", manifest_json=manifest, index_html=html, asset_count=len(assets), total_size=total, created_by=current_user.id)
     db.add(item); db.flush()
     for path, content_type, content in assets: db.add(PromotionAsset(template_id=item.id, path=path, content_type=content_type, size=len(content), content=content))
-    db.commit(); db.refresh(item); return {"data": {"template": template_row(item)}}
+    selected_integrations = _form_integration_ids(integration_ids)
+    if selected_integrations is not None: _set_template_integrations(db, item, selected_integrations, current_user)
+    db.commit(); db.refresh(item); return {"data": {"template": template_row(db, item)}}
 
 
 @router.post("/api/promotion/templates/{template_id}/versions")
-def replace_template_version(template_id: str, db: DbSession, current_user: CurrentUser, file: UploadFile = File(...)) -> dict:
+def replace_template_version(template_id: str, db: DbSession, current_user: CurrentUser, file: UploadFile = File(...), integration_ids: str | None = Form(default=None, alias="integrationIds")) -> dict:
     item = _template(db, template_id, current_user)
     if not file.filename or not file.filename.lower().endswith(".zip"): raise HTTPException(status_code=422, detail="请选择 ZIP 模板包")
-    _replace_bundle(db, item, file.file.read(MAX_ZIP + 1)); db.commit(); db.refresh(item); return {"data": {"template": template_row(item)}}
+    _replace_bundle(db, item, file.file.read(MAX_ZIP + 1))
+    selected_integrations = _form_integration_ids(integration_ids)
+    if selected_integrations is not None: _set_template_integrations(db, item, selected_integrations, current_user)
+    db.commit(); db.refresh(item); return {"data": {"template": template_row(db, item)}}
 
 
 @router.get("/api/promotion/templates/{template_id}")
-def get_template(template_id: str, db: DbSession, current_user: CurrentUser) -> dict: return {"data": {"template": template_row(_template(db, template_id, current_user))}}
+def get_template(template_id: str, db: DbSession, current_user: CurrentUser) -> dict: return {"data": {"template": template_row(db, _template(db, template_id, current_user))}}
 
 
 @router.patch("/api/promotion/templates/{template_id}")
@@ -748,7 +842,21 @@ def update_template(template_id: str, payload: PromotionTemplateUpdate, db: DbSe
     if payload.name is not None: item.name = payload.name
     if "description" in payload.model_fields_set: item.description = payload.description
     if payload.status is not None: item.status = payload.status
-    db.commit(); return {"data": {"template": template_row(item)}}
+    db.commit(); return {"data": {"template": template_row(db, item)}}
+
+
+@router.put("/api/promotion/templates/{template_id}/integrations")
+def update_template_integrations(
+    template_id: str,
+    payload: PromotionTemplateIntegrationsUpdate,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    item = _template(db, template_id, current_user)
+    _set_template_integrations(db, item, payload.integration_ids, current_user)
+    db.commit()
+    db.refresh(item)
+    return {"data": {"template": template_row(db, item)}}
 
 
 @router.get("/api/promotion/templates/{template_id}/preview", response_class=HTMLResponse)
@@ -762,6 +870,7 @@ def preview_template(
 ) -> HTMLResponse:
     item = _template(db, template_id, current_user)
     policy = _runtime_template_policy(db, current_user.id)
+    runtime_integrations = active_template_integrations(db, item.id)
     preview_root = f"/api/promotion/templates/{entity_id(item)}/preview/"
     preview_token = _preview_asset_token(item)
     asset_root = f"{preview_root}assets/_signed/{preview_token}/"
@@ -851,6 +960,7 @@ def preview_template(
         html,
         f'<base href="{asset_root}">{preview_runtime}',
     )
+    html = inject_runtime_integrations(html, runtime_integrations)
     # Without allow-same-origin, uploaded template code cannot inherit the
     # control-plane origin, cookies, or storage. The signed asset path above
     # lets the opaque sandbox fetch only this preview bundle without a login
@@ -859,7 +969,11 @@ def preview_template(
     return HTMLResponse(
         html,
         headers={
-            "Content-Security-Policy": _sandbox_csp(request, preview=True),
+            "Content-Security-Policy": _sandbox_csp(
+                request,
+                preview=True,
+                integrations=runtime_integrations,
+            ),
             "Cache-Control": "private, no-store",
             "Content-Language": resolved_locale,
             "Referrer-Policy": "no-referrer",
@@ -1580,13 +1694,14 @@ def _render_html(
     pixel_dataset_id: str | None = None,
     traffic_source: str = "direct",
     template_policy: dict | None = None,
-) -> tuple[str, str]:
+) -> tuple[str, str, list[ActivePromotionIntegration]]:
     slug = channel.slug
     requested_locale, default, supported = _resolved_locale(channel, template, lang)
     resolved, localized_copy = _locale_copy(
         db, template, requested_locale, default
     )
     html = _localize_template_html(html, resolved, localized_copy)
+    runtime_integrations = active_template_integrations(db, template.id)
     from app.services.meta_conversions import normalized_meta_event_mapping
 
     config = json.dumps({"eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "sessionToken": _session_token(channel, traffic_source), "trafficSource": traffic_source, "countryCode": channel.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "localizedCopy": localized_copy, "pixelDatasetId": pixel_dataset_id, "meta": {"datasetId": pixel_dataset_id, "browserEnabled": bool(pixel_dataset_id and channel.meta_browser_pixel_enabled), "eventMapping": normalized_meta_event_mapping(channel.meta_event_mapping_json)}, "inAppBrowserMode": channel.in_app_browser_mode, "templatePolicy": template_policy or {}}, ensure_ascii=False).replace("<", "\\u003c")
@@ -1607,8 +1722,9 @@ def _render_html(
     if re.search(r"<head\b[^>]*>", html, re.I):
         html = _inject_after_head_open(html, base)
         rendered = re.sub(r"</head\s*>", runtime + "</head>", html, count=1, flags=re.I) if re.search(r"</head\s*>", html, re.I) else html + runtime
-        return rendered, resolved
-    return base + runtime + html, resolved
+        return inject_runtime_integrations(rendered, runtime_integrations), resolved, runtime_integrations
+    rendered = inject_runtime_integrations(base + runtime + html, runtime_integrations)
+    return rendered, resolved, runtime_integrations
 
 
 @router.get("/api/public/promotion/channels/{slug}/render", response_class=HTMLResponse)
@@ -1619,7 +1735,7 @@ def render_channel(slug: str, request: Request, db: DbSession, lang: str | None 
     if pixel is not None and (not pixel.enabled or pixel.archived_at is not None):
         pixel = None
     policy = _runtime_template_policy(db, item.created_by)
-    html, resolved_locale = _render_html(
+    html, resolved_locale, runtime_integrations = _render_html(
             db,
             item,
             tpl,
@@ -1633,7 +1749,10 @@ def render_channel(slug: str, request: Request, db: DbSession, lang: str | None 
         headers={
             "Cache-Control": "no-store",
             "Content-Language": resolved_locale,
-            "Content-Security-Policy": _sandbox_csp(request),
+            "Content-Security-Policy": _sandbox_csp(
+                request,
+                integrations=runtime_integrations,
+            ),
             "Referrer-Policy": "strict-origin-when-cross-origin",
         },
     )
@@ -1652,7 +1771,7 @@ def render_fission_channel(
     if pixel is not None and (not pixel.enabled or pixel.archived_at is not None):
         pixel = None
     policy = _runtime_template_policy(db, item.created_by)
-    html, resolved_locale = _render_html(
+    html, resolved_locale, runtime_integrations = _render_html(
             db,
             item,
             tpl,
@@ -1667,7 +1786,10 @@ def render_fission_channel(
         headers={
             "Cache-Control": "no-store",
             "Content-Language": resolved_locale,
-            "Content-Security-Policy": _sandbox_csp(request),
+            "Content-Security-Policy": _sandbox_csp(
+                request,
+                integrations=runtime_integrations,
+            ),
             "Referrer-Policy": "strict-origin-when-cross-origin",
         },
     )
