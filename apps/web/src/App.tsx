@@ -17,6 +17,7 @@ const PersonalAccountsPage = lazy(() => import("./pages/PersonalAccountsPage").t
 const PromotionTemplatePreviewPage = lazy(() => import("./pages/PromotionPages").then((module) => ({ default: module.PromotionTemplatePreviewPage })));
 const PromotionChannelsPage = lazy(() => import("./pages/PromotionPages").then((module) => ({ default: module.PromotionChannelsPage })));
 const PromotionTemplatesPage = lazy(() => import("./pages/PromotionPages").then((module) => ({ default: module.PromotionTemplatesPage })));
+const PromotionIntegrationsPage = lazy(() => import("./pages/PromotionIntegrationsPage"));
 const DomainsPage = lazy(() => import("./pages/DomainsPage").then((module) => ({ default: module.DomainsPage })));
 const PromotionChannelStatisticsPage = lazy(() => import("./pages/PromotionDataPages").then((module) => ({ default: module.PromotionChannelStatisticsPage })));
 const PromotionTrendPage = lazy(() => import("./pages/PromotionDataPages").then((module) => ({ default: module.PromotionTrendPage })));
@@ -110,6 +111,10 @@ export default function App() {
           <Route
             path="/promotion/templates"
             element={<PromotionTemplatesPage />}
+          />
+          <Route
+            path="/promotion/integrations"
+            element={<PromotionIntegrationsPage />}
           />
           <Route
             path="/promotion/channels"

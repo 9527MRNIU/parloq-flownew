@@ -105,6 +105,7 @@ def seed_initial_data(db: Session) -> None:
         "resources.accounts.export",
         "resources.protocol.manage",
         "promotion.templates.manage",
+        "promotion.integrations.manage",
         "promotion.channels.manage",
         "promotion.domain.manage",
         "promotion.domain.purchase",

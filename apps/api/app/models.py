@@ -824,6 +824,71 @@ class PromotionTemplatePolicy(Base, TimestampMixin):
     )
 
 
+class PromotionIntegration(Base, TimestampMixin):
+    __tablename__ = "promotion_integrations"
+    __table_args__ = (
+        UniqueConstraint(
+            "created_by",
+            "integration_key",
+            name="uq_promotion_integration_owner_key",
+        ),
+        CheckConstraint(
+            "integration_type IN ('script', 'iframe')",
+            name="ck_promotion_integrations_type",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
+    public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    integration_key: Mapped[str] = mapped_column(String(80), index=True)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    integration_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    source_domain_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("domains.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    source_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    version: Mapped[str] = mapped_column(String(40), default="1", nullable=False)
+    integrity: Mapped[str | None] = mapped_column(String(255))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    created_by: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("user_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+
+
+class PromotionTemplateIntegration(Base, TimestampMixin):
+    __tablename__ = "promotion_template_integrations"
+    __table_args__ = (
+        UniqueConstraint(
+            "template_id",
+            "integration_id",
+            name="uq_promotion_template_integration",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
+    template_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("promotion_templates.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    integration_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("promotion_integrations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+
+
 class PromotionAsset(Base, TimestampMixin):
     __tablename__ = "promotion_assets"
     __table_args__ = (

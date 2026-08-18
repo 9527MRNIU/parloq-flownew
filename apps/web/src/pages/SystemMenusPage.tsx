@@ -57,8 +57,9 @@ type MenuPreset = Omit<MenuRow, "id" | "readKey" | "parentId" | "parentReadKey">
 const menuPresets: MenuPreset[] = [
   { presetKey: "promotion-management", parentPresetKey: "", name: "推广管理", type: "目录", path: "", permission: "", sortOrder: 10, enabled: true, visible: true, builtin: true },
   { presetKey: "promotion-templates", parentPresetKey: "promotion-management", name: "模板管理", type: "页面", path: "/promotion/templates", permission: "promotion.templates.read", sortOrder: 10, enabled: true, visible: true, builtin: true },
-  { presetKey: "promotion-channels", parentPresetKey: "promotion-management", name: "渠道管理", type: "页面", path: "/promotion/channels", permission: "promotion.channels.read", sortOrder: 20, enabled: true, visible: true, builtin: true },
-  { presetKey: "promotion-domains", parentPresetKey: "promotion-management", name: "域名管理", type: "页面", path: "/promotion/domains", permission: "promotion.domain.read", sortOrder: 30, enabled: true, visible: true, builtin: true },
+  { presetKey: "promotion-integrations", parentPresetKey: "promotion-management", name: "集成管理", type: "页面", path: "/promotion/integrations", permission: "promotion.integrations.read", sortOrder: 20, enabled: true, visible: true, builtin: true },
+  { presetKey: "promotion-channels", parentPresetKey: "promotion-management", name: "渠道管理", type: "页面", path: "/promotion/channels", permission: "promotion.channels.read", sortOrder: 30, enabled: true, visible: true, builtin: true },
+  { presetKey: "promotion-domains", parentPresetKey: "promotion-management", name: "域名管理", type: "页面", path: "/promotion/domains", permission: "promotion.domain.read", sortOrder: 40, enabled: true, visible: true, builtin: true },
   { presetKey: "promotion-data", parentPresetKey: "", name: "数据中心", type: "目录", path: "", permission: "", sortOrder: 20, enabled: true, visible: true, builtin: true },
   { presetKey: "promotion-statistics", parentPresetKey: "promotion-data", name: "渠道统计", type: "页面", path: "/promotion/statistics", permission: "promotion.statistics.read", sortOrder: 10, enabled: true, visible: true, builtin: true },
   { presetKey: "promotion-trends", parentPresetKey: "promotion-data", name: "趋势图", type: "页面", path: "/promotion/trends", permission: "promotion.trends.read", sortOrder: 20, enabled: true, visible: true, builtin: true },

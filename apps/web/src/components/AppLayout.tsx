@@ -88,6 +88,11 @@ export const navigation: NavSection[] = [
             permissionKey: "promotion.templates.read",
           },
           {
+            label: "集成管理",
+            to: "/promotion/integrations",
+            permissionKey: "promotion.integrations.read",
+          },
+          {
             label: "渠道管理",
             to: "/promotion/channels",
             permissionKey: "promotion.channels.read",

@@ -84,7 +84,7 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
     description:
       "ZIP 解压后可直接找到唯一的 index.html；允许外层只有一层 dist 目录。",
     bullets: [
-      "资源必须自包含并使用相对路径；禁止 CDN 字体、外部 JavaScript、隐藏 iframe 和跨域回传。",
+      "模板包资源必须自包含并使用相对路径；模板不得自行声明外部 JavaScript、隐藏 iframe 或跨域回传，已在平台集成管理登记并绑定的运行时集成除外。",
       "ZIP 不超过 20 MB，解压总量不超过 50 MB，文件数不超过 500，单文件不超过 5 MB。",
       "生产构建关闭 source map；图片优先 WebP/AVIF，字体放在 assets/fonts 并使用 font-display: swap。",
     ],
@@ -163,7 +163,7 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
     bullets: [
       "首屏压缩传输目标不超过 1.5 MB；JavaScript gzip 目标不超过 250 KB，CSS gzip 目标不超过 80 KB。",
       "密钥、WhatsApp 凭据、代理凭据和租户鉴权逻辑永远不得进入模板包或浏览器。",
-      "不允许未知第三方 SDK、外部脚本、source map、固定签名、隐藏 iframe 或号码持久化。",
+      "不允许未知第三方 SDK、模板自带外部脚本、source map、固定签名、模板自带隐藏 iframe 或号码持久化；平台运行时集成由集成管理统一控制。",
       "平台默认采用严格防护、检测后空白页、锁定视口缩放和增强设备环境信号；模板不得覆盖。",
     ],
   },

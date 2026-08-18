@@ -12,6 +12,7 @@ import {
   PauseIcon,
   PencilIcon,
   PlayIcon,
+  PlugZapIcon,
   PlusIcon,
   RefreshCwIcon,
   RocketIcon,
@@ -109,7 +110,15 @@ type PromotionTemplate = {
   channelCount: number;
   defaultLocale: string;
   supportedLocales: string[];
+  integrationIds: string[];
   updatedAt?: string;
+};
+type RuntimeIntegrationOption = {
+  id: string;
+  name: string;
+  type: "script" | "iframe";
+  sourceUrl: string;
+  enabled: boolean;
 };
 type TemplatePreviewDevice = "desktop" | "tablet" | "mobile";
 type TemplatePreviewState =
@@ -351,6 +360,7 @@ function templateRow(input: unknown): PromotionTemplate {
   );
   const rawVersion =
     field(row, "version", "versionName", "version_name") || "v1";
+  const rawIntegrationIds = row.integrationIds || row.integration_ids;
   return {
     id,
     readKey: entityRowKey(row, id, "promotion-template", `${field(row, "name")}:${field(row, "updatedAt", "updated_at")}`),
@@ -363,10 +373,66 @@ function templateRow(input: unknown): PromotionTemplate {
       (id ? `/api/promotion/templates/${id}/preview` : ""),
     assetCount: Number(row.assetCount ?? row.asset_count ?? 0),
     channelCount: Number(row.channelCount ?? row.channel_count ?? 0),
+    integrationIds: Array.isArray(rawIntegrationIds)
+      ? rawIntegrationIds.map(String)
+      : [],
     defaultLocale,
     supportedLocales: locales,
     updatedAt: field(row, "updatedAt", "updated_at"),
   };
+}
+function runtimeIntegrationRow(input: unknown): RuntimeIntegrationOption {
+  const row = object(input);
+  const id = snowflakeId(row, "id");
+  return {
+    id,
+    name: field(row, "name"),
+    type: field(row, "type") === "script" ? "script" : "iframe",
+    sourceUrl: field(row, "sourceUrl", "source_url"),
+    enabled: row.enabled !== false && row.domainReady !== false,
+  };
+}
+function RuntimeIntegrationSwitches({
+  integrations,
+  selectedIds,
+  disabled,
+  onToggle,
+}: {
+  integrations: RuntimeIntegrationOption[];
+  selectedIds: string[];
+  disabled?: boolean;
+  onToggle: (integrationId: string) => void;
+}) {
+  return (
+    <DrawerFormSection
+      title="运行时集成"
+      description="由平台统一注入。iframe 会挂载到 body 末尾，外部脚本按登记地址加载。"
+    >
+      {integrations.length ? (
+        integrations.map((integration) => (
+          <label className="switch-row" key={integration.id}>
+            <span>
+              <strong>{integration.name}</strong>
+              <small>
+                {integration.type === "iframe" ? "iframe" : "JavaScript"} ·{" "}
+                {integration.sourceUrl}
+              </small>
+            </span>
+            <Switch
+              checked={selectedIds.includes(integration.id)}
+              disabled={disabled || !integration.enabled}
+              onCheckedChange={() => onToggle(integration.id)}
+              aria-label={`${integration.name}集成`}
+            />
+          </label>
+        ))
+      ) : (
+        <div className="rounded-lg border border-dashed px-3 py-4 text-sm text-muted-foreground">
+          还没有可用集成，请先在集成管理中创建并启用。
+        </div>
+      )}
+    </DrawerFormSection>
+  );
 }
 function channelRow(input: unknown): PromotionChannel {
   const row = object(input);
@@ -805,6 +871,11 @@ export function PromotionTemplatesPage() {
   const [file, setFile] = useState<File | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [integrations, setIntegrations] = useState<RuntimeIntegrationOption[]>([]);
+  const [selectedIntegrationIds, setSelectedIntegrationIds] = useState<string[]>([]);
+  const [integrationEditing, setIntegrationEditing] = useState<PromotionTemplate | null>(null);
+  const [bindingIntegrationIds, setBindingIntegrationIds] = useState<string[]>([]);
+  const [bindingSaving, setBindingSaving] = useState(false);
   const [pending, setPending] = useState(false);
   const [previewing, setPreviewing] = useState<PromotionTemplate | null>(null);
   const [designSpecDrawer, setDesignSpecDrawer] = useState(false);
@@ -817,11 +888,17 @@ export function PromotionTemplatesPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [templatePayload, channelPayload] = await Promise.all([
+      const [templatePayload, channelPayload, integrationPayload] = await Promise.all([
         apiRequest("/api/promotion/templates?pageSize=100"),
         apiRequest("/api/promotion/channels?pageSize=100"),
+        apiRequest("/api/promotion/integrations"),
       ]);
       const channels = unwrapList<unknown>(channelPayload).rows.map(channelRow);
+      setIntegrations(
+        unwrapList<unknown>(integrationPayload)
+          .rows.map(runtimeIntegrationRow)
+          .filter((row) => row.id),
+      );
       setRows(
         unwrapList<unknown>(templatePayload)
           .rows.map(templateRow)
@@ -834,6 +911,7 @@ export function PromotionTemplatesPage() {
       );
     } catch {
       setRows([]);
+      setIntegrations([]);
     } finally {
       setLoading(false);
     }
@@ -859,6 +937,7 @@ export function PromotionTemplatesPage() {
     try {
       const body = new FormData();
       body.set("file", file);
+      body.set("integrationIds", JSON.stringify(selectedIntegrationIds));
       if (!replacing) {
         body.set("name", name.trim());
         if (description.trim()) body.set("description", description.trim());
@@ -873,6 +952,7 @@ export function PromotionTemplatesPage() {
       setReplacing(null);
       setFile(null);
       setName("");
+      setSelectedIntegrationIds([]);
       await load();
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "导入失败");
@@ -886,7 +966,43 @@ export function PromotionTemplatesPage() {
     setFile(null);
     setName(row?.name || "");
     setDescription("");
+    setSelectedIntegrationIds(row?.integrationIds || []);
     setDrawer(true);
+  }
+  function toggleIntegration(
+    integrationId: string,
+    values: string[],
+    setValues: (next: string[]) => void,
+  ) {
+    setValues(
+      values.includes(integrationId)
+        ? values.filter((value) => value !== integrationId)
+        : [...values, integrationId],
+    );
+  }
+  function openIntegrationEditor(row: PromotionTemplate) {
+    setIntegrationEditing(row);
+    setBindingIntegrationIds(row.integrationIds);
+  }
+  async function saveIntegrationBindings() {
+    if (!integrationEditing?.id || !canManage) return;
+    setBindingSaving(true);
+    try {
+      await apiRequest(
+        `/api/promotion/templates/${integrationEditing.id}/integrations`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ integrationIds: bindingIntegrationIds }),
+        },
+      );
+      setIntegrationEditing(null);
+      toast.success("模板集成已保存");
+      await load();
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "模板集成保存失败");
+    } finally {
+      setBindingSaving(false);
+    }
   }
   function openPreview(row: PromotionTemplate) {
     if (!row.previewUrl) return;
@@ -1026,6 +1142,7 @@ export function PromotionTemplatesPage() {
                 <TableHead>版本</TableHead>
                 <TableHead>语言</TableHead>
                 <TableHead>资源</TableHead>
+                <TableHead>集成</TableHead>
                 <TableHead>使用渠道</TableHead>
                 <TableHead>更新时间</TableHead>
                 <TableHead className="text-right">操作</TableHead>
@@ -1072,6 +1189,7 @@ export function PromotionTemplatesPage() {
                     </div>
                   </TableCell>
                   <TableCell>{row.assetCount} 个文件</TableCell>
+                  <TableCell>{row.integrationIds.length} 个</TableCell>
                   <TableCell>{row.channelCount} 个渠道</TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatDateTime(row.updatedAt)}
@@ -1087,6 +1205,13 @@ export function PromotionTemplatesPage() {
                       </IconButton>
                       {canManage ? (
                         <>
+                          <IconButton
+                            label="配置集成"
+                            disabled={!row.id}
+                            onClick={() => openIntegrationEditor(row)}
+                          >
+                            <PlugZapIcon size={16} />
+                          </IconButton>
                           <IconButton
                             label="替换版本"
                             disabled={!row.id}
@@ -1326,6 +1451,49 @@ export function PromotionTemplatesPage() {
         ) : null}
       </Drawer>
       <Drawer
+        open={Boolean(integrationEditing)}
+        onClose={() => !bindingSaving && setIntegrationEditing(null)}
+        title={
+          integrationEditing
+            ? `配置集成 · ${integrationEditing.name}`
+            : "配置集成"
+        }
+        description="选择这个模板发布时需要统一加载的运行时集成。"
+        footer={
+          <>
+            <Button
+              variant="outline"
+              disabled={bindingSaving}
+              onClick={() => setIntegrationEditing(null)}
+            >
+              取消
+            </Button>
+            <Button
+              disabled={bindingSaving}
+              onClick={() => void saveIntegrationBindings()}
+            >
+              {bindingSaving ? <Spinner /> : <PlugZapIcon size={16} />}
+              保存集成
+            </Button>
+          </>
+        }
+      >
+        <div className="drawer-form">
+          <RuntimeIntegrationSwitches
+            integrations={integrations}
+            selectedIds={bindingIntegrationIds}
+            disabled={bindingSaving}
+            onToggle={(integrationId) =>
+              toggleIntegration(
+                integrationId,
+                bindingIntegrationIds,
+                setBindingIntegrationIds,
+              )
+            }
+          />
+        </div>
+      </Drawer>
+      <Drawer
         open={drawer}
         onClose={() => !pending && setDrawer(false)}
         title={replacing ? `替换版本 · ${replacing.name}` : "导入推广模板"}
@@ -1380,6 +1548,18 @@ export function PromotionTemplatesPage() {
               </label>
             </>
           ) : null}
+          <RuntimeIntegrationSwitches
+            integrations={integrations}
+            selectedIds={selectedIntegrationIds}
+            disabled={pending}
+            onToggle={(integrationId) =>
+              toggleIntegration(
+                integrationId,
+                selectedIntegrationIds,
+                setSelectedIntegrationIds,
+              )
+            }
+          />
         </form>
       </Drawer>
     </StandardListPage>

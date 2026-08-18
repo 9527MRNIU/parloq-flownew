@@ -27,6 +27,7 @@ from app.routers import (
     meta_pixels,
     personal_accounts,
     promotion,
+    promotion_integrations,
     promotion_policy,
     protocol_nodes,
     system,
@@ -75,6 +76,7 @@ app.include_router(protocol_nodes.pool_router)
 app.include_router(domains.router)
 app.include_router(domains.order_router)
 app.include_router(promotion.router)
+app.include_router(promotion_integrations.router)
 app.include_router(promotion_policy.router)
 app.include_router(system.router)
 app.include_router(system_configuration.router)
