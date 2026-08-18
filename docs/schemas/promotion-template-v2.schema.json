@@ -28,7 +28,7 @@
     "runtime": { "const": "promotion-browser-bridge/v2" },
     "requirements": {
       "type": "object",
-      "required": ["pairingContract"],
+      "required": ["pairingContract", "componentKit"],
       "properties": {
         "pairingContract": { "const": "promotion-public-pairing/v1" },
         "componentKit": { "const": "account-link-elements/v1" }

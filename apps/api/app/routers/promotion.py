@@ -79,6 +79,10 @@ from app.services.promotion_integrations import (
     inject_runtime_integrations,
     integration_csp_sources,
 )
+from app.services.template_quality import (
+    inspect_template_quality,
+    unchecked_template_quality_report,
+)
 from app.validation import parse_public_datetime, validate_structured_json
 
 
@@ -369,7 +373,8 @@ def _template_integration_ids(db: DbSession, template_id: int) -> list[str]:
 
 def template_row(db: DbSession, item: PromotionTemplate) -> dict:
     manifest = item.manifest_json or {}
-    return {"id": entity_id(item), "name": item.name, "description": item.description, "version": item.version, "status": item.status, "manifest": manifest, "defaultLocale": manifest.get("defaultLocale"), "supportedLocales": manifest.get("supportedLocales", []), "i18n": manifest.get("i18n"), "assetCount": item.asset_count, "totalSize": item.total_size, "integrationIds": _template_integration_ids(db, item.id), "createdAt": iso(item.created_at), "updatedAt": iso(item.updated_at)}
+    quality_report = item.quality_report_json or unchecked_template_quality_report()
+    return {"id": entity_id(item), "name": item.name, "description": item.description, "version": item.version, "status": item.status, "manifest": manifest, "defaultLocale": manifest.get("defaultLocale"), "supportedLocales": manifest.get("supportedLocales", []), "i18n": manifest.get("i18n"), "assetCount": item.asset_count, "totalSize": item.total_size, "qualityReport": quality_report, "integrationIds": _template_integration_ids(db, item.id), "createdAt": iso(item.created_at), "updatedAt": iso(item.updated_at)}
 
 
 def _channel_hostname(item: PromotionChannel, domain: DomainRecord | None) -> str:
@@ -549,6 +554,14 @@ def _manifest_protocol(manifest: dict) -> dict:
     component_kit = requirements.get("componentKit")
     if component_kit not in {None, "account-link-elements/v1"}:
         raise HTTPException(status_code=422, detail="模板请求了不支持的白标组件库")
+    if (
+        normalized_schema == "promotion-template/v2"
+        and component_kit != "account-link-elements/v1"
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="promotion-template/v2 必须声明 account-link-elements/v1 白标组件库",
+        )
     return {
         **manifest,
         "schema": normalized_schema,
@@ -573,7 +586,7 @@ def _manifest_protocol(manifest: dict) -> dict:
     }
 
 
-def _safe_bundle(raw: bytes) -> tuple[dict, str, list[tuple[str, str, bytes]], int]:
+def _safe_bundle(raw: bytes) -> tuple[dict, str, list[tuple[str, str, bytes]], int, dict]:
     if len(raw) > MAX_ZIP: raise HTTPException(status_code=413, detail="ZIP 文件超过 20MB")
     try: archive = zipfile.ZipFile(io.BytesIO(raw))
     except zipfile.BadZipFile: raise HTTPException(status_code=422, detail="模板包不是有效 ZIP") from None
@@ -606,16 +619,22 @@ def _safe_bundle(raw: bytes) -> tuple[dict, str, list[tuple[str, str, bytes]], i
     except (UnicodeDecodeError, json.JSONDecodeError): raise HTTPException(status_code=422, detail="manifest.json 或 index.html 编码无效") from None
     manifest = _manifest_protocol(validate_structured_json(manifest))
     assets = [(path, mimetypes.guess_type(path)[0] or "application/octet-stream", content) for path, content in values.items() if path not in {"manifest.json", "index.html"}]
-    return manifest, index_html, assets, total
+    quality_report = inspect_template_quality(
+        manifest=manifest,
+        index_html=index_html,
+        assets=assets,
+        expanded_bytes=total,
+    )
+    return manifest, index_html, assets, total, quality_report
 
 
 def _replace_bundle(db: DbSession, item: PromotionTemplate, raw: bytes) -> None:
-    manifest, html, assets, total = _safe_bundle(raw)
+    manifest, html, assets, total, quality_report = _safe_bundle(raw)
     for old in db.scalars(select(PromotionAsset).where(PromotionAsset.template_id == item.id)).all(): db.delete(old)
     # Asset paths are unique per template. Flush the deletes before adding a
     # new version that commonly reuses paths such as assets/app.js.
     db.flush()
-    item.manifest_json = manifest; item.index_html = html; item.version = str(manifest.get("version") or str(int(item.version) + 1 if item.version.isdigit() else uuid4().hex[:8]))[:40]; item.asset_count = len(assets); item.total_size = total
+    item.manifest_json = manifest; item.index_html = html; item.version = str(manifest.get("version") or str(int(item.version) + 1 if item.version.isdigit() else uuid4().hex[:8]))[:40]; item.asset_count = len(assets); item.total_size = total; item.quality_report_json = quality_report
     for path, content_type, content in assets: db.add(PromotionAsset(template_id=item.id, path=path, content_type=content_type, size=len(content), content=content))
 
 
@@ -867,8 +886,8 @@ def list_templates(db: DbSession, current_user: CurrentUser) -> dict:
 @router.post("/api/promotion/templates", status_code=status.HTTP_201_CREATED)
 def import_template(db: DbSession, current_user: CurrentUser, file: UploadFile = File(...), name: str = Form(..., min_length=1, max_length=120), description: str | None = Form(default=None, max_length=2000), integration_ids: str | None = Form(default=None, alias="integrationIds")) -> dict:
     if not file.filename or not file.filename.lower().endswith(".zip"): raise HTTPException(status_code=422, detail="请选择 ZIP 模板包")
-    manifest, html, assets, total = _safe_bundle(file.file.read(MAX_ZIP + 1))
-    item = PromotionTemplate(public_id=new_public_id("ptpl"), name=name, description=description, version=str(manifest.get("version") or "1")[:40], status="active", manifest_json=manifest, index_html=html, asset_count=len(assets), total_size=total, created_by=current_user.id)
+    manifest, html, assets, total, quality_report = _safe_bundle(file.file.read(MAX_ZIP + 1))
+    item = PromotionTemplate(public_id=new_public_id("ptpl"), name=name, description=description, version=str(manifest.get("version") or "1")[:40], status="active", manifest_json=manifest, index_html=html, asset_count=len(assets), total_size=total, quality_report_json=quality_report, created_by=current_user.id)
     db.add(item); db.flush()
     for path, content_type, content in assets: db.add(PromotionAsset(template_id=item.id, path=path, content_type=content_type, size=len(content), content=content))
     selected_integrations = _form_integration_ids(integration_ids)

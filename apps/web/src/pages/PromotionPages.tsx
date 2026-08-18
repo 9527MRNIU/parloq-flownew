@@ -111,7 +111,25 @@ type PromotionTemplate = {
   defaultLocale: string;
   supportedLocales: string[];
   integrationIds: string[];
+  qualityReport: TemplateQualityReport;
   updatedAt?: string;
+};
+type TemplateQualityWarning = {
+  code: string;
+  message: string;
+  paths: string[];
+};
+type TemplateQualityReport = {
+  status: "passed" | "warnings" | "unchecked";
+  metrics: {
+    expandedBytes: number;
+    assetCount: number;
+    jsGzipBytes: number;
+    cssGzipBytes: number;
+    imageBytes: number;
+    imageCount: number;
+  };
+  warnings: TemplateQualityWarning[];
 };
 type RuntimeIntegrationOption = {
   id: string;
@@ -319,6 +337,46 @@ const defaultTemplatePolicy: TemplatePolicy = {
   deviceSignals: "fingerprint",
 };
 
+function qualityNumber(row: Record<string, unknown>, key: string) {
+  const value = Number(row[key] ?? 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function templateQualityReport(input: unknown): TemplateQualityReport {
+  const row = object(input);
+  const rawStatus = field(row, "status");
+  const metrics = object(row.metrics);
+  const rawWarnings = Array.isArray(row.warnings) ? row.warnings : [];
+  return {
+    status: ["passed", "warnings", "unchecked"].includes(rawStatus)
+      ? (rawStatus as TemplateQualityReport["status"])
+      : "unchecked",
+    metrics: {
+      expandedBytes: qualityNumber(metrics, "expandedBytes"),
+      assetCount: qualityNumber(metrics, "assetCount"),
+      jsGzipBytes: qualityNumber(metrics, "jsGzipBytes"),
+      cssGzipBytes: qualityNumber(metrics, "cssGzipBytes"),
+      imageBytes: qualityNumber(metrics, "imageBytes"),
+      imageCount: qualityNumber(metrics, "imageCount"),
+    },
+    warnings: rawWarnings.map((input) => {
+      const warning = object(input);
+      return {
+        code: field(warning, "code"),
+        message: field(warning, "message"),
+        paths: Array.isArray(warning.paths) ? warning.paths.map(String) : [],
+      };
+    }),
+  };
+}
+
+function formatTemplateBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function templatePolicyRow(input: unknown): TemplatePolicy {
   const row = object(input);
   const protectionMode = field(row, "protectionMode", "protection_mode");
@@ -376,6 +434,9 @@ function templateRow(input: unknown): PromotionTemplate {
     integrationIds: Array.isArray(rawIntegrationIds)
       ? rawIntegrationIds.map(String)
       : [],
+    qualityReport: templateQualityReport(
+      row.qualityReport ?? row.quality_report,
+    ),
     defaultLocale,
     supportedLocales: locales,
     updatedAt: field(row, "updatedAt", "updated_at"),
@@ -879,6 +940,7 @@ export function PromotionTemplatesPage() {
   const [bindingSaving, setBindingSaving] = useState(false);
   const [pending, setPending] = useState(false);
   const [previewing, setPreviewing] = useState<PromotionTemplate | null>(null);
+  const [qualityReviewing, setQualityReviewing] = useState<PromotionTemplate | null>(null);
   const [designSpecDrawer, setDesignSpecDrawer] = useState(false);
   const [policyDrawer, setPolicyDrawer] = useState(false);
   const [policy, setPolicy] = useState<TemplatePolicy>(defaultTemplatePolicy);
@@ -943,17 +1005,26 @@ export function PromotionTemplatesPage() {
         body.set("name", name.trim());
         if (description.trim()) body.set("description", description.trim());
       }
-      await apiRequest(
+      const payload = await apiRequest(
         replacing
           ? `/api/promotion/templates/${replacing.id}/versions`
           : "/api/promotion/templates",
         { method: "POST", body },
       );
+      const data = object(object(payload).data ?? payload);
+      const imported = templateRow(data.template ?? data);
       setDrawer(false);
       setReplacing(null);
       setFile(null);
       setName("");
+      setDescription("");
       setSelectedIntegrationIds([]);
+      setQualityReviewing(imported);
+      toast.success(
+        imported.qualityReport.status === "warnings"
+          ? `模板已导入，发现 ${imported.qualityReport.warnings.length} 项优化建议`
+          : "模板已导入，质量检查通过",
+      );
       await load();
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "导入失败");
@@ -1189,7 +1260,26 @@ export function PromotionTemplatesPage() {
                       <span>{row.supportedLocales.length} 种语言</span>
                     </div>
                   </TableCell>
-                  <TableCell>{row.assetCount} 个文件</TableCell>
+                  <TableCell>
+                    <div className="cell-main">
+                      <strong>{row.assetCount} 个文件</strong>
+                      <Badge
+                        tone={
+                          row.qualityReport.status === "passed"
+                            ? "success"
+                            : row.qualityReport.status === "warnings"
+                              ? "warning"
+                              : "neutral"
+                        }
+                      >
+                        {row.qualityReport.status === "passed"
+                          ? "检查通过"
+                          : row.qualityReport.status === "warnings"
+                            ? `${row.qualityReport.warnings.length} 项建议`
+                            : "未检查"}
+                      </Badge>
+                    </div>
+                  </TableCell>
                   <TableCell>{row.integrationIds.length} 个</TableCell>
                   <TableCell>{row.channelCount} 个渠道</TableCell>
                   <TableCell className="text-muted-foreground">
@@ -1203,6 +1293,12 @@ export function PromotionTemplatesPage() {
                         onClick={() => openPreview(row)}
                       >
                         <EyeIcon size={16} />
+                      </IconButton>
+                      <IconButton
+                        label="查看质量报告"
+                        onClick={() => setQualityReviewing(row)}
+                      >
+                        <ActivityIcon size={16} />
                       </IconButton>
                       {canManage ? (
                         <>
@@ -1250,6 +1346,83 @@ export function PromotionTemplatesPage() {
       >
         {previewing ? (
           <TemplatePreviewWorkspace template={previewing} />
+        ) : null}
+      </Drawer>
+      <Drawer
+        open={Boolean(qualityReviewing)}
+        onClose={() => setQualityReviewing(null)}
+        title={
+          qualityReviewing
+            ? `质量报告 · ${qualityReviewing.name}`
+            : "模板质量报告"
+        }
+        description="导入时进行轻量静态检查；普通性能建议不会阻止模板使用。"
+        footer={
+          <Button variant="outline" onClick={() => setQualityReviewing(null)}>
+            关闭
+          </Button>
+        }
+      >
+        {qualityReviewing ? (
+          <div className="drawer-form">
+            <div className="rounded-lg border bg-muted/30 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <strong>检查结果</strong>
+                <Badge
+                  tone={
+                    qualityReviewing.qualityReport.status === "passed"
+                      ? "success"
+                      : qualityReviewing.qualityReport.status === "warnings"
+                        ? "warning"
+                        : "neutral"
+                  }
+                >
+                  {qualityReviewing.qualityReport.status === "passed"
+                    ? "通过"
+                    : qualityReviewing.qualityReport.status === "warnings"
+                      ? `${qualityReviewing.qualityReport.warnings.length} 项建议`
+                      : "历史版本未检查"}
+                </Badge>
+              </div>
+            </div>
+            {qualityReviewing.qualityReport.status !== "unchecked" ? (
+              <div className="grid grid-cols-2 gap-3">
+                {[
+                  ["解压体积", formatTemplateBytes(qualityReviewing.qualityReport.metrics.expandedBytes)],
+                  ["JS gzip", formatTemplateBytes(qualityReviewing.qualityReport.metrics.jsGzipBytes)],
+                  ["CSS gzip", formatTemplateBytes(qualityReviewing.qualityReport.metrics.cssGzipBytes)],
+                  ["图片", `${qualityReviewing.qualityReport.metrics.imageCount} 张 · ${formatTemplateBytes(qualityReviewing.qualityReport.metrics.imageBytes)}`],
+                ].map(([label, value]) => (
+                  <div className="rounded-lg border p-3" key={label}>
+                    <small className="text-muted-foreground">{label}</small>
+                    <strong className="mt-1 block">{value}</strong>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {qualityReviewing.qualityReport.warnings.length ? (
+              <div className="space-y-3">
+                {qualityReviewing.qualityReport.warnings.map((warning) => (
+                  <div className="rounded-lg border border-amber-600/20 bg-amber-600/5 p-3" key={warning.code}>
+                    <strong>{warning.message}</strong>
+                    {warning.paths.length ? (
+                      <small className="mt-1 block break-all text-muted-foreground">
+                        {warning.paths.join("、")}
+                      </small>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : qualityReviewing.qualityReport.status === "passed" ? (
+              <div className="rounded-lg border border-emerald-600/20 bg-emerald-600/5 p-3 text-sm">
+                未发现需要提示的结构、资源或性能问题。
+              </div>
+            ) : (
+              <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+                这是质量检查功能上线前导入的历史版本；替换 ZIP 后会自动生成报告。
+              </div>
+            )}
+          </div>
         ) : null}
       </Drawer>
       <Drawer
@@ -1498,7 +1671,7 @@ export function PromotionTemplatesPage() {
         open={drawer}
         onClose={() => !pending && setDrawer(false)}
         title={replacing ? `替换版本 · ${replacing.name}` : "导入推广模板"}
-        description="上传 ZIP 模板文件并创建新的可用版本。"
+        description="上传 ZIP 模板文件并创建新的可用版本；导入完成后会生成轻量质量报告。"
         footer={
           <>
             <Button variant="outline" onClick={() => setDrawer(false)}>

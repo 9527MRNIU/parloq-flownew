@@ -53,6 +53,7 @@ template.zip
 ## 字段约定
 
 - `schema`、`entry`、`capabilities`、`runtime` 和 `interactionProtection` 必须使用示例中的固定值；
+- `requirements.pairingContract` 固定为 `promotion-public-pairing/v1`，`requirements.componentKit` 固定为 `account-link-elements/v1`；
 - `format` 可使用 `static-bundle` 或 `vite-dist`；
 - `version` 为 1–40 字符的模板业务版本；
 - `supportedLocales` 至少一个、最多 128 个，且必须包含可用的默认语言；
@@ -64,3 +65,7 @@ template.zip
 
 不要把项目源代码目录直接压缩。应先执行生产构建，再把构建产物中的文件放到 ZIP 根目录。导入系统前解压检查一次，确保 `index.html` 不是多套了一层目录。
 
+导入或替换 ZIP 后，模板管理页会生成轻量质量报告，显示 JS/CSS gzip
+估算、图片体积以及外部资源、iframe、图片属性、懒加载和 viewport 等建议。
+这些性能与标记建议不会阻止模板使用；不安全路径、非法 manifest、source map
+文件和超出硬限制的包仍会直接拒绝导入。

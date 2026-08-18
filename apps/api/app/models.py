@@ -778,6 +778,7 @@ class PromotionTemplate(Base, TimestampMixin):
     index_html: Mapped[str] = mapped_column(Text)
     asset_count: Mapped[int] = mapped_column(Integer, default=0)
     total_size: Mapped[int] = mapped_column(Integer, default=0)
+    quality_report_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,

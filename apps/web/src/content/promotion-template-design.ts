@@ -96,7 +96,7 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
       "新模板使用 promotion-template/v2，并显式声明所需账号接入契约。",
     bullets: [
       "version 使用语义版本；entry 固定为 index.html。",
-      "runtime 固定为 promotion-browser-bridge/v2；requirements.pairingContract 固定为 promotion-public-pairing/v1。使用白标组件时 requirements.componentKit 固定为 account-link-elements/v1。",
+      "runtime 固定为 promotion-browser-bridge/v2；requirements.pairingContract 固定为 promotion-public-pairing/v1；requirements.componentKit 固定为 account-link-elements/v1。",
       "interactionProtection 固定为 platform，表示防护策略由平台统一管理。",
       "supportedLocales 必须包含 defaultLocale，语言码使用 BCP 47 风格。",
     ],
@@ -109,7 +109,7 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
     bullets: [
       "account-link-locale-switcher 使用语言本地名称快速切换 supportedLocales；生成绑定码后自动锁定，避免中途切换遗留绑定任务。",
       "phone-number-field 以浏览器本地化推断默认国家，用户可以手动切换；渠道国家不作为号码前缀来源。",
-      "account-link-submit 负责防重复提交和加载状态。",
+      "account-link-submit 在号码有效前保持禁用，并负责防重复提交和加载状态。",
       "pairing-code-panel 负责配对码、倒计时和安全剪贴板复制。",
       "app-launch-actions 只承诺尝试打开 WhatsApp/Business；无法确认安装或打开结果时，直接使用 web.whatsapp.com 对应语言运行时中的四步操作文案，并保留同源的 WhatsApp、Android 菜单、iPhone 设置三个视觉指引图标。",
       "组件内置 15 个基础语言包：en、zh-CN、hi、id、pt-BR、es、ru、ur、de、tr、ar、fa、bn、it、fr；地区语言码按基础语言回退。",
@@ -180,6 +180,7 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
       "错误、超时、线路不可用和配对过期后均可理解并重试。",
       "规定的四种尺寸无溢出、遮挡或不可点击元素。",
       "包内无外部依赖、source map、秘密信息和号码持久化。",
+      "导入后的质量报告已检查；JS/CSS 预算、图片尺寸与懒加载等警告均已确认或修复。",
     ],
     checklist: true,
   },

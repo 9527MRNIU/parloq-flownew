@@ -281,6 +281,13 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     assert template["manifest"]["capabilities"] == ["phone-pairing"]
     assert template["defaultLocale"] == "en"
     assert template["supportedLocales"] == ["en"]
+    assert template["qualityReport"]["status"] == "warnings"
+    assert {
+        "legacy_template_schema",
+        "viewport_missing",
+    } <= {
+        warning["code"] for warning in template["qualityReport"]["warnings"]
+    }
 
     manifest = {
         "version": "2",
@@ -631,7 +638,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     ).status_code == 401
 
 
-def test_promotion_template_rejects_unknown_schema_and_source_maps(
+def test_promotion_template_rejects_invalid_v2_contract_and_source_maps(
     admin_client: TestClient,
 ) -> None:
     unknown_schema = _zip(
@@ -652,6 +659,34 @@ def test_promotion_template_rejects_unknown_schema_and_source_maps(
     )
     assert unsupported.status_code == 422
     assert "schema" in unsupported.json()["detail"]
+
+    missing_component_kit = _zip(
+        {
+            "index.html": "<!doctype html><html><body></body></html>",
+            "manifest.json": json.dumps(
+                {
+                    "schema": "promotion-template/v2",
+                    "runtime": "promotion-browser-bridge/v2",
+                    "requirements": {
+                        "pairingContract": "promotion-public-pairing/v1"
+                    },
+                }
+            ),
+        }
+    )
+    rejected_v2 = admin_client.post(
+        "/api/promotion/templates",
+        data={"name": "Missing component kit"},
+        files={
+            "file": (
+                "missing-component-kit.zip",
+                missing_component_kit,
+                "application/zip",
+            )
+        },
+    )
+    assert rejected_v2.status_code == 422
+    assert "account-link-elements/v1" in rejected_v2.json()["detail"]
 
     source_map = _zip(
         {
@@ -756,6 +791,7 @@ def test_white_label_account_link_starter_can_be_downloaded_and_imported(
         template["manifest"]["requirements"]["componentKit"]
         == "account-link-elements/v1"
     )
+    assert template["qualityReport"]["status"] == "passed"
 
     preview = admin_client.get(
         f"/api/promotion/templates/{template['id']}/preview"

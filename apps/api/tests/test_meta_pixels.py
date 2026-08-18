@@ -17,7 +17,10 @@ def _template_zip() -> bytes:
         "format": "static-bundle",
         "capabilities": ["phone-pairing"],
         "runtime": "promotion-browser-bridge/v2",
-        "requirements": {"pairingContract": "promotion-public-pairing/v1"},
+        "requirements": {
+            "pairingContract": "promotion-public-pairing/v1",
+            "componentKit": "account-link-elements/v1",
+        },
         "interactionProtection": "platform",
         "defaultLocale": "en",
         "supportedLocales": ["en"],
@@ -29,7 +32,20 @@ def _template_zip() -> bytes:
     }
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w") as archive:
-        archive.writestr("index.html", '<form data-promotion-manual><input type="tel"></form>')
+        archive.writestr(
+            "index.html",
+            """<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body>
+            <account-link-flow>
+              <account-link-locale-switcher></account-link-locale-switcher>
+              <phone-number-field></phone-number-field>
+              <account-link-submit></account-link-submit>
+              <pairing-code-panel></pairing-code-panel>
+              <app-launch-actions></app-launch-actions>
+              <account-link-status></account-link-status>
+              <account-initialization-status></account-initialization-status>
+            </account-link-flow>
+            </body></html>""",
+        )
         archive.writestr("manifest.json", json.dumps(manifest))
         archive.writestr("locales/en.json", '{"title":"Connect"}')
     return output.getvalue()

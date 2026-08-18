@@ -1,7 +1,8 @@
 # Promotion template specification v2
 
-Status: current for new templates (`promotion-template/v2`). Existing v1
-templates remain supported.
+Status: the only standard for new templates (`promotion-template/v2`). Existing
+v1 templates remain supported for compatibility, but must not be used as the
+starting point for new work.
 
 Machine-readable schema:
 [`schemas/promotion-template-v2.schema.json`](schemas/promotion-template-v2.schema.json).
@@ -48,6 +49,12 @@ self-contained relative assets, no source maps or external scripts, ZIP at most
 20 MB, expanded content at most 50 MB, at most 500 files and at most 5 MB per
 file.
 
+New v2 templates must declare
+`requirements.componentKit="account-link-elements/v1"` and compose the
+platform-owned account-link elements. Custom layout, CSS, branding and truthful
+customer content remain template responsibilities; phone parsing, country
+selection, CTA validity and pairing state are platform responsibilities.
+
 ## Runtime bridge
 
 The platform injects `promotion-runtime-config` and
@@ -78,7 +85,7 @@ pairing success.
 
 ## White-label account-link elements
 
-New visual themes should require `account-link-elements/v1` and compose the
+New visual themes must require `account-link-elements/v1` and compose the
 platform-owned elements below instead of copying pairing logic into the ZIP:
 
 ```html
@@ -99,6 +106,11 @@ country is not a phone-prefix source. The app launcher attempts WhatsApp or
 WhatsApp Business only after a user click and always preserves manual
 instructions as fallback. Themes customize CSS variables and exposed
 `::part()` names; they do not replace component network behavior.
+
+`account-link-submit` remains disabled until `phone-number-field` contains a
+valid number and disables itself again while a request is pending. Templates
+must not add a second primary CTA or bypass this validity gate with a custom
+submit handler.
 
 `account-link-locale-switcher` lists the manifest's `supportedLocales` by
 native language name and reloads the same page with the selected `lang` query
@@ -122,6 +134,46 @@ After verified pairing, `initializationStatus` can be `pending`, `syncing`,
 `ready`, `failed` or `unsupported`. Initialization failure never changes a
 verified pairing into a failed pairing.
 
+## Conversion and content baseline
+
+- The first screen has one clear primary CTA. Phone input, country selection
+  and the CTA have touch targets of at least 44×44 CSS px.
+- Loading, invalid input, submitting, code issued, waiting, reconnecting,
+  verified, expired, failed, cancelled and retry states must all remain usable.
+- Claims about user counts, identity verification, encryption, privacy,
+  delivery results or platform endorsement require real supporting data. If
+  the product cannot supply that data, the claim must not be shown.
+- Templates must support 360×800, 390×844, 768×1024 and 1440×900 without
+  horizontal overflow, inaccessible controls or clipped status messages.
+- Templates must not set `user-scalable=no` or otherwise lock zoom. The platform
+  template policy owns viewport behavior.
+
+## Resource and performance budget
+
+- JavaScript gzip target: at most 250 KB across the bundle.
+- CSS gzip target: at most 80 KB across the bundle.
+- Prefer WebP/AVIF for large raster images. Images should declare `width`,
+  `height` and `alt`; images after the primary visual should use lazy loading.
+- Fonts are bundled under the template assets and use `font-display: swap`.
+  Runtime CDN fonts, external images, external scripts and template-owned
+  iframes are not allowed.
+- The platform does not rewrite or optimize uploaded HTML and assets. Template
+  authors remain responsible for applying the reported recommendations.
+
+## Import quality report
+
+Every newly imported or replaced ZIP receives a lightweight static quality
+report. It records estimated JS/CSS gzip size, expanded size and image size,
+then groups actionable warnings for source-map references, external resources,
+template-owned iframes, large images, missing image metadata/lazy loading,
+viewport problems, legacy schema use and missing platform components.
+
+Unsafe paths, unsupported files, oversized packages and invalid manifests
+remain hard import errors. Performance and markup findings are recommendations:
+they are visible in template management but do not block use of an otherwise
+valid template. Historical versions imported before this check display
+"unchecked" until their ZIP is replaced.
+
 ## Channel-provided behavior
 
 - Meta standard-event mapping is channel configuration. The runtime generates
@@ -140,8 +192,12 @@ verified pairing into a failed pairing.
   an account.
 - A real test channel covers waiting, reconnecting, verified, failed, expired,
   cancelled and retry UI.
+- The primary CTA is disabled for an invalid number and while submission is in
+  progress; country selection remains manually overridable.
 - All status/cancel calls go through the v2 bridge.
 - No protocol ID, gateway URL, access token, phone persistence, third-party SDK
   or product-control-plane brand leaks into the public bundle.
 - Locales are complete, RTL is correct, and 360×800, 390×844, 768×1024 and
   1440×900 render without overflow.
+- Content claims are supportable and the import quality report has no
+  unexplained warnings.
