@@ -8,7 +8,12 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiRequest, formatLocalDateInput } from "../api/client";
-import { ListToolbar, StandardListPage } from "../components/list-page";
+import {
+  ListPagination,
+  ListToolbar,
+  StandardListPage,
+  useClientPagination,
+} from "../components/list-page";
 import {
   Badge,
   Button,
@@ -214,6 +219,9 @@ export function HyperlinkMarketInsightsPage() {
         .slice(0, 8),
     [rows],
   );
+  const pagination = useClientPagination(rows, {
+    resetKey: `${dateFrom}|${dateTo}|${sourceCountry}|${targetCountry}`,
+  });
 
   return (
     <StandardListPage>
@@ -416,6 +424,14 @@ export function HyperlinkMarketInsightsPage() {
               ))}
             </article>
           </section>
+          <ListPagination
+            page={pagination.page}
+            pageSize={pagination.pageSize}
+            total={pagination.total}
+            onPageChange={pagination.setPage}
+            onPageSizeChange={pagination.setPageSize}
+            ariaLabel="国家风险明细分页"
+          />
           <section className="card table-card">
             <div className="table-scroll">
               <Table>
@@ -433,7 +449,7 @@ export function HyperlinkMarketInsightsPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {rows.map((row) => (
+                  {pagination.rows.map((row) => (
                     <TableRow key={`${row.sourceCountry}-${row.targetCountry}`}>
                       <TableCell>
                         <Badge>{row.sourceCountry}</Badge>

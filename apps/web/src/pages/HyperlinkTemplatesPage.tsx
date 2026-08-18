@@ -55,9 +55,11 @@ import {
   DrawerFormSection,
 } from "../components/drawer-form";
 import {
+  ListPagination,
   ListTableCard,
   ListToolbar,
   StandardListPage,
+  useClientPagination,
 } from "../components/list-page";
 import {
   Badge,
@@ -584,6 +586,9 @@ export function HyperlinkTemplatesPage() {
       return matchesSearch && matchesStatus && matchesHeader;
     });
   }, [headerFilter, keyword, rows, statusFilter]);
+  const pagination = useClientPagination(visible, {
+    resetKey: `${keyword}|${statusFilter}|${headerFilter}`,
+  });
 
   function open(row?: TemplateRow) {
     setEditing(row || null);
@@ -751,10 +756,18 @@ export function HyperlinkTemplatesPage() {
         meta={`${visible.length} 个模板`}
         actions={<><Button variant="outline" onClick={() => void load()}><RefreshCwIcon />刷新</Button>{canManage ? <Button onClick={() => open()}><PlusIcon />创建模板</Button> : null}</>}
       />
+      <ListPagination
+        page={pagination.page}
+        pageSize={pagination.pageSize}
+        total={pagination.total}
+        disabled={loading}
+        onPageChange={pagination.setPage}
+        onPageSizeChange={pagination.setPageSize}
+      />
       <ListTableCard>
         {loading ? <div className="loading-state"><Spinner /></div> : visible.length ? (
           <div className="grid grid-cols-1 gap-4 bg-muted/[0.18] p-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-            {visible.map((row) => {
+            {pagination.rows.map((row) => {
               const formValue = formFromRow(row);
               const material = materials.find((item) => item.id === row.materialId);
               const structure = [

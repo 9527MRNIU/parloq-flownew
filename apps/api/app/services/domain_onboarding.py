@@ -12,10 +12,8 @@ from app.services.domain_verify import DomainVerifyError, verify_public_domain
 from app.services.platform_clients import (
     BaoTaClient,
     CloudflareClient,
-    NAMESILO_PAYMENT_VERIFIED_CARD,
     NameSiloClient,
     PlatformClientError,
-    namesilo_payment_mode,
 )
 
 
@@ -170,15 +168,9 @@ def continue_domain_onboarding(db: Session, item: DomainRecord) -> DomainRecord:
         )
         if purchased_with_namesilo:
             ns_platform = _platform(db, "namesilo", "api_key")
-            payment_id = None
-            if (
-                namesilo_payment_mode(ns_platform.settings.get("paymentMode"))
-                == NAMESILO_PAYMENT_VERIFIED_CARD
-            ):
-                payment_id = str(ns_platform.settings.get("paymentId") or "") or None
             namesilo = NameSiloClient(
                 ns_platform.secret,
-                payment_id=payment_id,
+                payment_id=str(ns_platform.settings.get("paymentId") or "").strip() or None,
             )
             if not namesilo.owns_domain(item.hostname):
                 raise PlatformClientError("NameSilo 当前账户中未找到该域名")

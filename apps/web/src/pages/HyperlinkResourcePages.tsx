@@ -23,9 +23,11 @@ import {
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import {
+  ListPagination,
   ListTableCard,
   ListToolbar,
   StandardListPage,
+  useClientPagination,
 } from "../components/list-page";
 import {
   EntityPrimaryCell,
@@ -533,7 +535,7 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailPage, setDetailPage] = useState(1);
   const [detailTotal, setDetailTotal] = useState(0);
-  const detailPageSize = 50;
+  const [detailPageSize, setDetailPageSize] = useState(50);
   const displayColumns = config.columns.filter(
     (column) => column.key.toLowerCase() !== "status",
   );
@@ -569,6 +571,9 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
       );
     });
   }, [keyword, rows, statusFilter]);
+  const listPagination = useClientPagination(visible, {
+    resetKey: `${keyword}|${statusFilter}`,
+  });
   useEffect(() => {
     if (
       !config.taskActions ||
@@ -682,14 +687,18 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
       setOperation("");
     }
   }
-  async function loadTaskDetails(row: AnyRow, page = 1) {
+  async function loadTaskDetails(
+    row: AnyRow,
+    page = 1,
+    pageSize = detailPageSize,
+  ) {
     if (!row.id) return;
     setDetailTask(row);
     setDetailPage(page);
     setDetailLoading(true);
     try {
       const payload = await apiRequest(
-        `${config.endpoint}/${row.id}/recipients?page=${page}&pageSize=${detailPageSize}`,
+        `${config.endpoint}/${row.id}/recipients?page=${page}&pageSize=${pageSize}`,
       );
       const result = unwrapList<Record<string, unknown>>(payload);
       setDetailRows(
@@ -823,6 +832,14 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
           </>
         }
       />
+      <ListPagination
+        page={listPagination.page}
+        pageSize={listPagination.pageSize}
+        total={listPagination.total}
+        disabled={loading}
+        onPageChange={listPagination.setPage}
+        onPageSizeChange={listPagination.setPageSize}
+      />
       <ListTableCard>
         {loading ? (
           <div className="loading-state">
@@ -842,7 +859,7 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {visible.map((row) => (
+              {listPagination.rows.map((row) => (
                 <TableRow key={row.readKey}>
                   {displayColumns.map((column, columnIndex) => (
                     <TableCell className={column.className} key={column.key}>
@@ -1005,38 +1022,22 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
             ? `${String(read(detailTask, "name") || "未命名任务")} · ${detailTotal} 个目标`
             : undefined
         }
-        footer={
-          <div className="flex w-full items-center justify-between gap-3">
-            <span className="text-sm text-muted-foreground">
-              第 {detailPage} / {Math.max(Math.ceil(detailTotal / detailPageSize), 1)} 页
-            </span>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                disabled={detailLoading || detailPage <= 1 || !detailTask}
-                onClick={() =>
-                  detailTask && void loadTaskDetails(detailTask, detailPage - 1)
-                }
-              >
-                上一页
-              </Button>
-              <Button
-                variant="outline"
-                disabled={
-                  detailLoading ||
-                  detailPage * detailPageSize >= detailTotal ||
-                  !detailTask
-                }
-                onClick={() =>
-                  detailTask && void loadTaskDetails(detailTask, detailPage + 1)
-                }
-              >
-                下一页
-              </Button>
-            </div>
-          </div>
-        }
       >
+        <ListPagination
+          ariaLabel="任务明细分页"
+          page={detailPage}
+          pageSize={detailPageSize}
+          total={detailTotal}
+          pageSizeOptions={[20, 50, 100]}
+          disabled={detailLoading || !detailTask}
+          onPageChange={(value) =>
+            detailTask && void loadTaskDetails(detailTask, value)
+          }
+          onPageSizeChange={(value) => {
+            setDetailPageSize(value);
+            if (detailTask) void loadTaskDetails(detailTask, 1, value);
+          }}
+        />
         {detailLoading ? (
           <div className="loading-state">
             <Spinner />

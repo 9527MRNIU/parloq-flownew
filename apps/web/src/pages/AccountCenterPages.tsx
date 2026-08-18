@@ -20,6 +20,7 @@ import {
   ListTableCard,
   ListToolbar,
   StandardListPage,
+  useClientPagination,
 } from "../components/list-page";
 import {
   Badge,
@@ -208,6 +209,9 @@ export function AccountExportPage() {
       ).map(([value, label]) => ({ value, label })),
     [rows],
   );
+  const exportPagination = useClientPagination(visible, {
+    resetKey: `${keyword}|${connectionFilter}|${validationFilter}|${sourceFilter}|${groupFilter}`,
+  });
   const selectableIds = visible.filter(exportable).map((row) => row.id);
   const allVisibleSelected =
     Boolean(selectableIds.length) &&
@@ -363,6 +367,14 @@ export function AccountExportPage() {
           </>
         }
       />
+      <ListPagination
+        page={exportPagination.page}
+        pageSize={exportPagination.pageSize}
+        total={exportPagination.total}
+        disabled={loading}
+        onPageChange={exportPagination.setPage}
+        onPageSizeChange={exportPagination.setPageSize}
+      />
       <ListTableCard>
         {loading ? <div className="loading-state"><Spinner />正在加载账号…</div> : visible.length ? (
           <Table>
@@ -383,7 +395,7 @@ export function AccountExportPage() {
               </TableHead>
               <TableHead>账号</TableHead><TableHead>来源</TableHead><TableHead>分组</TableHead><TableHead>导出条件</TableHead><TableHead>入库时间</TableHead><TableHead className="text-right">操作</TableHead>
             </TableRow></TableHeader>
-            <TableBody>{visible.map((row) => (
+            <TableBody>{exportPagination.rows.map((row) => (
               <TableRow key={row.readKey}>
                 <TableCell>
                   <Checkbox
@@ -508,6 +520,7 @@ export function AccountGroupsPage() {
     const search = keyword.trim().toLowerCase();
     return search ? rows.filter((row) => `${row.name} ${row.description}`.toLowerCase().includes(search)) : rows;
   }, [keyword, rows]);
+  const groupPagination = useClientPagination(visible, { resetKey: keyword });
   function edit(row?: AccountGroup) {
     setEditing(row || null);
     setName(row?.name || "");
@@ -550,10 +563,18 @@ export function AccountGroupsPage() {
         meta={`${visible.length} 个分组`}
         actions={<><Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCwIcon size={16} className={loading ? "spin" : ""} />刷新</Button>{canManage ? <Button onClick={() => edit()}><PlusIcon size={16} />新建分组</Button> : null}</>}
       />
+      <ListPagination
+        page={groupPagination.page}
+        pageSize={groupPagination.pageSize}
+        total={groupPagination.total}
+        disabled={loading}
+        onPageChange={groupPagination.setPage}
+        onPageSizeChange={groupPagination.setPageSize}
+      />
       <ListTableCard>
         {loading ? <div className="loading-state"><Spinner />正在加载账号分组…</div> : visible.length ? (
           <Table><TableHeader><TableRow><TableHead>分组</TableHead><TableHead>说明</TableHead><TableHead>账号数</TableHead><TableHead>创建时间</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader>
-            <TableBody>{visible.map((row) => <TableRow key={row.readKey}>
+            <TableBody>{groupPagination.rows.map((row) => <TableRow key={row.readKey}>
               <TableCell>
                 <EntityPrimaryCell
                   title={row.name}
@@ -590,6 +611,12 @@ type IntakeAttempt = {
   status: string;
   terminalReason: string;
   providerCode: string;
+  failureReason?: {
+    code: string;
+    label: string;
+    detailCode: string;
+    providerCode: string;
+  } | null;
   account: {
     id: string;
     name: string;
@@ -617,6 +644,44 @@ const attemptLabel: Record<string, string> = {
   cancelled: "用户已取消",
   failed: "绑定失败",
 };
+
+const failureReasonLabel: Record<string, string> = {
+  invalid_phone: "号码无效",
+  invalid_request: "请求信息无效",
+  number_unavailable: "号码不可用",
+  pairing_in_progress: "号码正在配对",
+  rate_limited: "请求限速",
+  protocol_unavailable: "协议节点不可用",
+  configuration_unavailable: "渠道配置不可用",
+  connection_route_unavailable: "连接线路不可用",
+  gateway_failed: "网关失败",
+  pairing_start_failed: "网关启动失败",
+  pairing_failed: "网关配对失败",
+  pairing_connection_lost: "配对连接中断",
+  pairing_expired: "配对码过期",
+  pairing_cancelled: "用户取消",
+  service_unavailable: "服务暂时不可用",
+  failed: "其他配对失败",
+  expired: "配对码过期",
+  cancelled: "用户取消",
+  unknown: "其他失败",
+};
+
+function attemptFailureReason(attempt: IntakeAttempt) {
+  const detailCode =
+    attempt.failureReason?.detailCode || attempt.terminalReason || attempt.status;
+  const label =
+    attempt.failureReason?.label ||
+    failureReasonLabel[detailCode] ||
+    failureReasonLabel[attempt.failureReason?.code || ""] ||
+    "其他失败";
+  return {
+    label,
+    detailCode,
+    providerCode:
+      attempt.failureReason?.providerCode || attempt.providerCode || "",
+  };
+}
 
 function attemptBadge(status: string) {
   if (status === "verified") return <Badge tone="success">验证成功</Badge>;
@@ -667,9 +732,6 @@ export function AccountIntakePage() {
 
   return (
     <StandardListPage viewport>
-      <div className="rounded-lg border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
-        这里记录落地页的首次绑定和重新认证。只有验证成功的首次绑定才进入正式账号池；失败、过期和取消记录不会出现在账号管理中。
-      </div>
       <ListToolbar
         search={{
           value: keyword,
@@ -707,6 +769,17 @@ export function AccountIntakePage() {
           </Button>
         }
       />
+      <ListPagination
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        disabled={loading}
+        onPageChange={setPage}
+        onPageSizeChange={(value) => {
+          setPage(1);
+          setPageSize(value);
+        }}
+      />
       <ListTableCard>
         {loading ? (
           <div className="loading-state"><Spinner />正在加载接入记录…</div>
@@ -722,7 +795,9 @@ export function AccountIntakePage() {
               <TableHead>资料同步</TableHead>
               <TableHead>发起时间</TableHead>
             </TableRow></TableHeader>
-            <TableBody>{rows.map((row) => (
+            <TableBody>{rows.map((row) => {
+              const failure = attemptFailureReason(row);
+              return (
               <TableRow key={row.id}>
                 <TableCell>
                   <div className="cell-main min-w-[210px]">
@@ -738,7 +813,24 @@ export function AccountIntakePage() {
                 <TableCell>
                   <div className="flex min-w-[150px] flex-col items-start gap-1">
                     {attemptBadge(row.status)}
-                    {row.terminalReason ? <span className="text-xs text-muted-foreground" title={row.providerCode || undefined}>{row.terminalReason}</span> : null}
+                          {row.failureReason || row.terminalReason ? (
+                      <span
+                        className="text-xs text-muted-foreground"
+                        title={[
+                          `内部原因：${failure.detailCode}`,
+                          failure.providerCode
+                            ? `提供方代码：${failure.providerCode}`
+                            : "",
+                        ]
+                          .filter(Boolean)
+                          .join("；")}
+                      >
+                        {failure.label}
+                        {failure.providerCode
+                          ? ` · 提供方 ${failure.providerCode}`
+                          : ""}
+                      </span>
+                    ) : null}
                   </div>
                 </TableCell>
                 <TableCell>{admissionBadge(row.account.admissionStatus)}</TableCell>
@@ -763,23 +855,13 @@ export function AccountIntakePage() {
                 </TableCell>
                 <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
               </TableRow>
-            ))}</TableBody>
+              );
+            })}</TableBody>
           </Table>
         ) : (
           <EmptyState title="暂无接入记录" description="访客从渠道落地页发起首次绑定或重新认证后，会显示在这里。" />
         )}
       </ListTableCard>
-      <ListPagination
-        page={page}
-        pageSize={pageSize}
-        total={total}
-        disabled={loading}
-        onPageChange={setPage}
-        onPageSizeChange={(value) => {
-          setPage(1);
-          setPageSize(value);
-        }}
-      />
     </StandardListPage>
   );
 }

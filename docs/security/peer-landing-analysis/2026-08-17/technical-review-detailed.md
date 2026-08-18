@@ -286,8 +286,14 @@ headers: X-Sign-LP: sign_lp, X-Sign-Time: 秒级时间戳
   `is_mobile`，并附签名头。
 - **wa-accounts/status**：带 `request_id` 轮询配对结果，`expires_sec`
   前端倒计时。
-- **fb-domain-blocked/report**：像素加载失败 → 上报被封域名，页内提示
-  “可能原因：域名被 Meta 黑名单 / Pixel 被停用 / 广告账号受限”。
+- **fb-domain-blocked/report**：初始化 Meta Pixel 前劫持 `console.error`；
+  错误文本同时包含 `[Meta pixel]`、当前 Pixel ID 和 `is unavailable` 时，
+  调用接口且 body 仅为 `{domain: location.hostname}`，每页最多一次。另有
+  `__pixelSdkDebug.triggerFbBlocked()` 测试钩子。代码没有监听 Meta 脚本的
+  `onerror` 或加载超时。页内提示将其解释为“域名被 Meta 黑名单 / Pixel 被
+  停用 / 广告账号受限”。管理端把结果保存为渠道字段 `fb_domain_blocked`，
+  显示“正常”或“域名已拉黑”；它不能独立验证域名封禁，但能为运营提供及时
+  的域名受限风险提示。
 
 ### S1
 
@@ -303,7 +309,8 @@ headers: X-Sign-LP: sign_lp, X-Sign-Time: 秒级时间戳
 - `page_view` 与 `phone_submit` 事件**服务端返回 `metaEvent`
   （名称+eventID）**，前端据其对 Browser Pixel 去重（避免 CAPI 与
   Browser 双计）。
-- 缺：步骤级 progress 落库、5 秒驻留 lead、FB 域名封禁上报。
+- 缺：步骤级 progress 落库和同行的 Pixel unavailable 域名风险提示；未采用
+  “驻留 5 秒即算 lead”的虚假线索口径。
 - 有：`inspection_detected` 上报（对方无）、服务端 `pairing_check`
   审计事件（对方无）。
 
@@ -346,9 +353,9 @@ FB Pixel 动态 ID（URL 参数）+ GA4 双发；`fbq('track', name, {},
   `user_data` 含 `client_ip_address`、`client_user_agent`、`fbp`/`fbc`
   （服务端读 cookie，正则校验）、`ph`（号码 SHA-256）、`external_id`
   （visitor SHA-256）；Browser 与 CAPI 共用同一 `event_id`。
-- **缺**：TikTok/Kwai 像素、`fbclid`/`ttclid`/`_ttp` 前端捕获、
-  FB 域名封禁自检。CSP 目前只放行 `connect.facebook.net`，扩平台需同步
-  改 `_sandbox_csp`。
+- **差异**：缺 TikTok/Kwai 像素和 `fbclid`/`ttclid`/`_ttp` 前端捕获；
+  未实现同行的 Pixel unavailable 域名风险状态。CSP 目前只放行
+  `connect.facebook.net`，扩平台需同步改 `_sandbox_csp`。
 
 ---
 
@@ -426,7 +433,7 @@ FB Pixel 动态 ID（URL 参数）+ GA4 双发；`fbq('track', name, {},
 | 请求防篡改 | 客户端 md5 签名（可还原） | HMAC 会话令牌 + 幂等 + 限流 | 我们更强 |
 | 漏斗埋点 | init/progress/lead(5s)/visit-end/status 全链路 | page_view/phone_submit/visit_end/inspection_detected | 缺 progress 与驻留 lead |
 | 像素 | Meta+TikTok+Kwai+mgskyads；fbclid/ttclid/_ttp | Meta Browser+CAPI（eventID 双端去重） | 缺多平台与前端归因捕获 |
-| 域名健康 | FB 封禁自检上报 | 无 | 缺 |
+| FB 域名风险 | Pixel unavailable 上报 + 渠道状态持久化 | 无 | 有运营价值，可轻量补齐 |
 | 多语言 | 客户端自动翻译 / 19 语言内联 | 服务端 locale + 打包语言包 + RTL | 我们更可控 |
 | 恶意载荷 | iOS≥18.4 RCE 分发器 | 无 | 红线，永不跟进 |
 | 会话连续性 | progress/lead 均持久化 + 恢复 | 幂等事件 + 配对状态 token | 可补进度恢复 |
@@ -445,8 +452,10 @@ FB Pixel 动态 ID（URL 参数）+ GA4 双发；`fbq('track', name, {},
 2. **多平台像素（P1）**：channel 增加 platform 配置，tracker.js 按配置
    注入 ttq/kwai；`_sandbox_csp` 按启用平台放行域；前端捕获
    `fbclid`/`ttclid`/`_ttp` 随事件上报；CAPI 侧保持 Meta 现状。
-3. **域名健康（P1）**：`fbq` 加载失败（或 init 后 X 秒无 PageView 回执）
-   时复用事件通道上报 `fb_pixel_unavailable`，控制台聚合展示。
+3. **FB 域名风险（P1）**：严格对齐已观察到的触发条件——Meta SDK 控制台
+   错误同时包含 `[Meta pixel]`、当前 Pixel ID 和 `is unavailable` 时，每页
+   一次性上报；服务端按渠道持久化，渠道列表展示状态。不把普通脚本加载失败
+   或“X 秒无 PageView”当作域名受限，也不扩成广告账户监控。
 4. **漏斗增强（P2）**：事件模型增加 `step`/`durationMs` 字段或新增
    `progress` 事件类型；前端 `useLeadEvent` 式 5 秒驻留 lead 可做成
    可选策略，默认关。

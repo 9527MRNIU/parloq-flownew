@@ -22,7 +22,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiDownload, apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { EntityStatusIndicator } from "../components/entity-primary-cell";
-import { ListTableCard, ListToolbar, StandardListPage } from "../components/list-page";
+import {
+  ListPagination,
+  ListTableCard,
+  ListToolbar,
+  StandardListPage,
+  useClientPagination,
+} from "../components/list-page";
 import {
   Badge,
   Button,
@@ -539,6 +545,10 @@ export function MaterialsPage() {
     });
   }, [activeTextRole, activeType, keyword, rows, statusFilter]);
 
+  const pagination = useClientPagination(visible, {
+    resetKey: `${keyword}|${activeType}|${activeTextRole}|${statusFilter}`,
+  });
+
   const selectedRows = useMemo(() => rows.filter((row) => selected.has(row.id)), [rows, selected]);
   const allVisibleSelected = Boolean(visible.length) && visible.every((row) => selected.has(row.id));
   const existingMaterialNames = useMemo(() => new Set(rows.map((row) => row.name.trim().toLocaleLowerCase())), [rows]);
@@ -859,6 +869,14 @@ export function MaterialsPage() {
         }
       />
 
+      <ListPagination
+        page={pagination.page}
+        pageSize={pagination.pageSize}
+        total={pagination.total}
+        onPageChange={pagination.setPage}
+        onPageSizeChange={pagination.setPageSize}
+      />
+
       <ListTableCard>
         <div className="flex shrink-0 items-center border-b border-border bg-background pr-3">
           <div className="overflow-x-auto">
@@ -914,7 +932,7 @@ export function MaterialsPage() {
             <EmptyState title={`暂无${definition(activeType).label}素材`} description={`上传${definition(activeType).label}素材后即可在消息中复用。`} />
           ) : gridMode ? (
             <div className="grid grid-cols-2 gap-4 p-4 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
-              {visible.map((row) => {
+              {pagination.rows.map((row) => {
                 const item = definition(row.type);
                 const isSelected = selected.has(row.id);
                 const state = statusMeta(row);
@@ -978,7 +996,7 @@ export function MaterialsPage() {
             </div>
           ) : (
             <div className="divide-y divide-border bg-background">
-              {visible.map((row) => {
+              {pagination.rows.map((row) => {
                 const item = definition(row.type);
                 const Icon = item.icon;
                 const url = previewUrl(row);

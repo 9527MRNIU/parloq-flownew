@@ -518,7 +518,22 @@ class AccountLinkFlow extends HTMLElement {
     } catch (error) {
       const value = error as BridgeError;
       const code = value.code || "failed";
-      this.status.setState(code);
+      if (code === "invalid_phone") {
+        this.phone.setError(functionalCopy().invalidPhone);
+        this.status.reset();
+      } else if (
+        [
+          "account_already_linked",
+          "number_unavailable",
+          "pairing_in_progress",
+        ].includes(code)
+      ) {
+        this.status.setState(code);
+      } else {
+        // Operational details remain in the management console. Visitors only
+        // need a concise retryable failure state.
+        this.status.setState("failed");
+      }
     } finally { this.submit.setLoading(false); }
   }
 

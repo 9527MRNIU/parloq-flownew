@@ -1928,6 +1928,51 @@ tr.selected-row {
   font-size: 21px;
   font-variant-numeric: tabular-nums;
 }
+.pairing-funnel-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.pairing-funnel-grid > div {
+  display: grid;
+  gap: 5px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--muted-2);
+}
+.pairing-funnel-grid span,
+.pairing-funnel-grid small,
+.pairing-failure-list span,
+.pairing-failure-list small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.pairing-funnel-grid strong {
+  font-size: 21px;
+  font-variant-numeric: tabular-nums;
+}
+.pairing-failure-list {
+  display: grid;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.pairing-failure-list > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 52px;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.pairing-failure-list > div:last-child {
+  border-bottom: 0;
+}
+.pairing-failure-list small {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 .pixel-create-card {
   display: grid;
   gap: 13px;

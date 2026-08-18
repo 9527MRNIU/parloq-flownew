@@ -209,7 +209,8 @@ class NameSiloDomainRegistrar(DomainRegistrar):
             if "mit charge requires mitidentifier" in message.lower():
                 message = (
                     "NameSilo 已拒绝当前信用卡支付资料（缺少自动扣款授权）。"
-                    "请在系统配置中改用账户余额，或更换可用于 API 的 Payment ID。"
+                    "请在 NameSilo 重新配置可用于 API 自动扣款的已验证信用卡，"
+                    "并在系统配置中更新 Payment ID。"
                 )
             raise DomainRegistrarError(
                 message,

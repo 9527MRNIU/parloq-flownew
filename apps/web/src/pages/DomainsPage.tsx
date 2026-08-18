@@ -28,9 +28,11 @@ import {
   toast,
 } from "../components/ui";
 import {
+  ListPagination,
   ListTableCard,
   ListToolbar,
   StandardListPage,
+  useClientPagination,
 } from "../components/list-page";
 import { useAuth } from "../auth/AuthContext";
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
@@ -331,6 +333,12 @@ export function DomainsPage() {
       ? orders.filter((row) => row.hostname.toLowerCase().includes(search))
       : orders;
   }, [keyword, orders]);
+  const domainPagination = useClientPagination(visible, {
+    resetKey: `${activeList}|${keyword}`,
+  });
+  const orderPagination = useClientPagination(visibleOrders, {
+    resetKey: `${activeList}|${keyword}`,
+  });
   const visibleDomainOptions = useMemo(() => {
     const search = resultKeyword.trim().toLowerCase();
     return (domainSearch?.options || []).filter((option) =>
@@ -650,6 +658,26 @@ export function DomainsPage() {
         }
       />
       {activeList === "domains" ? (
+        <ListPagination
+          page={domainPagination.page}
+          pageSize={domainPagination.pageSize}
+          total={domainPagination.total}
+          disabled={loading}
+          onPageChange={domainPagination.setPage}
+          onPageSizeChange={domainPagination.setPageSize}
+        />
+      ) : (
+        <ListPagination
+          ariaLabel="购买记录分页"
+          page={orderPagination.page}
+          pageSize={orderPagination.pageSize}
+          total={orderPagination.total}
+          disabled={loading}
+          onPageChange={orderPagination.setPage}
+          onPageSizeChange={orderPagination.setPageSize}
+        />
+      )}
+      {activeList === "domains" ? (
         <ListTableCard>
         {loading ? (
           <div className="loading-state">
@@ -671,7 +699,7 @@ export function DomainsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {visible.map((row) => (
+                {domainPagination.rows.map((row) => (
                   <TableRow key={row.readKey}>
                     <TableCell>
                       <EntityPrimaryCell
@@ -783,7 +811,7 @@ export function DomainsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {visibleOrders.map((row) => {
+                {orderPagination.rows.map((row) => {
                   const busy = Boolean(row.id) && orderPending.startsWith(`${row.id}:`);
                   return (
                     <TableRow key={row.readKey}>

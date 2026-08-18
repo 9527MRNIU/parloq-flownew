@@ -4,6 +4,7 @@ import hashlib
 import re
 from datetime import timedelta
 from typing import Any
+from uuid import uuid4
 
 import httpx
 from fastapi import Request
@@ -160,6 +161,102 @@ def enqueue_meta_conversion(
     )
     db.add(delivery)
     return delivery
+
+
+def _provider_error_message(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = error.get("message")
+            if message:
+                return str(message)[:500]
+        message = payload.get("message")
+        if message:
+            return str(message)[:500]
+    return f"Meta CAPI 返回 HTTP {response.status_code}"
+
+
+def probe_meta_conversion(
+    *,
+    channel: PromotionChannel,
+    pixel: MetaPixel,
+    request: Request,
+    event_source_url: str,
+) -> dict[str, Any]:
+    """Send one isolated CAPI probe without creating a delivery-ledger row."""
+    if (
+        not pixel.enabled
+        or pixel.archived_at is not None
+        or not pixel.capi_token_ciphertext
+    ):
+        raise ValueError("Meta Pixel 已停用或缺少 CAPI Token")
+
+    event_name = "ParloqCapiProbe"
+    event_id = f"parloq-probe-{uuid4().hex}"
+    payload = {
+        "data": [
+            {
+                "event_name": event_name,
+                "event_time": int(utcnow().timestamp()),
+                "event_id": event_id,
+                "action_source": "website",
+                "event_source_url": event_source_url[:2000],
+                "user_data": _request_user_data(
+                    request,
+                    phone=None,
+                    visitor_id=f"capi-probe:{channel.id}:{event_id}",
+                ),
+                "custom_data": {"probe": True},
+            }
+        ]
+    }
+    result: dict[str, Any] = {
+        "ok": False,
+        "datasetId": pixel.dataset_id,
+        "eventName": event_name,
+        "eventId": event_id,
+        "providerTraceId": "",
+        "httpStatus": None,
+        "sendError": "",
+    }
+    settings = get_settings()
+    if settings.meta_capi_mock:
+        return {
+            **result,
+            "ok": True,
+            "providerTraceId": "mock-probe",
+            "httpStatus": 200,
+        }
+
+    try:
+        token = decrypt_secret(pixel.capi_token_ciphertext)
+        response = httpx.post(
+            f"{settings.meta_capi_base_url}/{settings.meta_capi_api_version}/{pixel.dataset_id}/events",
+            headers={"Authorization": f"Bearer {token}"},
+            json=payload,
+            timeout=15.0,
+        )
+    except (httpx.HTTPError, ValueError) as exc:
+        return {**result, "sendError": str(exc)[:500]}
+
+    result["httpStatus"] = response.status_code
+    if not response.is_success:
+        result["sendError"] = _provider_error_message(response)
+        return result
+    try:
+        response_payload = response.json() if response.content else {}
+    except ValueError:
+        response_payload = {}
+    result["ok"] = True
+    if isinstance(response_payload, dict):
+        result["providerTraceId"] = str(
+            response_payload.get("fbtrace_id") or ""
+        )[:255]
+    return result
 
 
 def _claim_due_deliveries() -> list[int]:

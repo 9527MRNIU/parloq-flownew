@@ -14,9 +14,11 @@ import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
 import {
+  ListPagination,
   ListTableCard,
   ListToolbar,
   StandardListPage,
+  useClientPagination,
 } from "../components/list-page";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
 import {
@@ -151,8 +153,8 @@ const RATE_LIMIT_FIELDS: Array<[
   string,
   string,
 ]> = [
-  ["visitorCheck", "访客绑定检查", "同一渠道、同一访客发起绑定检查"],
-  ["visitorAttempt", "访客新建配对", "同一渠道、同一访客创建新配对任务"],
+  ["visitorCheck", "访客绑定检查", "同一渠道、同一访客发起绑定检查；优先使用复合设备指纹，指纹不可用时回退浏览器访客标识"],
+  ["visitorAttempt", "访客新建配对", "同一渠道、同一访客创建新配对任务；优先使用复合设备指纹，指纹不可用时回退浏览器访客标识"],
   ["ipStart", "来源 IP 请求", "同一渠道、同一来源 IP 调用开始绑定"],
   ["phoneAttempt", "号码新建配对", "同一租户、同一号码创建新配对任务"],
   ["channelAttempt", "渠道新建速率", "单个渠道在统计窗口内累计创建的新配对任务数；不同于上方协议节点同时进行的并发数"],
@@ -369,6 +371,8 @@ export function ProtocolManagementPage() {
       ? rows.filter((row) => `${row.id} ${row.name} ${row.remark}`.toLowerCase().includes(search))
       : rows;
   }, [keyword, rows]);
+  const nodePagination = useClientPagination(visible, { resetKey: keyword });
+  const poolPagination = useClientPagination(pools);
   const visibleIds = visible.map((row) => row.id).filter(Boolean);
   const allVisibleSelected = Boolean(visibleIds.length) && visibleIds.every((id) => selected.includes(id));
   const remainingSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
@@ -576,6 +580,14 @@ export function ProtocolManagementPage() {
           </>
         }
       />
+      <ListPagination
+        page={nodePagination.page}
+        pageSize={nodePagination.pageSize}
+        total={nodePagination.total}
+        disabled={loading}
+        onPageChange={nodePagination.setPage}
+        onPageSizeChange={nodePagination.setPageSize}
+      />
       <ListTableCard>
         {loading ? <div className="loading-state"><Spinner />正在加载协议节点…</div> : error ? (
           <div className="error-state"><strong>协议加载失败</strong><span>{error}</span><Button variant="outline" onClick={() => void load()}>重试</Button></div>
@@ -585,7 +597,7 @@ export function ProtocolManagementPage() {
               <TableHead className="w-10"><Checkbox aria-label="选择全部协议" checked={allVisibleSelected} onCheckedChange={(checked) => setSelected(checked ? Array.from(new Set([...selected, ...visibleIds])) : selected.filter((id) => !visibleIds.includes(id)))} /></TableHead>
               <TableHead>协议名称</TableHead><TableHead>进号开关</TableHead><TableHead>营销开关</TableHead><TableHead>账号总量</TableHead><TableHead>有效数 / 率</TableHead><TableHead>在线数 / 率</TableHead><TableHead>备注</TableHead><TableHead>创建时间</TableHead><TableHead className="text-right">操作</TableHead>
             </TableRow></TableHeader>
-            <TableBody>{visible.map((row) => <TableRow key={row.readKey}>
+            <TableBody>{nodePagination.rows.map((row) => <TableRow key={row.readKey}>
               <TableCell><Checkbox aria-label={`选择协议 ${row.name || "待迁移协议"}`} disabled={!row.id} checked={Boolean(row.id) && selected.includes(row.id)} onCheckedChange={(checked) => row.id && setSelected((current) => checked ? [...current, row.id] : current.filter((id) => id !== row.id))} /></TableCell>
               <TableCell>
                 <EntityPrimaryCell
@@ -624,10 +636,19 @@ export function ProtocolManagementPage() {
         <div><h2 className="text-base font-semibold">协议池回退</h2><p className="text-sm text-muted-foreground">只有渠道明确绑定协议池时才会按成员优先级回退；直接绑定节点永不自动切换。</p></div>
         <Button variant="outline" disabled={!canManage || !rows.length} onClick={() => openPool()}><NetworkIcon size={16} />新建协议池</Button>
       </div>
+      <ListPagination
+        ariaLabel="协议池分页"
+        page={poolPagination.page}
+        pageSize={poolPagination.pageSize}
+        total={poolPagination.total}
+        disabled={loading}
+        onPageChange={poolPagination.setPage}
+        onPageSizeChange={poolPagination.setPageSize}
+      />
       <ListTableCard>
         {pools.length ? <Table>
           <TableHeader><TableRow><TableHead>协议池</TableHead><TableHead>回退顺序</TableHead><TableHead>备注</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader>
-          <TableBody>{pools.map((pool) => <TableRow key={pool.id}>
+          <TableBody>{poolPagination.rows.map((pool) => <TableRow key={pool.id}>
             <TableCell><EntityPrimaryCell title={pool.name} id={pool.id} status={{ label: pool.members.some((member) => member.available) ? "可回退" : "无可用成员", description: pool.members.some((member) => member.available) ? "池中至少有一个成员可接入。" : "当前所有成员不可接入，渠道请求会明确失败。", tone: pool.members.some((member) => member.available) ? "success" : "warning" }} /></TableCell>
             <TableCell><div className="flex flex-wrap gap-1">{pool.members.map((member, index) => <Badge key={member.protocolNodeId} tone={member.available ? "success" : "neutral"}>{index + 1}. {member.protocolNodeName}</Badge>)}</div></TableCell>
             <TableCell><span className="block max-w-64 truncate text-muted-foreground">{pool.remark || "-"}</span></TableCell>
@@ -667,7 +688,7 @@ export function ProtocolManagementPage() {
             <DrawerFormField label="验证后保活（秒）"><Input type="number" min={0} max={3600} value={form.postVerifyGraceSeconds} onChange={(event) => setForm((current) => ({ ...current, postVerifyGraceSeconds: event.target.value }))} /></DrawerFormField>
           </DrawerFormSection>
 
-          <DrawerFormSection title="账号绑定限速" description="绑定到此协议节点的渠道自动使用这些规则。限制由系统内部执行，模板和渠道不保存限速配置。">
+          <DrawerFormSection title="公共配对风控与限速" description="两项访客规则优先按复合设备指纹识别同一访客，指纹不可用时回退浏览器访客标识；来源 IP、号码和渠道规则继续独立执行。模板和渠道不保存限速配置。">
             {RATE_LIMIT_FIELDS.map(([key, label, description]) => (
               <DrawerFormField key={key} label={label} hint={description} align="start">
                 <div className="grid min-w-0 grid-cols-2 gap-2">

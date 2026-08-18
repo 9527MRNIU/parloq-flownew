@@ -98,6 +98,53 @@ def test_unlimited_channel_attempt_does_not_consume_a_counter() -> None:
     assert redis.values == {}
 
 
+def test_fingerprint_backed_visitor_and_ip_limits_remain_independent() -> None:
+    redis = StubRedis()
+    protocol = _protocol()
+    protocol.rate_limit_policy_json["visitorCheck"] = {
+        "maxRequests": 1,
+        "windowSeconds": 600,
+    }
+    first = consume_pairing_rate_limits(
+        protocol,
+        [
+            PairingRateLimitRequest(
+                "visitorCheck", "channel:1:fingerprint:device-a"
+            ),
+            PairingRateLimitRequest("ipStart", "channel:1:ip:203.0.113.10"),
+        ],
+        client=redis,
+    )
+    assert first.allowed is True
+
+    blocked_device = consume_pairing_rate_limits(
+        protocol,
+        [
+            PairingRateLimitRequest(
+                "visitorCheck", "channel:1:fingerprint:device-a"
+            ),
+            PairingRateLimitRequest("ipStart", "channel:1:ip:203.0.113.11"),
+        ],
+        client=redis,
+    )
+    assert blocked_device.allowed is False
+    assert blocked_device.policy_key == "visitorCheck"
+
+    # A different device still reaches the independent IP counter.
+    blocked_ip = consume_pairing_rate_limits(
+        protocol,
+        [
+            PairingRateLimitRequest(
+                "visitorCheck", "channel:1:fingerprint:device-b"
+            ),
+            PairingRateLimitRequest("ipStart", "channel:1:ip:203.0.113.10"),
+        ],
+        client=redis,
+    )
+    assert blocked_ip.allowed is False
+    assert blocked_ip.policy_key == "ipStart"
+
+
 def test_public_request_ip_prefers_valid_forwarded_ingress_address() -> None:
     request = Request(
         {

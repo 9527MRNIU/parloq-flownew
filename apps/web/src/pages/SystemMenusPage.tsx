@@ -26,9 +26,11 @@ import {
   toast,
 } from "../components/ui";
 import {
+  ListPagination,
   ListTableCard,
   ListToolbar,
   StandardListPage,
+  useClientPagination,
 } from "../components/list-page";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
 
@@ -103,6 +105,7 @@ export function SystemMenusPage() {
         )
       : rows;
   }, [keyword, rows]);
+  const pagination = useClientPagination(visible, { resetKey: keyword });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -195,6 +198,14 @@ export function SystemMenusPage() {
           </Button>
         }
       />
+      <ListPagination
+        page={pagination.page}
+        pageSize={pagination.pageSize}
+        total={pagination.total}
+        disabled={loading}
+        onPageChange={pagination.setPage}
+        onPageSizeChange={pagination.setPageSize}
+      />
       <ListTableCard>
         {loading ? <div className="loading-state"><LoaderCircleIcon className="spin" size={18} />正在加载菜单…</div> : (
         <div className="table-scroll">
@@ -211,7 +222,7 @@ export function SystemMenusPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {visible.map((row) => (
+              {pagination.rows.map((row) => (
                 <TableRow key={row.readKey}>
                   <TableCell>
                     <EntityPrimaryCell

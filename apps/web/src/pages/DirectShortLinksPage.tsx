@@ -13,9 +13,11 @@ import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
 import {
+  ListPagination,
   ListTableCard,
   ListToolbar,
   StandardListPage,
+  useClientPagination,
 } from "../components/list-page";
 import {
   EntityPrimaryCell,
@@ -137,6 +139,8 @@ export function DirectShortLinksPage() {
   const [accounts, setAccounts] = useState<BitlyAccount[]>([]);
   const [rows, setRows] = useState<DirectShortLink[]>([]);
   const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [keyword, setKeyword] = useState("");
   const [query, setQuery] = useState("");
   const [accountId, setAccountId] = useState("");
@@ -181,8 +185,8 @@ export function DirectShortLinksPage() {
     const params = new URLSearchParams();
     if (query) params.set("keyword", query);
     if (accountId) params.set("providerAccountId", accountId);
-    params.set("page", "1");
-    params.set("pageSize", "100");
+    params.set("page", String(page));
+    params.set("pageSize", String(pageSize));
     try {
       const payload = await apiRequest(`/api/direct-short-links?${params}`);
       const list = unwrapList<unknown>(payload);
@@ -193,7 +197,7 @@ export function DirectShortLinksPage() {
     } finally {
       setLoading(false);
     }
-  }, [accountId, query]);
+  }, [accountId, page, pageSize, query]);
 
   useEffect(() => {
     void loadAccounts();
@@ -201,11 +205,18 @@ export function DirectShortLinksPage() {
   useEffect(() => {
     void loadLinks();
   }, [loadLinks]);
+  useEffect(() => {
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    if (page > totalPages) setPage(totalPages);
+  }, [page, pageSize, total]);
 
   const selectedAccount = useMemo(
     () => accounts.find((row) => row.id === accountId),
     [accountId, accounts],
   );
+  const accountPagination = useClientPagination(accounts, {
+    resetKey: String(accountDrawer),
+  });
 
   function openCreate() {
     setEditing(null);
@@ -373,16 +384,20 @@ export function DirectShortLinksPage() {
           value: keyword,
           onChange: setKeyword,
           placeholder: "搜索标题、Bitly 短链或目标地址",
-          onSubmit: () => setQuery(keyword.trim()),
+          onSubmit: () => {
+            setPage(1);
+            setQuery(keyword.trim());
+          },
         }}
         filters={
           user?.isAdmin && canManage ? (
             <SelectField
               ariaLabel="Bitly 账号筛选"
               value={accountId || "__all__"}
-              onValueChange={(value) =>
-                setAccountId(value === "__all__" ? "" : value)
-              }
+              onValueChange={(value) => {
+                setPage(1);
+                setAccountId(value === "__all__" ? "" : value);
+              }}
               options={[
                 { value: "__all__", label: "全部 Bitly 账号" },
                 ...accounts.filter((account) => account.id).map((account) => ({
@@ -425,6 +440,18 @@ export function DirectShortLinksPage() {
             ) : null}
           </>
         }
+      />
+
+      <ListPagination
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        disabled={loading}
+        onPageChange={setPage}
+        onPageSizeChange={(value) => {
+          setPage(1);
+          setPageSize(value);
+        }}
       />
 
       <ListTableCard>
@@ -720,9 +747,17 @@ export function DirectShortLinksPage() {
             <strong>账号池</strong>
             <span>{accounts.length}</span>
           </div>
+          <ListPagination
+            page={accountPagination.page}
+            pageSize={accountPagination.pageSize}
+            total={accountPagination.total}
+            onPageChange={accountPagination.setPage}
+            onPageSizeChange={accountPagination.setPageSize}
+            ariaLabel="Bitly 账号池分页"
+          />
           {accounts.length ? (
             <div className="pixel-list">
-              {accounts.map((row) => (
+              {accountPagination.rows.map((row) => (
                 <div key={row.readKey}>
                   <div>
                     <strong>{row.name}</strong>

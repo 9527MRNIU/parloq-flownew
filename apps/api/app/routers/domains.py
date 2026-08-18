@@ -46,12 +46,6 @@ from app.services.domain_registrar import (
     MockDomainRegistrar,
     NameSiloDomainRegistrar,
 )
-from app.services.platform_clients import (
-    NAMESILO_PAYMENT_VERIFIED_CARD,
-    namesilo_payment_mode,
-)
-
-
 router = APIRouter(prefix="/api/domains", tags=["domains"])
 order_router = APIRouter(prefix="/api/domain-orders", tags=["domain-orders"])
 logger = logging.getLogger(__name__)
@@ -109,14 +103,12 @@ def _registrar(
     except ValueError as exc:
         raise HTTPException(status_code=503, detail="NameSilo 凭据无法读取，请重新配置") from exc
     settings = dict(config.settings_json or {})
-    payment_id = None
-    if namesilo_payment_mode(settings.get("paymentMode")) == NAMESILO_PAYMENT_VERIFIED_CARD:
-        payment_id = str(settings.get("paymentId") or "").strip() or None
-        if payment_id is None:
-            raise HTTPException(
-                status_code=503,
-                detail="NameSilo 已选择信用卡支付，但尚未配置 Payment ID",
-            )
+    payment_id = str(settings.get("paymentId") or "").strip() or None
+    if payment_id is None:
+        raise HTTPException(
+            status_code=503,
+            detail="NameSilo 尚未配置信用卡 Payment ID",
+        )
     return NameSiloDomainRegistrar(api_key, payment_id=payment_id)
 
 

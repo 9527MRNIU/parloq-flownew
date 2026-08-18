@@ -191,6 +191,7 @@ def test_namesilo_purchase_timeout_is_marked_unknown_for_reconciliation() -> Non
 
     client = NameSiloClient(
         "secret-key",
+        payment_id="2531590",
         client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
     with pytest.raises(PlatformClientError) as caught:
@@ -203,7 +204,7 @@ def test_namesilo_purchase_timeout_is_marked_unknown_for_reconciliation() -> Non
     assert caught.value.outcome_unknown is True
 
 
-def test_namesilo_without_payment_id_uses_account_balance() -> None:
+def test_namesilo_purchase_requires_credit_card_payment_id() -> None:
     captured: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -217,15 +218,16 @@ def test_namesilo_without_payment_id_uses_account_balance() -> None:
         "secret-key",
         client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
-    amount = client.register_domain(
-        "example.com",
-        1,
-        private=True,
-        auto_renew=False,
-    )
+    with pytest.raises(PlatformClientError) as raised:
+        client.register_domain(
+            "example.com",
+            1,
+            private=True,
+            auto_renew=False,
+        )
 
-    assert amount == Decimal("12.00")
-    assert "payment_id" not in captured[0].url.params
+    assert str(raised.value) == "NameSilo 尚未配置信用卡 Payment ID"
+    assert captured == []
 
 
 def test_namesilo_connection_test_is_read_only() -> None:
@@ -248,27 +250,6 @@ def test_namesilo_connection_test_is_read_only() -> None:
     assert operations == ["listDomains"]
 
 
-def test_namesilo_reads_account_balance_for_payment_readiness() -> None:
-    operations: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        operation = request.url.path.rsplit("/", 1)[-1]
-        operations.append(operation)
-        assert operation == "getAccountBalance"
-        return httpx.Response(
-            200,
-            json={"reply": {"code": 300, "balance": "42.37"}},
-        )
-
-    client = NameSiloClient(
-        "secret-key",
-        client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
-
-    assert client.get_account_balance() == Decimal("42.37")
-    assert operations == ["getAccountBalance"]
-
-
 def test_namesilo_mit_payment_rejection_has_actionable_message() -> None:
     class RejectingClient:
         def register_domain(self, *args, **kwargs):
@@ -284,7 +265,7 @@ def test_namesilo_mit_payment_rejection_has_actionable_message() -> None:
         registrar.register("example.com", 1)
 
     assert "缺少自动扣款授权" in str(raised.value)
-    assert "改用账户余额" in str(raised.value)
+    assert "更新 Payment ID" in str(raised.value)
     assert raised.value.code == "280"
 
 

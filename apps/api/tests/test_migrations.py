@@ -900,6 +900,181 @@ def test_pairing_rate_limit_default_migration_preserves_custom_rules(
     }
 
 
+def test_device_fingerprint_migration_adds_nullable_audit_fields_and_policy(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'device-fingerprints.db'}"
+    _alembic(database_url, "0041_domain_order_status")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    assert "visitor_fingerprint_hash" not in {
+        column["name"] for column in inspector.get_columns("promotion_events")
+    }
+    policies = sa.Table(
+        "promotion_template_policies", sa.MetaData(), autoload_with=engine
+    )
+    users = sa.Table("user_accounts", sa.MetaData(), autoload_with=engine)
+    with engine.begin() as connection:
+        owner_id = connection.execute(sa.select(users.c.id).limit(1)).scalar_one()
+        policy_id = 9_000_000_001
+        connection.execute(
+            policies.insert().values(
+                id=policy_id,
+                created_by=owner_id,
+                device_signals="enhanced",
+            )
+        )
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    for table in ("promotion_events", "account_pairing_attempts"):
+        assert {
+            "visitor_fingerprint_hash",
+            "fingerprint_version",
+            "fingerprint_quality",
+        } <= {column["name"] for column in inspector.get_columns(table)}
+    assert "ix_promotion_events_channel_fingerprint" in {
+        index["name"] for index in inspector.get_indexes("promotion_events")
+    }
+    assert "ix_account_pairing_attempts_channel_fingerprint_created" in {
+        index["name"]
+        for index in inspector.get_indexes("account_pairing_attempts")
+    }
+    policies = sa.Table(
+        "promotion_template_policies", sa.MetaData(), autoload_with=engine
+    )
+    with engine.connect() as connection:
+        assert (
+            connection.execute(
+                sa.select(policies.c.device_signals).where(
+                    policies.c.id == policy_id
+                )
+            ).scalar_one()
+            == "fingerprint"
+        )
+    engine.dispose()
+
+    _alembic_downgrade(database_url, "0041_domain_order_status")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    assert "visitor_fingerprint_hash" not in {
+        column["name"] for column in inspector.get_columns("promotion_events")
+    }
+    policies = sa.Table(
+        "promotion_template_policies", sa.MetaData(), autoload_with=engine
+    )
+    with engine.connect() as connection:
+        assert (
+            connection.execute(
+                sa.select(policies.c.device_signals).where(
+                    policies.c.id == policy_id
+                )
+            ).scalar_one()
+            == "enhanced"
+        )
+    engine.dispose()
+
+
+def test_meta_domain_monitoring_migration_adds_reversible_channel_state(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'meta-domain-monitoring.db'}"
+    _alembic(database_url, "0042_device_fingerprints")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    assert "meta_domain_blocked" not in {
+        column["name"] for column in inspector.get_columns("promotion_channels")
+    }
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    assert {"meta_domain_blocked", "meta_domain_blocked_at"} <= {
+        column["name"] for column in inspector.get_columns("promotion_channels")
+    }
+    engine.dispose()
+
+    _alembic_downgrade(database_url, "0042_device_fingerprints")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    assert "meta_domain_blocked" not in {
+        column["name"] for column in inspector.get_columns("promotion_channels")
+    }
+    engine.dispose()
+
+
+def test_pairing_observability_migration_repairs_missing_intake_menu(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'pairing-observability.db'}"
+    _alembic(database_url, "0043_meta_domain_monitoring")
+    engine = sa.create_engine(database_url)
+    with engine.begin() as connection:
+        menu_id = connection.execute(
+            sa.text(
+                "SELECT id FROM system_menus "
+                "WHERE public_id = 'menu_resources_account_intake'"
+            )
+        ).scalar_one()
+        connection.execute(
+            sa.text(
+                "DELETE FROM role_menu_permissions WHERE menu_id = :menu_id"
+            ),
+            {"menu_id": menu_id},
+        )
+        connection.execute(
+            sa.text("DELETE FROM system_menus WHERE id = :menu_id"),
+            {"menu_id": menu_id},
+        )
+        connection.execute(
+            sa.text(
+                "UPDATE system_menus SET sort_order = 314 "
+                "WHERE public_id = 'menu_resources_accounts_export'"
+            )
+        )
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        menu = connection.execute(
+            sa.text(
+                "SELECT id, route_path, permission_key, enabled, visible "
+                "FROM system_menus "
+                "WHERE public_id = 'menu_resources_account_intake'"
+            )
+        ).mappings().one()
+        assert menu["route_path"] == "/resources/accounts/intake"
+        assert menu["permission_key"] == "resources.account_intake.read"
+        assert bool(menu["enabled"]) is True
+        assert bool(menu["visible"]) is True
+        granted_roles = set(
+            connection.execute(
+                sa.text(
+                    "SELECT user_groups.system_key "
+                    "FROM role_menu_permissions "
+                    "JOIN user_groups "
+                    "ON user_groups.id = role_menu_permissions.role_id "
+                    "WHERE role_menu_permissions.menu_id = :menu_id"
+                ),
+                {"menu_id": menu["id"]},
+            ).scalars()
+        )
+        expected_roles = set(
+            connection.execute(
+                sa.text(
+                    "SELECT system_key FROM user_groups "
+                    "WHERE system_key IN ('admin', 'operator')"
+                )
+            ).scalars()
+        )
+        assert expected_roles <= granted_roles
+    engine.dispose()
+
+
 def test_system_configuration_migration_adds_admin_only_menu_and_storage(
     tmp_path: Path,
 ) -> None:

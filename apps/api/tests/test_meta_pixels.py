@@ -119,11 +119,83 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
     )
     assert channel["effectiveConfig"]["route"]["mode"] == "node"
     assert channel["metaCapiEnabled"] is True
+    assert channel["metaCapiProbeReady"] is True
+    assert channel["metaDomainMonitored"] is True
+    assert channel["metaDomainBlocked"] is False
+
+    ledger_url = f"/api/promotion/channels/{channel['id']}/meta-deliveries"
+    probe = admin_client.post(
+        f"/api/promotion/channels/{channel['id']}/meta-capi-probe"
+    )
+    assert probe.status_code == 200, probe.text
+    probe_result = probe.json()["data"]
+    assert probe_result["ok"] is True
+    assert probe_result["eventName"] == "ParloqCapiProbe"
+    assert probe_result["eventId"].startswith("parloq-probe-")
+    assert probe_result["providerTraceId"] == "mock-probe"
+    assert admin_client.get(ledger_url).json()["data"]["total"] == 0
 
     public = admin_client.get(
         "/api/public/promotion/channels/meta-delivery-test"
     ).json()["data"]
     assert public["meta"]["browserEnabled"] is True
+    assert public["metaDomainReportUrl"].endswith(
+        "/meta-domain-unavailable"
+    )
+    unavailable = admin_client.post(
+        public["metaDomainReportUrl"],
+        content=json.dumps(
+            {
+                "sessionToken": public["sessionToken"],
+                "datasetId": public["meta"]["datasetId"],
+            }
+        ),
+        headers={"content-type": "text/plain;charset=UTF-8"},
+    )
+    assert unavailable.status_code == 200, unavailable.text
+    assert unavailable.json()["data"]["affectedChannels"] == 1
+    duplicate_unavailable = admin_client.post(
+        public["metaDomainReportUrl"],
+        content=json.dumps(
+            {
+                "sessionToken": public["sessionToken"],
+                "datasetId": public["meta"]["datasetId"],
+            }
+        ),
+        headers={"content-type": "text/plain;charset=UTF-8"},
+    )
+    assert duplicate_unavailable.json()["data"]["duplicate"] is True
+    monitored = admin_client.get(
+        f"/api/promotion/channels/{channel['id']}"
+    ).json()["data"]["channel"]
+    assert monitored["metaDomainBlocked"] is True
+    assert monitored["metaDomainBlockedAt"]
+
+    reset = admin_client.patch(
+        f"/api/promotion/channels/{channel['id']}",
+        json={"metaBrowserPixelEnabled": False},
+    )
+    assert reset.status_code == 200, reset.text
+    assert reset.json()["data"]["channel"]["metaDomainBlocked"] is False
+    assert reset.json()["data"]["channel"]["metaDomainMonitored"] is False
+    reenabled = admin_client.patch(
+        f"/api/promotion/channels/{channel['id']}",
+        json={"metaBrowserPixelEnabled": True},
+    )
+    assert reenabled.status_code == 200, reenabled.text
+    assert reenabled.json()["data"]["channel"]["metaDomainMonitored"] is True
+    stale_report = admin_client.post(
+        public["metaDomainReportUrl"],
+        content=json.dumps(
+            {
+                "sessionToken": public["sessionToken"],
+                "datasetId": "stale-dataset-id",
+            }
+        ),
+        headers={"content-type": "text/plain;charset=UTF-8"},
+    )
+    assert stale_report.status_code == 409
+
     event = {
         "eventType": "phone_submit",
         "idempotencyKey": "meta-lead-event-0001",
@@ -144,7 +216,6 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
     )
     assert duplicate.json()["data"]["duplicate"] is True
 
-    ledger_url = f"/api/promotion/channels/{channel['id']}/meta-deliveries"
     pending = admin_client.get(ledger_url).json()["data"]
     assert pending["total"] == 1
     assert pending["rows"][0]["eventName"] == "Lead"

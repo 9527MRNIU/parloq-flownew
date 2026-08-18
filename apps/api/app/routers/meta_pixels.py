@@ -9,13 +9,25 @@ from app.deps import CurrentUser, DbSession
 from app.entity_ids import identifier_filter
 from app.snowflake import new_public_id
 
-from app.models import MetaPixel
+from app.models import MetaPixel, PromotionChannel
 from app.schemas import MetaPixelCreate, MetaPixelUpdate
 from app.security import encrypt_secret, utcnow
 from app.serializers import meta_pixel_row
 
 
 router = APIRouter(prefix="/api/meta-pixels", tags=["meta-pixels"])
+
+
+def _reset_domain_monitoring(db: DbSession, pixel_id: int) -> None:
+    channels = db.scalars(
+        select(PromotionChannel).where(
+            PromotionChannel.pixel_id == pixel_id,
+            PromotionChannel.archived_at.is_(None),
+        )
+    ).all()
+    for channel in channels:
+        channel.meta_domain_blocked = False
+        channel.meta_domain_blocked_at = None
 
 
 def _pixel_or_404(db: DbSession, identifier: str, user) -> MetaPixel:
@@ -71,16 +83,23 @@ def update_pixel(
     current_user: CurrentUser,
 ) -> dict:
     pixel = _pixel_or_404(db, pixel_id, current_user)
+    monitoring_config_changed = False
     if payload.name is not None:
         pixel.name = payload.name
     if payload.dataset_id is not None:
+        monitoring_config_changed = pixel.dataset_id != payload.dataset_id
         pixel.dataset_id = payload.dataset_id
     if payload.enabled is not None:
+        monitoring_config_changed = (
+            monitoring_config_changed or pixel.enabled != payload.enabled
+        )
         pixel.enabled = payload.enabled
     if "capi_token" in payload.model_fields_set:
         token = (payload.capi_token or "").strip()
         pixel.capi_token_ciphertext = encrypt_secret(token) if token else None
         pixel.capi_token_last4 = token[-4:] if token else ""
+    if monitoring_config_changed:
+        _reset_domain_monitoring(db, pixel.id)
     try:
         db.commit()
     except IntegrityError:
@@ -95,5 +114,6 @@ def archive_pixel(pixel_id: str, db: DbSession, current_user: CurrentUser) -> di
     pixel = _pixel_or_404(db, pixel_id, current_user)
     pixel.enabled = False
     pixel.archived_at = utcnow()
+    _reset_domain_monitoring(db, pixel.id)
     db.commit()
     return {"data": {"ok": True}}

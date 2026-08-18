@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -101,6 +101,8 @@ export function ListPagination({
   onPageChange,
   onPageSizeChange,
   disabled,
+  ariaLabel = "列表分页",
+  className,
 }: {
   page: number;
   pageSize: number;
@@ -109,13 +111,21 @@ export function ListPagination({
   onPageChange: (page: number) => void;
   onPageSizeChange: (pageSize: number) => void;
   disabled?: boolean;
+  ariaLabel?: string;
+  className?: string;
 }) {
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const start = total ? (page - 1) * pageSize + 1 : 0;
   const end = Math.min(page * pageSize, total);
 
   return (
-    <div className="flex flex-col gap-3 rounded-xl border border-border/60 bg-card/40 px-3 py-2.5 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+    <nav
+      aria-label={ariaLabel}
+      className={cn(
+        "list-pagination flex flex-col gap-3 rounded-xl border border-border/60 bg-card/40 px-3 py-2.5 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between",
+        className,
+      )}
+    >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <strong className="font-medium text-foreground">
           {start}-{end} 条
@@ -173,6 +183,52 @@ export function ListPagination({
           <ChevronsRightIcon />
         </Button>
       </div>
-    </div>
+    </nav>
   );
+}
+
+export function useClientPagination<T>(
+  rows: T[],
+  options: {
+    initialPageSize?: number;
+    resetKey?: string;
+  } = {},
+) {
+  const { initialPageSize = 20, resetKey = "" } = options;
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSizeState] = useState(initialPageSize);
+  const total = rows.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const currentPage = Math.min(page, totalPages);
+
+  useEffect(() => {
+    setPage(1);
+  }, [resetKey]);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
+  const paginatedRows = useMemo(
+    () =>
+      rows.slice(
+        (currentPage - 1) * pageSize,
+        currentPage * pageSize,
+      ),
+    [currentPage, pageSize, rows],
+  );
+
+  const setPageSize = useCallback((value: number) => {
+    setPageSizeState(value);
+    setPage(1);
+  }, []);
+
+  return {
+    page: currentPage,
+    pageSize,
+    total,
+    rows: paginatedRows,
+    setPage,
+    setPageSize,
+  };
 }

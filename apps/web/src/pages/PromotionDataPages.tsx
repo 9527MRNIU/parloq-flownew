@@ -36,9 +36,11 @@ import {
   toast,
 } from "../components/ui";
 import {
+  ListPagination,
   ListTableCard,
   ListToolbar,
   StandardListPage,
+  useClientPagination,
 } from "../components/list-page";
 import {
   ChartContainer,
@@ -413,6 +415,9 @@ export function PromotionChannelStatisticsPage() {
         (!search || `${row.name} ${row.templateName}`.toLowerCase().includes(search)),
     );
   }, [channelId, countryCode, creatorId, keyword, report.rows, templateId]);
+  const pagination = useClientPagination(rows, {
+    resetKey: `${keyword}|${channelId}|${templateId}|${countryCode}|${creatorId}|${report.dateFrom}|${report.dateTo}`,
+  });
   function resetFilters() {
     setKeyword("");
     setChannelId("all");
@@ -548,6 +553,13 @@ export function PromotionChannelStatisticsPage() {
           </>
         }
       />
+      <ListPagination
+        page={pagination.page}
+        pageSize={pagination.pageSize}
+        total={pagination.total}
+        onPageChange={pagination.setPage}
+        onPageSizeChange={pagination.setPageSize}
+      />
       <ListTableCard>
         {report.loading ? (
           <div className="loading-state"><Spinner />正在加载渠道统计…</div>
@@ -570,7 +582,7 @@ export function PromotionChannelStatisticsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {rows.flatMap((row) => {
+                {pagination.rows.flatMap((row) => {
                   const open = expanded.includes(row.readKey);
                   const parent = (
                     <TableRow key={row.readKey}>
@@ -711,6 +723,9 @@ export function PromotionTrendPage() {
     requestRate: number(row.requestRate) * 100,
     successRate: number(row.successRate) * 100,
   }));
+  const pagination = useClientPagination(daily, {
+    resetKey: `${channelId}|${report.dateFrom}|${report.dateTo}`,
+  });
   const totals = {
     uv: number(report.summary.uv),
     leads: number(report.summary.leads),
@@ -752,6 +767,13 @@ export function PromotionTrendPage() {
             <ConversionFunnelPanel {...totals} />
             <ConversionTrendPanel rows={daily} />
           </div>
+          <ListPagination
+            page={pagination.page}
+            pageSize={pagination.pageSize}
+            total={pagination.total}
+            onPageChange={pagination.setPage}
+            onPageSizeChange={pagination.setPageSize}
+          />
           <ListTableCard>
             {daily.length ? (
               <Table>
@@ -766,7 +788,7 @@ export function PromotionTrendPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {daily.map((row) => (
+                  {pagination.rows.map((row) => (
                     <TableRow key={row.date}>
                       <TableCell><strong>{row.date}</strong></TableCell>
                       <TableCell className="tabular-nums">{number(row.uv).toLocaleString()}</TableCell>

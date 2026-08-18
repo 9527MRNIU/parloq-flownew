@@ -1,4 +1,5 @@
 import {
+  ActivityIcon,
   ArchiveIcon,
   BookOpenIcon,
   ChevronLeftIcon,
@@ -58,9 +59,11 @@ import {
   toast,
 } from "../components/ui";
 import {
+  ListPagination,
   ListTableCard,
   ListToolbar,
   StandardListPage,
+  useClientPagination,
 } from "../components/list-page";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
 import { DrawerFormSection } from "../components/drawer-form";
@@ -191,6 +194,10 @@ type PromotionChannel = {
   pixelName: string;
   metaBrowserPixelEnabled: boolean;
   metaCapiEnabled: boolean;
+  metaCapiProbeReady: boolean;
+  metaDomainMonitored: boolean;
+  metaDomainBlocked: boolean;
+  metaDomainBlockedAt: string;
   metaEventMapping: MetaEventMapping;
   inAppBrowserMode: "allow" | "guide_external";
   newAccountMarketingEnabled: boolean;
@@ -228,6 +235,34 @@ type MetaEventMapping = {
   pairing_started: string;
   pairing_verified: string;
 };
+type MetaCapiProbeResult = {
+  ok: boolean;
+  datasetId: string;
+  eventName: string;
+  eventId: string;
+  providerTraceId: string;
+  httpStatus?: number;
+  sendError: string;
+};
+type PairingFunnelStep = {
+  key: string;
+  count: number;
+  visitorRate: number;
+  stepRate: number;
+};
+type PairingFailureReason = {
+  code: string;
+  label: string;
+  count: number;
+  share: number;
+};
+const pairingFunnelLabels: Record<string, string> = {
+  visitors: "可识别访客",
+  phoneSubmitted: "提交号码",
+  checksPassed: "通过配对检查",
+  pairingStarted: "获得配对码",
+  verified: "验证成功",
+};
 const defaultMetaEventMapping: MetaEventMapping = {
   page_view: "PageView",
   phone_submit: "Lead",
@@ -260,7 +295,7 @@ type AdMetric = {
 };
 type TemplateProtectionMode = "basic" | "enhanced" | "strict";
 type TemplateDevtoolsAction = "log" | "block" | "blank";
-type TemplateDeviceSignals = "off" | "standard" | "enhanced";
+type TemplateDeviceSignals = "off" | "standard" | "enhanced" | "fingerprint";
 type TemplatePolicy = {
   protectionMode: TemplateProtectionMode;
   devtoolsAction: TemplateDevtoolsAction;
@@ -272,7 +307,7 @@ const defaultTemplatePolicy: TemplatePolicy = {
   protectionMode: "strict",
   devtoolsAction: "blank",
   lockViewportZoom: true,
-  deviceSignals: "enhanced",
+  deviceSignals: "fingerprint",
 };
 
 function templatePolicyRow(input: unknown): TemplatePolicy {
@@ -292,7 +327,7 @@ function templatePolicyRow(input: unknown): TemplatePolicy {
         row.lock_viewport_zoom ??
         defaultTemplatePolicy.lockViewportZoom,
     ),
-    deviceSignals: ["off", "standard", "enhanced"].includes(deviceSignals)
+    deviceSignals: ["off", "standard", "enhanced", "fingerprint"].includes(deviceSignals)
       ? (deviceSignals as TemplateDeviceSignals)
       : defaultTemplatePolicy.deviceSignals,
   };
@@ -370,6 +405,20 @@ function channelRow(input: unknown): PromotionChannel {
     ),
     metaCapiEnabled: Boolean(
       row.metaCapiEnabled ?? row.meta_capi_enabled ?? false,
+    ),
+    metaCapiProbeReady: Boolean(
+      row.metaCapiProbeReady ?? row.meta_capi_probe_ready ?? false,
+    ),
+    metaDomainMonitored: Boolean(
+      row.metaDomainMonitored ?? row.meta_domain_monitored ?? false,
+    ),
+    metaDomainBlocked: Boolean(
+      row.metaDomainBlocked ?? row.meta_domain_blocked ?? false,
+    ),
+    metaDomainBlockedAt: field(
+      row,
+      "metaDomainBlockedAt",
+      "meta_domain_blocked_at",
     ),
     metaEventMapping: {
       page_view: String(mapping.page_view ?? defaultMetaEventMapping.page_view),
@@ -802,6 +851,7 @@ export function PromotionTemplatesPage() {
         )
       : rows;
   }, [keyword, rows]);
+  const templatePagination = useClientPagination(visible, { resetKey: keyword });
   async function upload(event?: FormEvent) {
     event?.preventDefault();
     if (!file || !name.trim() || (replacing && !replacing.id)) return;
@@ -955,6 +1005,14 @@ export function PromotionTemplatesPage() {
           </>
         }
       />
+      <ListPagination
+        page={templatePagination.page}
+        pageSize={templatePagination.pageSize}
+        total={templatePagination.total}
+        disabled={loading}
+        onPageChange={templatePagination.setPage}
+        onPageSizeChange={templatePagination.setPageSize}
+      />
       <ListTableCard>
         {loading ? (
           <div className="loading-state">
@@ -974,7 +1032,7 @@ export function PromotionTemplatesPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {visible.map((row) => (
+              {templatePagination.rows.map((row) => (
                 <TableRow key={row.readKey}>
                   <TableCell>
                     <EntityPrimaryCell
@@ -1252,15 +1310,17 @@ export function PromotionTemplatesPage() {
                   { value: "off", label: "关闭" },
                   { value: "standard", label: "标准" },
                   { value: "enhanced", label: "增强" },
+                  { value: "fingerprint", label: "复合设备指纹" },
                 ]}
               />
               <small>
-                仅收集浏览器与设备环境、匿名关联信号，不采集 WhatsApp
+                复合设备指纹使用 Canvas、音频、字体、WebGL
+                等匿名哈希增强跨会话访客识别，不采集原始渲染数据、WhatsApp
                 号码或账号凭据。
               </small>
             </label>
             <div className="rounded-lg border border-amber-600/20 bg-amber-600/5 p-3 text-sm text-muted-foreground">
-              跨域访客关联和流量筛选属于推广渠道及平台侧能力，不属于模板策略，本页不提供虚构开关。
+              设备指纹由平台公共运行时统一采集，并在服务端按租户隔离；模板不能自行采集、保存或外传原始指纹信号。
             </div>
           </div>
         ) : null}
@@ -1349,10 +1409,20 @@ export function PromotionChannelsPage() {
     datasetId: "",
     capiToken: "",
   });
+  const [capiProbeOpen, setCapiProbeOpen] = useState(false);
+  const [capiProbePending, setCapiProbePending] = useState(false);
+  const [capiProbeChannelId, setCapiProbeChannelId] = useState("");
+  const [capiProbeResult, setCapiProbeResult] =
+    useState<MetaCapiProbeResult | null>(null);
   const [insightOpen, setInsightOpen] = useState(false);
   const [insightChannelId, setInsightChannelId] = useState("");
   const [insightLoading, setInsightLoading] = useState(false);
   const [insightStats, setInsightStats] = useState<Record<string, number>>({});
+  const [pairingFunnel, setPairingFunnel] = useState<PairingFunnelStep[]>([]);
+  const [pairingFailureTotal, setPairingFailureTotal] = useState(0);
+  const [pairingFailures, setPairingFailures] = useState<
+    PairingFailureReason[]
+  >([]);
   const [metaDeliverySummary, setMetaDeliverySummary] = useState<
     Record<string, number>
   >({});
@@ -1487,6 +1557,16 @@ export function PromotionChannelsPage() {
         )
       : rows;
   }, [keyword, rows]);
+  const channelPagination = useClientPagination(visible, { resetKey: keyword });
+  const pixelPagination = useClientPagination(pixels, {
+    resetKey: String(pixelDrawer),
+  });
+  const metricPagination = useClientPagination(metrics, {
+    resetKey: insightChannelId,
+  });
+  const leadPagination = useClientPagination(insightLeads, {
+    resetKey: insightChannelId,
+  });
   function open(row?: PromotionChannel) {
     if (row && !row.id) return;
     setEditing(row || null);
@@ -1604,6 +1684,9 @@ export function PromotionChannelsPage() {
     : protocolPools
   ).find((row) => row.id === form.protocolRouteId);
   const selectedPixel = pixels.find((row) => row.id === form.pixelId);
+  const capiProbeChannel = rows.find(
+    (row) => row.id === capiProbeChannelId,
+  );
   async function copyPublicUrl(value: string) {
     try {
       await navigator.clipboard.writeText(value);
@@ -1622,6 +1705,44 @@ export function PromotionChannelsPage() {
       await load();
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "操作失败");
+    }
+  }
+  async function probeCapi(row: PromotionChannel) {
+    if (!row.id) return;
+    setCapiProbeChannelId(row.id);
+    setCapiProbeResult(null);
+    setCapiProbeOpen(true);
+    setCapiProbePending(true);
+    try {
+      const response = object(
+        await apiRequest(
+          `/api/promotion/channels/${row.id}/meta-capi-probe`,
+          { method: "POST" },
+        ),
+      );
+      const result = object(response.data);
+      setCapiProbeResult({
+        ok: Boolean(result.ok),
+        datasetId: field(result, "datasetId"),
+        eventName: field(result, "eventName"),
+        eventId: field(result, "eventId"),
+        providerTraceId: field(result, "providerTraceId"),
+        httpStatus:
+          result.httpStatus == null ? undefined : Number(result.httpStatus),
+        sendError: field(result, "sendError"),
+      });
+    } catch (caught) {
+      setCapiProbeResult({
+        ok: false,
+        datasetId: "",
+        eventName: "ParloqCapiProbe",
+        eventId: "",
+        providerTraceId: "",
+        sendError:
+          caught instanceof Error ? caught.message : "CAPI 探测请求失败",
+      });
+    } finally {
+      setCapiProbePending(false);
     }
   }
   async function openInsights() {
@@ -1649,8 +1770,19 @@ export function PromotionChannelsPage() {
       statsData.stats ||
       statsData.summary ||
       statsData) as Record<string, unknown>;
+    const pairingFunnelData = object(statsData.pairingFunnel);
+    const pairingFailureData = object(statsData.pairingFailures);
+    const funnelSteps = Array.isArray(pairingFunnelData.steps)
+      ? pairingFunnelData.steps.map(object)
+      : [];
+    const failureReasons = Array.isArray(pairingFailureData.reasons)
+      ? pairingFailureData.reasons.map(object)
+      : [];
     setInsightStats({
       visits: Number(stats.visits ?? stats.pageView ?? stats.pageViews ?? 0),
+      visitors: Number(stats.uv ?? stats.visitors ?? 0),
+      fingerprintCoverageRate:
+        Number(stats.fingerprintCoverageRate ?? 0) * 100,
       completedVisits: Number(stats.visitEnd ?? stats.completedVisits ?? 0),
       leads: Number(
         stats.uniqueLeads ??
@@ -1661,6 +1793,23 @@ export function PromotionChannelsPage() {
       ),
       submissions: Number(stats.phoneSubmit ?? stats.phoneSubmits ?? 0),
     });
+    setPairingFunnel(
+      funnelSteps.map((step) => ({
+        key: field(step, "key"),
+        count: Number(step.count || 0),
+        visitorRate: Number(step.visitorRate || 0),
+        stepRate: Number(step.stepRate || 0),
+      })),
+    );
+    setPairingFailureTotal(Number(pairingFailureData.total || 0));
+    setPairingFailures(
+      failureReasons.map((reason) => ({
+        code: field(reason, "code"),
+        label: field(reason, "label") || "其他失败",
+        count: Number(reason.count || 0),
+        share: Number(reason.share || 0),
+      })),
+    );
     setInsightLeads(
       leadsPayload
         ? unwrapList<Record<string, unknown>>(leadsPayload).rows
@@ -1853,6 +2002,14 @@ export function PromotionChannelsPage() {
           </>
         }
       />
+      <ListPagination
+        page={channelPagination.page}
+        pageSize={channelPagination.pageSize}
+        total={channelPagination.total}
+        disabled={loading}
+        onPageChange={channelPagination.setPage}
+        onPageSizeChange={channelPagination.setPageSize}
+      />
       <ListTableCard>
         {loading ? (
           <div className="loading-state">
@@ -1868,13 +2025,14 @@ export function PromotionChannelsPage() {
                 <TableHead>账号入库分组</TableHead>
                 <TableHead>访问地址</TableHead>
                 <TableHead>Pixel</TableHead>
+                <TableHead>FB 域名状态</TableHead>
                 <TableHead>语言</TableHead>
                 <TableHead>上线时间</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {visible.map((row) => (
+              {channelPagination.rows.map((row) => (
                 <TableRow key={row.readKey}>
                   <TableCell>
                     <EntityPrimaryCell
@@ -1948,6 +2106,24 @@ export function PromotionChannelsPage() {
                     </div>
                   </TableCell>
                   <TableCell>
+                    <div className="cell-main">
+                      {!row.metaDomainMonitored ? (
+                        <Badge tone="neutral">未监测</Badge>
+                      ) : row.metaDomainBlocked ? (
+                        <Badge tone="danger">疑似受限</Badge>
+                      ) : (
+                        <Badge tone="success">正常</Badge>
+                      )}
+                      <span>
+                        {row.metaDomainBlockedAt
+                          ? `发现于 ${formatDateTime(row.metaDomainBlockedAt)}`
+                          : row.metaDomainMonitored
+                            ? "尚未发现 Meta 不可用提示"
+                            : "需绑定并启用浏览器 Pixel"}
+                      </span>
+                    </div>
+                  </TableCell>
+                  <TableCell>
                     {row.localeMode === "fixed" ? row.locale || "固定" : "自动"}
                   </TableCell>
                   <TableCell className="text-muted-foreground">
@@ -1965,6 +2141,17 @@ export function PromotionChannelsPage() {
                       </IconButton>
                       {canManage ? (
                         <>
+                          <IconButton
+                            label={
+                              row.metaCapiProbeReady
+                                ? "探测 Facebook CAPI 连通性"
+                                : "需先配置可用的 CAPI Token"
+                            }
+                            disabled={!row.metaCapiProbeReady}
+                            onClick={() => void probeCapi(row)}
+                          >
+                            <ActivityIcon size={16} />
+                          </IconButton>
                           <IconButton label="编辑" disabled={!row.id} onClick={() => open(row)}>
                             <PencilIcon size={16} />
                           </IconButton>
@@ -2382,6 +2569,81 @@ export function PromotionChannelsPage() {
         </div>
       </Drawer>
       <Drawer
+        open={capiProbeOpen}
+        onClose={() => !capiProbePending && setCapiProbeOpen(false)}
+        title="Facebook CAPI 连通性探测"
+        description={capiProbeChannel?.name || ""}
+        footer={
+          <>
+            <Button
+              variant="outline"
+              disabled={capiProbePending}
+              onClick={() => setCapiProbeOpen(false)}
+            >
+              关闭
+            </Button>
+            <Button
+              disabled={capiProbePending || !capiProbeChannel?.metaCapiProbeReady}
+              onClick={() =>
+                capiProbeChannel && void probeCapi(capiProbeChannel)
+              }
+            >
+              {capiProbePending ? <Spinner /> : <ActivityIcon size={16} />}
+              重新探测
+            </Button>
+          </>
+        }
+      >
+        {capiProbePending ? (
+          <div className="loading-state">
+            <Spinner />
+          </div>
+        ) : capiProbeResult ? (
+          <div className="drawer-form">
+            <div className="pixel-create-card">
+              <div className="flex items-center justify-between gap-3">
+                <strong>
+                  {capiProbeResult.ok ? "CAPI 连通正常" : "CAPI 探测失败"}
+                </strong>
+                <Badge tone={capiProbeResult.ok ? "success" : "danger"}>
+                  {capiProbeResult.ok ? "成功" : "失败"}
+                </Badge>
+              </div>
+              <small className="text-muted-foreground">
+                该探测会向 Meta 发送一次独立的 ParloqCapiProbe 事件，不写入正式投递账本。
+              </small>
+            </div>
+            <div className="channel-stat-grid">
+              <div>
+                <span>Dataset / Pixel ID</span>
+                <strong>{capiProbeResult.datasetId || "-"}</strong>
+              </div>
+              <div>
+                <span>HTTP 状态</span>
+                <strong>{capiProbeResult.httpStatus ?? "-"}</strong>
+              </div>
+              <div>
+                <span>探测事件</span>
+                <strong>{capiProbeResult.eventName || "-"}</strong>
+              </div>
+              <div>
+                <span>Meta Trace</span>
+                <strong>{capiProbeResult.providerTraceId || "-"}</strong>
+              </div>
+            </div>
+            <label className="field">
+              <span>事件 ID</span>
+              <Input readOnly value={capiProbeResult.eventId || "-"} />
+            </label>
+            {!capiProbeResult.ok ? (
+              <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+                {capiProbeResult.sendError || "Meta 未接受本次探测请求"}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </Drawer>
+      <Drawer
         open={pixelDrawer}
         onClose={() => !pixelPending && setPixelDrawer(false)}
         title="Meta Pixel 管理"
@@ -2437,9 +2699,17 @@ export function PromotionChannelsPage() {
             <strong>已配置 Pixel</strong>
             <span>{pixels.length}</span>
           </div>
+          <ListPagination
+            page={pixelPagination.page}
+            pageSize={pixelPagination.pageSize}
+            total={pixelPagination.total}
+            onPageChange={pixelPagination.setPage}
+            onPageSizeChange={pixelPagination.setPageSize}
+            ariaLabel="Meta Pixel 分页"
+          />
           {pixels.length ? (
             <div className="pixel-list">
-              {pixels.map((row) => (
+              {pixelPagination.rows.map((row) => (
                 <div key={row.readKey}>
                   <div>
                     <strong>{row.name}</strong>
@@ -2495,8 +2765,18 @@ export function PromotionChannelsPage() {
           <div className="drawer-form">
             <div className="channel-stat-grid">
               <div>
-                <span>页面访客</span>
+                <span>页面访问</span>
                 <strong>{insightStats.visits || 0}</strong>
+              </div>
+              <div>
+                <span>设备增强 UV</span>
+                <strong>{insightStats.visitors || 0}</strong>
+              </div>
+              <div>
+                <span>指纹覆盖率</span>
+                <strong>
+                  {(insightStats.fingerprintCoverageRate || 0).toFixed(1)}%
+                </strong>
               </div>
               <div>
                 <span>完整停留会话</span>
@@ -2511,6 +2791,49 @@ export function PromotionChannelsPage() {
                 <strong>{insightStats.submissions || 0}</strong>
               </div>
             </div>
+            <div className="binding-list-header">
+              <strong>配对转化漏斗</strong>
+              <span>按访客去重</span>
+            </div>
+            {pairingFunnel.length ? (
+              <div className="pairing-funnel-grid">
+                {pairingFunnel.map((step, index) => (
+                  <div key={step.key}>
+                    <span>
+                      {index + 1}. {pairingFunnelLabels[step.key] || step.key}
+                    </span>
+                    <strong>{step.count}</strong>
+                    <small>
+                      {index === 0
+                        ? "漏斗起点"
+                        : `上一步转化 ${(step.stepRate * 100).toFixed(1)}%`}
+                      {index > 0
+                        ? ` · 访问转化 ${(step.visitorRate * 100).toFixed(1)}%`
+                        : ""}
+                    </small>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="compact-empty">暂无配对漏斗数据。</div>
+            )}
+            <div className="binding-list-header">
+              <strong>主要流失原因</strong>
+              <span>{pairingFailureTotal}</span>
+            </div>
+            {pairingFailures.length ? (
+              <div className="pairing-failure-list">
+                {pairingFailures.map((reason) => (
+                  <div key={reason.code}>
+                    <strong>{reason.label}</strong>
+                    <span>{reason.count} 次</span>
+                    <small>{(reason.share * 100).toFixed(1)}%</small>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="compact-empty">当前没有配对失败记录。</div>
+            )}
             <div className="binding-list-header">
               <strong>Meta CAPI 投递账本</strong>
               <span>Browser / CAPI 使用相同 eventId 去重</span>
@@ -2530,9 +2853,17 @@ export function PromotionChannelsPage() {
                 </Button>
               ) : null}
             </div>
+            <ListPagination
+              page={metricPagination.page}
+              pageSize={metricPagination.pageSize}
+              total={metricPagination.total}
+              onPageChange={metricPagination.setPage}
+              onPageSizeChange={metricPagination.setPageSize}
+              ariaLabel="Facebook 日投放数据分页"
+            />
             {metrics.length ? (
               <div className="metric-list">
-                {metrics.map((metric) => (
+                {metricPagination.rows.map((metric) => (
                   <div key={metric.readKey}>
                     <strong>{metric.date}</strong>
                     <span>{metric.id || "等待 ID 迁移"}</span>
@@ -2570,9 +2901,17 @@ export function PromotionChannelsPage() {
               <strong>号码留资</strong>
               <span>{insightLeads.length}</span>
             </div>
+            <ListPagination
+              page={leadPagination.page}
+              pageSize={leadPagination.pageSize}
+              total={leadPagination.total}
+              onPageChange={leadPagination.setPage}
+              onPageSizeChange={leadPagination.setPageSize}
+              ariaLabel="渠道号码留资分页"
+            />
             {insightLeads.length ? (
               <div className="lead-list">
-                {insightLeads.map((lead, index) => (
+                {leadPagination.rows.map((lead, index) => (
                   <div key={String(lead.id || index)}>
                     <strong>
                       {formatPhoneDisplay(

@@ -154,7 +154,11 @@ def test_protocol_node_create_pool_and_template_contract(
         f"/api/protocol-nodes/{node['id']}",
         json={
             "rateLimitPolicy": {
-                "cancel": {"maxRequests": 6, "windowSeconds": 120}
+                "cancel": {"maxRequests": 6, "windowSeconds": 120},
+                "visitorAttempt": {
+                    "maxRequests": 8,
+                    "windowSeconds": 900,
+                },
             }
         },
     )
@@ -165,6 +169,10 @@ def test_protocol_node_create_pool_and_template_contract(
     assert updated_rate_policy["cancel"] == {
         "maxRequests": 6,
         "windowSeconds": 120,
+    }
+    assert updated_rate_policy["visitorAttempt"] == {
+        "maxRequests": 8,
+        "windowSeconds": 900,
     }
     assert updated_rate_policy["visitorCheck"]["maxRequests"] == 7
 

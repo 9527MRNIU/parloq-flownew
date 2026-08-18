@@ -8,6 +8,7 @@ import re
 import zipfile
 from datetime import timedelta
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -19,6 +20,7 @@ from app.models import (
     AccountProxyBinding,
     MessageDelivery,
     PersonalAccount,
+    PromotionEvent,
 )
 from app.routers.promotion import _localize_template_html
 from app.security import utcnow
@@ -27,6 +29,26 @@ from app.services.account_metadata_sync import (
     process_pending_account_metadata_sync_jobs,
 )
 from app.task_worker import process_task, recover_running_tasks
+
+
+def _device_fingerprint(**overrides: str) -> dict:
+    components = {
+        "canvas": "1" * 64,
+        "audio": "2" * 64,
+        "fonts": "3" * 64,
+        "webgl": "4" * 64,
+        "hardware": "5" * 64,
+        "math": "6" * 64,
+        "system": "7" * 64,
+        **overrides,
+    }
+    return {
+        "version": "device-fingerprint/v1",
+        "profile": "chromium",
+        "components": components,
+        "availability": {key: "ok" for key in components},
+        "elapsedMs": 125,
+    }
 
 
 def _zip(files: dict[str, str]) -> bytes:
@@ -324,7 +346,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     assert "promotionPreviewPolls" not in preview.text
     assert "nextPollAfterMs:1000" in preview.text
     assert '"templatePolicy": {' in preview.text
-    assert '"deviceSignals": "enhanced"' in preview.text
+    assert '"deviceSignals": "fingerprint"' in preview.text
     assert "window.PromotionBridge" in preview.text
     assert 'addEventListener("contextmenu"' in preview.text
     assert 'e.key==="F12"' in preview.text
@@ -407,29 +429,72 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
         "eventType": "page_view",
         "idempotencyKey": "page-view-event-0001",
         "sessionToken": session_token,
+        "visitorId": "visitor-fingerprint-0001",
+        "deviceFingerprint": _device_fingerprint(),
     }
     assert admin_client.post(
         "/api/public/promotion/channels/de-facebook-demo/events", json=page_view
     ).status_code == 200
+    delayed_page_view = {
+        "eventType": "page_view",
+        "idempotencyKey": "page-view-event-0002",
+        "sessionToken": session_token,
+        "visitorId": "visitor-fingerprint-0001",
+    }
+    assert admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/events",
+        json=delayed_page_view,
+    ).status_code == 200
+    enriched_page_view = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/events",
+        json={
+            **delayed_page_view,
+            "deviceFingerprint": _device_fingerprint(),
+        },
+    )
+    assert enriched_page_view.status_code == 200
+    assert enriched_page_view.json()["data"]["duplicate"] is True
     lead = {
         "eventType": "phone_submit",
         "idempotencyKey": "phone-lead-event-0001",
         "sessionToken": session_token,
+        "visitorId": "visitor-fingerprint-0001",
         "phone": "+49 151 23456789",
+        "deviceFingerprint": _device_fingerprint(),
     }
     first = admin_client.post(
         "/api/public/promotion/channels/de-facebook-demo/events", json=lead
     )
     assert first.status_code == 200
+    assert first.json()["data"]["deviceToken"].startswith("df1.")
     duplicate = admin_client.post(
         "/api/public/promotion/channels/de-facebook-demo/events", json=lead
     )
     assert duplicate.json()["data"]["duplicate"] is True
+    assert duplicate.json()["data"]["deviceToken"].startswith("df1.")
+    with SessionLocal() as db:
+        fingerprint_event = db.scalar(
+            select(PromotionEvent).where(
+                PromotionEvent.idempotency_key == "phone-lead-event-0001"
+            )
+        )
+        assert fingerprint_event is not None
+        assert len(fingerprint_event.visitor_fingerprint_hash or "") == 64
+        assert fingerprint_event.fingerprint_version == "device-fingerprint/v1"
+        assert fingerprint_event.fingerprint_quality == "high"
+        assert "components" not in fingerprint_event.metadata_json[
+            "deviceFingerprint"
+        ]
     leads = admin_client.get(f"/api/promotion/channels/{channel_id}/leads").json()["data"]
     assert leads["total"] == 1
     assert leads["rows"][0]["phone"] == "+4915123456789"
     stats = admin_client.get(f"/api/promotion/channels/{channel_id}/stats").json()["data"]
-    assert stats["totals"]["pageView"] == 1
+    assert stats["totals"]["pageView"] == 2
+    assert stats["totals"]["uv"] == 1
+    assert stats["totals"]["browserUv"] == 1
+    assert stats["totals"]["fingerprintUv"] == 1
+    assert stats["totals"]["fingerprintCoverage"] == 2
+    assert stats["totals"]["fingerprintCoverageRate"] == 1
     assert stats["totals"]["phoneSubmit"] == 1
     policy = admin_client.patch(
         "/api/promotion/template-policy",
@@ -489,15 +554,22 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     assert locale_asset.json()["title"] == "Hallo"
     tracker = admin_client.get("/api/public/promotion/tracker.js")
     assert "connect.facebook.net/en_US/fbevents.js" in tracker.text
-    assert 'fireMeta("phone_submit",eventId)' in tracker.text
-    assert "meta.eventMapping" in tracker.text
+    assert "meta-domain-unavailable" in render.text
+    assert "is unavailable" in tracker.text
+    assert "phone_submit" in tracker.text
     assert "getPairingStatus" in tracker.text
     assert "pairingStartUrl" in tracker.text
     assert "pairing_start_failed" in tracker.text
     assert "form[data-promotion-manual]" in tracker.text
     assert "parloq" not in tracker.text.lower()
-    assert 'send("page_view",{metadata:{deviceSignals:signals()}},pageEventId)' in tracker.text
-    assert '"inspection_detected"' in tracker.text
+    assert "page_view" in tracker.text
+    assert "inspection_detected" in tracker.text
+    assert "device-fingerprint/v1" in tracker.text
+    assert "deviceFingerprint" in tracker.text
+    assert "deviceToken" in tracker.text
+    assert "OfflineAudioContext" in tracker.text
+    assert "Random Text WMwmil10Oo" in tracker.text
+    assert tracker.headers["x-content-type-options"] == "nosniff"
     guard = admin_client.get("/api/public/promotion/guard.js")
     assert guard.status_code == 200
     assert 'addEventListener("contextmenu"' in guard.text
@@ -746,12 +818,41 @@ def test_personal_account_gateway_and_hyperlink_delivery(
     public_config = admin_client.get(
         "/api/public/promotion/channels/de-facebook-demo"
     ).json()["data"]
+    enabled_fingerprint = admin_client.patch(
+        "/api/promotion/template-policy",
+        json={"deviceSignals": "fingerprint"},
+    )
+    assert enabled_fingerprint.status_code == 200, enabled_fingerprint.text
+    fingerprint_event = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/events",
+        json={
+            "eventType": "phone_submit",
+            "idempotencyKey": "landing-fingerprint-event-0001",
+            "phone": "+4915123456790",
+            "visitorId": "landing-visitor-0001",
+            "sessionToken": public_config["sessionToken"],
+            "deviceFingerprint": _device_fingerprint(),
+        },
+    )
+    assert fingerprint_event.status_code == 200, fingerprint_event.text
+    device_token = fingerprint_event.json()["data"]["deviceToken"]
+    rejected_device_token = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/pairing/start",
+        json={
+            "phone": "+4915123456790",
+            "visitorId": "landing-visitor-0001",
+            "sessionToken": public_config["sessionToken"],
+            "deviceToken": f"{device_token}x",
+        },
+    )
+    assert rejected_device_token.status_code == 403
     landing_pair = admin_client.post(
         "/api/public/promotion/channels/de-facebook-demo/pairing/start",
         json={
             "phone": "+4915123456790",
             "visitorId": "landing-visitor-0001",
             "sessionToken": public_config["sessionToken"],
+            "deviceToken": device_token,
         },
     )
     assert landing_pair.status_code == 200, landing_pair.text
@@ -768,6 +869,9 @@ def test_personal_account_gateway_and_hyperlink_delivery(
         assert attempt.protocol_node_id == original_protocol_id
         assert attempt.route_version >= 1
         assert attempt.sync_policy_json["avatar"] is True
+        assert len(attempt.visitor_fingerprint_hash or "") == 64
+        assert attempt.fingerprint_version == "device-fingerprint/v1"
+        assert attempt.fingerprint_quality == "high"
     assert pairing["pairingCode"] == "0000-0000"
     pairing_preflight = admin_client.options(
         pairing["statusUrl"],
@@ -1119,8 +1223,197 @@ def test_landing_pairing_failure_stays_in_intake_records(
     assert intake["total"] == 1
     attempt = intake["rows"][0]
     assert attempt["status"] == "failed"
+    assert attempt["failureReason"] == {
+        "code": "gateway_failed",
+        "label": "网关失败",
+        "detailCode": "pairing_start_failed",
+        "providerCode": None,
+    }
     assert attempt["account"]["admissionStatus"] == "abandoned"
     assert attempt["account"]["validationStatus"] == "failed"
+
+
+def test_pre_attempt_protocol_failure_uses_promotion_event_ledger(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
+    public_config = admin_client.get(
+        "/api/public/promotion/channels/de-facebook-demo"
+    ).json()["data"]
+
+    def unavailable_protocol(*_args, **_kwargs):
+        raise HTTPException(status_code=409, detail="协议池中没有可接入节点")
+
+    monkeypatch.setattr(
+        "app.services.protocol_nodes.resolve_channel_ingress_protocol",
+        unavailable_protocol,
+    )
+    failed = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/pairing/start",
+        json={
+            "phone": "+4915123456801",
+            "visitorId": "protocol-failure-visitor-0001",
+            "sessionToken": public_config["sessionToken"],
+        },
+    )
+    assert failed.status_code == 409, failed.text
+    assert failed.json()["error"] == {
+        "code": "protocol_unavailable",
+        "message": "当前没有可用的协议节点，请稍后再试",
+        "retryable": True,
+    }
+
+    with SessionLocal() as db:
+        failure = db.scalar(
+            select(PromotionEvent).where(
+                PromotionEvent.visitor_id == "protocol-failure-visitor-0001",
+                PromotionEvent.event_type == "pairing_failed",
+            )
+        )
+        assert failure is not None
+        assert failure.metadata_json["reasonCode"] == "protocol_unavailable"
+        assert failure.metadata_json["detailCode"] == "protocol_route_unavailable"
+        assert failure.metadata_json["stage"] == "protocol_routing"
+        assert (
+            db.scalar(
+                select(AccountPairingAttempt).where(
+                    AccountPairingAttempt.visitor_id
+                    == "protocol-failure-visitor-0001"
+                )
+            )
+            is None
+        )
+
+    stats = admin_client.get(
+        f"/api/promotion/channels/{public_config['channel']['id']}/stats"
+    )
+    assert stats.status_code == 200, stats.text
+    reasons = stats.json()["data"]["pairingFailures"]["reasons"]
+    protocol_reason = next(
+        reason for reason in reasons if reason["code"] == "protocol_unavailable"
+    )
+    assert protocol_reason["label"] == "协议节点不可用"
+    assert protocol_reason["count"] >= 1
+
+
+def test_invalid_phone_and_rate_limit_are_safe_recorded_failures(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
+    public_config = admin_client.get(
+        "/api/public/promotion/channels/de-facebook-demo"
+    ).json()["data"]
+    invalid_phone = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/pairing/start",
+        json={
+            "phone": "not-a-phone",
+            "visitorId": "invalid-phone-visitor-0001",
+            "sessionToken": public_config["sessionToken"],
+        },
+    )
+    assert invalid_phone.status_code == 422, invalid_phone.text
+    assert invalid_phone.json()["error"]["code"] == "invalid_phone"
+
+    from app.services.pairing_rate_limits import PairingRateLimitDecision
+
+    monkeypatch.setattr(
+        "app.services.pairing_rate_limits.consume_pairing_rate_limits",
+        lambda *_args, **_kwargs: PairingRateLimitDecision(
+            allowed=False,
+            retry_after_seconds=17,
+            policy_key="visitorCheck",
+            limit=5,
+        ),
+    )
+    rate_limited = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/pairing/start",
+        json={
+            "phone": "+4915123456803",
+            "visitorId": "rate-limit-visitor-0001",
+            "sessionToken": public_config["sessionToken"],
+        },
+    )
+    assert rate_limited.status_code == 429, rate_limited.text
+    assert rate_limited.json()["error"] == {
+        "code": "rate_limited",
+        "message": "绑定请求过于频繁，请稍后再试",
+        "retryable": True,
+        "retryAfterSeconds": 17,
+    }
+    assert rate_limited.headers["retry-after"] == "17"
+
+    with SessionLocal() as db:
+        failures = {
+            event.visitor_id: event.metadata_json
+            for event in db.scalars(
+                select(PromotionEvent).where(
+                    PromotionEvent.visitor_id.in_(
+                        (
+                            "invalid-phone-visitor-0001",
+                            "rate-limit-visitor-0001",
+                        )
+                    ),
+                    PromotionEvent.event_type == "pairing_failed",
+                )
+            ).all()
+        }
+    assert failures["invalid-phone-visitor-0001"]["reasonCode"] == "invalid_phone"
+    assert failures["rate-limit-visitor-0001"]["reasonCode"] == "rate_limited"
+    assert failures["rate-limit-visitor-0001"]["policyKey"] == "visitorCheck"
+
+
+def test_channel_stats_combines_events_and_attempts_into_pairing_funnel(
+    admin_client: TestClient,
+) -> None:
+    public_config = admin_client.get(
+        "/api/public/promotion/channels/de-facebook-demo"
+    ).json()["data"]
+    visitor_id = "pairing-funnel-visitor-0001"
+    event = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/events",
+        json={
+            "eventType": "phone_submit",
+            "idempotencyKey": "pairing-funnel-submit-0001",
+            "phone": "+4915123456802",
+            "visitorId": visitor_id,
+            "sessionToken": public_config["sessionToken"],
+        },
+    )
+    assert event.status_code == 200, event.text
+    started = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/pairing/start",
+        json={
+            "phone": "+4915123456802",
+            "visitorId": visitor_id,
+            "sessionToken": public_config["sessionToken"],
+        },
+    )
+    assert started.status_code == 200, started.text
+    pairing = started.json()["data"]["pairing"]
+    verified = admin_client.get(
+        pairing["statusUrl"],
+        headers={"Authorization": f"Bearer {pairing['statusToken']}"},
+    )
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["data"]["pairingStatus"] == "verified"
+
+    stats = admin_client.get(
+        f"/api/promotion/channels/{public_config['channel']['id']}/stats"
+    )
+    assert stats.status_code == 200, stats.text
+    funnel = stats.json()["data"]["pairingFunnel"]["steps"]
+    assert [step["key"] for step in funnel] == [
+        "visitors",
+        "phoneSubmitted",
+        "checksPassed",
+        "pairingStarted",
+        "verified",
+    ]
+    counts = [step["count"] for step in funnel]
+    assert counts == sorted(counts, reverse=True)
+    assert counts[-1] >= 1
+    assert all(0 <= step["visitorRate"] <= 1 for step in funnel)
+    assert all(0 <= step["stepRate"] <= 1 for step in funnel)
 
 
 def test_legacy_unverified_landing_pairing_can_request_a_fresh_code(

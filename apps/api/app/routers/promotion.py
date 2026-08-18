@@ -12,6 +12,7 @@ import re
 import secrets
 import stat
 import zipfile
+from collections import Counter
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
@@ -30,6 +31,7 @@ from app.business_schemas import (
     AdMetricImport,
     AdMetricInput,
     AdMetricUpdate,
+    MetaDomainUnavailableInput,
     PromotionChannelCreate,
     PromotionChannelUpdate,
     PromotionEventInput,
@@ -63,6 +65,11 @@ from app.models import (
 )
 from app.security import utcnow
 from app.serializers import iso
+from app.services.pairing_observability import (
+    PAIRING_FAILURE_LABELS,
+    canonical_pairing_failure_reason,
+    persist_pairing_failure_event,
+)
 from app.validation import parse_public_datetime, validate_structured_json
 
 
@@ -92,7 +99,6 @@ MAX_LOCALIZED_COPY_VALUE = 8_000
 PUBLIC_RUNTIME_DIR = Path(__file__).resolve().parents[1] / "public"
 
 
-TRACKER_JS = r'''(()=>{const node=document.getElementById("promotion-runtime-config");if(!node)return;let c={};try{c=JSON.parse(node.textContent||"{}")}catch{return}const started=Date.now(),id=()=>crypto.randomUUID(),policy=c.templatePolicy||{},meta=c.meta||{},mapping=meta.eventMapping||{};let visitor;try{visitor=localStorage.getItem("promotion_visitor_id")||id();localStorage.setItem("promotion_visitor_id",visitor)}catch{visitor=id()}const seenMeta=eventId=>{const key=`promotion_meta_event:${eventId}`;try{if(sessionStorage.getItem(key))return true;sessionStorage.setItem(key,"1")}catch{}return false},fireMeta=(eventKey,eventId)=>{const name=mapping[eventKey];if(!window.fbq||!name||!eventId||seenMeta(eventId))return;window.fbq("track",name,{}, {eventID:eventId})};if(meta.browserEnabled&&meta.datasetId&&/^[A-Za-z0-9_.:-]{1,120}$/.test(meta.datasetId)){const f=window.fbq=function(){f.callMethod?f.callMethod.apply(f,arguments):f.queue.push(arguments)};if(!window._fbq)window._fbq=f;f.push=f;f.loaded=true;f.version="2.0";f.queue=[];const s=document.createElement("script");s.async=true;s.src="https://connect.facebook.net/en_US/fbevents.js";document.head.appendChild(s);f("init",meta.datasetId)}const body=(eventType,eventId,extra={})=>JSON.stringify({eventType,idempotencyKey:eventId,visitorId:visitor,sessionToken:c.sessionToken,...extra}),send=(eventType,extra={},eventId=id())=>fetch(c.eventUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:body(eventType,eventId,extra),keepalive:true}),signals=()=>{if(policy.deviceSignals==="off")return{};const base={language:navigator.language,timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,viewport:[innerWidth,innerHeight],screen:[screen.width,screen.height],pixelRatio:devicePixelRatio,touchPoints:navigator.maxTouchPoints||0};if(policy.deviceSignals==="enhanced")Object.assign(base,{platform:navigator.platform||"",hardwareConcurrency:navigator.hardwareConcurrency||null,deviceMemory:navigator.deviceMemory||null,colorDepth:screen.colorDepth||null,userAgent:navigator.userAgent});return base},readMetaEvent=async response=>{try{const value=await response.clone().json(),event=value?.data?.metaEvent;if(event?.name&&event?.eventId&&!seenMeta(event.eventId)&&window.fbq)window.fbq("track",event.name,{}, {eventID:event.eventId})}catch{}return response},fail=async(response,fallback)=>{let value={};try{value=await response.clone().json()}catch{}const info=value?.error||{},message=info.message||value?.detail||fallback,error=new Error(message);error.name="AccountLinkError";error.code=info.code||fallback;error.retryable=Boolean(info.retryable);error.status=response.status;throw error},pairingHeaders=pairing=>({Authorization:`Bearer ${pairing.statusToken}`});const bridge=window.PromotionBridge=window.PromotionBridge||{};bridge.version="promotion-browser-bridge/v2";bridge.submitPhone=async(phone,metadata={})=>{if(window.__promotionInspectionBlocked)throw new Error("inspection_blocked");const eventId=id();fireMeta("phone_submit",eventId);const tracked=await send("phone_submit",{phone,metadata},eventId);if(!tracked.ok)return fail(tracked,"phone_submit_failed");const paired=await fetch(c.pairingStartUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body:JSON.stringify({phone,visitorId:visitor,sessionToken:c.sessionToken})});if(!paired.ok)return fail(paired,"pairing_start_failed");return readMetaEvent(paired)};bridge.getPairingStatus=async pairing=>readMetaEvent(await fetch(pairing.statusUrl,{method:"GET",headers:pairingHeaders(pairing),cache:"no-store"}));bridge.cancelPairing=pairing=>fetch(pairing.cancelUrl,{method:"POST",headers:pairingHeaders(pairing)});const pageEventId=id();fireMeta("page_view",pageEventId);send("page_view",{metadata:{deviceSignals:signals()}},pageEventId).catch(()=>{});if(c.inAppBrowserMode==="guide_external"&&/(FBAN|FBAV|Instagram)/i.test(navigator.userAgent))dispatchEvent(new CustomEvent("promotion:in-app-browser",{detail:{mode:"guide_external"}}));addEventListener("promotion:inspection-detected",e=>send("inspection_detected",{metadata:e.detail||{}}).catch(()=>{}));document.addEventListener("submit",e=>{if(e.target.matches("form[data-promotion-manual]"))return;const p=e.target.querySelector('input[type="tel"],input[name*="phone" i]');if(p&&p.value)bridge.submitPhone(p.value).catch(()=>{})});addEventListener("pagehide",()=>{const eventId=id();navigator.sendBeacon(c.eventUrl,new Blob([body("visit_end",eventId,{metadata:{durationMs:Math.max(0,Date.now()-started)}})],{type:"text/plain;charset=UTF-8"}))})})();'''
 
 
 # Conversion-page display rules and interaction hardening are platform-owned so
@@ -104,7 +110,7 @@ DEFAULT_TEMPLATE_POLICY = {
     "protectionMode": "strict",
     "devtoolsAction": "blank",
     "lockViewportZoom": True,
-    "deviceSignals": "enhanced",
+    "deviceSignals": "fingerprint",
     "updatedAt": None,
 }
 
@@ -284,6 +290,46 @@ def _pairing_rate_limit_unavailable_response() -> JSONResponse:
     )
 
 
+def _recorded_pairing_failure_response(
+    db: DbSession,
+    channel: PromotionChannel,
+    *,
+    visitor_id: str,
+    traffic_source: str,
+    code: str,
+    message: str,
+    status_code: int,
+    stage: str,
+    device_identity=None,
+    detail_code: str | None = None,
+    retryable: bool = False,
+    retry_after_seconds: int | None = None,
+    metadata: dict | None = None,
+) -> JSONResponse:
+    persist_pairing_failure_event(
+        db,
+        channel=channel,
+        visitor_id=visitor_id,
+        reason_code=code,
+        detail_code=detail_code or code,
+        stage=stage,
+        traffic_source=traffic_source,
+        fingerprint_hash=(
+            device_identity.fingerprint_hash if device_identity else None
+        ),
+        fingerprint_version=(device_identity.version if device_identity else None),
+        fingerprint_quality=(device_identity.quality if device_identity else None),
+        extra=metadata,
+    )
+    return _public_pairing_error(
+        status_code,
+        code,
+        message,
+        retryable=retryable,
+        retry_after_seconds=retry_after_seconds,
+    )
+
+
 def _template(db: DbSession, identifier: str, user) -> PromotionTemplate:
     statement = select(PromotionTemplate).where(identifier_filter(PromotionTemplate, identifier), PromotionTemplate.archived_at.is_(None))
     if user.role != "admin": statement = statement.where(PromotionTemplate.created_by == user.id)
@@ -319,6 +365,10 @@ def channel_row(db: DbSession, item: PromotionChannel) -> dict:
     from app.services.protocol_nodes import protocol_health
 
     manifest = template.manifest_json if template else {}
+    pixel_ready = bool(pixel and pixel.enabled and pixel.archived_at is None)
+    meta_domain_monitored = bool(
+        hostname and item.meta_browser_pixel_enabled and pixel_ready
+    )
     if protocol_node is not None:
         route_health, route_reason = protocol_health(db, protocol_node)
         route_mode = "node"
@@ -367,6 +417,10 @@ def channel_row(db: DbSession, item: PromotionChannel) -> dict:
         "routeVersion": item.route_version,
         "metaBrowserPixelEnabled": item.meta_browser_pixel_enabled,
         "metaCapiEnabled": item.meta_capi_enabled,
+        "metaCapiProbeReady": bool(pixel_ready and pixel.capi_token_ciphertext),
+        "metaDomainMonitored": meta_domain_monitored,
+        "metaDomainBlocked": bool(item.meta_domain_blocked),
+        "metaDomainBlockedAt": iso(item.meta_domain_blocked_at),
         "metaEventMapping": normalized_meta_event_mapping(item.meta_event_mapping_json),
         "inAppBrowserMode": item.in_app_browser_mode,
         "newAccountMarketingEnabled": item.new_account_marketing_enabled,
@@ -1138,7 +1192,14 @@ def get_channel(channel_id: str, db: DbSession, current_user: CurrentUser) -> di
 
 @router.patch("/api/promotion/channels/{channel_id}")
 def update_channel(channel_id: str, payload: PromotionChannelUpdate, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _channel(db, channel_id, current_user); tpl, dom, pix = _resolve_channel_refs(db, current_user, payload.template_id, payload.domain_id if "domain_id" in payload.model_fields_set else None, payload.pixel_id if "pixel_id" in payload.model_fields_set else None, item)
+    item = _channel(db, channel_id, current_user)
+    monitored_config_before = (
+        item.domain_id,
+        item.subdomain_prefix,
+        item.pixel_id,
+        item.meta_browser_pixel_enabled,
+    )
+    tpl, dom, pix = _resolve_channel_refs(db, current_user, payload.template_id, payload.domain_id if "domain_id" in payload.model_fields_set else None, payload.pixel_id if "pixel_id" in payload.model_fields_set else None, item)
     if payload.name is not None: item.name = payload.name
     if payload.country_code is not None: item.country_code = payload.country_code
     if payload.slug is not None: item.slug = payload.slug
@@ -1170,6 +1231,15 @@ def update_channel(channel_id: str, payload: PromotionChannelUpdate, db: DbSessi
         item.new_account_marketing_enabled = payload.new_account_marketing_enabled
     if item.pixel_id is None:
         item.meta_browser_pixel_enabled = False
+    monitored_config_after = (
+        item.domain_id,
+        item.subdomain_prefix,
+        item.pixel_id,
+        item.meta_browser_pixel_enabled,
+    )
+    if monitored_config_after != monitored_config_before:
+        item.meta_domain_blocked = False
+        item.meta_domain_blocked_at = None
     if "account_group_id" in payload.model_fields_set:
         item.account_group_id = (
             _resolve_channel_account_group(
@@ -1227,6 +1297,47 @@ def update_channel(channel_id: str, payload: PromotionChannelUpdate, db: DbSessi
 @router.delete("/api/promotion/channels/{channel_id}")
 def archive_channel(channel_id: str, db: DbSession, current_user: CurrentUser) -> dict:
     item = _channel(db, channel_id, current_user); item.status = "archived"; item.archived_at = utcnow(); db.commit(); return {"data": {"ok": True}}
+
+
+@router.post("/api/promotion/channels/{channel_id}/meta-capi-probe")
+def probe_channel_meta_capi(
+    channel_id: str,
+    request: Request,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    channel = _channel(db, channel_id, current_user)
+    pixel = db.get(MetaPixel, channel.pixel_id) if channel.pixel_id else None
+    if (
+        pixel is None
+        or not pixel.enabled
+        or pixel.archived_at is not None
+        or not pixel.capi_token_ciphertext
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="当前渠道未绑定可用且已配置 CAPI Token 的 Meta Pixel",
+        )
+    domain = db.get(DomainRecord, channel.domain_id) if channel.domain_id else None
+    hostname = _channel_hostname(channel, domain)
+    source_url = (
+        f"https://{hostname}/{channel.slug}"
+        if hostname
+        else str(request.base_url).rstrip("/")
+        + f"/api/public/promotion/channels/{channel.slug}/render"
+    )
+    from app.services.meta_conversions import probe_meta_conversion
+
+    try:
+        result = probe_meta_conversion(
+            channel=channel,
+            pixel=pixel,
+            request=request,
+            event_source_url=source_url,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return {"data": result}
 
 
 @router.get("/api/promotion/channels/{channel_id}/meta-deliveries")
@@ -1568,7 +1679,7 @@ def public_channel(slug: str, request: Request, db: DbSession, lang: str | None 
     from app.services.meta_conversions import normalized_meta_event_mapping
     policy = _runtime_template_policy(db, item.created_by)
     resolved, default, supported = _resolved_locale(item, tpl, lang)
-    return {"data": {"channel": {"id": entity_id(item), "type": item.channel_type, "name": item.name, "countryCode": item.country_code, "slug": item.slug, "localeMode": item.locale_mode}, "template": {"id": entity_id(tpl), "version": tpl.version, "manifest": tpl.manifest_json}, "templatePolicy": policy, "meta": {"datasetId": pixel.dataset_id if pixel else None, "browserEnabled": bool(pixel and item.meta_browser_pixel_enabled), "capiEnabled": bool(pixel and item.meta_capi_enabled), "eventMapping": normalized_meta_event_mapping(item.meta_event_mapping_json)}, "inAppBrowserMode": item.in_app_browser_mode, "countryCode": item.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "renderUrl": f"/api/public/promotion/channels/{slug}/render", "fissionRenderUrl": f"/api/public/promotion/channels/{slug}/fission/render", "assetBaseUrl": f"/api/public/promotion/channels/{slug}/assets/", "eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "sessionToken": token, "sessionExpiresIn": 1800, "rateLimitPolicy": "reserved", "serverTimestamp": utcnow().isoformat()}}
+    return {"data": {"channel": {"id": entity_id(item), "type": item.channel_type, "name": item.name, "countryCode": item.country_code, "slug": item.slug, "localeMode": item.locale_mode}, "template": {"id": entity_id(tpl), "version": tpl.version, "manifest": tpl.manifest_json}, "templatePolicy": policy, "meta": {"datasetId": pixel.dataset_id if pixel else None, "browserEnabled": bool(pixel and item.meta_browser_pixel_enabled), "capiEnabled": bool(pixel and item.meta_capi_enabled), "eventMapping": normalized_meta_event_mapping(item.meta_event_mapping_json)}, "inAppBrowserMode": item.in_app_browser_mode, "countryCode": item.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "renderUrl": f"/api/public/promotion/channels/{slug}/render", "fissionRenderUrl": f"/api/public/promotion/channels/{slug}/fission/render", "assetBaseUrl": f"/api/public/promotion/channels/{slug}/assets/", "eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "metaDomainReportUrl": f"/api/public/promotion/channels/{slug}/meta-domain-unavailable", "sessionToken": token, "sessionExpiresIn": 1800, "rateLimitPolicy": "reserved", "serverTimestamp": utcnow().isoformat()}}
 
 
 def _render_html(
@@ -1589,7 +1700,7 @@ def _render_html(
     html = _localize_template_html(html, resolved, localized_copy)
     from app.services.meta_conversions import normalized_meta_event_mapping
 
-    config = json.dumps({"eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "sessionToken": _session_token(channel, traffic_source), "trafficSource": traffic_source, "countryCode": channel.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "localizedCopy": localized_copy, "pixelDatasetId": pixel_dataset_id, "meta": {"datasetId": pixel_dataset_id, "browserEnabled": bool(pixel_dataset_id and channel.meta_browser_pixel_enabled), "eventMapping": normalized_meta_event_mapping(channel.meta_event_mapping_json)}, "inAppBrowserMode": channel.in_app_browser_mode, "templatePolicy": template_policy or {}}, ensure_ascii=False).replace("<", "\\u003c")
+    config = json.dumps({"eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "metaDomainReportUrl": f"/api/public/promotion/channels/{slug}/meta-domain-unavailable", "sessionToken": _session_token(channel, traffic_source), "trafficSource": traffic_source, "countryCode": channel.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "localizedCopy": localized_copy, "pixelDatasetId": pixel_dataset_id, "meta": {"datasetId": pixel_dataset_id, "browserEnabled": bool(pixel_dataset_id and channel.meta_browser_pixel_enabled), "eventMapping": normalized_meta_event_mapping(channel.meta_event_mapping_json)}, "inAppBrowserMode": channel.in_app_browser_mode, "templatePolicy": template_policy or {}}, ensure_ascii=False).replace("<", "\\u003c")
     html = _apply_viewport_policy(html, template_policy or {})
     base = f'<base href="/api/public/promotion/channels/{slug}/assets/">'
     runtime = (
@@ -1674,7 +1785,16 @@ def render_fission_channel(
 
 
 @router.get("/api/public/promotion/tracker.js")
-def tracker_script() -> Response: return Response(TRACKER_JS, media_type="application/javascript", headers={"Cache-Control": "public, max-age=300", "Access-Control-Allow-Origin": "*"})
+def tracker_script() -> Response:
+    return Response(
+        (PUBLIC_RUNTIME_DIR / "promotion-tracker.js").read_bytes(),
+        media_type="application/javascript",
+        headers={
+            "Cache-Control": "public, max-age=300",
+            "Access-Control-Allow-Origin": "*",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("/api/public/promotion/account-link-elements.js")
@@ -1721,8 +1841,60 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
     except ValidationError as exc: raise HTTPException(status_code=422, detail=exc.errors(include_url=False)) from None
     channel = _public_channel(db, slug, request)
     token_payload = _verify_session_token(channel, payload.session_token)
+    from app.services.device_fingerprints import (
+        fingerprint_identity,
+        fingerprint_metadata,
+        issue_device_token,
+    )
+
+    fingerprint_payload = (
+        payload.device_fingerprint
+        if _runtime_template_policy(db, channel.created_by).get("deviceSignals")
+        == "fingerprint"
+        else None
+    )
+    fingerprint = fingerprint_identity(channel.created_by, fingerprint_payload)
+    device_token = (
+        issue_device_token(
+            fingerprint,
+            channel_id=entity_id(channel),
+            tenant_id=channel.created_by,
+            visitor_id=payload.visitor_id,
+            session_nonce=str(token_payload["nonce"]),
+            session_expires_at=int(token_payload["exp"]),
+        )
+        if fingerprint is not None and payload.visitor_id
+        else None
+    )
+    fingerprint_details = fingerprint_metadata(
+        fingerprint, fingerprint_payload
+    )
     existing = db.scalar(select(PromotionEvent).where(PromotionEvent.channel_id == channel.id, PromotionEvent.idempotency_key == payload.idempotency_key))
-    if existing: return JSONResponse({"data": {"ok": True, "duplicate": True, "serverTimestamp": iso(existing.created_at)}}, headers={"Access-Control-Allow-Origin": "null"})
+    if existing:
+        if (
+            fingerprint is not None
+            and fingerprint_details is not None
+            and existing.visitor_fingerprint_hash is None
+            and existing.visitor_id == payload.visitor_id
+        ):
+            existing.visitor_fingerprint_hash = fingerprint.fingerprint_hash
+            existing.fingerprint_version = fingerprint.version
+            existing.fingerprint_quality = fingerprint.quality
+            enriched_metadata = dict(existing.metadata_json or {})
+            enriched_metadata["deviceFingerprint"] = fingerprint_details
+            existing.metadata_json = enriched_metadata
+            db.commit()
+        return JSONResponse(
+            {
+                "data": {
+                    "ok": True,
+                    "duplicate": True,
+                    **({"deviceToken": device_token} if device_token else {}),
+                    "serverTimestamp": iso(existing.created_at),
+                }
+            },
+            headers={"Access-Control-Allow-Origin": "null"},
+        )
     if payload.event_type == "phone_submit" and not payload.phone: raise HTTPException(status_code=422, detail="phone_submit 必须包含手机号")
     now = utcnow(); occurred_at = parse_public_datetime(payload.occurred_at)
     occurred_ts = int(occurred_at.timestamp())
@@ -1738,7 +1910,24 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
             db.flush()
     metadata = dict(payload.metadata)
     metadata["trafficSource"] = token_payload.get("trafficSource", "direct")
-    event = PromotionEvent(public_id=new_public_id("pevt"), channel_id=channel.id, event_type=payload.event_type, idempotency_key=payload.idempotency_key, visitor_id=payload.visitor_id, lead_id=lead.id if lead else None, occurred_at=occurred_at, country_code=channel.country_code, metadata_json=metadata)
+    if fingerprint_details is not None:
+        metadata["deviceFingerprint"] = fingerprint_details
+    event = PromotionEvent(
+        public_id=new_public_id("pevt"),
+        channel_id=channel.id,
+        event_type=payload.event_type,
+        idempotency_key=payload.idempotency_key,
+        visitor_id=payload.visitor_id,
+        visitor_fingerprint_hash=(
+            fingerprint.fingerprint_hash if fingerprint else None
+        ),
+        fingerprint_version=fingerprint.version if fingerprint else None,
+        fingerprint_quality=fingerprint.quality if fingerprint else None,
+        lead_id=lead.id if lead else None,
+        occurred_at=occurred_at,
+        country_code=channel.country_code,
+        metadata_json=metadata,
+    )
     db.add(event)
     from app.services.meta_conversions import (
         browser_event_descriptor,
@@ -1760,21 +1949,167 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
         channel, payload.event_type, payload.idempotency_key
     )
     try: db.commit()
-    except IntegrityError: db.rollback(); return JSONResponse({"data": {"ok": True, "duplicate": True, "serverTimestamp": now.isoformat()}}, headers={"Access-Control-Allow-Origin": "null"})
-    return JSONResponse({"data": {"ok": True, "duplicate": False, "metaEvent": meta_event, "serverTimestamp": now.isoformat()}}, headers={"Access-Control-Allow-Origin": "null"})
+    except IntegrityError:
+        db.rollback()
+        return JSONResponse(
+            {
+                "data": {
+                    "ok": True,
+                    "duplicate": True,
+                    **({"deviceToken": device_token} if device_token else {}),
+                    "serverTimestamp": now.isoformat(),
+                }
+            },
+            headers={"Access-Control-Allow-Origin": "null"},
+        )
+    return JSONResponse(
+        {
+            "data": {
+                "ok": True,
+                "duplicate": False,
+                **({"deviceToken": device_token} if device_token else {}),
+                "metaEvent": meta_event,
+                "serverTimestamp": now.isoformat(),
+            }
+        },
+        headers={"Access-Control-Allow-Origin": "null"},
+    )
+
+
+@router.post(
+    "/api/public/promotion/channels/{slug}/meta-domain-unavailable"
+)
+async def report_meta_domain_unavailable(
+    slug: str,
+    request: Request,
+    db: DbSession,
+) -> JSONResponse:
+    try:
+        payload = MetaDomainUnavailableInput.model_validate_json(
+            await request.body()
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=exc.errors(include_url=False),
+        ) from None
+
+    channel = _public_channel(db, slug, request)
+    _verify_session_token(channel, payload.session_token)
+    pixel = db.get(MetaPixel, channel.pixel_id) if channel.pixel_id else None
+    if (
+        pixel is None
+        or not pixel.enabled
+        or pixel.archived_at is not None
+        or not channel.meta_browser_pixel_enabled
+    ):
+        raise HTTPException(status_code=409, detail="当前渠道未启用浏览器 Pixel")
+    if pixel.dataset_id != payload.dataset_id:
+        raise HTTPException(status_code=409, detail="Pixel 配置已更新，请刷新页面")
+    if channel.domain_id is None:
+        raise HTTPException(status_code=409, detail="当前渠道未绑定域名")
+
+    same_hostname_channels = list(
+        db.scalars(
+            select(PromotionChannel)
+            .join(MetaPixel, MetaPixel.id == PromotionChannel.pixel_id)
+            .where(
+                PromotionChannel.created_by == channel.created_by,
+                PromotionChannel.domain_id == channel.domain_id,
+                PromotionChannel.subdomain_prefix
+                == (channel.subdomain_prefix or ""),
+                PromotionChannel.meta_browser_pixel_enabled.is_(True),
+                PromotionChannel.pixel_id.is_not(None),
+                PromotionChannel.archived_at.is_(None),
+                MetaPixel.enabled.is_(True),
+                MetaPixel.archived_at.is_(None),
+            )
+        ).all()
+    )
+    detected_at = utcnow()
+    affected = 0
+    for item in same_hostname_channels:
+        if not item.meta_domain_blocked:
+            item.meta_domain_blocked = True
+            item.meta_domain_blocked_at = detected_at
+            affected += 1
+    if affected:
+        db.commit()
+    return JSONResponse(
+        {
+            "data": {
+                "ok": True,
+                "duplicate": affected == 0,
+                "affectedChannels": affected,
+                "detectedAt": detected_at.isoformat(),
+            }
+        },
+        headers={"Access-Control-Allow-Origin": "null"},
+    )
 
 
 @router.post("/api/public/promotion/channels/{slug}/pairing/start")
 async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JSONResponse:
+    raw_body = await request.body()
     try:
-        payload = PromotionPairingStart.model_validate_json(await request.body())
+        payload = PromotionPairingStart.model_validate_json(raw_body)
     except ValidationError as exc:
+        phone_error = any("phone" in error.get("loc", ()) for error in exc.errors())
+        if phone_error:
+            try:
+                raw_payload = json.loads(raw_body)
+                if not isinstance(raw_payload, dict):
+                    raise ValueError("invalid pairing payload")
+                visitor_id = str(raw_payload.get("visitorId") or "")
+                session_token = str(raw_payload.get("sessionToken") or "")
+                if not 8 <= len(visitor_id) <= 80 or not session_token:
+                    raise ValueError("missing trusted pairing context")
+                channel = _public_channel(db, slug, request)
+                session_payload = _verify_session_token(channel, session_token)
+            except (HTTPException, TypeError, ValueError, json.JSONDecodeError):
+                pass
+            else:
+                return _recorded_pairing_failure_response(
+                    db,
+                    channel,
+                    visitor_id=visitor_id,
+                    traffic_source=str(
+                        session_payload.get("trafficSource", "direct")
+                    ),
+                    code="invalid_phone",
+                    message="请输入有效的手机号码",
+                    status_code=422,
+                    stage="request_validation",
+                )
         raise HTTPException(
             status_code=422, detail=exc.errors(include_url=False)
         ) from None
     channel = _public_channel(db, slug, request)
     session_payload = _verify_session_token(channel, payload.session_token)
     traffic_source = session_payload.get("trafficSource", "direct")
+    device_identity = None
+    if payload.device_token:
+        from app.services.device_fingerprints import verify_device_token
+
+        try:
+            device_identity = verify_device_token(
+                payload.device_token,
+                channel_id=entity_id(channel),
+                tenant_id=channel.created_by,
+                visitor_id=payload.visitor_id,
+                session_nonce=str(session_payload["nonce"]),
+            )
+        except ValueError:
+            return _recorded_pairing_failure_response(
+                db,
+                channel,
+                visitor_id=payload.visitor_id,
+                traffic_source=str(traffic_source),
+                code="device_identity_invalid",
+                message="设备识别凭证已失效，请刷新页面后重试",
+                status_code=403,
+                stage="device_validation",
+            )
     now = utcnow()
     from app.services.pairing_rate_limits import (
         PairingRateLimitRequest,
@@ -1786,11 +2121,17 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
 
     preflight_protocol = channel_rate_limit_protocol(db, channel)
     source_ip = public_request_ip(request)
+    visitor_limit_keys = (
+        [
+            f"channel:{channel.id}:fingerprint:{limit_key}"
+            for limit_key in device_identity.limit_keys
+        ]
+        if device_identity is not None
+        else [f"channel:{channel.id}:visitor:{payload.visitor_id}"]
+    )
     preflight_limits = [
-        PairingRateLimitRequest(
-            "visitorCheck",
-            f"channel:{channel.id}:visitor:{payload.visitor_id}",
-        )
+        PairingRateLimitRequest("visitorCheck", limit_key)
+        for limit_key in visitor_limit_keys
     ]
     if source_ip != "unknown":
         preflight_limits.append(
@@ -1805,10 +2146,38 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             preflight_limits,
         )
     except PairingRateLimitUnavailable:
-        return _pairing_rate_limit_unavailable_response()
+        return _recorded_pairing_failure_response(
+            db,
+            channel,
+            visitor_id=payload.visitor_id,
+            traffic_source=str(traffic_source),
+            code="service_temporarily_unavailable",
+            message="绑定服务暂时不可用，请稍后再试",
+            status_code=503,
+            stage="preflight_rate_limit",
+            device_identity=device_identity,
+            retryable=True,
+            retry_after_seconds=5,
+        )
     limited = _pairing_rate_limit_response(preflight_decision)
     if limited is not None:
-        return limited
+        return _recorded_pairing_failure_response(
+            db,
+            channel,
+            visitor_id=payload.visitor_id,
+            traffic_source=str(traffic_source),
+            code="rate_limited",
+            message="绑定请求过于频繁，请稍后再试",
+            status_code=429,
+            stage="preflight_rate_limit",
+            device_identity=device_identity,
+            retryable=True,
+            retry_after_seconds=preflight_decision.retry_after_seconds,
+            metadata={
+                "policyKey": preflight_decision.policy_key,
+                "limit": preflight_decision.limit,
+            },
+        )
     db.add(
         PromotionEvent(
             public_id=new_public_id("pevt"),
@@ -1816,6 +2185,15 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             event_type="pairing_check",
             idempotency_key=f"pairing_check:{uuid4().hex}",
             visitor_id=payload.visitor_id,
+            visitor_fingerprint_hash=(
+                device_identity.fingerprint_hash if device_identity else None
+            ),
+            fingerprint_version=(
+                device_identity.version if device_identity else None
+            ),
+            fingerprint_quality=(
+                device_identity.quality if device_identity else None
+            ),
             occurred_at=now,
             country_code=channel.country_code,
             metadata_json={"trafficSource": traffic_source},
@@ -1842,10 +2220,16 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
     )
     if item is not None and item.created_by != channel.created_by:
         db.rollback()
-        return _public_pairing_error(
-            409,
-            "number_unavailable",
-            "该号码当前不能在这里绑定",
+        return _recorded_pairing_failure_response(
+            db,
+            channel,
+            visitor_id=payload.visitor_id,
+            traffic_source=str(traffic_source),
+            code="number_unavailable",
+            message="该号码当前不能在这里绑定",
+            status_code=409,
+            stage="number_check",
+            device_identity=device_identity,
         )
     gateway_requires_reset = item is not None and item.status == "reauth_required"
     active_attempt = None
@@ -1871,10 +2255,16 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             active_attempt = None
         if active_attempt is not None and active_attempt.channel_id != channel.id:
             db.rollback()
-            return _public_pairing_error(
-                409,
-                "pairing_in_progress",
-                "该号码已有正在进行的绑定请求",
+            return _recorded_pairing_failure_response(
+                db,
+                channel,
+                visitor_id=payload.visitor_id,
+                traffic_source=str(traffic_source),
+                code="pairing_in_progress",
+                message="该号码已有正在进行的绑定请求",
+                status_code=409,
+                stage="number_check",
+                device_identity=device_identity,
                 retryable=True,
             )
         if (
@@ -1882,10 +2272,16 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             and active_attempt.visitor_id != payload.visitor_id
         ):
             db.rollback()
-            return _public_pairing_error(
-                409,
-                "pairing_in_progress",
-                "该号码已有正在进行的绑定请求",
+            return _recorded_pairing_failure_response(
+                db,
+                channel,
+                visitor_id=payload.visitor_id,
+                traffic_source=str(traffic_source),
+                code="pairing_in_progress",
+                message="该号码已有正在进行的绑定请求",
+                status_code=409,
+                stage="number_check",
+                device_identity=device_identity,
                 retryable=True,
             )
 
@@ -1905,8 +2301,17 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             active_attempt.protocol_node_id or item.protocol_id,
         )
         if protocol is None:
-            db.rollback()
-            raise HTTPException(status_code=409, detail="配对任务的协议节点不存在")
+            active_attempt.status = "failed"
+            active_attempt.terminal_reason = "protocol_unavailable"
+            if active_attempt.attempt_type == "initial":
+                item.admission_status = "abandoned"
+            db.commit()
+            return _public_pairing_error(
+                409,
+                "protocol_unavailable",
+                "配对任务的协议节点当前不可用",
+                retryable=True,
+            )
         if active_attempt.protocol_node_id is None:
             active_attempt.protocol_node_id = protocol.id
         if not active_attempt.sync_policy_json:
@@ -1922,10 +2327,16 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             or not protocol.online_enabled
         ):
             db.rollback()
-            return _public_pairing_error(
-                409,
-                "protocol_unavailable",
-                "该账号所属协议节点当前不可用",
+            return _recorded_pairing_failure_response(
+                db,
+                channel,
+                visitor_id=payload.visitor_id,
+                traffic_source=str(traffic_source),
+                code="protocol_unavailable",
+                message="该账号所属协议节点当前不可用",
+                status_code=409,
+                stage="protocol_routing",
+                device_identity=device_identity,
                 retryable=True,
             )
         capacity = protocol_capacity(db, protocol)
@@ -1934,19 +2345,52 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             and capacity.active_pairings >= protocol.max_concurrent_pairings
         ):
             db.rollback()
-            return _public_pairing_error(
-                409,
-                "protocol_capacity_limited",
-                "该账号所属协议节点当前配对繁忙",
+            return _recorded_pairing_failure_response(
+                db,
+                channel,
+                visitor_id=payload.visitor_id,
+                traffic_source=str(traffic_source),
+                code="protocol_capacity_limited",
+                message="该账号所属协议节点当前配对繁忙",
+                status_code=409,
+                stage="protocol_routing",
+                device_identity=device_identity,
                 retryable=True,
             )
     else:
-        protocol = resolve_channel_ingress_protocol(db, channel)
+        try:
+            protocol = resolve_channel_ingress_protocol(db, channel)
+        except HTTPException as exc:
+            db.rollback()
+            return _recorded_pairing_failure_response(
+                db,
+                channel,
+                visitor_id=payload.visitor_id,
+                traffic_source=str(traffic_source),
+                code="protocol_unavailable",
+                message="当前没有可用的协议节点，请稍后再试",
+                status_code=exc.status_code,
+                stage="protocol_routing",
+                device_identity=device_identity,
+                detail_code="protocol_route_unavailable",
+                retryable=True,
+            )
 
     if active_attempt is None and not is_reauthentication:
         if channel.account_group_id is None:
             db.rollback()
-            raise HTTPException(status_code=409, detail="推广渠道尚未配置账号入库分组")
+            return _recorded_pairing_failure_response(
+                db,
+                channel,
+                visitor_id=payload.visitor_id,
+                traffic_source=str(traffic_source),
+                code="channel_configuration_unavailable",
+                message="当前渠道暂时无法接入账号，请联系管理员",
+                status_code=409,
+                stage="channel_configuration",
+                device_identity=device_identity,
+                detail_code="account_group_missing",
+            )
         landing_group = db.scalar(
             select(AccountGroup).where(
                 AccountGroup.id == channel.account_group_id,
@@ -1956,7 +2400,18 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
         )
         if landing_group is None:
             db.rollback()
-            raise HTTPException(status_code=409, detail="推广渠道的账号入库分组不可用")
+            return _recorded_pairing_failure_response(
+                db,
+                channel,
+                visitor_id=payload.visitor_id,
+                traffic_source=str(traffic_source),
+                code="channel_configuration_unavailable",
+                message="当前渠道暂时无法接入账号，请联系管理员",
+                status_code=409,
+                stage="channel_configuration",
+                device_identity=device_identity,
+                detail_code="account_group_unavailable",
+            )
 
     account_created = item is None
     if item is None:
@@ -1987,7 +2442,18 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             db.flush()
         except IntegrityError:
             db.rollback()
-            raise HTTPException(status_code=409, detail="该号码已在账号池中") from None
+            return _recorded_pairing_failure_response(
+                db,
+                channel,
+                visitor_id=payload.visitor_id,
+                traffic_source=str(traffic_source),
+                code="number_unavailable",
+                message="该号码当前不能在这里绑定",
+                status_code=409,
+                stage="number_check",
+                device_identity=device_identity,
+                detail_code="concurrent_account_exists",
+            )
     else:
         retryable_legacy_pairing = (
             item.source == "landing_page"
@@ -2011,15 +2477,27 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 "sending",
                 "draining",
             }:
-                return _public_pairing_error(
-                    409,
-                    "account_already_linked",
-                    "该号码已经绑定并可用，无需重复绑定",
+                return _recorded_pairing_failure_response(
+                    db,
+                    channel,
+                    visitor_id=payload.visitor_id,
+                    traffic_source=str(traffic_source),
+                    code="account_already_linked",
+                    message="该号码已经绑定并可用，无需重复绑定",
+                    status_code=409,
+                    stage="number_check",
+                    device_identity=device_identity,
                 )
-            return _public_pairing_error(
-                409,
-                "number_unavailable",
-                "该号码当前不能在这里绑定",
+            return _recorded_pairing_failure_response(
+                db,
+                channel,
+                visitor_id=payload.visitor_id,
+                traffic_source=str(traffic_source),
+                code="number_unavailable",
+                message="该号码当前不能在这里绑定",
+                status_code=409,
+                stage="number_check",
+                device_identity=device_identity,
             )
         if retryable_legacy_pairing:
             # Releases before the verified-pairing state contract could leave
@@ -2058,9 +2536,11 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             attempt_decision = consume_pairing_rate_limits(
                 protocol,
                 [
-                    PairingRateLimitRequest(
-                        "visitorAttempt",
-                        f"channel:{channel.id}:visitor:{payload.visitor_id}",
+                    *(
+                        PairingRateLimitRequest(
+                            "visitorAttempt", limit_key
+                        )
+                        for limit_key in visitor_limit_keys
                     ),
                     PairingRateLimitRequest(
                         "phoneAttempt",
@@ -2075,11 +2555,39 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             )
         except PairingRateLimitUnavailable:
             db.rollback()
-            return _pairing_rate_limit_unavailable_response()
+            return _recorded_pairing_failure_response(
+                db,
+                channel,
+                visitor_id=payload.visitor_id,
+                traffic_source=str(traffic_source),
+                code="service_temporarily_unavailable",
+                message="绑定服务暂时不可用，请稍后再试",
+                status_code=503,
+                stage="attempt_rate_limit",
+                device_identity=device_identity,
+                retryable=True,
+                retry_after_seconds=5,
+            )
         limited = _pairing_rate_limit_response(attempt_decision)
         if limited is not None:
             db.rollback()
-            return limited
+            return _recorded_pairing_failure_response(
+                db,
+                channel,
+                visitor_id=payload.visitor_id,
+                traffic_source=str(traffic_source),
+                code="rate_limited",
+                message="绑定请求过于频繁，请稍后再试",
+                status_code=429,
+                stage="attempt_rate_limit",
+                device_identity=device_identity,
+                retryable=True,
+                retry_after_seconds=attempt_decision.retry_after_seconds,
+                metadata={
+                    "policyKey": attempt_decision.policy_key,
+                    "limit": attempt_decision.limit,
+                },
+            )
 
     from app.routers.personal_accounts import _auto_proxy, _proxy_url, _set_binding
     from app.services.wa_gateway import GatewayError, WaGatewayClient
@@ -2090,7 +2598,18 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             proxy = _auto_proxy(db, channel.created_by, channel.country_code)
             if proxy is None:
                 db.rollback()
-                raise HTTPException(status_code=409, detail="暂时没有可用的账号连接线路")
+                return _recorded_pairing_failure_response(
+                    db,
+                    channel,
+                    visitor_id=payload.visitor_id,
+                    traffic_source=str(traffic_source),
+                    code="connection_route_unavailable",
+                    message="暂时没有可用的账号连接线路，请稍后再试",
+                    status_code=409,
+                    stage="connection_route",
+                    device_identity=device_identity,
+                    retryable=True,
+                )
             _set_binding(db, item.gateway_account_id, entity_id(proxy))
         db.flush()
         if active_attempt is None:
@@ -2109,6 +2628,15 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                     protocol.sync_policy_json
                 ),
                 visitor_id=payload.visitor_id,
+                visitor_fingerprint_hash=(
+                    device_identity.fingerprint_hash if device_identity else None
+                ),
+                fingerprint_version=(
+                    device_identity.version if device_identity else None
+                ),
+                fingerprint_quality=(
+                    device_identity.quality if device_identity else None
+                ),
                 status="code_issued",
                 expires_at=now + timedelta(minutes=3),
             )
@@ -2127,7 +2655,18 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(status_code=409, detail="该号码已在账号池中") from None
+        return _recorded_pairing_failure_response(
+            db,
+            channel,
+            visitor_id=payload.visitor_id,
+            traffic_source=str(traffic_source),
+            code="number_unavailable",
+            message="该号码当前不能在这里绑定",
+            status_code=409,
+            stage="attempt_creation",
+            device_identity=device_identity,
+            detail_code="concurrent_pairing_exists",
+        )
 
     try:
         try:
@@ -2193,6 +2732,11 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 event_type="pairing_started",
                 idempotency_key=pairing_started_id,
                 visitor_id=payload.visitor_id,
+                visitor_fingerprint_hash=(
+                    active_attempt.visitor_fingerprint_hash
+                ),
+                fingerprint_version=active_attempt.fingerprint_version,
+                fingerprint_quality=active_attempt.fingerprint_quality,
                 occurred_at=now,
                 country_code=channel.country_code,
                 metadata_json={
@@ -2240,7 +2784,12 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 if failed_attempt.attempt_type == "initial":
                     failed.admission_status = "abandoned"
             db.commit()
-        raise HTTPException(status_code=502, detail=str(exc)) from None
+        return _public_pairing_error(
+            502,
+            "gateway_failed",
+            "暂时无法连接账号服务，请稍后重试",
+            retryable=True,
+        )
 
     status_token = _pairing_status_token(
         channel, item, active_attempt, payload.visitor_id
@@ -2395,6 +2944,11 @@ def public_pairing_status(
                     event_type="pair_success",
                     idempotency_key=f"pair_success:{item.id}",
                     visitor_id=str(token_payload.get("visitor") or "") or None,
+                    visitor_fingerprint_hash=(
+                        attempt.visitor_fingerprint_hash
+                    ),
+                    fingerprint_version=attempt.fingerprint_version,
+                    fingerprint_quality=attempt.fingerprint_quality,
                     occurred_at=utcnow(),
                     country_code=channel.country_code,
                     metadata_json={
@@ -2648,12 +3202,195 @@ def list_leads(channel_id: str, db: DbSession, current_user: CurrentUser) -> dic
 
 @router.get("/api/promotion/channels/{channel_id}/stats")
 def channel_stats(channel_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    channel = _channel(db, channel_id, current_user); events = db.scalars(select(PromotionEvent).where(PromotionEvent.channel_id == channel.id)).all(); totals = {name: 0 for name in ("page_view", "phone_submit", "visit_end", "login_success", "pair_success")}; daily: dict[str, dict] = {}
+    channel = _channel(db, channel_id, current_user); events = db.scalars(select(PromotionEvent).where(PromotionEvent.channel_id == channel.id)).all(); totals = {name: 0 for name in ("page_view", "phone_submit", "visit_end", "login_success", "pair_success", "pairing_check", "pairing_started", "pairing_failed")}; daily: dict[str, dict] = {}
     for event in events:
         totals[event.event_type] = totals.get(event.event_type, 0) + 1; key = event.occurred_at.date().isoformat(); daily.setdefault(key, {"date": key, "pageView": 0, "phoneSubmit": 0, "visitEnd": 0, "loginSuccess": 0, "pairSuccess": 0}); field = {"page_view":"pageView","phone_submit":"phoneSubmit","visit_end":"visitEnd","login_success":"loginSuccess","pair_success":"pairSuccess"}.get(event.event_type)
         if field: daily[key][field] += 1
-    visitors = {event.visitor_id or f"legacy:{event.id}" for event in events if event.event_type == "page_view"}
-    return {"data": {"totals": {"pageView": totals["page_view"], "uv": len(visitors), "phoneSubmit": totals["phone_submit"], "visitEnd": totals["visit_end"], "loginSuccess": totals["login_success"], "pairSuccess": totals["pair_success"], "successes": totals["login_success"] + totals["pair_success"], "uniqueLeads": int(db.scalar(select(func.count()).select_from(PromotionLead).where(PromotionLead.channel_id == channel.id)) or 0)}, "series": sorted(daily.values(), key=lambda x: x["date"])}}
+    page_views = [event for event in events if event.event_type == "page_view"]
+    browser_visitors = {
+        event.visitor_id or f"legacy:{event.id}" for event in page_views
+    }
+    fingerprinted_page_views = [
+        event
+        for event in page_views
+        if event.visitor_fingerprint_hash
+        and event.fingerprint_quality in {"high", "medium"}
+    ]
+    enhanced_visitors = {
+        (
+            f"fingerprint:{event.visitor_fingerprint_hash}"
+            if event.visitor_fingerprint_hash
+            and event.fingerprint_quality in {"high", "medium"}
+            else f"visitor:{event.visitor_id or event.id}"
+        )
+        for event in page_views
+    }
+    fingerprint_quality = {
+        quality: sum(
+            1 for event in page_views if event.fingerprint_quality == quality
+        )
+        for quality in ("high", "medium", "low")
+    }
+    attempts = list(
+        db.scalars(
+            select(AccountPairingAttempt).where(
+                AccountPairingAttempt.channel_id == channel.id
+            )
+        ).all()
+    )
+
+    def event_visitor_key(event: PromotionEvent) -> str:
+        if (
+            event.visitor_fingerprint_hash
+            and event.fingerprint_quality in {"high", "medium"}
+        ):
+            return f"fingerprint:{event.visitor_fingerprint_hash}"
+        return f"visitor:{event.visitor_id or event.id}"
+
+    def attempt_visitor_key(attempt: AccountPairingAttempt) -> str:
+        if (
+            attempt.visitor_fingerprint_hash
+            and attempt.fingerprint_quality in {"high", "medium"}
+        ):
+            return f"fingerprint:{attempt.visitor_fingerprint_hash}"
+        return f"visitor:{attempt.visitor_id or attempt.id}"
+
+    submitted_visitors = {
+        event_visitor_key(event)
+        for event in events
+        if event.event_type == "phone_submit"
+    }
+    checked_visitors = {
+        event_visitor_key(event)
+        for event in events
+        if event.event_type == "pairing_check"
+    }
+    started_visitors = {
+        event_visitor_key(event)
+        for event in events
+        if event.event_type == "pairing_started"
+    }
+    verified_visitors = {
+        event_visitor_key(event)
+        for event in events
+        if event.event_type == "pair_success"
+    }
+    for attempt in attempts:
+        visitor_key = attempt_visitor_key(attempt)
+        checked_visitors.add(visitor_key)
+        started_visitors.add(visitor_key)
+        if attempt.status == "verified":
+            verified_visitors.add(visitor_key)
+    # Later durable stages imply the earlier ones even when a browser event was
+    # lost to navigation or an older runtime did not emit it yet.
+    started_visitors.update(verified_visitors)
+    checked_visitors.update(started_visitors)
+    submitted_visitors.update(checked_visitors)
+    funnel_visitors = set(enhanced_visitors)
+    funnel_visitors.update(submitted_visitors)
+
+    failure_counts: Counter[str] = Counter()
+    for event in events:
+        if event.event_type != "pairing_failed":
+            continue
+        metadata = (
+            event.metadata_json if isinstance(event.metadata_json, dict) else {}
+        )
+        failure_counts[
+            canonical_pairing_failure_reason(
+                str(metadata.get("reasonCode") or metadata.get("detailCode") or "")
+            )
+        ] += 1
+    for attempt in attempts:
+        if attempt.status not in {"failed", "expired", "cancelled"}:
+            continue
+        failure_counts[
+            canonical_pairing_failure_reason(
+                attempt.terminal_reason or attempt.status
+            )
+        ] += 1
+
+    def funnel_rate(numerator: int, denominator: int) -> float:
+        return round(numerator / denominator, 4) if denominator else 0.0
+
+    funnel_counts = [
+        ("visitors", len(funnel_visitors)),
+        ("phoneSubmitted", len(submitted_visitors)),
+        ("checksPassed", len(checked_visitors)),
+        ("pairingStarted", len(started_visitors)),
+        ("verified", len(verified_visitors)),
+    ]
+    visitor_total = funnel_counts[0][1]
+    funnel_steps = []
+    previous_count = visitor_total
+    for index, (key, count) in enumerate(funnel_counts):
+        funnel_steps.append(
+            {
+                "key": key,
+                "count": count,
+                "visitorRate": funnel_rate(count, visitor_total),
+                "stepRate": (
+                    1.0 if index == 0 else funnel_rate(count, previous_count)
+                ),
+            }
+        )
+        previous_count = count
+    failure_total = sum(failure_counts.values())
+    failure_reasons = [
+        {
+            "code": reason,
+            "label": PAIRING_FAILURE_LABELS[reason],
+            "count": count,
+            "share": funnel_rate(count, failure_total),
+        }
+        for reason, count in sorted(
+            failure_counts.items(), key=lambda item: (-item[1], item[0])
+        )
+    ]
+    return {
+        "data": {
+            "totals": {
+                "pageView": totals["page_view"],
+                "uv": len(enhanced_visitors),
+                "browserUv": len(browser_visitors),
+                "fingerprintUv": len(
+                    {
+                        event.visitor_fingerprint_hash
+                        for event in fingerprinted_page_views
+                    }
+                ),
+                "fingerprintCoverage": len(fingerprinted_page_views),
+                "fingerprintCoverageRate": (
+                    round(len(fingerprinted_page_views) / len(page_views), 4)
+                    if page_views
+                    else 0
+                ),
+                "fingerprintQuality": fingerprint_quality,
+                "phoneSubmit": totals["phone_submit"],
+                "pairingCheck": totals["pairing_check"],
+                "pairingStarted": totals["pairing_started"],
+                "pairingFailed": failure_total,
+                "visitEnd": totals["visit_end"],
+                "loginSuccess": totals["login_success"],
+                "pairSuccess": totals["pair_success"],
+                "successes": totals["login_success"] + totals["pair_success"],
+                "uniqueLeads": int(
+                    db.scalar(
+                        select(func.count())
+                        .select_from(PromotionLead)
+                        .where(PromotionLead.channel_id == channel.id)
+                    )
+                    or 0
+                ),
+            },
+            "series": sorted(daily.values(), key=lambda x: x["date"]),
+            "pairingFunnel": {"steps": funnel_steps},
+            "pairingFailures": {
+                "total": failure_total,
+                "reasons": failure_reasons,
+            },
+        }
+    }
 
 
 def _ad_metric_row(db: DbSession, item: AdMetric) -> dict:

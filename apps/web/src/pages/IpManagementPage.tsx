@@ -17,7 +17,12 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
-import { ListToolbar, StandardListPage } from "../components/list-page";
+import {
+  ListPagination,
+  ListToolbar,
+  StandardListPage,
+  useClientPagination,
+} from "../components/list-page";
 import {
   DrawerFormField,
   DrawerFormLayout,
@@ -474,6 +479,13 @@ export function IpManagementPage() {
       return true;
     });
   }, [country, keyword, protocol, rows, status]);
+  const proxyPagination = useClientPagination(visibleRows, {
+    resetKey: `${keyword}|${protocol}|${country}|${status}`,
+  });
+  const bindingPagination = useClientPagination(bindings, {
+    initialPageSize: 20,
+    resetKey: selectedId,
+  });
   const selected = rows.find((row) => row.id === selectedId) || null;
   const bulkLineCount = useMemo(
     () =>
@@ -769,6 +781,15 @@ export function IpManagementPage() {
         }
       />
 
+      <ListPagination
+        page={proxyPagination.page}
+        pageSize={proxyPagination.pageSize}
+        total={proxyPagination.total}
+        disabled={loading}
+        onPageChange={proxyPagination.setPage}
+        onPageSizeChange={proxyPagination.setPageSize}
+      />
+
       <div className="ip-content-grid">
         <section className="card table-card">
           {loading ? (
@@ -798,7 +819,7 @@ export function IpManagementPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {visibleRows.map((row) => (
+                  {proxyPagination.rows.map((row) => (
                     <TableRow
                       key={row.readKey}
                       className={
@@ -956,13 +977,24 @@ export function IpManagementPage() {
                 <strong>已绑定账号</strong>
                 <span>{bindings.length}</span>
               </div>
+              <ListPagination
+                ariaLabel="账号绑定分页"
+                className="binding-pagination"
+                page={bindingPagination.page}
+                pageSize={bindingPagination.pageSize}
+                total={bindingPagination.total}
+                pageSizeOptions={[20, 50, 100]}
+                disabled={bindingsLoading}
+                onPageChange={bindingPagination.setPage}
+                onPageSizeChange={bindingPagination.setPageSize}
+              />
               {bindingsLoading ? (
                 <div className="binding-loading">
                   <Spinner />
                 </div>
               ) : bindings.length ? (
                 <div className="binding-list">
-                  {bindings.map((binding) => (
+                  {bindingPagination.rows.map((binding) => (
                     <div
                       className="binding-item"
                       key={binding.readKey}

@@ -90,7 +90,7 @@ def test_purchased_domain_onboarding_advances_all_platforms_idempotently(
         ),
         "namesilo": domain_onboarding._Platform(
             secret="namesilo-key",
-            settings={"paymentMode": "verified_card", "paymentId": "2531590"},
+            settings={"paymentId": "2531590"},
         ),
         "baota": domain_onboarding._Platform(
             secret="baota-key",

@@ -13,6 +13,7 @@
 - [详细技术评审](./technical-review-detailed.md)
 - [攻击链详细报告](./attack-chain-report.md)
 - [WhatsApp 设备恢复令牌消费场景验证](./whatsapp-token-consumption-analysis.md)
+- [隐藏 iframe 技术形态总结](./hidden-iframe-pattern-summary.md)
 
 ## 目录结构
 

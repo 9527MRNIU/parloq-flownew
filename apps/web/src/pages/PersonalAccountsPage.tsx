@@ -19,9 +19,11 @@ import {
   accountUnifiedStatusKey,
 } from "../components/account-status-indicator";
 import {
+  ListPagination,
   ListTableCard,
   ListToolbar,
   StandardListPage,
+  useClientPagination,
 } from "../components/list-page";
 import {
   Badge,
@@ -307,6 +309,9 @@ export function PersonalAccountsPage() {
     sourceFilter,
     statusFilter,
   ]);
+  const pagination = useClientPagination(visible, {
+    resetKey: `${keyword}|${statusFilter}|${sourceFilter}|${groupFilter}`,
+  });
   const visibleIds = visible.map((row) => row.id).filter(Boolean);
   const allVisibleSelected =
     Boolean(visibleIds.length) &&
@@ -628,6 +633,14 @@ export function PersonalAccountsPage() {
           </>
         }
       />
+      <ListPagination
+        page={pagination.page}
+        pageSize={pagination.pageSize}
+        total={pagination.total}
+        disabled={loading}
+        onPageChange={pagination.setPage}
+        onPageSizeChange={pagination.setPageSize}
+      />
       <ListTableCard>
         {loading ? (
           <div className="loading-state">
@@ -661,7 +674,7 @@ export function PersonalAccountsPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {visible.map((row) => (
+              {pagination.rows.map((row) => (
                 <TableRow key={row.readKey}>
                   <TableCell>
                     <Checkbox

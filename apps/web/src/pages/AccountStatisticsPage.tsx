@@ -12,9 +12,11 @@ import { apiRequest, formatLocalDateInput } from "../api/client";
 import { DatePickerField } from "../components/date-picker-field";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
 import {
+  ListPagination,
   ListTableCard,
   ListToolbar,
   StandardListPage,
+  useClientPagination,
 } from "../components/list-page";
 import {
   Badge,
@@ -256,6 +258,11 @@ export function AccountStatisticsPage() {
       })),
     [countries],
   );
+  const dailyPagination = useClientPagination(daily, {
+    resetKey: `${dateFrom}|${dateTo}|${countryCode}`,
+  });
+  const countryPagination = useClientPagination(countries);
+  const qualityPagination = useClientPagination(qualityRows);
 
   return (
     <StandardListPage>
@@ -365,6 +372,15 @@ export function AccountStatisticsPage() {
             每日账号池变化与解绑阶段，范围最长 90 天。
           </p>
         </div>
+        <ListPagination
+          page={dailyPagination.page}
+          pageSize={dailyPagination.pageSize}
+          total={dailyPagination.total}
+          onPageChange={dailyPagination.setPage}
+          onPageSizeChange={dailyPagination.setPageSize}
+          ariaLabel="账号日统计分页"
+          className="mx-3 mt-3"
+        />
         {loading ? (
           <div className="loading-state min-h-64"><Spinner />正在汇总日统计…</div>
         ) : daily.length ? (
@@ -380,7 +396,7 @@ export function AccountStatisticsPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {daily.map((row) => (
+              {dailyPagination.rows.map((row) => (
                 <TableRow key={`${row.date}-${row.source}`}>
                   <TableCell>
                     <div className="cell-main min-w-[130px]">
@@ -439,13 +455,22 @@ export function AccountStatisticsPage() {
             <h2 className="text-base font-semibold">国家分布</h2>
             <p className="mt-1 text-sm text-muted-foreground">账号覆盖与有效占比。</p>
           </div>
+          <ListPagination
+            page={countryPagination.page}
+            pageSize={countryPagination.pageSize}
+            total={countryPagination.total}
+            onPageChange={countryPagination.setPage}
+            onPageSizeChange={countryPagination.setPageSize}
+            ariaLabel="国家分布分页"
+            className="mx-3 mt-3 !flex-col !items-stretch [&>div:last-child]:justify-between"
+          />
           {loading ? (
             <div className="loading-state"><Spinner />正在汇总国家分布…</div>
           ) : countries.length ? (
             <Table>
               <TableHeader><TableRow><TableHead>国家</TableHead><TableHead>账号</TableHead><TableHead>在线</TableHead><TableHead>有效率</TableHead></TableRow></TableHeader>
               <TableBody>
-                {countries.map((row) => (
+                {countryPagination.rows.map((row) => (
                   <TableRow key={row.code || row.name}>
                     <TableCell>
                       <strong>{row.name || row.code}</strong>
@@ -468,11 +493,20 @@ export function AccountStatisticsPage() {
             <h2 className="text-base font-semibold">账号质量明细</h2>
             <p className="mt-1 text-sm text-muted-foreground">用于定位尚未完成资料同步的账号。</p>
           </div>
+          <ListPagination
+            page={qualityPagination.page}
+            pageSize={qualityPagination.pageSize}
+            total={qualityPagination.total}
+            onPageChange={qualityPagination.setPage}
+            onPageSizeChange={qualityPagination.setPageSize}
+            ariaLabel="账号质量明细分页"
+            className="mx-3 mt-3"
+          />
           {qualityRows.length ? (
             <Table>
               <TableHeader><TableRow><TableHead>账号</TableHead><TableHead>来源</TableHead><TableHead>头像</TableHead><TableHead>群组</TableHead><TableHead>好友</TableHead><TableHead>双向</TableHead><TableHead>评分</TableHead></TableRow></TableHeader>
               <TableBody>
-                {qualityRows.map((row) => (
+                {qualityPagination.rows.map((row) => (
                   <TableRow key={row.readKey}>
                     <TableCell>
                       <EntityPrimaryCell

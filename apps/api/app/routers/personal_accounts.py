@@ -50,6 +50,10 @@ from app.services.protocol_nodes import (
     select_ingress_protocol,
 )
 from app.services.account_lifecycle import record_initial_account_state
+from app.services.pairing_observability import (
+    canonical_pairing_failure_reason,
+    pairing_failure_label,
+)
 
 
 router = APIRouter(prefix="/api/personal-accounts", tags=["personal-accounts"])
@@ -1066,6 +1070,16 @@ def list_intake_attempts(
             .order_by(AccountMetadataSyncJob.created_at.desc())
             .limit(1)
         )
+        terminal_detail = attempt.terminal_reason or (
+            attempt.status
+            if attempt.status in {"failed", "expired", "cancelled"}
+            else None
+        )
+        failure_reason = (
+            canonical_pairing_failure_reason(terminal_detail)
+            if terminal_detail
+            else None
+        )
         result.append(
             {
                 "id": str(attempt.id),
@@ -1073,6 +1087,16 @@ def list_intake_attempts(
                 "status": attempt.status,
                 "terminalReason": attempt.terminal_reason,
                 "providerCode": attempt.provider_code,
+                "failureReason": (
+                    {
+                        "code": failure_reason,
+                        "label": pairing_failure_label(terminal_detail),
+                        "detailCode": terminal_detail,
+                        "providerCode": attempt.provider_code,
+                    }
+                    if failure_reason
+                    else None
+                ),
                 "visitorId": attempt.visitor_id,
                 "account": {
                     "id": str(account.id),

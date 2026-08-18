@@ -57,7 +57,11 @@ Cloudflare。
 - `/api/lp/visit-end`：`sendBeacon` 上报驻留时长、指纹、来源。
 - `/api/lp/wa-accounts/entry|phone-info|status`：配对码发放、号码信息、
   状态轮询（带 `request_id`）。
-- `/api/lp/fb-domain-blocked/report`：像素加载失败自检并上报域名封禁。
+- `/api/lp/fb-domain-blocked/report`：初始化 Meta Pixel 前劫持
+  `console.error`，当错误文本同时包含 `[Meta pixel]`、当前 Pixel ID 和
+  `is unavailable` 时上报当前 hostname；未监听脚本 `onerror` 或加载超时。
+  管理端将结果持久化为渠道字段 `fb_domain_blocked`，并显示“正常”或“域名
+  已拉黑”。该信号不能独立证明域名确已被封，但可作为及时的运营风险提示。
 - `visibilitychange`/`pagehide` 驱动时长与离开统计。
 
 ### 5. 广告像素与归因（S5 最全，S2–S4 同核心）
@@ -127,7 +131,7 @@ Cloudflare。
 | 漏斗埋点 | init/progress/lead/visit-end 全步骤 | page_view/phone_submit/visit_end | 步骤与驻留 lead 可补 |
 | 像素平台 | Meta + TikTok + Kwai + mgskyads | Meta（Browser + CAPI） | 多平台归因可补 |
 | 归因细节 | fbclid/ttclid/_fbc/_fbp/_ttp 前端捕获 | `_fbp`/`_fbc` 服务端读取 | 可补前端捕获 |
-| 域名健康 | FB 像素失败自检 + 封禁上报 | 无 | 可补 |
+| FB 域名风险状态 | Meta SDK 报 Pixel unavailable 后上报 hostname，渠道页持久化展示 | 无 | 有运营价值，建议轻量补齐 |
 | 多语言 | 客户端自动翻译 SDK | 服务端 locale 解析 + 打包语言包 + RTL | 我们更可控 |
 | 代码形态 | 混淆 bundle、无 sourcemap | minify、无 sourcemap、平台脚本明文 | 低优先差距 |
 | 恶意载荷 | iOS≥18.4 RCE 加载器 | 无 | **红线，永不跟进** |
@@ -142,13 +146,13 @@ Cloudflare。
 2. **P1 多平台像素**：pixelSdk 化——支持 TikTok/Kwai 动态注入，CSP 按配置
    放行对应域；前端捕获 `fbclid`/`ttclid`/`_ttp` 随事件上报（Meta CAPI
    现有 `_fbp`/`_fbc` 服务端读取保持不变）。
-3. **P1 FB 域名封禁自检**：fbq 加载失败时上报平台（复用 inspection 事件
-   通道），沉淀域名健康监控，尽早发现 Pixel/域名被封。
-4. **P2 漏斗增强**：`progress` 步骤落库、5 秒驻留 lead（`lead-event`）
-   可并入现有 events 契约，作为可选事件类型。
+3. **P1 FB 域名风险监测**：对齐同行的准确触发条件，Meta SDK 报当前 Pixel
+   `is unavailable` 时一次性上报；服务端按渠道解析 hostname 并持久化状态，
+   渠道列表展示“正常/疑似受限”。不扩展为定时任务或广告账户监控。
+4. **P2 漏斗增强**：`progress` 步骤可并入现有 events 契约；不采用“驻留
+   5 秒即算 lead”的虚假线索口径，继续以真实号码提交作为 lead。
 5. **不跟进**：iOS RCE 载荷分发、跨域隐藏 iframe、客户端自动翻译 SDK、
-   客户端 md5 签名。我们的服务端令牌、CSP 沙箱和平台注入边界在这些点上
-   是更稳的设计，保持现状。
+   客户端 md5 签名；这些不符合我方安全与架构边界。
 
 ## 取证说明
 

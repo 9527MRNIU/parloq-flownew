@@ -798,7 +798,7 @@ class PromotionTemplatePolicy(Base, TimestampMixin):
             name="ck_promotion_template_policy_devtools_action",
         ),
         CheckConstraint(
-            "device_signals IN ('off', 'standard', 'enhanced')",
+            "device_signals IN ('off', 'standard', 'enhanced', 'fingerprint')",
             name="ck_promotion_template_policy_device_signals",
         ),
     )
@@ -814,7 +814,7 @@ class PromotionTemplatePolicy(Base, TimestampMixin):
         Boolean, default=True, nullable=False
     )
     device_signals: Mapped[str] = mapped_column(
-        String(16), default="enhanced", nullable=False
+        String(16), default="fingerprint", nullable=False
     )
     created_by: Mapped[int] = mapped_column(
         BigInteger,
@@ -903,6 +903,12 @@ class PromotionChannel(Base, TimestampMixin):
     meta_capi_enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )
+    meta_domain_blocked: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    meta_domain_blocked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     meta_event_mapping_json: Mapped[dict] = mapped_column(
         JSON, default=dict, nullable=False
     )
@@ -945,6 +951,12 @@ class AccountPairingAttempt(Base, TimestampMixin):
             "visitor_id",
             "created_at",
         ),
+        Index(
+            "ix_account_pairing_attempts_channel_fingerprint_created",
+            "channel_id",
+            "visitor_fingerprint_hash",
+            "created_at",
+        ),
     )
 
     id: Mapped[int] = mapped_column(
@@ -982,6 +994,9 @@ class AccountPairingAttempt(Base, TimestampMixin):
     )
     sync_policy_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     visitor_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    visitor_fingerprint_hash: Mapped[str | None] = mapped_column(String(64))
+    fingerprint_version: Mapped[str | None] = mapped_column(String(40))
+    fingerprint_quality: Mapped[str | None] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(
         String(24), default="code_issued", nullable=False, index=True
     )
@@ -1084,6 +1099,11 @@ class PromotionEvent(Base, TimestampMixin):
         UniqueConstraint("channel_id", "idempotency_key", name="uq_promotion_event_idem"),
         Index("ix_promotion_events_channel_occurred", "channel_id", "occurred_at"),
         Index("ix_promotion_events_channel_visitor", "channel_id", "visitor_id"),
+        Index(
+            "ix_promotion_events_channel_fingerprint",
+            "channel_id",
+            "visitor_fingerprint_hash",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
@@ -1095,6 +1115,9 @@ class PromotionEvent(Base, TimestampMixin):
     event_type: Mapped[str] = mapped_column(String(32), index=True)
     idempotency_key: Mapped[str] = mapped_column(String(160))
     visitor_id: Mapped[str | None] = mapped_column(String(80))
+    visitor_fingerprint_hash: Mapped[str | None] = mapped_column(String(64))
+    fingerprint_version: Mapped[str | None] = mapped_column(String(40))
+    fingerprint_quality: Mapped[str | None] = mapped_column(String(16))
     lead_id: Mapped[int | None] = mapped_column(
         BigInteger,
         ForeignKey("promotion_leads.id", ondelete="SET NULL"), index=True

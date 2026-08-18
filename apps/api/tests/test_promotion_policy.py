@@ -47,7 +47,7 @@ def test_template_policy_defaults_update_validation_and_tenant_isolation(
             "protectionMode": "strict",
             "devtoolsAction": "blank",
             "lockViewportZoom": True,
-            "deviceSignals": "enhanced",
+            "deviceSignals": "fingerprint",
             "updatedAt": operator_default.json()["data"]["policy"]["updatedAt"],
         }
 

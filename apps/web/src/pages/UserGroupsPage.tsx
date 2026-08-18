@@ -29,9 +29,11 @@ import {
   toast,
 } from "../components/ui";
 import {
+  ListPagination,
   ListTableCard,
   ListToolbar,
   StandardListPage,
+  useClientPagination,
 } from "../components/list-page";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
 
@@ -140,6 +142,7 @@ export function UserGroupsPage() {
         )
       : rows;
   }, [keyword, rows]);
+  const pagination = useClientPagination(visibleRows, { resetKey: keyword });
   function create() {
     setEditing(null);
     setName("");
@@ -234,6 +237,14 @@ export function UserGroupsPage() {
           </>
         }
       />
+      <ListPagination
+        page={pagination.page}
+        pageSize={pagination.pageSize}
+        total={pagination.total}
+        disabled={loading}
+        onPageChange={pagination.setPage}
+        onPageSizeChange={pagination.setPageSize}
+      />
       <ListTableCard>
         {loading ? (
           <div className="loading-state">
@@ -262,7 +273,7 @@ export function UserGroupsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {visibleRows.map((row) => (
+                {pagination.rows.map((row) => (
                   <TableRow key={row.readKey}>
                     <TableCell>
                       <EntityPrimaryCell
