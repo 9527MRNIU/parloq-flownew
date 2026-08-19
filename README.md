@@ -333,7 +333,8 @@ bash deploy/release-production.sh
 同步到宝塔已经登记的 `parloq-flow` 目录，使用 Compose/BuildKit 缓存构建 API、
 Web 和 Baileys 网关，并执行 `docker compose up`。API 在对外启动前自动执行
 Alembic，Worker 等 API 健康后再完成更新。整个过程不调用宝塔 API、不创建计划
-任务、不导出 tar，也不上传镜像。
+任务、不导出 tar，也不上传镜像。发布完全成功后，每个应用组件保留最近 3 个
+镜像版本，运行中的镜像始终保留，同时清理超过 7 天的 BuildKit 构建缓存。
 
 ### 发布后验证
 

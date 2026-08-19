@@ -111,6 +111,11 @@ bash deploy/release-production.sh
 context，使用 BuildKit 缓存构建三个镜像并直接更新宝塔登记的 Compose 项目。
 全程不调用宝塔 API、不重复下载构建源码，也不创建宝塔计划任务。
 
+容器、revision 和健康检查全部成功后，脚本才会清理历史构建产物。API、Web、
+Baileys 三个组件分别保留最近 3 个 `server`/旧 `local` Git SHA 镜像，并额外保护
+所有正在运行的镜像；不会匹配或删除 WABA 镜像。BuildKit 仅清理超过 7 天的缓存，
+清理失败只输出警告，不改变本次发布的成功状态。
+
 服务器上的 `github-token` 权限为 `600`，仅由更新脚本的 Git 凭据助手读取；Token
 不进入 Compose、镜像、构建参数或 Git URL。
 

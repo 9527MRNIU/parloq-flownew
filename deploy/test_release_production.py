@@ -48,6 +48,22 @@ class ProductionReleaseScriptTests(unittest.TestCase):
         self.assertNotIn("down -v", self.script)
         self.assertNotIn("docker compose down", self.script)
 
+    def test_cleanup_keeps_recent_and_running_parloq_images_only(self) -> None:
+        self.assertIn('PARLOQ_IMAGE_RETENTION:-3', self.script)
+        self.assertIn('docker ps -q --filter "ancestor=${image_id}"', self.script)
+        self.assertIn('"parloq-flow-${component}-server"', self.script)
+        self.assertIn('"parloq-flow-${component}-local"', self.script)
+        self.assertNotIn("docker image prune", self.script)
+        self.assertNotIn("docker system prune", self.script)
+        self.assertNotIn("docker image rm --force", self.script)
+
+    def test_cleanup_removes_only_expired_build_cache(self) -> None:
+        self.assertIn('PARLOQ_BUILD_CACHE_MAX_AGE:-168h', self.script)
+        self.assertIn(
+            'docker builder prune --force --filter "until=${BUILD_CACHE_MAX_AGE}"',
+            self.script,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

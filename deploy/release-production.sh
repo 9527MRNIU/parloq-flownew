@@ -8,6 +8,8 @@ COMPOSE_FILE="${COMPOSE_DIR}/docker-compose.yaml"
 ENV_FILE="${COMPOSE_DIR}/.env"
 GITHUB_TOKEN_FILE="${COMPOSE_DIR}/github-token"
 MANAGED_COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.production.yml"
+IMAGE_RETENTION="${PARLOQ_IMAGE_RETENTION:-3}"
+BUILD_CACHE_MAX_AGE="${PARLOQ_BUILD_CACHE_MAX_AGE:-168h}"
 
 log() {
   printf '[parloq-release] %s\n' "$*"
@@ -18,9 +20,14 @@ die() {
   exit 1
 }
 
-for command_name in git docker flock curl mktemp; do
+for command_name in git docker flock curl mktemp sort; do
   command -v "${command_name}" >/dev/null 2>&1 || die "${command_name} is required"
 done
+
+case "${IMAGE_RETENTION}" in
+  ''|*[!0-9]*) die "PARLOQ_IMAGE_RETENTION must be a positive integer" ;;
+esac
+[ "${IMAGE_RETENTION}" -gt 0 ] || die "PARLOQ_IMAGE_RETENTION must be greater than zero"
 
 [ -d "${COMPOSE_DIR}" ] || die "BaoTa Compose directory does not exist: ${COMPOSE_DIR}"
 [ -f "${COMPOSE_FILE}" ] || die "BaoTa Compose file does not exist: ${COMPOSE_FILE}"
@@ -207,6 +214,62 @@ curl -fsS --max-time 20 http://127.0.0.1:18100/healthz >/dev/null
 curl -fsS --max-time 20 http://127.0.0.1:18100/readyz >/dev/null
 
 trap - ERR
+
+cleanup_component_images() {
+  component="$1"
+  entries=()
+  for repository in \
+    "parloq-flow-${component}-server" \
+    "parloq-flow-${component}-local"; do
+    while IFS= read -r image_ref; do
+      [ -n "${image_ref}" ] || continue
+      image_tag="${image_ref##*:}"
+      [[ "${image_tag}" =~ ^[0-9a-f]{12}$ ]] || continue
+      if ! created_at="$(docker image inspect --format '{{.Created}}' "${image_ref}" 2>/dev/null)"; then
+        log "WARNING: 无法读取镜像 ${image_ref}，跳过清理。"
+        continue
+      fi
+      entries+=("${created_at}|${image_ref}")
+    done < <(docker image ls "${repository}" --format '{{.Repository}}:{{.Tag}}')
+  done
+
+  [ "${#entries[@]}" -gt 0 ] || return 0
+  mapfile -t sorted_entries < <(printf '%s\n' "${entries[@]}" | sort -r)
+  kept=0
+  for entry in "${sorted_entries[@]}"; do
+    image_ref="${entry#*|}"
+    if [ "${kept}" -lt "${IMAGE_RETENTION}" ]; then
+      kept=$((kept + 1))
+      continue
+    fi
+    if ! image_id="$(docker image inspect --format '{{.Id}}' "${image_ref}" 2>/dev/null)"; then
+      continue
+    fi
+    if [ -n "$(docker ps -q --filter "ancestor=${image_id}")" ]; then
+      log "保留运行中的镜像 ${image_ref}。"
+      continue
+    fi
+    if docker image rm "${image_ref}" >/dev/null; then
+      log "已清理旧镜像 ${image_ref}。"
+    else
+      log "WARNING: 无法清理旧镜像 ${image_ref}，可能仍被停止的容器引用。"
+    fi
+  done
+}
+
+log "开始清理 Parloq Flow 历史镜像，每个组件保留最近 ${IMAGE_RETENTION} 个版本。"
+for component in api web wa-gateway; do
+  if ! cleanup_component_images "${component}"; then
+    log "WARNING: ${component} 历史镜像清理失败，不影响本次发布结果。"
+  fi
+done
+
+if docker builder prune --force --filter "until=${BUILD_CACHE_MAX_AGE}"; then
+  log "已清理超过 ${BUILD_CACHE_MAX_AGE} 的 BuildKit 构建缓存。"
+else
+  log "WARNING: BuildKit 缓存清理失败，不影响本次发布结果。"
+fi
+
 log "${head_sha} 构建和更新完成。"
 log "配置备份：${env_backup}"
 log "Compose 备份：${compose_backup}"
