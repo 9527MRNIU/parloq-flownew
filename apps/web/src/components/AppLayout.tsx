@@ -157,12 +157,6 @@ export const navigation: NavSection[] = [
         ],
       },
       {
-        label: "直接短链",
-        to: "/direct-short-links",
-        icon: Link2Icon,
-        permissionKey: "marketing.direct_short_links.read",
-      },
-      {
         label: "拉群营销",
         icon: UsersRoundIcon,
         children: [
@@ -202,6 +196,12 @@ export const navigation: NavSection[] = [
             permissionKey: "marketing.group_market_analysis.read",
           },
         ],
+      },
+      {
+        label: "直接短链",
+        to: "/direct-short-links",
+        icon: Link2Icon,
+        permissionKey: "marketing.direct_short_links.read",
       },
     ],
   },
