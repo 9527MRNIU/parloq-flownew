@@ -4,6 +4,7 @@ from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.engine import make_url
 
 from app.config import get_settings
 from app.database import Base
@@ -30,10 +31,17 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    database_url = config.get_main_option("sqlalchemy.url")
+    connect_args = (
+        {"prepare_threshold": None}
+        if make_url(database_url).drivername == "postgresql+psycopg"
+        else {}
+    )
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=connect_args,
     )
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
