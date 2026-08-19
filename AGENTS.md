@@ -50,13 +50,14 @@ together with the current user request.
 - Production host: `216.106.185.81`.
 - BaoTa panel: `https://bt2.felixweb.top:10049` (version 11.8.1 at the
   2026-08-14 handoff).
-- BaoTa HTTP APIs are the only production write control plane. Do not use SSH,
-  SCP, direct Nginx edits, direct Compose commands, or direct SQLite changes to
-  mutate production.
-- The local untracked `.env.baota.local` records the connection. The deployment
-  client opens an SSH port-forward to BaoTa's loopback listener and sends every
-  mutation through the authenticated BaoTa API. SSH is transport/read-only
-  diagnostics only; it does not authorize remote write commands.
+- Application releases run on the production server from `/root/parloq-flow`
+  with `bash deploy/release-production.sh`. This is the normal application
+  update path; do not build or upload production images from the local Mac.
+- BaoTa HTTP APIs remain the write control plane for sites, reverse proxies,
+  certificates, and Nginx infrastructure. Do not directly edit Nginx or BaoTa
+  SQLite.
+- The local untracked `.env.baota.local` is only for BaoTa infrastructure
+  maintenance and is not part of normal application releases.
 - Public management origin: `https://center.parloq.com`.
 - Promotion landing pages use customer-owned domains. They are not assigned a
   Parloq subdomain by default.
@@ -86,37 +87,21 @@ tokens, proxy credentials, WhatsApp credentials, Signal keys, or session JSON.
 
 ## Production Release Policy
 
-The repository owner's standing preference is to build `linux/amd64` images on
-the local Mac and upload them directly to production. Do not wait for a cloud
-registry build unless the user explicitly changes this policy.
+When the user authorizes a production release, require a clean working tree,
+confirm `main` is pushed, and record the exact commit SHA. Then run this command
+from the production repository:
 
-When the user authorizes a production release:
+```bash
+cd /root/parloq-flow
+bash deploy/release-production.sh
+```
 
-1. Require a clean working tree, confirm `main` is pushed, and record the exact
-   commit SHA. Run `python3 deploy/baota_api.py status` before building.
-2. Build immutable images locally with `deploy/build-production-images.sh`:
-   `parloq-flow-api-local:<sha>`, `parloq-flow-web-local:<sha>`, and
-   `parloq-flow-wa-gateway-local:<sha>` for `linux/amd64`.
-3. Export only those images as a tar archive and upload it with BaoTa's chunked
-   File API. The local script must not use SCP.
-4. Start a temporary, audited BaoTa task that verifies SHA-256, loads the
-   images, backs up `.env`, and changes only the three image variables. The
-   task must publish a status file that the client polls before cleanup.
-5. Validate Compose inside that BaoTa task.
-6. Run `migrate` with the `migration` profile and require a zero exit code
-   before recreating `api`, `api-worker`, `wa-gateway`, and `web`. The profile
-   prevents the successful one-shot container from making BaoTa show the whole
-   stack as stopped.
-7. Never recreate, delete, or clear PostgreSQL/Redis data as part of a release.
-   Never use `docker compose down -v`, and never delete `/data/parloq-flow`.
-8. Verify image revisions, migration status, health, restart counts,
-   `http://127.0.0.1:18100/healthz`, public HTTPS when DNS is ready, and recent
-   error logs.
-9. Keep prior image tags and the `.env` backup until verification passes. On
-   failure, restore the previous image variables and recreate only application
-   services; report the failure and rollback result.
-10. Remove local and remote transfer archives only after a successful release;
-    retain the `.env` backup.
+The script updates the server repository to `origin/main`, builds the images on
+the production server with BuildKit cache, updates the BaoTa-managed Compose
+project, runs migrations during API startup, verifies health, and preserves
+rollback images. Do not use the former local build, image archive upload, or
+BaoTa release-task workflow. Never run `docker compose down -v`, delete the
+BaoTa Compose project, or delete `/data/parloq-flow`.
 
 The checked-in Compose file is the desired managed Compose configuration. The
 Nginx file contains reference fragments only. Never install it over BaoTa's
