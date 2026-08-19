@@ -81,7 +81,7 @@ flowchart LR
 | API | Python 3.12、FastAPI、SQLAlchemy、Alembic |
 | WhatsApp 网关 | Node.js 22、TypeScript、Baileys、Fastify |
 | 数据 | PostgreSQL 16、Redis 7 |
-| 运行与发布 | Docker Compose v2、Docker Buildx、Nginx、宝塔 API |
+| 运行与发布 | Docker Compose v2、Docker Buildx、Nginx、宝塔 Docker 编排 |
 
 ## 项目结构
 
@@ -95,7 +95,7 @@ parloq-flow/
 │   └── wa-gateway/                  # 旧 whatsmeow 实验实现，不在当前 Compose 中
 ├── examples/
 │   └── promotion-template-demo/     # 可直接导入的推广模板示例
-├── deploy/                          # 生产 Compose、镜像构建和宝塔 API 发布工具
+├── deploy/                          # 生产 Compose、服务器本机更新及基础设施工具
 ├── docs/                            # 架构、ID、模板和生产交接文档
 ├── docker-compose.yml               # 仅用于本地开发
 └── .env.example                     # 本地环境变量模板
@@ -292,57 +292,48 @@ docker compose --env-file .env.example config --quiet
 | 项目 | 本地开发 | 生产环境 |
 | --- | --- | --- |
 | Compose 文件 | `docker-compose.yml` | `deploy/docker-compose.production.yml` |
-| 镜像 | Compose 现场构建 | 本机为 `linux/amd64` 构建的不可变镜像 |
+| 镜像 | Compose 现场构建 | 生产服务器从本机仓库源码现场构建 |
 | WhatsApp 引擎 | `mock` | `baileys` |
 | 数据库 | Docker 命名卷 | 独立宿主持久化目录 |
 | Redis | 临时数据 | AOF 持久化 |
 | 对外端口 | 多个开发端口 | 仅 Web 绑定 `127.0.0.1:18100` |
-| 数据迁移 | 开发自动建表 | `migration` profile 中显式运行 Alembic |
-| 写入控制面 | 本地 Docker | 仅宝塔 HTTP API |
+| 数据迁移 | 开发自动建表 | API 启动时先运行 Alembic |
+| 写入控制面 | 本地 Docker | 服务器本机 Docker Compose（沿用宝塔编排目录） |
 
 管理入口为 <https://center.parloq.com>。固定服务器、宝塔记录、目录、站点、反代、证书和客户域名接入方式统一维护在 [生产部署与交接文档](docs/production-deployment.md)，不要在多个文档中维护易过期的副本。
 
-### 发布前条件
+### 首次配置私有仓库
 
-生产发布必须同时满足：
+生产脚本使用 GitHub Token 在服务器仓库执行 `git fetch`。Compose 随后直接使用
+同一台服务器上的仓库目录作为 build context，不会再次从 GitHub 下载源码。Token
+必须具有该私人仓库的 `Contents: Read-only` 权限，不得写进 `.env`、Git URL、
+Compose 文件或仓库。
 
-- 工作树干净，不包含未跟踪文件；
-- 当前分支为 `main`；
-- `HEAD` 与 `origin/main` 完全一致；
-- 已记录本次发布的完整 Git commit SHA；
-- Docker Desktop、Docker Buildx、Python 3、Git 和 `shasum` 可用；
-- 根目录存在未跟踪的 `.env.baota.local`，格式参考 [deploy/baota.env.example](deploy/baota.env.example)；
-- 已完成上一节的全部测试和构建检查；
-- 已先只读核对生产容器、镜像 revision、健康状态、重启次数、磁盘、端口、Nginx 和 DNS。
+不需要单独运行配置命令。第一次在生产服务器执行一键更新时，如果服务器还没有
+Token，脚本会在终端提示输入（输入内容不回显），并直接保存到：
 
-先检查发布控制面登记：
-
-```bash
-python3 deploy/baota_api.py status
+```text
+/www/server/panel/data/compose/parloq-flow/github-token
 ```
 
-成功结果必须表明站点、反代和 `parloq-flow` Compose 栈均已登记。
+文件权限自动设为 `600`，后续更新不会再次询问。Token 只用于服务器 Git 更新，
+不会写进 `.env`、镜像或 Git URL。
 
-### 执行发布
+生产 `.env` 的源码路径、Git revision、构建策略和镜像标签由发布命令自动维护。
+
+### 一键更新
+
+代码推送到 `main` 后，在生产服务器的仓库根目录执行：
 
 ```bash
 bash deploy/release-production.sh
 ```
 
-发布脚本会自动完成：
-
-1. 再次验证干净工作树、`main` 和 `origin/main`；
-2. 记录精确 commit，并执行生产状态预检；
-3. 在本机为 `linux/amd64` 构建 API、Web 和 Baileys 网关三个不可变镜像；
-4. 只导出这三个镜像，计算 SHA-256，通过宝塔 File API 分片上传；
-5. 创建临时、可审计的宝塔任务，在远端复核哈希并载入镜像；
-6. 备份生产 `.env` 和宝塔管理的 Compose 文件，只更新三个镜像变量；
-7. 校验 Compose，启动 PostgreSQL/Redis，并通过 `migration` profile 执行 Alembic；
-8. 仅更新 `wa-gateway`、`api`、`api-worker` 和 `web`；
-9. 验证容器镜像 revision、回环健康检查和公网 HTTPS；
-10. 成功后清理临时任务和传输归档，保留发布前配置备份。
-
-发布脚本使用本机镜像直传，不经过云端镜像仓库，也不使用 SCP。
+脚本直接在服务器本机使用 Token 更新 `origin/main`，然后把生产 Compose 配置
+同步到宝塔已经登记的 `parloq-flow` 目录，使用 Compose/BuildKit 缓存构建 API、
+Web 和 Baileys 网关，并执行 `docker compose up`。API 在对外启动前自动执行
+Alembic，Worker 等 API 健康后再完成更新。整个过程不调用宝塔 API、不创建计划
+任务、不导出 tar，也不上传镜像。
 
 ### 发布后验证
 
@@ -362,15 +353,18 @@ curl -fsS https://center.parloq.com/readyz
 
 ### 失败与回滚
 
-发布任务失败时会记录状态；若已经切换配置，会自动恢复发布前的 `.env` 和 Compose 备份，并尝试仅重建上一版应用服务。回滚不得清空或重建 PostgreSQL/Redis。
+服务器每次使用带 commit 短 SHA 的本地镜像标签，上一版镜像不会被本次构建覆盖；
+更新失败时脚本会恢复发布前的 Compose 和 `.env` 并重新启用上一版应用镜像。回滚
+不得清空或重建 PostgreSQL/Redis；不兼容数据库迁移仍需单独处理。
 
 涉及不向后兼容的数据库迁移时，必须先单独设计数据库回滚方案，不能只回退镜像。
 
 ### 生产红线
 
-- 生产写操作只能走宝塔 HTTP API；
-- SSH 仅用于只读诊断和面板端口转发，禁止用 SSH 直接修改生产；
-- 禁止 SCP、直接远端 Docker/Compose、直接编辑 Nginx 或宝塔 SQLite；
+- 应用更新只能在生产服务器执行 `deploy/release-production.sh`；
+- 站点、反代、证书和 Nginx 等基础设施写操作仍通过宝塔 API；
+- 禁止从其他机器通过 SSH/SCP 修改生产，禁止绕过发布脚本手工更新 Compose；
+- 禁止直接编辑 Nginx 或宝塔 SQLite；
 - 禁止执行 `docker compose down -v`；
 - 禁止删除宝塔编排或 `/data/parloq-flow`；
 - 禁止修改旧 `waba` 项目、`/data/waba`、`app.parloq.com` 或端口 `8000/8002`；

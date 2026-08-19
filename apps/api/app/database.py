@@ -175,8 +175,10 @@ def seed_initial_data(db: Session) -> None:
 
 
 def init_database() -> None:
-    if settings.auto_create_tables:
-        config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    if settings.auto_create_tables or settings.auto_migrate:
+        project_dir = Path(__file__).resolve().parents[1]
+        config = Config(str(project_dir / "alembic.ini"))
+        config.set_main_option("script_location", str(project_dir / "alembic"))
         config.set_main_option("sqlalchemy.url", settings.database_url)
         existing_tables = set(inspect(engine).get_table_names())
         initial_tables = {

@@ -26,21 +26,22 @@
 复用。宝塔把旧 `waba` 显示为「已停止」是因为它有一个成功退出的一次性
 `migrate` 容器；实际 21 个常驻容器仍在运行。不要为了修正显示状态去改旧栈。
 
-## 唯一写入控制面
+## 管理边界
 
-生产写操作一律通过宝塔 API：
+应用更新直接在生产服务器本机执行，同时继续沿用宝塔登记的 Compose 项目：
 
 - Docker 编排登记、启动和日常人工管理：宝塔 Docker/容器编排；
-- 镜像归档上传：宝塔 File API；
-- 版本切换、迁移和健康验收：宝塔临时计划任务 API；
+- 应用构建与更新：生产服务器仓库中的一键脚本直接执行 Docker Compose；
+- 私有源码认证：Compose 目录中的只读 GitHub Token 文件；
 - 建站与反代：宝塔 Site API；
 - 证书：宝塔 SSL API；
 - 自定义 Nginx 片段：宝塔 File API，使用版本号和 Parloq marker；
 - Nginx 检查及 reload：宝塔 System API。
 
-禁止用 SSH/SCP 直接写远端文件、直接执行 Docker/Compose、直接修改 Nginx
-或直接改宝塔 SQLite。SSH 只用于两件事：只读诊断，以及把本机端口加密转发
-到面板的 `127.0.0.1:10049`。真正的变更请求仍由宝塔 API 完成并留下宝塔日志。
+发布脚本与 Docker 位于同一台服务器，不通过宝塔 API，也不通过 SSH 绕一圈连接
+自己。脚本直接维护宝塔登记目录中的 Compose 和 `.env`，因此宝塔前端仍能识别、
+查看日志并管理同一个 `parloq-flow` 项目。网站、反代、证书和 Nginx 等基础设施
+操作仍使用宝塔 API，禁止直接修改宝塔 SQLite。
 
 本机连接记录在仓库根目录的未跟踪文件 `.env.baota.local`：
 
@@ -50,10 +51,9 @@ BAOTA_PANEL_REMOTE_PORT=10049
 BAOTA_TOKEN_SOURCE=remote-api-json
 ```
 
-该文件不保存 API Key。客户端通过一次只读 SSH 调用读取服务器已配置的 Token
-哈希，随后所有写操作走宝塔 API。文件被 `.gitignore` 排除，不要提交任何密钥。
-若本地文件丢失，可从 `deploy/baota.env.example` 复制恢复，不需要用户重新说明
-服务器连接方式。
+该文件仅供站点、反代、证书等基础设施维护工具使用，与日常应用更新无关。它不
+保存 API Key，并被 `.gitignore` 排除。若本地文件丢失，可从
+`deploy/baota.env.example` 复制恢复。
 
 ## 当前架构与隔离
 
@@ -63,9 +63,9 @@ BAOTA_TOKEN_SOURCE=remote-api-json
 - `/data/parloq-flow/postgres`
 - `/data/parloq-flow/redis`
 
-`migrate` 服务属于 Compose profile `migration`。常规 `up` 不会创建它，因此宝塔
-不会因为一个 `Exited (0)` 的迁移容器把整个 `parloq-flow` 误显示为停止。发布
-脚本会显式执行一次 `--profile migration ... run --rm migrate`。
+API 容器设置 `AUTO_MIGRATE=true`，启动时先执行 Alembic，再开始监听端口。这样
+宝塔普通 `up` 即可完成迁移，仍然只有 6 个常驻服务，不会因为一次性迁移容器
+显示为停止。`migration` profile 仅保留为应急迁移入口。
 
 不得执行 `docker compose down -v`，不得在宝塔点击「删除编排」，不得删除
 `/data/parloq-flow`。宝塔的删除编排流程可能连带 volumes。
@@ -97,29 +97,22 @@ BAOTA_TOKEN_SOURCE=remote-api-json
 
 ## 常规发布
 
-发布命令：
+第一次在生产服务器执行发布命令时，如果尚未配置 GitHub Token，终端会提示输入
+一次，输入内容不会回显。Token 随后直接保存为服务器文件
+`/www/server/panel/data/compose/parloq-flow/github-token`，权限为 `600`，本地不保留
+其他副本。后续发布不会再次询问：
 
 ```bash
 bash deploy/release-production.sh
 ```
 
-脚本会：
+脚本使用 Token 执行 `git fetch`，以 fast-forward 方式更新服务器仓库到
+`origin/main`，然后以服务器本机 `/root/parloq-flow` 的源码目录作为 build
+context，使用 BuildKit 缓存构建三个镜像并直接更新宝塔登记的 Compose 项目。
+全程不调用宝塔 API、不重复下载构建源码，也不创建宝塔计划任务。
 
-1. 检查工作树干净、当前为 `main`、HEAD 已推送到 `origin/main`；
-2. 用 `deploy/baota_api.py status` 核对网站、反代和 Docker 编排均已登记；
-3. 在本机为 `linux/amd64` 构建带完整 Git revision 的三个不可变镜像；
-4. 导出 tar，计算 SHA-256，通过宝塔 File API 分片上传；
-5. 创建一次性宝塔任务，远端复核 SHA-256 并加载镜像；
-6. 备份 `.env` 和宝塔管理的 Compose 文件，原子同步仓库中已验证的生产 Compose，
-   并只更新 `.env` 中 API/Web/Baileys 三个镜像变量；
-7. 切换前后均校验 Compose，运行一次迁移，再更新四个应用服务；
-8. 验证回环健康和四个应用容器的镜像 revision；
-9. 客户端轮询宝塔状态文件，成功后删除临时任务、归档和状态文件；
-10. 最后验证公网 `https://center.parloq.com/healthz` 和 `https://center.parloq.com/readyz`。
-
-任何步骤失败都会写入明确状态；若已经切换配置，任务会恢复 `.env` 与 Compose
-备份并尝试重建上一版应用服务。数据库和 Redis 不会重建，也不会删除任何数据。失败的任务保留
-在宝塔计划任务中供排查。
+服务器上的 `github-token` 权限为 `600`，仅由更新脚本的 Git 凭据助手读取；Token
+不进入 Compose、镜像、构建参数或 Git URL。
 
 ## 人工验证与回滚
 
@@ -132,6 +125,6 @@ bash deploy/release-production.sh
 - `https://center.parloq.com/readyz` 返回 `{"status":"ready", ...}`，且数据库、Redis、Worker 检查均通过；
 - 旧 `waba` 的 21 个常驻容器数量没有变化。
 
-回滚使用发布前的 `.env.backup-<commit>-<UTC>`，只恢复三个镜像变量并通过
-宝塔临时任务执行应用服务更新。不要回滚/清空数据库；遇到不可向后兼容迁移时，
-必须先单独制定数据库回滚方案。
+每次构建使用带 commit 短 SHA 的本地镜像标签，失败时任务恢复发布前的 `.env`
+和 Compose 文件并重新启用上一版镜像。不要回滚/清空数据库；遇到不可向后兼容
+迁移时，必须先单独制定数据库回滚方案。

@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 !deploy/*.env.example
+github-token
 
 # JavaScript
 node_modules/

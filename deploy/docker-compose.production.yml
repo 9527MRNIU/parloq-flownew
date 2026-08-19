@@ -1,5 +1,21 @@
 name: ${COMPOSE_PROJECT_NAME:-parloq-flow}
 
+x-api-build: &api-build
+  context: "${PARLOQ_SOURCE_ROOT:-/root/parloq-flow}/apps/api"
+  args:
+    BUILD_VERSION: ${PARLOQ_GIT_REF:-main}
+
+x-web-build: &web-build
+  context: "${PARLOQ_SOURCE_ROOT:-/root/parloq-flow}/apps/web"
+  target: production
+  args:
+    BUILD_VERSION: ${PARLOQ_GIT_REF:-main}
+
+x-gateway-build: &gateway-build
+  context: "${PARLOQ_SOURCE_ROOT:-/root/parloq-flow}/services/wa-gateway-baileys"
+  args:
+    BUILD_VERSION: ${PARLOQ_GIT_REF:-main}
+
 x-api-environment: &api-environment
   APP_ENV: production
   DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
@@ -73,7 +89,8 @@ services:
       retries: 12
 
   migrate:
-    image: ${PARLOQ_API_IMAGE:?PARLOQ_API_IMAGE is required}
+    image: ${PARLOQ_API_IMAGE:-parloq-flow-api-server:latest}
+    pull_policy: never
     restart: "no"
     profiles: ["migration"]
     command: ["alembic", "upgrade", "head"]
@@ -85,7 +102,9 @@ services:
         condition: service_healthy
 
   wa-gateway:
-    image: ${PARLOQ_WA_GATEWAY_IMAGE:?PARLOQ_WA_GATEWAY_IMAGE is required}
+    image: ${PARLOQ_WA_GATEWAY_IMAGE:-parloq-flow-wa-gateway-server:latest}
+    pull_policy: ${PARLOQ_APP_PULL_POLICY:-build}
+    build: *gateway-build
     restart: unless-stopped
     environment:
       SNOWFLAKE_NODE_ID: ${WA_GATEWAY_SNOWFLAKE_NODE_ID:-3}
@@ -114,11 +133,14 @@ services:
       start_period: 10s
 
   api:
-    image: ${PARLOQ_API_IMAGE:?PARLOQ_API_IMAGE is required}
+    image: ${PARLOQ_API_IMAGE:-parloq-flow-api-server:latest}
+    pull_policy: ${PARLOQ_APP_PULL_POLICY:-build}
+    build: *api-build
     restart: unless-stopped
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
     environment:
       <<: *api-environment
+      AUTO_MIGRATE: "true"
       SNOWFLAKE_NODE_ID: ${API_SNOWFLAKE_NODE_ID:-1}
     volumes:
       - type: bind
@@ -139,14 +161,15 @@ services:
       wa-gateway:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 15s
 
   api-worker:
-    image: ${PARLOQ_API_IMAGE:?PARLOQ_API_IMAGE is required}
+    image: ${PARLOQ_API_IMAGE:-parloq-flow-api-server:latest}
+    pull_policy: never
     restart: unless-stopped
     command: ["python", "-m", "app.task_worker"]
     environment:
@@ -159,6 +182,8 @@ services:
         condition: service_healthy
       wa-gateway:
         condition: service_healthy
+      api:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-m", "app.worker_health"]
       interval: 10s
@@ -167,7 +192,9 @@ services:
       start_period: 20s
 
   web:
-    image: ${PARLOQ_WEB_IMAGE:?PARLOQ_WEB_IMAGE is required}
+    image: ${PARLOQ_WEB_IMAGE:-parloq-flow-web-server:latest}
+    pull_policy: ${PARLOQ_APP_PULL_POLICY:-build}
+    build: *web-build
     restart: unless-stopped
     ports:
       - "127.0.0.1:${PARLOQ_HTTP_PORT:-18100}:8080"

@@ -78,6 +78,7 @@ class Settings:
     data_encryption_active_key_id: str
     data_encryption_keys: tuple[tuple[str, str], ...]
     auto_create_tables: bool
+    auto_migrate: bool
     seed_admin_username: str
     seed_admin_password: str
     bitly_mock: bool
@@ -151,6 +152,7 @@ def get_settings() -> Settings:
         ).strip(),
         data_encryption_keys=_encryption_keys_env(),
         auto_create_tables=_bool_env("AUTO_CREATE_TABLES", True),
+        auto_migrate=_bool_env("AUTO_MIGRATE", False),
         seed_admin_username=os.getenv("SEED_ADMIN_USERNAME", "admin"),
         seed_admin_password=os.getenv("SEED_ADMIN_PASSWORD", "admin"),
         bitly_mock=_bool_env("BITLY_MOCK", False),
