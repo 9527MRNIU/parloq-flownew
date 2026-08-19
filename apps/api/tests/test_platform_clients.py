@@ -250,6 +250,50 @@ def test_namesilo_connection_test_is_read_only() -> None:
     assert operations == ["listDomains"]
 
 
+def test_namesilo_lists_all_account_domains_with_dates() -> None:
+    pages: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        pages.append(page)
+        rows = (
+            [
+                {
+                    "domain": f"domain-{index}.example",
+                    "created": "2026-01-01",
+                    "expires": "2027-01-01",
+                }
+                for index in range(100)
+            ]
+            if page == 1
+            else [{"#text": "last.example", "@expires": "2027-02-01"}]
+        )
+        return httpx.Response(
+            200,
+            json={
+                "reply": {
+                    "code": 300,
+                    "domains": {"domain": rows},
+                    "pager": {"total": 101, "page": page, "pageSize": 100},
+                }
+            },
+        )
+
+    client = NameSiloClient(
+        "secret-key",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    rows = client.list_domains()
+
+    assert pages == [1, 2]
+    assert len(rows) == 101
+    assert rows[-1] == {
+        "domain": "last.example",
+        "created": "",
+        "expires": "2027-02-01",
+    }
+
+
 def test_namesilo_mit_payment_rejection_has_actionable_message() -> None:
     class RejectingClient:
         def register_domain(self, *args, **kwargs):
@@ -392,6 +436,84 @@ def test_cloudflare_ensures_zone_dns_and_settings_idempotently() -> None:
         ("POST", "/zones/zone-1/dns_records"),
         ("PATCH", "/zones/zone-1/settings/ssl"),
     ]
+
+
+def test_cloudflare_accepts_user_and_account_api_tokens() -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/client/v4")
+        requests.append(path)
+        if path == "/accounts":
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "result": [{"id": "account-1", "name": "Primary"}],
+                },
+            )
+        if path in {
+            "/user/tokens/verify",
+            "/accounts/account-1/tokens/verify",
+        }:
+            return httpx.Response(
+                200,
+                json={"success": True, "result": {"status": "active"}},
+            )
+        raise AssertionError(f"unexpected request {path}")
+
+    http_client = httpx.Client(
+        base_url=CloudflareClient.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    assert CloudflareClient("cfut_user-token", client=http_client).verify_connection() == [
+        {"id": "account-1", "name": "Primary"}
+    ]
+    assert requests == ["/accounts", "/user/tokens/verify"]
+
+    requests.clear()
+    assert CloudflareClient("cfat_account-token", client=http_client).verify_connection() == [
+        {"id": "account-1", "name": "Primary"}
+    ]
+    assert requests == ["/accounts", "/accounts/account-1/tokens/verify"]
+
+
+def test_cloudflare_lists_all_zones_for_the_selected_account() -> None:
+    pages: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/client/v4")
+        assert path == "/zones"
+        assert request.url.params["account.id"] == "account-1"
+        page = int(request.url.params["page"])
+        pages.append(page)
+        rows = (
+            [{"id": f"zone-{index}", "name": f"zone-{index}.example"} for index in range(50)]
+            if page == 1
+            else [{"id": "zone-last", "name": "last.example"}]
+        )
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "result": rows,
+                "result_info": {"page": page, "total_pages": 2},
+            },
+        )
+
+    http_client = httpx.Client(
+        base_url=CloudflareClient.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    rows = CloudflareClient(
+        "cfat_account-token",
+        account_id="account-1",
+        client=http_client,
+    ).list_zones()
+
+    assert pages == [1, 2]
+    assert len(rows) == 51
+    assert rows[-1]["name"] == "last.example"
 
 
 def test_baota_creates_site_and_proxy_once_and_refuses_conflicts() -> None:

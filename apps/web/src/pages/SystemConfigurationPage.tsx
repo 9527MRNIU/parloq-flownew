@@ -1,4 +1,6 @@
 import {
+  BookOpenIcon,
+  ExternalLinkIcon,
   LoaderCircleIcon,
   PlugZapIcon,
   SaveIcon,
@@ -11,6 +13,7 @@ import {
   Button,
   confirmAction,
   Input,
+  Modal,
   Select,
   SelectContent,
   SelectItem,
@@ -55,6 +58,13 @@ type PlatformDraft = PlatformSettings & {
 };
 
 type CloudflareAccount = { id: string; name: string };
+
+const CLOUDFLARE_TOKEN_PERMISSIONS = [
+  "Account → Account Settings → Read",
+  "Zone → Zone → Read",
+  "Zone → DNS → Edit",
+  "Zone → Zone Settings → Edit",
+] as const;
 
 function platformRows(payload: unknown): PlatformConfiguration[] {
   const body = payload as { data?: { platforms?: unknown[] } };
@@ -111,6 +121,7 @@ export function SystemConfigurationPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [pendingKey, setPendingKey] = useState("");
+  const [cloudflareGuideOpen, setCloudflareGuideOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -383,6 +394,12 @@ export function SystemConfigurationPage() {
                         {pendingKey === `${row.key}:save` ? <LoaderCircleIcon className="spin" /> : <SaveIcon />}
                         保存配置
                       </Button>
+                      {row.key === "cloudflare" ? (
+                        <Button variant="outline" onClick={() => setCloudflareGuideOpen(true)}>
+                          <BookOpenIcon />
+                          创建指引
+                        </Button>
+                      ) : null}
                       <Button variant="outline" disabled={busy || !row.configured} onClick={() => void testConnection(row)}>
                         {pendingKey === `${row.key}:test` ? <LoaderCircleIcon className="spin" /> : <PlugZapIcon />}
                         测试连接
@@ -399,6 +416,61 @@ export function SystemConfigurationPage() {
           </DrawerFormLayout>
         )}
       </div>
+
+      <Modal
+        open={cloudflareGuideOpen}
+        title="Cloudflare API Token 创建指引"
+        description="推荐创建账户 API Token，用户 API Token 也可以使用；不要填写 Global API Key 或 Token ID。"
+        onClose={() => setCloudflareGuideOpen(false)}
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setCloudflareGuideOpen(false)}>关闭</Button>
+            <Button asChild>
+              <a href="https://dash.cloudflare.com/" target="_blank" rel="noreferrer">
+                打开 Cloudflare
+                <ExternalLinkIcon />
+              </a>
+            </Button>
+          </>
+        }
+      >
+        <div className="grid gap-4">
+          <section className="rounded-lg border border-border bg-muted/30 p-3">
+            <h3 className="font-medium">推荐：账户 API Token</h3>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">
+              Cloudflare 控制台 → Manage Account（管理账户）→ Account API Tokens → Create Token
+            </p>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">
+              也可以使用：右上角个人头像 → My Profile → API Tokens 创建用户 API Token。
+            </p>
+          </section>
+
+          <section className="grid gap-2">
+            <h3 className="font-medium">创建方式</h3>
+            <ol className="grid list-decimal gap-1.5 pl-5 text-sm leading-6 text-muted-foreground">
+              <li>选择 Edit Zone DNS 模板。</li>
+              <li>在模板已有权限基础上，增加 Zone → Zone Settings → Edit。</li>
+              <li>Account Resources 选择目标账户。</li>
+              <li>Zone Resources 选择该账户下的 All zones。</li>
+            </ol>
+          </section>
+
+          <section className="grid gap-2">
+            <h3 className="font-medium">最终权限</h3>
+            <ul className="grid gap-1.5 text-sm text-muted-foreground">
+              {CLOUDFLARE_TOKEN_PERMISSIONS.map((permission) => (
+                <li key={permission} className="rounded-md border border-border px-3 py-2 font-mono">
+                  {permission}
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          <p className="rounded-lg bg-muted/40 px-3 py-2 text-sm leading-6 text-muted-foreground">
+            Client IP Address Filtering 建议首次创建时留空。Token 创建成功后只显示一次，请复制完整的 Token 值并回到本页保存、测试连接。
+          </p>
+        </div>
+      </Modal>
     </StandardListPage>
   );
 }

@@ -33,6 +33,152 @@ def _account_group(admin_client: TestClient, name: str) -> str:
     return response.json()["data"]["group"]["id"]
 
 
+def test_external_domain_inventories_and_namesilo_purchase_source(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
+    class FakeCloudflareClient:
+        def __init__(self, _token: str, *, account_id: str | None = None) -> None:
+            assert account_id == "account-1"
+
+        def list_zones(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "name": "cloudflare-owned.example",
+                    "status": "active",
+                    "type": "full",
+                    "account": {"name": "Primary"},
+                    "name_servers": ["one.ns.cloudflare.com", "two.ns.cloudflare.com"],
+                    "created_on": "2026-01-01T00:00:00Z",
+                    "modified_on": "2026-02-01T00:00:00Z",
+                }
+            ]
+
+        def close(self) -> None:
+            pass
+
+    class FakeNameSiloClient:
+        def __init__(self, _key: str) -> None:
+            pass
+
+        def list_domains(self) -> list[dict[str, str]]:
+            return [
+                {
+                    "domain": "system-bought.example",
+                    "created": "2026-01-01",
+                    "expires": "2027-01-01",
+                },
+                {
+                    "domain": "account-existing.example",
+                    "created": "2025-01-01",
+                    "expires": "2027-02-01",
+                },
+            ]
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(domains_router, "CloudflareClient", FakeCloudflareClient)
+    monkeypatch.setattr(domains_router, "NameSiloClient", FakeNameSiloClient)
+
+    admin_client.delete("/api/system/configuration/cloudflare")
+    admin_client.delete("/api/system/configuration/namesilo")
+    try:
+        assert admin_client.put(
+            "/api/system/configuration/cloudflare",
+            json={
+                "value": "cloudflare-account-token-123456",
+                "enabled": True,
+                "accountId": "account-1",
+            },
+        ).status_code == 200
+        assert admin_client.put(
+            "/api/system/configuration/namesilo",
+            json={
+                "value": "namesilo-api-key-123456",
+                "enabled": True,
+                "paymentId": "2531590",
+            },
+        ).status_code == 200
+
+        with SessionLocal() as db:
+            admin = db.scalar(select(UserAccount).where(UserAccount.username == "admin"))
+            assert admin is not None
+            quote = DomainQuote(
+                public_id=new_public_id("dquote"),
+                hostname="system-bought.example",
+                years=1,
+                amount=12,
+                currency="USD",
+                provider="namesilo",
+                expires_at=utcnow() + timedelta(minutes=15),
+                consumed_at=utcnow(),
+                created_by=admin.id,
+            )
+            domain = DomainRecord(
+                public_id=new_public_id("dom"),
+                hostname="system-bought.example",
+                acquisition_type="purchased",
+                management_mode="platform",
+                registrar_provider="namesilo",
+                registration_status="active",
+                hosting_provider="cloudflare",
+                hosting_status="pending",
+                verification_token="external-inventory-test-token",
+                created_by=admin.id,
+            )
+            db.add_all([quote, domain])
+            db.flush()
+            order = DomainOrder(
+                public_id=new_public_id("dord"),
+                quote_id=quote.id,
+                hostname=quote.hostname,
+                years=1,
+                amount=12,
+                currency="USD",
+                status="completed",
+                provider="namesilo",
+                provider_order_ref="namesilo:system-bought.example",
+                domain_id=domain.id,
+                completed_at=utcnow(),
+                created_by=admin.id,
+            )
+            db.add(order)
+            db.commit()
+
+        cloudflare = admin_client.get("/api/domains/cloudflare")
+        assert cloudflare.status_code == 200, cloudflare.text
+        assert cloudflare.json()["data"]["rows"][0]["hostname"] == "cloudflare-owned.example"
+
+        namesilo = admin_client.get("/api/domains/namesilo")
+        assert namesilo.status_code == 200, namesilo.text
+        rows = {row["hostname"]: row for row in namesilo.json()["data"]["rows"]}
+        assert rows["system-bought.example"]["source"] == "system_purchase"
+        assert rows["system-bought.example"]["order"]["status"] == "completed"
+        assert rows["account-existing.example"]["source"] == "account_existing"
+        assert rows["account-existing.example"]["order"] is None
+    finally:
+        admin_client.delete("/api/system/configuration/cloudflare")
+        admin_client.delete("/api/system/configuration/namesilo")
+        with SessionLocal() as db:
+            order = db.scalar(
+                select(DomainOrder).where(DomainOrder.hostname == "system-bought.example")
+            )
+            quote = db.scalar(
+                select(DomainQuote).where(DomainQuote.hostname == "system-bought.example")
+            )
+            domain = db.scalar(
+                select(DomainRecord).where(DomainRecord.hostname == "system-bought.example")
+            )
+            if order is not None:
+                db.delete(order)
+            if domain is not None:
+                db.delete(domain)
+            if quote is not None:
+                db.delete(quote)
+            db.commit()
+
+
 def test_system_roles_menus_and_backend_permission(admin_client: TestClient) -> None:
     menus = admin_client.get("/api/system/menus")
     assert menus.status_code == 200

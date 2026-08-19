@@ -46,6 +46,11 @@ from app.services.domain_registrar import (
     MockDomainRegistrar,
     NameSiloDomainRegistrar,
 )
+from app.services.platform_clients import (
+    CloudflareClient,
+    NameSiloClient,
+    PlatformClientError,
+)
 router = APIRouter(prefix="/api/domains", tags=["domains"])
 order_router = APIRouter(prefix="/api/domain-orders", tags=["domain-orders"])
 logger = logging.getLogger(__name__)
@@ -115,6 +120,38 @@ def _registrar(
 def _close_registrar(registrar: MockDomainRegistrar | NameSiloDomainRegistrar) -> None:
     if isinstance(registrar, NameSiloDomainRegistrar):
         registrar.close()
+
+
+def _platform_secret(
+    db: DbSession,
+    platform_key: str,
+    credential_key: str,
+) -> tuple[str, dict[str, object]]:
+    config = db.scalar(
+        select(SystemPlatformConfiguration).where(
+            SystemPlatformConfiguration.platform_key == platform_key
+        )
+    )
+    credential = db.scalar(
+        select(SystemCredential).where(
+            SystemCredential.platform_key == platform_key,
+            SystemCredential.credential_key == credential_key,
+        )
+    )
+    display_name = "Cloudflare" if platform_key == "cloudflare" else "NameSilo"
+    if config is None or not config.enabled or credential is None:
+        raise HTTPException(
+            status_code=503,
+            detail=f"{display_name} 尚未启用或未配置凭据",
+        )
+    try:
+        secret = decrypt_secret(credential.value_ciphertext)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"{display_name} 凭据无法读取，请重新配置",
+        ) from exc
+    return secret, dict(config.settings_json or {})
 
 
 def _domain(db: DbSession, identifier: str, user) -> DomainRecord:
@@ -400,6 +437,125 @@ def list_domains(db: DbSession, current_user: CurrentUser) -> dict:
     if current_user.role != "admin": statement = statement.where(DomainRecord.created_by == current_user.id)
     items = db.scalars(statement.order_by(DomainRecord.created_at.desc())).all()
     return {"data": {"rows": [domain_row(db, item) for item in items], "total": len(items)}}
+
+
+@router.get("/cloudflare")
+def list_cloudflare_domains(db: DbSession, current_user: CurrentUser) -> dict:
+    del current_user
+    api_token, settings = _platform_secret(db, "cloudflare", "api_token")
+    client = CloudflareClient(
+        api_token,
+        account_id=str(settings.get("accountId") or "").strip() or None,
+    )
+    try:
+        zones = client.list_zones()
+    except PlatformClientError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"读取 Cloudflare 域名失败：{exc}",
+        ) from exc
+    finally:
+        client.close()
+
+    rows = []
+    for zone in zones:
+        account = dict(zone.get("account") or {}) if isinstance(zone.get("account"), dict) else {}
+        rows.append(
+            {
+                "hostname": str(zone.get("name") or "").lower().rstrip("."),
+                "status": str(zone.get("status") or "unknown"),
+                "paused": bool(zone.get("paused")),
+                "type": str(zone.get("type") or ""),
+                "accountName": str(account.get("name") or ""),
+                "nameServers": [
+                    str(value)
+                    for value in (zone.get("name_servers") or [])
+                    if str(value).strip()
+                ],
+                "createdAt": zone.get("created_on"),
+                "modifiedAt": zone.get("modified_on"),
+                "activatedAt": zone.get("activated_on"),
+            }
+        )
+    rows.sort(key=lambda row: row["hostname"])
+    return {"data": {"rows": rows, "total": len(rows)}}
+
+
+@router.get("/namesilo")
+def list_namesilo_domains(db: DbSession, current_user: CurrentUser) -> dict:
+    api_key, _ = _platform_secret(db, "namesilo", "api_key")
+    client = NameSiloClient(api_key)
+    try:
+        provider_domains = client.list_domains()
+    except PlatformClientError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"读取 NameSilo 域名失败：{exc}",
+        ) from exc
+    finally:
+        client.close()
+
+    order_statement = select(DomainOrder).where(DomainOrder.provider == "namesilo")
+    domain_statement = select(DomainRecord).where(DomainRecord.archived_at.is_(None))
+    if current_user.role != "admin":
+        order_statement = order_statement.where(DomainOrder.created_by == current_user.id)
+        domain_statement = domain_statement.where(DomainRecord.created_by == current_user.id)
+    orders = db.scalars(order_statement.order_by(DomainOrder.created_at.desc())).all()
+    local_domains = db.scalars(domain_statement).all()
+    domains_by_hostname = {item.hostname.lower(): item for item in local_domains}
+
+    orders_by_hostname: dict[str, list[DomainOrder]] = {}
+    for order in orders:
+        orders_by_hostname.setdefault(order.hostname.lower(), []).append(order)
+
+    rows: list[dict[str, object]] = []
+    provider_hostnames: set[str] = set()
+    for provider_domain in provider_domains:
+        hostname = provider_domain["domain"].lower()
+        provider_hostnames.add(hostname)
+        hostname_orders = orders_by_hostname.get(hostname, [])
+        system_order = next(
+            (
+                order
+                for order in hostname_orders
+                if order.status == "completed" or order.provider_order_ref is not None
+            ),
+            None,
+        )
+        local_domain = domains_by_hostname.get(hostname)
+        rows.append(
+            {
+                "hostname": hostname,
+                "source": "system_purchase" if system_order else "account_existing",
+                "providerOwned": True,
+                "providerStatus": "active",
+                "createdAt": provider_domain.get("created") or None,
+                "expiresAt": provider_domain.get("expires") or None,
+                "systemDomainId": entity_id(local_domain) if local_domain else None,
+                "order": _order_row(db, system_order) if system_order else None,
+            }
+        )
+
+    for order in orders:
+        hostname = order.hostname.lower()
+        if hostname in provider_hostnames or order.status == "cancelled":
+            continue
+        local_domain = domains_by_hostname.get(hostname)
+        rows.append(
+            {
+                "hostname": hostname,
+                "source": "system_purchase",
+                "providerOwned": False,
+                "providerStatus": order.status,
+                "createdAt": None,
+                "expiresAt": None,
+                "systemDomainId": entity_id(local_domain) if local_domain else None,
+                "order": _order_row(db, order),
+            }
+        )
+
+    rows.sort(key=lambda row: str(row["hostname"]))
+    return {"data": {"rows": rows, "total": len(rows)}}
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

@@ -286,6 +286,63 @@ class NameSiloClient:
     def verify_connection(self) -> None:
         self._request("listDomains", page=1, pageSize=1)
 
+    def list_domains(self) -> list[dict[str, str]]:
+        """Return every domain visible to the configured NameSilo account."""
+
+        domains: list[dict[str, str]] = []
+        page = 1
+        page_size = 100
+        while page <= 1000:
+            reply = self._request("listDomains", page=page, pageSize=page_size)
+            rows = _domain_rows(reply.get("domains"))
+            for row in rows:
+                domain = str(
+                    row.get("domain")
+                    or row.get("name")
+                    or row.get("#text")
+                    or row.get("value")
+                    or ""
+                ).strip().lower().rstrip(".")
+                if not domain:
+                    continue
+                domains.append(
+                    {
+                        "domain": domain,
+                        "created": str(
+                            row.get("created")
+                            or row.get("@created")
+                            or row.get("created_at")
+                            or ""
+                        ).strip(),
+                        "expires": str(
+                            row.get("expires")
+                            or row.get("@expires")
+                            or row.get("expires_at")
+                            or ""
+                        ).strip(),
+                    }
+                )
+
+            pager = _mapping(reply.get("pager"))
+            total = int(str(pager.get("total") or "0") or "0")
+            current_page = int(str(pager.get("page") or page) or page)
+            returned_page_size = int(
+                str(pager.get("pageSize") or pager.get("page_size") or page_size)
+                or page_size
+            )
+            if (
+                not rows
+                or len(rows) < page_size
+                or (total > 0 and current_page * returned_page_size >= total)
+            ):
+                break
+            page += 1
+
+        unique: dict[str, dict[str, str]] = {}
+        for row in domains:
+            unique[row["domain"]] = row
+        return [unique[key] for key in sorted(unique)]
+
     def check_availability(self, domain: str) -> tuple[bool, Decimal | None]:
         reply = self._request("checkRegisterAvailability", domains=domain)
         normalized = domain.lower()
@@ -459,10 +516,7 @@ class CloudflareClient:
     def _get(self, path: str, **params: object) -> dict[str, object]:
         return self._request("GET", path, params=dict(params) or None)
 
-    def verify_connection(self) -> list[dict[str, str]]:
-        token = _mapping(self._get("/user/tokens/verify").get("result"))
-        if str(token.get("status") or "").lower() != "active":
-            raise PlatformClientError("Cloudflare API Token 未激活")
+    def list_accounts(self) -> list[dict[str, str]]:
         rows = self._get("/accounts", page=1, per_page=50).get("result")
         if not isinstance(rows, list):
             raise PlatformClientError("Cloudflare 账户响应无效")
@@ -471,6 +525,69 @@ class CloudflareClient:
             for value in rows
             if (row := _mapping(value)) and str(row.get("id") or "")
         ]
+
+    def _verify_account_token(self, accounts: list[dict[str, str]]) -> None:
+        candidates: list[str] = []
+        if self._account_id:
+            candidates.append(self._account_id)
+        candidates.extend(
+            row["id"] for row in accounts if row["id"] not in candidates
+        )
+        if not candidates:
+            raise PlatformClientError("Cloudflare API Token 未关联可访问的账户")
+
+        last_error: PlatformClientError | None = None
+        for account_id in candidates:
+            try:
+                token = _mapping(
+                    self._get(f"/accounts/{account_id}/tokens/verify").get("result")
+                )
+            except PlatformClientError as exc:
+                last_error = exc
+                continue
+            if str(token.get("status") or "").lower() == "active":
+                return
+        if last_error is not None:
+            raise last_error
+        raise PlatformClientError("Cloudflare API Token 未激活")
+
+    def verify_connection(self) -> list[dict[str, str]]:
+        accounts = self.list_accounts()
+        if self._api_token.startswith("cfat_"):
+            self._verify_account_token(accounts)
+            return accounts
+
+        try:
+            token = _mapping(self._get("/user/tokens/verify").get("result"))
+            if str(token.get("status") or "").lower() != "active":
+                raise PlatformClientError("Cloudflare API Token 未激活")
+        except PlatformClientError as user_error:
+            try:
+                self._verify_account_token(accounts)
+            except PlatformClientError:
+                raise user_error from None
+        return accounts
+
+    def list_zones(self) -> list[dict[str, object]]:
+        zones: list[dict[str, object]] = []
+        page = 1
+        per_page = 50
+        while page <= 1000:
+            params: dict[str, object] = {"page": page, "per_page": per_page}
+            if self._account_id:
+                params["account.id"] = self._account_id
+            payload = self._get("/zones", **params)
+            rows = payload.get("result")
+            if not isinstance(rows, list):
+                raise PlatformClientError("Cloudflare Zone 响应无效")
+            zones.extend(_mapping(value) for value in rows if _mapping(value))
+
+            result_info = _mapping(payload.get("result_info"))
+            total_pages = int(str(result_info.get("total_pages") or "0") or "0")
+            if not rows or len(rows) < per_page or (total_pages and page >= total_pages):
+                break
+            page += 1
+        return zones
 
     def find_zone(self, domain: str) -> dict[str, object] | None:
         params: dict[str, object] = {"name": domain, "page": 1, "per_page": 50}

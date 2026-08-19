@@ -99,6 +99,28 @@ type DomainOrderRow = {
   createdAt?: string;
   updatedAt?: string;
 };
+type CloudflareDomainRow = {
+  readKey: string;
+  hostname: string;
+  status: string;
+  paused: boolean;
+  type: string;
+  accountName: string;
+  nameServers: string[];
+  createdAt?: string;
+  modifiedAt?: string;
+};
+type NameSiloDomainRow = {
+  readKey: string;
+  hostname: string;
+  source: "system_purchase" | "account_existing";
+  providerOwned: boolean;
+  providerStatus: string;
+  createdAt?: string;
+  expiresAt?: string;
+  systemDomainId?: string;
+  order?: DomainOrderRow;
+};
 type DomainSearchOption = {
   domain: string;
   registrationPrice: number;
@@ -188,6 +210,39 @@ function normalizeOrder(input: unknown): DomainOrderRow {
     },
     createdAt: get(row, "createdAt", "created_at"),
     updatedAt: get(row, "updatedAt", "updated_at"),
+  };
+}
+function normalizeCloudflareDomain(input: unknown): CloudflareDomainRow {
+  const row = input as Record<string, unknown>;
+  const hostname = get(row, "hostname", "name");
+  const accountName = get(row, "accountName", "account_name");
+  const nameServers = row.nameServers ?? row.name_servers;
+  return {
+    readKey: `cloudflare:${accountName}:${hostname}`,
+    hostname,
+    status: get(row, "status") || "unknown",
+    paused: Boolean(row.paused),
+    type: get(row, "type"),
+    accountName,
+    nameServers: Array.isArray(nameServers) ? nameServers.map(String) : [],
+    createdAt: get(row, "createdAt", "created_at"),
+    modifiedAt: get(row, "modifiedAt", "modified_at"),
+  };
+}
+function normalizeNameSiloDomain(input: unknown): NameSiloDomainRow {
+  const row = input as Record<string, unknown>;
+  const hostname = get(row, "hostname", "domain");
+  const orderValue = row.order && typeof row.order === "object" ? row.order : null;
+  return {
+    readKey: `namesilo:${hostname}`,
+    hostname,
+    source: row.source === "system_purchase" ? "system_purchase" : "account_existing",
+    providerOwned: Boolean(row.providerOwned ?? row.provider_owned),
+    providerStatus: get(row, "providerStatus", "provider_status") || "unknown",
+    createdAt: get(row, "createdAt", "created_at"),
+    expiresAt: get(row, "expiresAt", "expires_at"),
+    systemDomainId: snowflakeId(row, "systemDomainId", "system_domain_id") || undefined,
+    order: orderValue ? normalizeOrder(orderValue) : undefined,
   };
 }
 function normalizeSearch(input: unknown): DomainSearchState {
@@ -280,9 +335,11 @@ export function DomainsPage() {
   const canManage = can("promotion.domain.manage");
   const canPurchase = can("promotion.domain.purchase");
   const [rows, setRows] = useState<DomainRow[]>([]);
-  const [orders, setOrders] = useState<DomainOrderRow[]>([]);
+  const [cloudflareDomains, setCloudflareDomains] = useState<CloudflareDomainRow[]>([]);
+  const [nameSiloDomains, setNameSiloDomains] = useState<NameSiloDomainRow[]>([]);
+  const [externalErrors, setExternalErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
-  const [activeList, setActiveList] = useState<"domains" | "orders">("domains");
+  const [activeList, setActiveList] = useState<"system" | "cloudflare" | "namesilo">("system");
   const [keyword, setKeyword] = useState("");
   const [drawer, setDrawer] = useState(false);
   const [editing, setEditing] = useState<DomainRow | null>(null);
@@ -304,19 +361,42 @@ export function DomainsPage() {
   const [orderPending, setOrderPending] = useState("");
   const load = useCallback(async () => {
     setLoading(true);
-    try {
-      const [domainPayload, orderPayload] = await Promise.all([
-        apiRequest("/api/domains?pageSize=100"),
-        apiRequest("/api/domain-orders"),
-      ]);
-      setRows(unwrapList<unknown>(domainPayload).rows.map(normalize));
-      setOrders(unwrapList<unknown>(orderPayload).rows.map(normalizeOrder));
-    } catch {
+    const [systemResult, cloudflareResult, nameSiloResult] = await Promise.allSettled([
+      apiRequest("/api/domains?pageSize=100"),
+      apiRequest("/api/domains/cloudflare"),
+      apiRequest("/api/domains/namesilo"),
+    ]);
+    const errors: Record<string, string> = {};
+    if (systemResult.status === "fulfilled") {
+      setRows(unwrapList<unknown>(systemResult.value).rows.map(normalize));
+    } else {
       setRows([]);
-      setOrders([]);
-    } finally {
-      setLoading(false);
+      errors.system = systemResult.reason instanceof Error
+        ? systemResult.reason.message
+        : "系统域名读取失败";
     }
+    if (cloudflareResult.status === "fulfilled") {
+      setCloudflareDomains(
+        unwrapList<unknown>(cloudflareResult.value).rows.map(normalizeCloudflareDomain),
+      );
+    } else {
+      setCloudflareDomains([]);
+      errors.cloudflare = cloudflareResult.reason instanceof Error
+        ? cloudflareResult.reason.message
+        : "Cloudflare 域名读取失败";
+    }
+    if (nameSiloResult.status === "fulfilled") {
+      setNameSiloDomains(
+        unwrapList<unknown>(nameSiloResult.value).rows.map(normalizeNameSiloDomain),
+      );
+    } else {
+      setNameSiloDomains([]);
+      errors.namesilo = nameSiloResult.reason instanceof Error
+        ? nameSiloResult.reason.message
+        : "NameSilo 域名读取失败";
+    }
+    setExternalErrors(errors);
+    setLoading(false);
   }, []);
   useEffect(() => {
     void load();
@@ -327,16 +407,25 @@ export function DomainsPage() {
       ? rows.filter((row) => row.hostname.toLowerCase().includes(search))
       : rows;
   }, [keyword, rows]);
-  const visibleOrders = useMemo(() => {
+  const visibleCloudflareDomains = useMemo(() => {
     const search = keyword.trim().toLowerCase();
     return search
-      ? orders.filter((row) => row.hostname.toLowerCase().includes(search))
-      : orders;
-  }, [keyword, orders]);
+      ? cloudflareDomains.filter((row) => row.hostname.toLowerCase().includes(search))
+      : cloudflareDomains;
+  }, [cloudflareDomains, keyword]);
+  const visibleNameSiloDomains = useMemo(() => {
+    const search = keyword.trim().toLowerCase();
+    return search
+      ? nameSiloDomains.filter((row) => row.hostname.toLowerCase().includes(search))
+      : nameSiloDomains;
+  }, [keyword, nameSiloDomains]);
   const domainPagination = useClientPagination(visible, {
     resetKey: `${activeList}|${keyword}`,
   });
-  const orderPagination = useClientPagination(visibleOrders, {
+  const cloudflarePagination = useClientPagination(visibleCloudflareDomains, {
+    resetKey: `${activeList}|${keyword}`,
+  });
+  const nameSiloPagination = useClientPagination(visibleNameSiloDomains, {
     resetKey: `${activeList}|${keyword}`,
   });
   const visibleDomainOptions = useMemo(() => {
@@ -599,40 +688,58 @@ export function DomainsPage() {
         search={{
           value: keyword,
           onChange: setKeyword,
-          placeholder: activeList === "domains" ? "搜索域名" : "搜索购买记录",
+          placeholder: activeList === "system"
+            ? "搜索系统域名"
+            : activeList === "cloudflare"
+              ? "搜索 Cloudflare 域名"
+              : "搜索 NameSilo 域名",
         }}
         filters={
           <div className="flex items-center gap-2">
             <Button
-              variant={activeList === "domains" ? "secondary" : "outline"}
-              aria-pressed={activeList === "domains"}
+              variant={activeList === "system" ? "secondary" : "outline"}
+              aria-pressed={activeList === "system"}
               onClick={() => {
-                setActiveList("domains");
+                setActiveList("system");
                 setKeyword("");
               }}
             >
-              域名列表
+              系统域名
             </Button>
             <Button
-              variant={activeList === "orders" ? "secondary" : "outline"}
-              aria-pressed={activeList === "orders"}
+              variant={activeList === "cloudflare" ? "secondary" : "outline"}
+              aria-pressed={activeList === "cloudflare"}
               onClick={() => {
-                setActiveList("orders");
+                setActiveList("cloudflare");
                 setKeyword("");
               }}
             >
-              购买记录
+              Cloudflare 域名
+            </Button>
+            <Button
+              variant={activeList === "namesilo" ? "secondary" : "outline"}
+              aria-pressed={activeList === "namesilo"}
+              onClick={() => {
+                setActiveList("namesilo");
+                setKeyword("");
+              }}
+            >
+              NameSilo 域名
             </Button>
           </div>
         }
-        meta={activeList === "domains" ? `${visible.length} 个域名` : `${visibleOrders.length} 条记录`}
+        meta={activeList === "system"
+          ? `${visible.length} 个域名`
+          : activeList === "cloudflare"
+            ? `${visibleCloudflareDomains.length} 个域名`
+            : `${visibleNameSiloDomains.length} 个域名`}
         actions={
           <>
             <Button variant="outline" onClick={() => void load()}>
               <RefreshCwIcon size={16} />
               刷新
             </Button>
-            {canManage && activeList === "domains" ? (
+            {canManage && activeList === "system" ? (
               <Button variant="outline" onClick={() => open()}>
                 <PlusIcon size={17} />
                 接入已有域名
@@ -657,8 +764,9 @@ export function DomainsPage() {
           </>
         }
       />
-      {activeList === "domains" ? (
+      {activeList === "system" ? (
         <ListPagination
+          ariaLabel="系统域名分页"
           page={domainPagination.page}
           pageSize={domainPagination.pageSize}
           total={domainPagination.total}
@@ -666,18 +774,28 @@ export function DomainsPage() {
           onPageChange={domainPagination.setPage}
           onPageSizeChange={domainPagination.setPageSize}
         />
+      ) : activeList === "cloudflare" ? (
+        <ListPagination
+          ariaLabel="Cloudflare 域名分页"
+          page={cloudflarePagination.page}
+          pageSize={cloudflarePagination.pageSize}
+          total={cloudflarePagination.total}
+          disabled={loading}
+          onPageChange={cloudflarePagination.setPage}
+          onPageSizeChange={cloudflarePagination.setPageSize}
+        />
       ) : (
         <ListPagination
-          ariaLabel="购买记录分页"
-          page={orderPagination.page}
-          pageSize={orderPagination.pageSize}
-          total={orderPagination.total}
+          ariaLabel="NameSilo 域名分页"
+          page={nameSiloPagination.page}
+          pageSize={nameSiloPagination.pageSize}
+          total={nameSiloPagination.total}
           disabled={loading}
-          onPageChange={orderPagination.setPage}
-          onPageSizeChange={orderPagination.setPageSize}
+          onPageChange={nameSiloPagination.setPage}
+          onPageSizeChange={nameSiloPagination.setPageSize}
         />
       )}
-      {activeList === "domains" ? (
+      {activeList === "system" ? (
         <ListTableCard>
         {loading ? (
           <div className="loading-state">
@@ -789,7 +907,53 @@ export function DomainsPage() {
         ) : (
           <EmptyState
             title="还没有域名"
-            description="添加推广域名并完成 DNS、SSL 验证。"
+            description={externalErrors.system || "添加推广域名并完成 DNS、SSL 验证。"}
+          />
+        )}
+        </ListTableCard>
+      ) : activeList === "cloudflare" ? (
+        <ListTableCard>
+        {loading ? (
+          <div className="loading-state"><Spinner /></div>
+        ) : visibleCloudflareDomains.length ? (
+          <div className="table-scroll">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>域名</TableHead>
+                  <TableHead>状态</TableHead>
+                  <TableHead>账户</TableHead>
+                  <TableHead>类型</TableHead>
+                  <TableHead>域名服务器</TableHead>
+                  <TableHead>创建时间</TableHead>
+                  <TableHead>最近修改</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {cloudflarePagination.rows.map((row) => (
+                  <TableRow key={row.readKey}>
+                    <TableCell><strong>{row.hostname}</strong></TableCell>
+                    <TableCell>
+                      <Badge tone={row.paused ? "warning" : row.status === "active" ? "success" : "danger"}>
+                        {row.paused ? "已暂停" : row.status === "active" ? "正常" : row.status}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>{row.accountName || "-"}</TableCell>
+                    <TableCell>{row.type || "-"}</TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {row.nameServers.length ? row.nameServers.join("、") : "-"}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
+                    <TableCell className="text-muted-foreground">{formatDateTime(row.modifiedAt)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        ) : (
+          <EmptyState
+            title={externalErrors.cloudflare ? "Cloudflare 域名读取失败" : "暂无 Cloudflare 域名"}
+            description={externalErrors.cloudflare || "当前 Cloudflare 账户下没有可见的 Zone。"}
           />
         )}
         </ListTableCard>
@@ -797,65 +961,85 @@ export function DomainsPage() {
         <ListTableCard>
         {loading ? (
           <div className="loading-state"><Spinner /></div>
-        ) : visibleOrders.length ? (
+        ) : visibleNameSiloDomains.length ? (
           <div className="table-scroll">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>域名订单</TableHead>
-                  <TableHead>年限</TableHead>
-                  <TableHead>金额</TableHead>
-                  <TableHead>注册商</TableHead>
+                  <TableHead>域名</TableHead>
+                  <TableHead>来源</TableHead>
+                  <TableHead>NameSilo 状态</TableHead>
                   <TableHead>创建时间</TableHead>
+                  <TableHead>到期时间</TableHead>
+                  <TableHead>系统订单</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {orderPagination.rows.map((row) => {
-                  const busy = Boolean(row.id) && orderPending.startsWith(`${row.id}:`);
+                {nameSiloPagination.rows.map((row) => {
+                  const itemOrder = row.order;
+                  const busy = Boolean(itemOrder?.id)
+                    && orderPending.startsWith(`${itemOrder?.id}:`);
+                  const hasActions = Boolean(
+                    itemOrder && Object.values(itemOrder.allowedActions).some(Boolean),
+                  );
                   return (
                     <TableRow key={row.readKey}>
                       <TableCell>
-                        <EntityPrimaryCell
-                          title={row.hostname}
-                          id={row.id}
-                          description={row.failureReason || undefined}
-                          status={{
-                            ...domainOrderStatus(row),
-                            details: [
-                              { label: "年限", value: `${row.years} 年` },
-                              { label: "金额", value: `${row.currency} ${row.amount.toFixed(2)}` },
-                            ],
-                          }}
-                        />
+                        <div className="cell-main">
+                          <strong>{row.hostname}</strong>
+                          <span>{row.systemDomainId ? "已接入系统域名" : "尚未接入系统域名"}</span>
+                          {itemOrder?.failureReason ? <span className="text-destructive">{itemOrder.failureReason}</span> : null}
+                        </div>
                       </TableCell>
-                      <TableCell>{row.years} 年</TableCell>
-                      <TableCell className="tabular-nums">{row.currency} {row.amount.toFixed(2)}</TableCell>
-                      <TableCell>{row.provider || "-"}</TableCell>
+                      <TableCell>
+                        <Badge tone={row.source === "system_purchase" ? "success" : "neutral"}>
+                          {row.source === "system_purchase" ? "系统购买" : "账户已有"}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        <Badge tone={row.providerOwned ? "success" : row.providerStatus === "failed" ? "danger" : "warning"}>
+                          {row.providerOwned
+                            ? "账户持有"
+                            : orderStatusLabels[row.providerStatus] || "尚未持有"}
+                        </Badge>
+                      </TableCell>
                       <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
+                      <TableCell className="text-muted-foreground">{formatDateTime(row.expiresAt)}</TableCell>
+                      <TableCell>
+                        {itemOrder ? (
+                          <div className="cell-main">
+                            <Badge tone={domainOrderStatus(itemOrder).tone}>
+                              {orderStatusLabels[itemOrder.status] || itemOrder.status}
+                            </Badge>
+                            <span>{itemOrder.years} 年 · {itemOrder.currency} {itemOrder.amount.toFixed(2)}</span>
+                            <span>{formatDateTime(itemOrder.createdAt)}</span>
+                          </div>
+                        ) : <span className="text-muted-foreground">-</span>}
+                      </TableCell>
                       <TableCell>
                         <div className="flex items-center justify-end gap-1">
-                          {canPurchase && row.allowedActions.mockPayment ? (
-                            <Button disabled={!row.id || busy} onClick={() => void runOrderAction(row, "mock-payment")}>
+                          {canPurchase && itemOrder?.allowedActions.mockPayment ? (
+                            <Button disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "mock-payment")}>
                               {busy ? <Spinner /> : null}确认支付并开通
                             </Button>
                           ) : null}
-                          {canPurchase && row.allowedActions.provision ? (
-                            <Button disabled={!row.id || busy} onClick={() => void runOrderAction(row, "provision")}>
-                              {busy ? <Spinner /> : null}{row.provider === "namesilo" ? "确认购买" : "立即开通"}
+                          {canPurchase && itemOrder?.allowedActions.provision ? (
+                            <Button disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "provision")}>
+                              {busy ? <Spinner /> : null}确认购买
                             </Button>
                           ) : null}
-                          {canPurchase && row.allowedActions.reconcile ? (
-                            <Button variant="outline" disabled={!row.id || busy} onClick={() => void runOrderAction(row, "reconcile")}>
+                          {canPurchase && itemOrder?.allowedActions.reconcile ? (
+                            <Button variant="outline" disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "reconcile")}>
                               {busy ? <Spinner /> : null}订单对账
                             </Button>
                           ) : null}
-                          {canPurchase && row.allowedActions.cancel ? (
-                            <Button variant="ghost" className="danger" disabled={!row.id || busy} onClick={() => void runOrderAction(row, "cancel")}>
+                          {canPurchase && itemOrder?.allowedActions.cancel ? (
+                            <Button variant="ghost" className="danger" disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "cancel")}>
                               取消
                             </Button>
                           ) : null}
-                          {!canPurchase || !Object.values(row.allowedActions).some(Boolean) ? <span className="text-muted-foreground">-</span> : null}
+                          {!canPurchase || !hasActions ? <span className="text-muted-foreground">-</span> : null}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -865,7 +1049,10 @@ export function DomainsPage() {
             </Table>
           </div>
         ) : (
-          <EmptyState title="暂无域名订单" description="购买域名时，报价和订单进度会显示在这里。" />
+          <EmptyState
+            title={externalErrors.namesilo ? "NameSilo 域名读取失败" : "暂无 NameSilo 域名"}
+            description={externalErrors.namesilo || "当前 NameSilo 账户下没有域名。"}
+          />
         )}
         </ListTableCard>
       )}
