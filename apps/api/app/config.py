@@ -90,6 +90,7 @@ class Settings:
     redis_url: str
     task_queue_mock: bool
     pairing_rate_limit_mock: bool
+    promotion_event_rate_limit_mock: bool
     task_worker_max_concurrency: int
     domain_verify_mock: bool
     domain_registrar_mock: bool
@@ -167,6 +168,9 @@ def get_settings() -> Settings:
         redis_url=os.getenv("REDIS_URL", "redis://redis:6379/0"),
         task_queue_mock=_bool_env("TASK_QUEUE_MOCK", False),
         pairing_rate_limit_mock=_bool_env("PAIRING_RATE_LIMIT_MOCK", False),
+        promotion_event_rate_limit_mock=_bool_env(
+            "PROMOTION_EVENT_RATE_LIMIT_MOCK", False
+        ),
         task_worker_max_concurrency=max(
             1, min(int(os.getenv("TASK_WORKER_MAX_CONCURRENCY", "200")), 1000)
         ),
@@ -254,6 +258,7 @@ def get_settings() -> Settings:
                 settings.wa_gateway_mock,
                 settings.task_queue_mock,
                 settings.pairing_rate_limit_mock,
+                settings.promotion_event_rate_limit_mock,
                 settings.domain_verify_mock,
                 settings.domain_registrar_mock,
                 settings.meta_capi_mock,

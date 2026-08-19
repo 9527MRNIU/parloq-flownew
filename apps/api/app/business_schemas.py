@@ -273,6 +273,38 @@ class ProtocolBatchAction(Model):
     )
 
 
+class PromotionEventRateLimitRule(Model):
+    max_requests: int = Field(alias="maxRequests", ge=1, le=1_000_000)
+    window_seconds: int = Field(alias="windowSeconds", ge=1, le=86_400)
+
+
+class PromotionEventRateLimitPolicy(Model):
+    session_reports: PromotionEventRateLimitRule = Field(
+        default=PromotionEventRateLimitRule(
+            maxRequests=60, windowSeconds=60
+        ),
+        alias="sessionReports",
+    )
+    ip_reports: PromotionEventRateLimitRule = Field(
+        default=PromotionEventRateLimitRule(
+            maxRequests=600, windowSeconds=60
+        ),
+        alias="ipReports",
+    )
+    channel_reports: PromotionEventRateLimitRule = Field(
+        default=PromotionEventRateLimitRule(
+            maxRequests=10_000, windowSeconds=60
+        ),
+        alias="channelReports",
+    )
+    meta_domain_reports: PromotionEventRateLimitRule = Field(
+        default=PromotionEventRateLimitRule(
+            maxRequests=5, windowSeconds=600
+        ),
+        alias="metaDomainReports",
+    )
+
+
 class PromotionTemplatePolicyUpdate(Model):
     protection_mode: Literal["basic", "enhanced", "strict"] | None = Field(
         default=None, alias="protectionMode"
@@ -287,6 +319,9 @@ class PromotionTemplatePolicyUpdate(Model):
         "off", "standard", "enhanced", "fingerprint"
     ] | None = Field(
         default=None, alias="deviceSignals"
+    )
+    event_rate_limit_policy: PromotionEventRateLimitPolicy | None = Field(
+        default=None, alias="eventRateLimitPolicy"
     )
 
 

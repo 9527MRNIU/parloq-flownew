@@ -153,13 +153,13 @@ const RATE_LIMIT_FIELDS: Array<[
   string,
   string,
 ]> = [
-  ["visitorCheck", "访客绑定检查", "同一渠道、同一访客发起绑定检查；优先使用复合设备指纹，指纹不可用时回退浏览器访客标识"],
-  ["visitorAttempt", "访客新建配对", "同一渠道、同一访客创建新配对任务；优先使用复合设备指纹，指纹不可用时回退浏览器访客标识"],
-  ["ipStart", "来源 IP 请求", "同一渠道、同一来源 IP 调用开始绑定"],
-  ["phoneAttempt", "号码新建配对", "同一租户、同一号码创建新配对任务"],
-  ["channelAttempt", "渠道新建速率", "单个渠道在统计窗口内累计创建的新配对任务数；不同于上方协议节点同时进行的并发数"],
-  ["status", "状态查询", "同一个配对任务查询绑定状态"],
-  ["cancel", "取消请求", "同一个配对任务调用取消操作"],
+  ["visitorCheck", "同一设备请求开始配对", "同一渠道、同一设备每次调用开始配对接口都会计数，无论是否创建新任务；优先使用复合设备指纹，指纹不可用时回退浏览器访客标识。"],
+  ["ipStart", "同一 IP 请求开始配对", "同一渠道、同一来源 IP 每次调用开始配对接口都会计数，无论是否创建新任务。"],
+  ["visitorAttempt", "同一设备新建任务", "只有准备创建新配对任务时才计数；继续已有任务不计数。优先使用复合设备指纹，指纹不可用时回退浏览器访客标识。"],
+  ["phoneAttempt", "同一号码新建任务", "同一租户、同一号码创建新的配对任务时计数；继续已有任务不计数。"],
+  ["channelAttempt", "单个渠道新建总量", "单个渠道在统计窗口内累计创建的新配对任务数；继续已有任务不计数，也不同于协议节点同时进行的配对任务上限。"],
+  ["status", "单个任务状态查询", "按同一个配对任务限制状态查询频率。"],
+  ["cancel", "单个任务取消请求", "按同一个配对任务限制取消请求频率。"],
 ];
 
 function toRateLimitForm(policy: RateLimitPolicy): RateLimitPolicyForm {
@@ -688,7 +688,7 @@ export function ProtocolManagementPage() {
             <DrawerFormField label="验证后保活（秒）"><Input type="number" min={0} max={3600} value={form.postVerifyGraceSeconds} onChange={(event) => setForm((current) => ({ ...current, postVerifyGraceSeconds: event.target.value }))} /></DrawerFormField>
           </DrawerFormSection>
 
-          <DrawerFormSection title="公共配对风控与限速" description="两项访客规则优先按复合设备指纹识别同一访客，指纹不可用时回退浏览器访客标识；来源 IP、号码和渠道规则继续独立执行。模板和渠道不保存限速配置。">
+          <DrawerFormSection title="公共配对风控与限速" description="设备和 IP 规则限制每次开始配对请求；设备、号码和渠道的新建规则只限制新配对任务；状态查询和取消请求按单个配对任务限制。">
             {RATE_LIMIT_FIELDS.map(([key, label, description]) => (
               <DrawerFormField key={key} label={label} hint={description} align="start">
                 <div className="grid min-w-0 grid-cols-2 gap-2">

@@ -214,6 +214,7 @@ def test_flexible_packages_bind_to_templates_and_expand_csp(
 
 def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     admin_client: TestClient,
+    monkeypatch,
 ) -> None:
     domain = _verified_domain(admin_client, "integration-feedback.test")
     integration = _create_integration(
@@ -347,6 +348,32 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     )
     assert duplicate.status_code == 200, duplicate.text
     assert duplicate.json()["data"]["duplicate"] is True
+
+    from app.services.promotion_event_rate_limits import (
+        PromotionEventRateLimitDecision,
+    )
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            "app.routers.promotion_integrations.consume_promotion_event_rate_limits",
+            lambda *_args, **_kwargs: PromotionEventRateLimitDecision(
+                allowed=False,
+                retry_after_seconds=23,
+                policy_key="ipReports",
+                limit=1,
+            ),
+        )
+        limited = admin_client.post(
+            f"/api/public/promotion/integrations/{integration['id']}/events",
+            headers={"host": "integration-feedback.test"},
+            json={
+                **event_payload,
+                "idempotencyKey": "feedback-rate-limited-0001",
+            },
+        )
+    assert limited.status_code == 429, limited.text
+    assert limited.headers["retry-after"] == "23"
+    assert limited.json()["error"]["code"] == "report_rate_limited"
 
     undeclared = admin_client.post(
         f"/api/public/promotion/integrations/{integration['id']}/events",

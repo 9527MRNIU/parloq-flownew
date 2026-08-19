@@ -251,7 +251,10 @@ def test_interrupted_pairing_webhook_marks_account_retryable(
     assert account["lastError"] == "配对连接已中断，请重新获取配对码"
 
 
-def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestClient) -> None:
+def test_promotion_zip_channel_tracking_leads_and_insights(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
     domain = admin_client.post("/api/domains", json={"hostname": "promo-example.test"})
     assert domain.status_code == 201
     domain_id = domain.json()["data"]["domain"]["id"]
@@ -461,6 +464,30 @@ def test_promotion_zip_channel_tracking_leads_and_insights(admin_client: TestCli
     )
     assert enriched_page_view.status_code == 200
     assert enriched_page_view.json()["data"]["duplicate"] is True
+    from app.services.promotion_event_rate_limits import (
+        PromotionEventRateLimitDecision,
+    )
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            "app.routers.promotion.consume_promotion_event_rate_limits",
+            lambda *_args, **_kwargs: PromotionEventRateLimitDecision(
+                allowed=False,
+                retry_after_seconds=17,
+                policy_key="sessionReports",
+                limit=1,
+            ),
+        )
+        limited_report = admin_client.post(
+            "/api/public/promotion/channels/de-facebook-demo/events",
+            json={
+                **page_view,
+                "idempotencyKey": "page-view-rate-limited-0001",
+            },
+        )
+    assert limited_report.status_code == 429
+    assert limited_report.headers["retry-after"] == "17"
+    assert limited_report.json()["error"]["code"] == "report_rate_limited"
     lead = {
         "eventType": "phone_submit",
         "idempotencyKey": "phone-lead-event-0001",

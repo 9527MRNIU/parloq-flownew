@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from datetime import timedelta
 from pathlib import Path
@@ -50,6 +51,13 @@ from app.services.promotion_integrations import (
     replace_integration_package,
     verify_integration_embed_token,
 )
+from app.services.promotion_event_rate_limits import (
+    PromotionEventRateLimitRequest,
+    PromotionEventRateLimitUnavailable,
+    consume_promotion_event_rate_limits,
+    normalized_promotion_event_rate_limit_policy,
+)
+from app.services.public_rate_limits import public_request_ip
 from app.snowflake import new_public_id, parse_snowflake_id
 from app.validation import parse_public_datetime
 
@@ -60,6 +68,7 @@ public_router = APIRouter(
     tags=["public-promotion-integrations"],
 )
 PUBLIC_RUNTIME_DIR = Path(__file__).resolve().parents[1] / "public"
+logger = logging.getLogger(__name__)
 
 
 def _integration(
@@ -533,6 +542,59 @@ async def report_integration_event(
     _, allowed_events = integration_feedback_contract(item)
     if event_input.event_type not in allowed_events:
         raise HTTPException(status_code=422, detail="集成没有声明这个回传事件")
+    policy = db.scalar(
+        select(PromotionTemplatePolicy).where(
+            PromotionTemplatePolicy.created_by == item.created_by
+        )
+    )
+    rate_policy = normalized_promotion_event_rate_limit_policy(
+        policy.event_rate_limit_policy_json if policy else None
+    )
+    source_ip = public_request_ip(request)
+    try:
+        report_limit = consume_promotion_event_rate_limits(
+            rate_policy,
+            [
+                PromotionEventRateLimitRequest(
+                    "sessionReports", str(token_payload["nonce"])
+                ),
+                PromotionEventRateLimitRequest(
+                    "ipReports",
+                    source_ip
+                    if source_ip != "unknown"
+                    else f"session:{token_payload['nonce']}",
+                ),
+                PromotionEventRateLimitRequest("channelReports", "all"),
+            ],
+            partition=f"integration:{item.id}:channel:{channel.id}",
+        )
+    except PromotionEventRateLimitUnavailable:
+        logger.warning(
+            "promotion event rate-limit store unavailable; allowing report",
+            extra={
+                "channel_id": channel.id,
+                "integration_id": item.id,
+                "report_scope": "integration",
+            },
+        )
+    else:
+        if not report_limit.allowed:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "report_rate_limited",
+                        "message": "数据上报过于频繁，请稍后再试",
+                        "retryable": True,
+                        "retryAfterSeconds": report_limit.retry_after_seconds,
+                    }
+                },
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                headers={
+                    "Cache-Control": "no-store",
+                    "Retry-After": str(report_limit.retry_after_seconds),
+                    "Access-Control-Expose-Headers": "Retry-After",
+                },
+            )
     occurred_at = parse_public_datetime(event_input.occurred_at)
     now = utcnow()
     occurred_ts = int(occurred_at.timestamp())
@@ -548,11 +610,6 @@ async def report_integration_event(
         fingerprint_metadata,
     )
 
-    policy = db.scalar(
-        select(PromotionTemplatePolicy).where(
-            PromotionTemplatePolicy.created_by == item.created_by
-        )
-    )
     fingerprint_payload = (
         event_input.device_fingerprint
         if (policy.device_signals if policy else "fingerprint") == "fingerprint"

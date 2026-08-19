@@ -9,6 +9,9 @@ from app.business_schemas import PromotionTemplatePolicyUpdate
 from app.deps import CurrentUser, DbSession
 from app.entity_ids import entity_id
 from app.models import PromotionTemplatePolicy
+from app.services.promotion_event_rate_limits import (
+    normalized_promotion_event_rate_limit_policy,
+)
 
 
 router = APIRouter(
@@ -54,6 +57,9 @@ def template_policy_row(item: PromotionTemplatePolicy) -> dict:
         "devtoolsAction": item.devtools_action,
         "lockViewportZoom": item.lock_viewport_zoom,
         "deviceSignals": item.device_signals,
+        "eventRateLimitPolicy": normalized_promotion_event_rate_limit_policy(
+            item.event_rate_limit_policy_json
+        ),
         "updatedAt": item.updated_at.isoformat() if item.updated_at else None,
     }
 
@@ -81,6 +87,10 @@ def update_template_policy(
         item.lock_viewport_zoom = payload.lock_viewport_zoom
     if payload.device_signals is not None:
         item.device_signals = payload.device_signals
+    if payload.event_rate_limit_policy is not None:
+        item.event_rate_limit_policy_json = (
+            payload.event_rate_limit_policy.model_dump(by_alias=True)
+        )
     db.commit()
     db.refresh(item)
     return {"data": {"policy": template_policy_row(item)}}

@@ -977,6 +977,42 @@ def test_device_fingerprint_migration_adds_nullable_audit_fields_and_policy(
     engine.dispose()
 
 
+def test_promotion_event_rate_limit_policy_migration_is_reversible(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'event-rate-limits.db'}"
+    _alembic(database_url, "0048_integration_feedback")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    assert "event_rate_limit_policy_json" not in {
+        column["name"]
+        for column in inspector.get_columns("promotion_template_policies")
+    }
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    policies = sa.Table(
+        "promotion_template_policies", sa.MetaData(), autoload_with=engine
+    )
+    assert "event_rate_limit_policy_json" in policies.c
+    with engine.connect() as connection:
+        values = connection.execute(
+            sa.select(policies.c.event_rate_limit_policy_json)
+        ).scalars().all()
+        assert all(value == {} for value in values)
+    engine.dispose()
+
+    _alembic_downgrade(database_url, "0048_integration_feedback")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    assert "event_rate_limit_policy_json" not in {
+        column["name"]
+        for column in inspector.get_columns("promotion_template_policies")
+    }
+    engine.dispose()
+
+
 def test_meta_domain_monitoring_migration_adds_reversible_channel_state(
     tmp_path: Path,
 ) -> None:

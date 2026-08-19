@@ -7,6 +7,7 @@ import hmac
 import html as html_lib
 import ipaddress
 import json
+import logging
 import mimetypes
 import re
 import secrets
@@ -80,6 +81,13 @@ from app.services.promotion_integrations import (
     integration_csp_sources,
     issue_integration_embed_token,
 )
+from app.services.promotion_event_rate_limits import (
+    DEFAULT_PROMOTION_EVENT_RATE_LIMIT_POLICY,
+    PromotionEventRateLimitRequest,
+    PromotionEventRateLimitUnavailable,
+    consume_promotion_event_rate_limits,
+)
+from app.services.public_rate_limits import public_request_ip
 from app.services.template_quality import (
     inspect_template_quality,
     unchecked_template_quality_report,
@@ -88,6 +96,7 @@ from app.validation import parse_public_datetime, validate_structured_json
 
 
 router = APIRouter(tags=["promotion"])
+logger = logging.getLogger(__name__)
 REPORT_TIMEZONE = ZoneInfo("Asia/Shanghai")
 MAX_ZIP = 20 * 1024 * 1024
 MAX_TOTAL = 50 * 1024 * 1024
@@ -125,6 +134,7 @@ DEFAULT_TEMPLATE_POLICY = {
     "devtoolsAction": "blank",
     "lockViewportZoom": True,
     "deviceSignals": "fingerprint",
+    "eventRateLimitPolicy": DEFAULT_PROMOTION_EVENT_RATE_LIMIT_POLICY,
     "updatedAt": None,
 }
 
@@ -301,6 +311,30 @@ def _pairing_rate_limit_unavailable_response() -> JSONResponse:
         "绑定服务暂时不可用，请稍后再试",
         retryable=True,
         retry_after_seconds=5,
+    )
+
+
+def _promotion_report_rate_limit_response(
+    decision,
+    *,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse | None:
+    if decision.allowed:
+        return None
+    response_headers = dict(headers or {})
+    response_headers["Retry-After"] = str(decision.retry_after_seconds)
+    response_headers["Access-Control-Expose-Headers"] = "Retry-After"
+    return JSONResponse(
+        {
+            "error": {
+                "code": "report_rate_limited",
+                "message": "数据上报过于频繁，请稍后再试",
+                "retryable": True,
+                "retryAfterSeconds": decision.retry_after_seconds,
+            }
+        },
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        headers=response_headers,
     )
 
 
@@ -2005,6 +2039,37 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
     except ValidationError as exc: raise HTTPException(status_code=422, detail=exc.errors(include_url=False)) from None
     channel = _public_channel(db, slug, request)
     token_payload = _verify_session_token(channel, payload.session_token)
+    runtime_policy = _runtime_template_policy(db, channel.created_by)
+    source_ip = public_request_ip(request)
+    try:
+        report_limit = consume_promotion_event_rate_limits(
+            runtime_policy.get("eventRateLimitPolicy", {}),
+            [
+                PromotionEventRateLimitRequest(
+                    "sessionReports", str(token_payload["nonce"])
+                ),
+                PromotionEventRateLimitRequest(
+                    "ipReports",
+                    source_ip
+                    if source_ip != "unknown"
+                    else f"session:{token_payload['nonce']}",
+                ),
+                PromotionEventRateLimitRequest("channelReports", "all"),
+            ],
+            partition=f"template-channel:{channel.id}",
+        )
+    except PromotionEventRateLimitUnavailable:
+        logger.warning(
+            "promotion event rate-limit store unavailable; allowing report",
+            extra={"channel_id": channel.id, "report_scope": "template"},
+        )
+    else:
+        limited = _promotion_report_rate_limit_response(
+            report_limit,
+            headers={"Access-Control-Allow-Origin": "null"},
+        )
+        if limited is not None:
+            return limited
     from app.services.device_fingerprints import (
         fingerprint_identity,
         fingerprint_metadata,
@@ -2013,8 +2078,7 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
 
     fingerprint_payload = (
         payload.device_fingerprint
-        if _runtime_template_policy(db, channel.created_by).get("deviceSignals")
-        == "fingerprint"
+        if runtime_policy.get("deviceSignals") == "fingerprint"
         else None
     )
     fingerprint = fingerprint_identity(channel.created_by, fingerprint_payload)
@@ -2159,7 +2223,35 @@ async def report_meta_domain_unavailable(
         ) from None
 
     channel = _public_channel(db, slug, request)
-    _verify_session_token(channel, payload.session_token)
+    token_payload = _verify_session_token(channel, payload.session_token)
+    runtime_policy = _runtime_template_policy(db, channel.created_by)
+    source_ip = public_request_ip(request)
+    report_hostname = (request.url.hostname or f"channel-{channel.id}").lower()
+    try:
+        report_limit = consume_promotion_event_rate_limits(
+            runtime_policy.get("eventRateLimitPolicy", {}),
+            [
+                PromotionEventRateLimitRequest(
+                    "metaDomainReports",
+                    source_ip
+                    if source_ip != "unknown"
+                    else f"session:{token_payload['nonce']}",
+                )
+            ],
+            partition=f"meta-domain:{report_hostname}",
+        )
+    except PromotionEventRateLimitUnavailable:
+        logger.warning(
+            "promotion event rate-limit store unavailable; allowing report",
+            extra={"channel_id": channel.id, "report_scope": "meta-domain"},
+        )
+    else:
+        limited = _promotion_report_rate_limit_response(
+            report_limit,
+            headers={"Access-Control-Allow-Origin": "null"},
+        )
+        if limited is not None:
+            return limited
     pixel = db.get(MetaPixel, channel.pixel_id) if channel.pixel_id else None
     if (
         pixel is None

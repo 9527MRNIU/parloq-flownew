@@ -817,6 +817,9 @@ class PromotionTemplatePolicy(Base, TimestampMixin):
     device_signals: Mapped[str] = mapped_column(
         String(16), default="fingerprint", nullable=False
     )
+    event_rate_limit_policy_json: Mapped[dict] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="CASCADE"),

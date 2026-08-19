@@ -133,3 +133,9 @@ await window.PromotionIntegrationBridge.report("completed", {
 
 只有 `feedback.events` 已声明的自定义事件可以写入。元数据必须是普通 JSON 对象，
 单次最大 4 KB；令牌过期、集成停用、模板解绑或源域名失效后会立即拒绝上报。
+
+iframe 回传使用“模板策略”中的公开数据回传限速。平台分别按 iframe 集成、渠道、
+会话和来源 IP 计数，不与主模板事件或协议配对接口共用额度。超过额度时接口返回
+`429`、稳定错误码 `report_rate_limited` 和 `Retry-After`，集成脚本应停止本轮重试，
+等待指定秒数后再发送。Redis 限速服务暂时不可用时平台按可用性优先继续接收事件，
+并在服务端记录告警。

@@ -323,11 +323,22 @@ type AdMetric = {
 type TemplateProtectionMode = "basic" | "enhanced" | "strict";
 type TemplateDevtoolsAction = "log" | "block" | "blank";
 type TemplateDeviceSignals = "off" | "standard" | "enhanced" | "fingerprint";
+type EventRateLimitRuleForm = {
+  maxRequests: string;
+  windowSeconds: string;
+};
+type EventRateLimitPolicyForm = {
+  sessionReports: EventRateLimitRuleForm;
+  ipReports: EventRateLimitRuleForm;
+  channelReports: EventRateLimitRuleForm;
+  metaDomainReports: EventRateLimitRuleForm;
+};
 type TemplatePolicy = {
   protectionMode: TemplateProtectionMode;
   devtoolsAction: TemplateDevtoolsAction;
   lockViewportZoom: boolean;
   deviceSignals: TemplateDeviceSignals;
+  eventRateLimitPolicy: EventRateLimitPolicyForm;
 };
 
 const defaultTemplatePolicy: TemplatePolicy = {
@@ -335,7 +346,24 @@ const defaultTemplatePolicy: TemplatePolicy = {
   devtoolsAction: "blank",
   lockViewportZoom: true,
   deviceSignals: "fingerprint",
+  eventRateLimitPolicy: {
+    sessionReports: { maxRequests: "60", windowSeconds: "60" },
+    ipReports: { maxRequests: "600", windowSeconds: "60" },
+    channelReports: { maxRequests: "10000", windowSeconds: "60" },
+    metaDomainReports: { maxRequests: "5", windowSeconds: "600" },
+  },
 };
+
+const EVENT_RATE_LIMIT_FIELDS: Array<[
+  keyof EventRateLimitPolicyForm,
+  string,
+  string,
+]> = [
+  ["sessionReports", "单会话数据回传", "同一个签名运行会话内，主模板或单个 iframe 集成允许的数据回传请求数。"],
+  ["ipReports", "同一 IP 数据回传", "同一渠道下，单个来源 IP 对主模板或单个 iframe 集成发起的数据回传请求数。"],
+  ["channelReports", "单渠道回传总量", "单个渠道对主模板或单个 iframe 集成的回传总量；不同集成之间分别计数。"],
+  ["metaDomainReports", "Facebook 域名异常回传", "同一落地域名、同一来源 IP 上报 Facebook Pixel 域名异常的请求数。"],
+];
 
 function qualityNumber(row: Record<string, unknown>, key: string) {
   const value = Number(row[key] ?? 0);
@@ -377,11 +405,60 @@ function formatTemplateBytes(value: number) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function eventRateLimitRuleForm(
+  input: unknown,
+  fallback: EventRateLimitRuleForm,
+): EventRateLimitRuleForm {
+  const row = object(input);
+  const maxRequests = Number(row.maxRequests ?? row.max_requests);
+  const windowSeconds = Number(row.windowSeconds ?? row.window_seconds);
+  return {
+    maxRequests:
+      Number.isInteger(maxRequests) && maxRequests > 0
+        ? String(maxRequests)
+        : fallback.maxRequests,
+    windowSeconds:
+      Number.isInteger(windowSeconds) && windowSeconds > 0
+        ? String(windowSeconds)
+        : fallback.windowSeconds,
+  };
+}
+
+function validEventRateLimitPolicy(policy: EventRateLimitPolicyForm) {
+  return Object.values(policy).every((rule) => {
+    const maxRequests = Number(rule.maxRequests);
+    const windowSeconds = Number(rule.windowSeconds);
+    return (
+      Number.isInteger(maxRequests) &&
+      maxRequests >= 1 &&
+      maxRequests <= 1_000_000 &&
+      Number.isInteger(windowSeconds) &&
+      windowSeconds >= 1 &&
+      windowSeconds <= 86_400
+    );
+  });
+}
+
+function eventRateLimitPayload(policy: EventRateLimitPolicyForm) {
+  return Object.fromEntries(
+    Object.entries(policy).map(([key, rule]) => [
+      key,
+      {
+        maxRequests: Number(rule.maxRequests),
+        windowSeconds: Number(rule.windowSeconds),
+      },
+    ]),
+  );
+}
+
 function templatePolicyRow(input: unknown): TemplatePolicy {
   const row = object(input);
   const protectionMode = field(row, "protectionMode", "protection_mode");
   const devtoolsAction = field(row, "devtoolsAction", "devtools_action");
   const deviceSignals = field(row, "deviceSignals", "device_signals");
+  const eventRateLimitPolicy = object(
+    row.eventRateLimitPolicy ?? row.event_rate_limit_policy,
+  );
   return {
     protectionMode: ["basic", "enhanced", "strict"].includes(protectionMode)
       ? (protectionMode as TemplateProtectionMode)
@@ -397,6 +474,24 @@ function templatePolicyRow(input: unknown): TemplatePolicy {
     deviceSignals: ["off", "standard", "enhanced", "fingerprint"].includes(deviceSignals)
       ? (deviceSignals as TemplateDeviceSignals)
       : defaultTemplatePolicy.deviceSignals,
+    eventRateLimitPolicy: {
+      sessionReports: eventRateLimitRuleForm(
+        eventRateLimitPolicy.sessionReports ?? eventRateLimitPolicy.session_reports,
+        defaultTemplatePolicy.eventRateLimitPolicy.sessionReports,
+      ),
+      ipReports: eventRateLimitRuleForm(
+        eventRateLimitPolicy.ipReports ?? eventRateLimitPolicy.ip_reports,
+        defaultTemplatePolicy.eventRateLimitPolicy.ipReports,
+      ),
+      channelReports: eventRateLimitRuleForm(
+        eventRateLimitPolicy.channelReports ?? eventRateLimitPolicy.channel_reports,
+        defaultTemplatePolicy.eventRateLimitPolicy.channelReports,
+      ),
+      metaDomainReports: eventRateLimitRuleForm(
+        eventRateLimitPolicy.metaDomainReports ?? eventRateLimitPolicy.meta_domain_reports,
+        defaultTemplatePolicy.eventRateLimitPolicy.metaDomainReports,
+      ),
+    },
   };
 }
 function templateRow(input: unknown): PromotionTemplate {
@@ -1147,7 +1242,12 @@ export function PromotionTemplatesPage() {
     try {
       const payload = await apiRequest("/api/promotion/template-policy", {
         method: "PATCH",
-        body: JSON.stringify(policy),
+        body: JSON.stringify({
+          ...policy,
+          eventRateLimitPolicy: eventRateLimitPayload(
+            policy.eventRateLimitPolicy,
+          ),
+        }),
       });
       const data = object(object(payload).data ?? payload);
       setPolicy(templatePolicyRow(data.policy || data));
@@ -1479,7 +1579,7 @@ export function PromotionTemplatesPage() {
         open={policyDrawer}
         onClose={() => !policySaving && setPolicyDrawer(false)}
         title="模板策略"
-        description="统一设置推广模板的前端防护、视口行为与匿名设备环境信号。"
+        description="统一设置推广运行时的前端防护、匿名设备环境信号与数据回传限速。"
         footer={
           <>
             <Button
@@ -1495,7 +1595,8 @@ export function PromotionTemplatesPage() {
                   policyLoading ||
                   policySaving ||
                   !policyLoaded ||
-                  Boolean(policyError)
+                  Boolean(policyError) ||
+                  !validEventRateLimitPolicy(policy.eventRateLimitPolicy)
                 }
                 onClick={() => void savePolicy()}
               >
@@ -1621,6 +1722,58 @@ export function PromotionTemplatesPage() {
             <div className="rounded-lg border border-amber-600/20 bg-amber-600/5 p-3 text-sm text-muted-foreground">
               设备指纹由平台公共运行时统一采集，并在服务端按租户隔离；模板不能自行采集、保存或外传原始指纹信号。
             </div>
+            {EVENT_RATE_LIMIT_FIELDS.map(([key, label, description]) => (
+              <div className="field" key={key}>
+                <span>{label}</span>
+                <div className="grid min-w-0 grid-cols-2 gap-2">
+                  <label className="grid min-w-0 gap-1 text-xs text-muted-foreground">
+                    <span>最多请求</span>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={1_000_000}
+                      disabled={!canManage || policySaving}
+                      value={policy.eventRateLimitPolicy[key].maxRequests}
+                      onChange={(event) =>
+                        setPolicy((current) => ({
+                          ...current,
+                          eventRateLimitPolicy: {
+                            ...current.eventRateLimitPolicy,
+                            [key]: {
+                              ...current.eventRateLimitPolicy[key],
+                              maxRequests: event.target.value,
+                            },
+                          },
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="grid min-w-0 gap-1 text-xs text-muted-foreground">
+                    <span>统计窗口（秒）</span>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={86_400}
+                      disabled={!canManage || policySaving}
+                      value={policy.eventRateLimitPolicy[key].windowSeconds}
+                      onChange={(event) =>
+                        setPolicy((current) => ({
+                          ...current,
+                          eventRateLimitPolicy: {
+                            ...current.eventRateLimitPolicy,
+                            [key]: {
+                              ...current.eventRateLimitPolicy[key],
+                              windowSeconds: event.target.value,
+                            },
+                          },
+                        }))
+                      }
+                    />
+                  </label>
+                </div>
+                <small>{description}</small>
+              </div>
+            ))}
           </div>
         ) : null}
       </Drawer>

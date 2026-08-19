@@ -76,6 +76,7 @@ def test_meta_pixel_placeholder_crud_masks_capi_token(admin_client: TestClient) 
 
 def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
     admin_client: TestClient,
+    monkeypatch,
 ) -> None:
     domain = admin_client.post(
         "/api/domains", json={"hostname": "meta-ledger.test"}
@@ -181,6 +182,35 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
         headers={"content-type": "text/plain;charset=UTF-8"},
     )
     assert duplicate_unavailable.json()["data"]["duplicate"] is True
+    from app.services.promotion_event_rate_limits import (
+        PromotionEventRateLimitDecision,
+    )
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            "app.routers.promotion.consume_promotion_event_rate_limits",
+            lambda *_args, **_kwargs: PromotionEventRateLimitDecision(
+                allowed=False,
+                retry_after_seconds=29,
+                policy_key="metaDomainReports",
+                limit=1,
+            ),
+        )
+        limited_domain_report = admin_client.post(
+            public["metaDomainReportUrl"],
+            content=json.dumps(
+                {
+                    "sessionToken": public["sessionToken"],
+                    "datasetId": public["meta"]["datasetId"],
+                }
+            ),
+            headers={"content-type": "text/plain;charset=UTF-8"},
+        )
+    assert limited_domain_report.status_code == 429
+    assert limited_domain_report.headers["retry-after"] == "29"
+    assert limited_domain_report.json()["error"]["code"] == (
+        "report_rate_limited"
+    )
     monitored = admin_client.get(
         f"/api/promotion/channels/{channel['id']}"
     ).json()["data"]["channel"]
