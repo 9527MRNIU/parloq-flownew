@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "type": "iframe",
+  "version": "1.0.0",
+  "entry": "index.html",
+  "feedback": {
+    "enabled": true,
+    "events": ["ready", "completed", "failed"]
+  }
+}

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build:account-link-elements": "esbuild src/public-runtime/account-link-elements.ts --bundle --format=iife --target=es2020 --minify --outfile=../api/app/public/account-link-elements.js",
+    "build:promotion-integration-frame": "esbuild src/public-runtime/promotion-integration-frame.ts --bundle --format=iife --target=es2020 --minify --outfile=../api/app/public/promotion-integration-frame.js",
     "build:promotion-tracker": "esbuild src/public-runtime/promotion-tracker.ts --bundle --format=iife --target=es2020 --minify --outfile=../api/app/public/promotion-tracker.js",
     "dev": "vite",
     "build": "tsc -b && vite build",

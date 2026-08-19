@@ -1,4 +1,5 @@
 import {
+  ActivityIcon,
   PackageIcon,
   PauseIcon,
   PencilIcon,
@@ -58,7 +59,29 @@ type PromotionIntegration = {
   enabled: boolean;
   domainReady: boolean;
   templateCount: number;
+  feedbackEnabled: boolean;
+  feedbackEvents: string[];
+  eventCount: number;
+  lastEventAt?: string;
   updatedAt?: string;
+};
+
+type IntegrationEvent = {
+  id: string;
+  eventType: string;
+  channelId: string;
+  channelSlug: string;
+  integrationVersion: string;
+  visitorId: string;
+  fingerprintQuality: string;
+  trafficSource: string;
+  occurredAt?: string;
+  metadata: Record<string, unknown>;
+};
+
+type IntegrationEventSummary = {
+  eventType: string;
+  count: number;
 };
 
 type DomainOption = {
@@ -120,7 +143,27 @@ function integrationRow(input: unknown): PromotionIntegration {
     enabled: row.enabled !== false,
     domainReady: row.domainReady !== false && row.domain_ready !== false,
     templateCount: Number(row.templateCount ?? row.template_count ?? 0),
+    feedbackEnabled: row.feedbackEnabled === true || row.feedback_enabled === true,
+    feedbackEvents: stringList(row.feedbackEvents ?? row.feedback_events),
+    eventCount: Number(row.eventCount ?? row.event_count ?? 0),
+    lastEventAt: field(row, "lastEventAt", "last_event_at"),
     updatedAt: field(row, "updatedAt", "updated_at"),
+  };
+}
+
+function eventRow(input: unknown): IntegrationEvent {
+  const row = object(input);
+  return {
+    id: snowflakeId(row, "id"),
+    eventType: field(row, "eventType", "event_type"),
+    channelId: snowflakeId(row, "channelId", "channel_id"),
+    channelSlug: field(row, "channelSlug", "channel_slug"),
+    integrationVersion: field(row, "integrationVersion", "integration_version"),
+    visitorId: field(row, "visitorId", "visitor_id"),
+    fingerprintQuality: field(row, "fingerprintQuality", "fingerprint_quality"),
+    trafficSource: field(row, "trafficSource", "traffic_source") || "direct",
+    occurredAt: field(row, "occurredAt", "occurred_at"),
+    metadata: object(row.metadata),
   };
 }
 
@@ -144,6 +187,14 @@ export default function PromotionIntegrationsPage() {
   const [pending, setPending] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [form, setForm] = useState<IntegrationForm>(emptyForm);
+  const [eventIntegration, setEventIntegration] =
+    useState<PromotionIntegration | null>(null);
+  const [eventRows, setEventRows] = useState<IntegrationEvent[]>([]);
+  const [eventSummary, setEventSummary] = useState<IntegrationEventSummary[]>([]);
+  const [eventTotal, setEventTotal] = useState(0);
+  const [eventPage, setEventPage] = useState(1);
+  const [eventPageSize, setEventPageSize] = useState(20);
+  const [eventsLoading, setEventsLoading] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -176,6 +227,39 @@ export default function PromotionIntegrationsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const loadEvents = useCallback(
+    async (row: PromotionIntegration, page: number, pageSize: number) => {
+      setEventsLoading(true);
+      try {
+        const payload = await apiRequest(
+          `/api/promotion/integrations/${row.id}/events?page=${page}&perPage=${pageSize}`,
+        );
+        const data = object(object(payload).data);
+        setEventRows(
+          (Array.isArray(data.rows) ? data.rows : []).map(eventRow),
+        );
+        setEventSummary(
+          (Array.isArray(data.summary) ? data.summary : []).map((input) => {
+            const summary = object(input);
+            return {
+              eventType: field(summary, "eventType", "event_type"),
+              count: Number(summary.count || 0),
+            };
+          }),
+        );
+        setEventTotal(Number(data.total || 0));
+      } catch (caught) {
+        setEventRows([]);
+        setEventSummary([]);
+        setEventTotal(0);
+        toast.error(caught instanceof Error ? caught.message : "回传记录读取失败");
+      } finally {
+        setEventsLoading(false);
+      }
+    },
+    [],
+  );
 
   const visible = useMemo(() => {
     const search = keyword.trim().toLowerCase();
@@ -215,6 +299,12 @@ export default function PromotionIntegrationsPage() {
     setReplacing(row);
     setFile(null);
     setDrawer(true);
+  }
+
+  function openEvents(row: PromotionIntegration) {
+    setEventIntegration(row);
+    setEventPage(1);
+    void loadEvents(row, 1, eventPageSize);
   }
 
   async function save() {
@@ -353,6 +443,7 @@ export default function PromotionIntegrationsPage() {
                 <TableHead>源域名</TableHead>
                 <TableHead>资源包</TableHead>
                 <TableHead>模板</TableHead>
+                <TableHead>回传</TableHead>
                 <TableHead>更新时间</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
@@ -404,11 +495,30 @@ export default function PromotionIntegrationsPage() {
                     </div>
                   </TableCell>
                   <TableCell>{row.templateCount} 个</TableCell>
+                  <TableCell>
+                    <div className="cell-main">
+                      <strong>
+                        {row.feedbackEnabled ? `${row.eventCount} 条` : "未启用"}
+                      </strong>
+                      <span>
+                        {row.feedbackEnabled
+                          ? row.lastEventAt
+                            ? formatDateTime(row.lastEventAt)
+                            : "暂无回传"
+                          : "—"}
+                      </span>
+                    </div>
+                  </TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatDateTime(row.updatedAt)}
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center justify-end gap-1">
+                      {row.feedbackEnabled ? (
+                        <IconButton label="查看回传记录" onClick={() => openEvents(row)}>
+                          <ActivityIcon size={16} />
+                        </IconButton>
+                      ) : null}
                       {canManage ? (
                         <>
                           <IconButton label="上传新版本" onClick={() => openVersion(row)}>
@@ -565,6 +675,113 @@ export default function PromotionIntegrationsPage() {
               integration.json 指定 entry 或 entries。
             </div>
           ) : null}
+        </div>
+      </Drawer>
+
+      <Drawer
+        open={Boolean(eventIntegration)}
+        onClose={() => setEventIntegration(null)}
+        title={`回传记录${eventIntegration ? ` · ${eventIntegration.name}` : ""}`}
+        description={`共 ${eventTotal.toLocaleString()} 条事件`}
+        wide
+      >
+        <div className="flex flex-col gap-4">
+          {eventSummary.length ? (
+            <div className="flex flex-wrap gap-2">
+              {eventSummary.map((summary) => (
+                <Badge key={summary.eventType} tone="neutral">
+                  {summary.eventType} · {summary.count}
+                </Badge>
+              ))}
+            </div>
+          ) : null}
+          <ListPagination
+            page={eventPage}
+            pageSize={eventPageSize}
+            total={eventTotal}
+            disabled={eventsLoading}
+            ariaLabel="回传记录分页"
+            onPageChange={(page) => {
+              if (!eventIntegration) return;
+              setEventPage(page);
+              void loadEvents(eventIntegration, page, eventPageSize);
+            }}
+            onPageSizeChange={(pageSize) => {
+              if (!eventIntegration) return;
+              setEventPage(1);
+              setEventPageSize(pageSize);
+              void loadEvents(eventIntegration, 1, pageSize);
+            }}
+          />
+          <ListTableCard>
+            {eventsLoading ? (
+              <div className="loading-state">
+                <Spinner />
+              </div>
+            ) : eventRows.length ? (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>事件</TableHead>
+                    <TableHead>渠道</TableHead>
+                    <TableHead>访客</TableHead>
+                    <TableHead>来源</TableHead>
+                    <TableHead>时间</TableHead>
+                    <TableHead>数据</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {eventRows.map((event) => (
+                    <TableRow key={event.id}>
+                      <TableCell>
+                        <div className="cell-main">
+                          <strong>{event.eventType}</strong>
+                          <span>v{event.integrationVersion}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <div className="cell-main">
+                          <strong>{event.channelSlug}</strong>
+                          <span>{event.channelId}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <div className="cell-main max-w-56">
+                          <strong className="truncate" title={event.visitorId}>
+                            {event.visitorId}
+                          </strong>
+                          <span>{event.fingerprintQuality || "无指纹"}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        {event.trafficSource === "fission" ? "裂变" : "直接"}
+                      </TableCell>
+                      <TableCell>{formatDateTime(event.occurredAt)}</TableCell>
+                      <TableCell>
+                        {Object.keys(event.metadata).length ? (
+                          <details className="max-w-72">
+                            <summary className="cursor-pointer text-sm text-primary">
+                              查看
+                            </summary>
+                            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-muted p-2 text-xs">
+                              {JSON.stringify(event.metadata, null, 2)}
+                            </pre>
+                          </details>
+                        ) : (
+                          "—"
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            ) : (
+              <EmptyState
+                title="暂无回传记录"
+                description="当前集成还没有收到数据。"
+              />
+            )}
+          </ListTableCard>
         </div>
       </Drawer>
     </StandardListPage>

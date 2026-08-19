@@ -19,6 +19,19 @@ def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int
     return max(minimum, min(int(os.getenv(name, str(default))), maximum))
 
 
+def _optional_port_env(name: str) -> int | None:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} 必须是有效端口") from exc
+    if not 1 <= port <= 65535:
+        raise RuntimeError(f"{name} 必须是 1 到 65535 之间的端口")
+    return port
+
+
 def _encryption_keys_env() -> tuple[tuple[str, str], ...]:
     raw = os.getenv("DATA_ENCRYPTION_KEYS", "").strip()
     if not raw:
@@ -81,6 +94,8 @@ class Settings:
     domain_verify_mock: bool
     domain_registrar_mock: bool
     promotion_ingress_host: str
+    promotion_integration_public_scheme: str
+    promotion_integration_public_port: int | None
     promotion_success_webhook_secret: str
     meta_capi_mock: bool
     meta_capi_base_url: str
@@ -164,6 +179,12 @@ def get_settings() -> Settings:
         promotion_ingress_host=os.getenv(
             "PROMOTION_INGRESS_HOST", "promotion.localhost"
         ).strip().lower().rstrip("."),
+        promotion_integration_public_scheme=os.getenv(
+            "PROMOTION_INTEGRATION_PUBLIC_SCHEME", "https"
+        ).strip().lower(),
+        promotion_integration_public_port=_optional_port_env(
+            "PROMOTION_INTEGRATION_PUBLIC_PORT"
+        ),
         promotion_success_webhook_secret=os.getenv(
             "PROMOTION_SUCCESS_WEBHOOK_SECRET", ""
         ),
@@ -195,6 +216,10 @@ def get_settings() -> Settings:
         raise RuntimeError(
             "DATA_ENCRYPTION_ACTIVE_KEY_ID 未出现在 DATA_ENCRYPTION_KEYS 中"
         )
+    if settings.promotion_integration_public_scheme not in {"http", "https"}:
+        raise RuntimeError(
+            "PROMOTION_INTEGRATION_PUBLIC_SCHEME 只能是 http 或 https"
+        )
     if settings.environment.lower() in {"production", "prod"}:
         errors: list[str] = []
         if len(settings.app_secret_key) < 32 or settings.app_secret_key in {
@@ -209,6 +234,10 @@ def get_settings() -> Settings:
             errors.append("PROMOTION_SUCCESS_WEBHOOK_SECRET 必须配置独立生产密钥")
         if settings.promotion_ingress_host in {"promotion.localhost", "localhost"}:
             errors.append("PROMOTION_INGRESS_HOST 必须配置生产入口域名")
+        if settings.promotion_integration_public_scheme != "https":
+            errors.append("PROMOTION_INTEGRATION_PUBLIC_SCHEME 在生产环境必须为 https")
+        if settings.promotion_integration_public_port not in {None, 443}:
+            errors.append("PROMOTION_INTEGRATION_PUBLIC_PORT 在生产环境只能留空或使用 443")
         if not settings.cookie_secure:
             errors.append("COOKIE_SECURE 在生产环境必须为 true")
         if settings.auto_create_tables:

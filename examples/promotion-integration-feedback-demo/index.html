@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>集成回传测试</title>
+    <link rel="stylesheet" href="assets/demo.css" />
+  </head>
+  <body>
+    <main class="card">
+      <p class="eyebrow">Parloq iframe integration</p>
+      <h1>独立回传测试</h1>
+      <p class="description">此页面不读取主模板，直接通过 iframe 自己的域名获取运行上下文并上报。</p>
+
+      <dl class="context">
+        <div><dt>运行状态</dt><dd id="runtime-status">正在连接</dd></div>
+        <div><dt>集成</dt><dd id="integration-value">—</dd></div>
+        <div><dt>渠道</dt><dd id="channel-value">—</dd></div>
+        <div><dt>流量来源</dt><dd id="source-value">—</dd></div>
+      </dl>
+
+      <div class="actions">
+        <button type="button" data-event="completed">上报 completed</button>
+        <button type="button" class="danger" data-event="failed">上报 failed</button>
+      </div>
+
+      <ol id="event-log" class="log" aria-live="polite"></ol>
+    </main>
+    <script src="scripts/demo.js"></script>
+  </body>
+</html>

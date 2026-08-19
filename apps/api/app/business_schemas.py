@@ -732,6 +732,27 @@ class PromotionDeviceFingerprint(Model):
         return value
 
 
+class PromotionIntegrationEventInput(Model):
+    event_type: str = Field(
+        alias="eventType",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_.-]{0,63}$",
+    )
+    idempotency_key: str = Field(alias="idempotencyKey", min_length=8, max_length=160)
+    visitor_id: str = Field(alias="visitorId", min_length=8, max_length=80)
+    session_token: str = Field(alias="sessionToken", min_length=20, max_length=2000)
+    occurred_at: datetime | None = Field(default=None, alias="occurredAt")
+    metadata: dict = Field(default_factory=dict)
+    device_fingerprint: PromotionDeviceFingerprint | None = Field(
+        default=None, alias="deviceFingerprint"
+    )
+
+    _metadata = field_validator("metadata")(
+        lambda value: validate_structured_json(value, max_bytes=4096)
+    )
+
+
 class PromotionEventInput(PublicEvent):
     event_type: Literal[
         "page_view", "phone_submit", "visit_end", "inspection_detected"

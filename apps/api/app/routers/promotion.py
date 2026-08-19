@@ -78,6 +78,7 @@ from app.services.promotion_integrations import (
     active_template_integrations,
     inject_runtime_integrations,
     integration_csp_sources,
+    issue_integration_embed_token,
 )
 from app.services.template_quality import (
     inspect_template_quality,
@@ -1832,6 +1833,18 @@ def _render_html(
     )
     html = _localize_template_html(html, resolved, localized_copy)
     runtime_integrations = active_template_integrations(db, template.id)
+    iframe_tokens = {
+        integration.id: issue_integration_embed_token(
+            integration,
+            channel_id=entity_id(channel),
+            template_id=entity_id(template),
+            tenant_id=channel.created_by,
+            traffic_source=traffic_source,
+        )
+        for integration in runtime_integrations
+        if integration.integration_type == "iframe"
+        and integration.feedback_enabled
+    }
     from app.services.meta_conversions import normalized_meta_event_mapping
 
     config = json.dumps({"eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "metaDomainReportUrl": f"/api/public/promotion/channels/{slug}/meta-domain-unavailable", "sessionToken": _session_token(channel, traffic_source), "trafficSource": traffic_source, "countryCode": channel.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "localizedCopy": localized_copy, "pixelDatasetId": pixel_dataset_id, "meta": {"datasetId": pixel_dataset_id, "browserEnabled": bool(pixel_dataset_id and channel.meta_browser_pixel_enabled), "eventMapping": normalized_meta_event_mapping(channel.meta_event_mapping_json)}, "inAppBrowserMode": channel.in_app_browser_mode, "templatePolicy": template_policy or {}}, ensure_ascii=False).replace("<", "\\u003c")
@@ -1852,8 +1865,18 @@ def _render_html(
     if re.search(r"<head\b[^>]*>", html, re.I):
         html = _inject_after_head_open(html, base)
         rendered = re.sub(r"</head\s*>", runtime + "</head>", html, count=1, flags=re.I) if re.search(r"</head\s*>", html, re.I) else html + runtime
-        return inject_runtime_integrations(rendered, runtime_integrations), resolved, runtime_integrations
-    rendered = inject_runtime_integrations(base + runtime + html, runtime_integrations)
+        return (
+            inject_runtime_integrations(
+                rendered, runtime_integrations, iframe_tokens=iframe_tokens
+            ),
+            resolved,
+            runtime_integrations,
+        )
+    rendered = inject_runtime_integrations(
+        base + runtime + html,
+        runtime_integrations,
+        iframe_tokens=iframe_tokens,
+    )
     return rendered, resolved, runtime_integrations
 
 

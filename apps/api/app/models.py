@@ -917,6 +917,63 @@ class PromotionTemplateIntegration(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
 
 
+class PromotionIntegrationEvent(Base, TimestampMixin):
+    __tablename__ = "promotion_integration_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "integration_id",
+            "channel_id",
+            "idempotency_key",
+            name="uq_promotion_integration_event_idem",
+        ),
+        Index(
+            "ix_promotion_integration_events_integration_occurred",
+            "integration_id",
+            "occurred_at",
+        ),
+        Index(
+            "ix_promotion_integration_events_channel_occurred",
+            "channel_id",
+            "occurred_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=next_snowflake_id
+    )
+    public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    integration_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("promotion_integrations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    channel_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("promotion_channels.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    template_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("promotion_templates.id", ondelete="SET NULL"),
+        index=True,
+    )
+    integration_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    visitor_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    visitor_fingerprint_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    fingerprint_version: Mapped[str | None] = mapped_column(String(40))
+    fingerprint_quality: Mapped[str | None] = mapped_column(String(16))
+    traffic_source: Mapped[str] = mapped_column(String(16), default="direct", nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    country_code: Mapped[str | None] = mapped_column(String(2), index=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+
+
 class PromotionAsset(Base, TimestampMixin):
     __tablename__ = "promotion_assets"
     __table_args__ = (

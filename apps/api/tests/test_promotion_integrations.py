@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import zipfile
+from urllib.parse import unquote
 
 from fastapi.testclient import TestClient
 
@@ -106,6 +108,8 @@ def test_flexible_packages_bind_to_templates_and_expand_csp(
         assert expected in asset.text
         assert asset.headers["cache-control"] == "public, max-age=31536000, immutable"
         assert asset.headers["access-control-allow-origin"] == "*"
+        if expected == "<html>":
+            assert "promotion-integration-frame.js" not in asset.text
 
     wrong_host = admin_client.get(
         script["sourceUrls"][0].removeprefix("https://integration-source.test"),
@@ -206,6 +210,166 @@ def test_flexible_packages_bind_to_templates_and_expand_csp(
     assert disabled.status_code == 200, disabled.text
     preview = admin_client.get(f"/api/promotion/templates/{template['id']}/preview")
     assert first_script_url not in preview.text
+
+
+def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
+    admin_client: TestClient,
+) -> None:
+    domain = _verified_domain(admin_client, "integration-feedback.test")
+    integration = _create_integration(
+        admin_client,
+        domain_id=domain["id"],
+        key="feedback-frame",
+        name="反馈 iframe",
+        package=_zip(
+            {
+                "integration.json": json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "type": "iframe",
+                        "version": "1.0.0",
+                        "entry": "index.html",
+                        "feedback": {
+                            "enabled": True,
+                            "events": ["ready", "completed", "failed"],
+                        },
+                    }
+                ),
+                "index.html": (
+                    "<html><head><title>Feedback</title></head>"
+                    "<body><script src='frame.js'></script></body></html>"
+                ),
+                "frame.js": (
+                    "window.PromotionIntegrationBridge?.report('ready', {ok:true});"
+                ),
+            }
+        ),
+    )
+    assert integration["feedbackEnabled"] is True
+    assert integration["feedbackEvents"] == [
+        "page_view",
+        "visit_end",
+        "ready",
+        "completed",
+        "failed",
+    ]
+
+    entry_path = integration["sourceUrls"][0].removeprefix(
+        "https://integration-feedback.test"
+    )
+    entry = admin_client.get(
+        entry_path,
+        headers={"host": "integration-feedback.test"},
+    )
+    assert entry.status_code == 200, entry.text
+    assert "/api/public/promotion/integrations/runtime.js" in entry.text
+    assert f'data-integration-id="{integration["id"]}"' in entry.text
+
+    imported = admin_client.post(
+        "/api/promotion/templates",
+        data={
+            "name": "Feedback template",
+            "integrationIds": json.dumps([integration["id"]]),
+        },
+        files={
+            "file": (
+                "feedback-template.zip",
+                _zip({"index.html": "<html><head></head><body>Landing</body></html>"}),
+                "application/zip",
+            )
+        },
+    )
+    assert imported.status_code == 201, imported.text
+    template = imported.json()["data"]["template"]
+    account_group = admin_client.post(
+        "/api/account-groups", json={"name": "Feedback integration accounts"}
+    )
+    assert account_group.status_code == 201, account_group.text
+    channel_response = admin_client.post(
+        "/api/promotion/channels",
+        json={
+            "type": "facebook",
+            "name": "Feedback channel",
+            "countryCode": "US",
+            "templateId": template["id"],
+            "domainId": domain["id"],
+            "accountGroupId": account_group.json()["data"]["group"]["id"],
+            "slug": "feedback-channel-v1",
+            "status": "active",
+            "localeMode": "auto",
+        },
+    )
+    assert channel_response.status_code == 201, channel_response.text
+    channel = channel_response.json()["data"]["channel"]
+
+    rendered = admin_client.get(
+        "/api/public/promotion/channels/feedback-channel-v1/render"
+    )
+    assert rendered.status_code == 200, rendered.text
+    token_match = re.search(r"#parloqEmbedToken=([^\"]+)", rendered.text)
+    assert token_match is not None
+    token = unquote(token_match.group(1))
+
+    runtime = admin_client.get(
+        f"/api/public/promotion/integrations/{integration['id']}/runtime",
+        headers={
+            "host": "integration-feedback.test",
+            "authorization": f"Bearer {token}",
+        },
+    )
+    assert runtime.status_code == 200, runtime.text
+    runtime_data = runtime.json()["data"]
+    assert runtime_data["integration"]["id"] == integration["id"]
+    assert runtime_data["channel"]["id"] == channel["id"]
+    assert runtime_data["template"]["id"] == template["id"]
+    assert runtime_data["events"] == integration["feedbackEvents"]
+    assert runtime_data["fingerprintEnabled"] is True
+    assert runtime.headers["cache-control"] == "no-store"
+
+    event_payload = {
+        "eventType": "completed",
+        "idempotencyKey": "feedback-event-0001",
+        "visitorId": "visitor-feedback-0001",
+        "sessionToken": runtime_data["sessionToken"],
+        "metadata": {"result": "ok", "count": 2},
+    }
+    event = admin_client.post(
+        f"/api/public/promotion/integrations/{integration['id']}/events",
+        headers={"host": "integration-feedback.test"},
+        json=event_payload,
+    )
+    assert event.status_code == 201, event.text
+    assert event.json()["data"]["duplicate"] is False
+    duplicate = admin_client.post(
+        f"/api/public/promotion/integrations/{integration['id']}/events",
+        headers={"host": "integration-feedback.test"},
+        json=event_payload,
+    )
+    assert duplicate.status_code == 200, duplicate.text
+    assert duplicate.json()["data"]["duplicate"] is True
+
+    undeclared = admin_client.post(
+        f"/api/public/promotion/integrations/{integration['id']}/events",
+        headers={"host": "integration-feedback.test"},
+        json={**event_payload, "eventType": "not_declared", "idempotencyKey": "bad-event-0001"},
+    )
+    assert undeclared.status_code == 422, undeclared.text
+
+    events = admin_client.get(
+        f"/api/promotion/integrations/{integration['id']}/events"
+    )
+    assert events.status_code == 200, events.text
+    event_data = events.json()["data"]
+    assert event_data["total"] == 1
+    assert event_data["summary"] == [{"eventType": "completed", "count": 1}]
+    assert event_data["rows"][0]["channelId"] == channel["id"]
+    assert event_data["rows"][0]["metadata"] == {"result": "ok", "count": 2}
+
+    refreshed = admin_client.get(
+        f"/api/promotion/integrations/{integration['id']}"
+    )
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json()["data"]["integration"]["eventCount"] == 1
 
 
 def test_manifest_can_define_multi_script_order_and_replace_version(

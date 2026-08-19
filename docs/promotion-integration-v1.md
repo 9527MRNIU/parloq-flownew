@@ -44,9 +44,30 @@
 - iframe 只能指定一个 `.html` / `.htm` 入口，包内其他脚本由 HTML 自行引用；
 - `version` 可省略，平台会使用 ZIP 的 SHA-256 摘要生成稳定版本。
 
+需要向平台回传数据的 iframe 可增加可选 `feedback`。普通 iframe 不声明此项，
+加载行为与之前完全相同：
+
+```json
+{
+  "schemaVersion": 1,
+  "type": "iframe",
+  "version": "1.0.0",
+  "entry": "index.html",
+  "feedback": {
+    "enabled": true,
+    "events": ["ready", "completed", "failed"]
+  }
+}
+```
+
+- 平台固定提供 `page_view` 和 `visit_end`，无需重复声明；
+- 自定义事件名称使用小写字母、数字、点、下划线或连字符，最多 32 个；
+- 数据回传当前只用于 iframe。script 集成仍按原方式注入，不获得独立运行会话。
+
 ## 3. 托管和资源地址
 
 - 每个集成必须选择已经完成注册、DNS、SSL 和托管验证的源域名；
+- 本地 Compose 使用 `http://*.localhost:5173` 验证完整链路；生产环境固定使用源域名的 HTTPS 入口；
 - ZIP 解压后的文件存入平台资源表，不需要人工部署目录或填写资源路径；
 - 平台按集成 ID、版本和包内路径生成不可变资源地址：
 
@@ -90,3 +111,25 @@ https://源域名/api/public/promotion/integrations/{集成ID}/{版本}/{包内�
 4. 当前资源包存在至少一个有效入口。
 
 模板替换版本时保留当前集成绑定。集成管理中的全局停用是即时停止分发的总开关。
+
+## 7. iframe 独立运行与回传
+
+启用 `feedback` 后，iframe 仍是绑定源域名的独立页面，不读取主模板，也不通过
+`postMessage` 或主模板转发数据：
+
+1. 平台给 iframe URL 附加一个 30 分钟有效、绑定集成版本、模板和渠道的短期令牌；
+2. iframe 在自己的域名下使用令牌获取渠道、版本、可用事件和指纹策略；
+3. iframe 独立生成访客 ID、采集设备指纹，并直接向同域平台接口回传；
+4. 平台按集成、渠道和幂等键持久化原始事件，管理端“集成管理”可查看事件统计和明细。
+
+平台会自动上报 iframe 的 `page_view` 和 `visit_end`。包内脚本可调用：
+
+```js
+await window.PromotionIntegrationBridge.ready();
+await window.PromotionIntegrationBridge.report("completed", {
+  result: "ok"
+});
+```
+
+只有 `feedback.events` 已声明的自定义事件可以写入。元数据必须是普通 JSON 对象，
+单次最大 4 KB；令牌过期、集成停用、模板解绑或源域名失效后会立即拒绝上报。

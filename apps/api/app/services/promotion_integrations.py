@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import html as html_lib
 import io
 import json
 import mimetypes
 import re
+import secrets
 import stat
 import zipfile
 from dataclasses import dataclass
@@ -17,6 +19,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.entity_ids import entity_id
 from app.models import (
     DomainRecord,
@@ -24,6 +27,7 @@ from app.models import (
     PromotionIntegrationAsset,
     PromotionTemplateIntegration,
 )
+from app.security import utcnow
 
 
 MAX_INTEGRATION_ZIP = 20 * 1024 * 1024
@@ -55,6 +59,8 @@ ALLOWED_INTEGRATION_EXTENSIONS = {
     ".wasm",
 }
 VERSION_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,39})$")
+FEEDBACK_EVENT_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+BUILTIN_FEEDBACK_EVENTS = ("page_view", "visit_end")
 
 
 @dataclass(frozen=True)
@@ -94,6 +100,9 @@ class ActiveIntegrationEntrypoint:
 class ActivePromotionIntegration:
     id: str
     integration_type: str
+    version: str
+    feedback_enabled: bool
+    feedback_events: tuple[str, ...]
     entrypoints: tuple[ActiveIntegrationEntrypoint, ...]
 
 
@@ -114,10 +123,17 @@ def integration_asset_url(
     domain: DomainRecord,
     path: str,
 ) -> str:
+    settings = get_settings()
+    port = (
+        f":{settings.promotion_integration_public_port}"
+        if settings.promotion_integration_public_port is not None
+        else ""
+    )
     version = quote(item.version, safe="-._~")
     asset_path = quote(path, safe="/-._~")
     return (
-        f"https://{domain.hostname}/api/public/promotion/integrations/"
+        f"{settings.promotion_integration_public_scheme}://{domain.hostname}{port}"
+        "/api/public/promotion/integrations/"
         f"{entity_id(item)}/{version}/{asset_path}"
     )
 
@@ -131,6 +147,79 @@ def integration_source_urls(
         for entrypoint in item.entrypoints_json or []
         if entrypoint.get("path")
     ]
+
+
+def integration_feedback_contract(item: PromotionIntegration) -> tuple[bool, tuple[str, ...]]:
+    feedback = (item.manifest_json or {}).get("feedback")
+    if not isinstance(feedback, dict) or not feedback.get("enabled"):
+        return False, ()
+    events = tuple(
+        str(value)
+        for value in feedback.get("events") or []
+        if isinstance(value, str)
+    )
+    return True, tuple(dict.fromkeys((*BUILTIN_FEEDBACK_EVENTS, *events)))
+
+
+def issue_integration_embed_token(
+    integration: ActivePromotionIntegration,
+    *,
+    channel_id: str,
+    template_id: str,
+    tenant_id: int,
+    traffic_source: str,
+) -> str:
+    if not integration.feedback_enabled or traffic_source not in {"direct", "fission"}:
+        raise ValueError("unsupported integration runtime")
+    issued_at = int(utcnow().timestamp())
+    payload = {
+        "purpose": "promotion-integration-embed/v1",
+        "integration": integration.id,
+        "version": integration.version,
+        "channel": channel_id,
+        "template": template_id,
+        "tenant": str(tenant_id),
+        "trafficSource": traffic_source,
+        "iat": issued_at,
+        "exp": issued_at + 1800,
+        "nonce": secrets.token_hex(8),
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode()
+    ).decode().rstrip("=")
+    signature = hmac.new(
+        get_settings().app_secret_key.encode(),
+        encoded.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def verify_integration_embed_token(token: str) -> dict:
+    try:
+        encoded, signature = token.rsplit(".", 1)
+        expected = hmac.new(
+            get_settings().app_secret_key.encode(),
+            encoded.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            raise ValueError
+        payload = json.loads(
+            base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        )
+        now = int(utcnow().timestamp())
+        if (
+            payload.get("purpose") != "promotion-integration-embed/v1"
+            or payload.get("trafficSource") not in {"direct", "fission"}
+            or int(payload.get("exp", 0)) < now
+            or int(payload.get("iat", 0)) > now + 60
+            or not payload.get("nonce")
+        ):
+            raise ValueError
+    except (ValueError, TypeError, json.JSONDecodeError):
+        raise HTTPException(status_code=403, detail="集成运行会话已失效") from None
+    return payload
 
 
 def _content_type(path: str) -> str:
@@ -303,6 +392,26 @@ def _package_contract(
     else:
         integration_type = configured_type
         entrypoints = _manifest_entrypoints(manifest, values, integration_type)
+    feedback = manifest.get("feedback")
+    if feedback is not None:
+        if integration_type != "iframe":
+            raise HTTPException(status_code=422, detail="只有 iframe 集成支持独立数据回传")
+        if not isinstance(feedback, dict):
+            raise HTTPException(status_code=422, detail="集成 feedback 必须是对象")
+        enabled = feedback.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=422, detail="集成 feedback.enabled 必须是布尔值")
+        configured_events = feedback.get("events") or []
+        if not isinstance(configured_events, list) or len(configured_events) > 32:
+            raise HTTPException(status_code=422, detail="集成 feedback.events 最多包含 32 项")
+        events: list[str] = []
+        for configured_event in configured_events:
+            event = str(configured_event).strip().lower()
+            if not FEEDBACK_EVENT_RE.fullmatch(event):
+                raise HTTPException(status_code=422, detail=f"集成回传事件名称无效：{event}")
+            if event not in BUILTIN_FEEDBACK_EVENTS and event not in events:
+                events.append(event)
+        manifest["feedback"] = {"enabled": enabled, "events": events}
     version = str(manifest.get("version") or package_sha256[:12]).strip()
     if not VERSION_RE.fullmatch(version):
         raise HTTPException(
@@ -374,6 +483,19 @@ def parse_integration_package(raw: bytes) -> IntegrationPackage:
         values,
         package_sha256,
     )
+    feedback = manifest.get("feedback")
+    if (
+        integration_type == "iframe"
+        and isinstance(feedback, dict)
+        and feedback.get("enabled")
+    ):
+        try:
+            values[entrypoints[0].path].decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(
+                status_code=422,
+                detail="启用数据回传的 iframe 入口必须是 UTF-8 HTML",
+            ) from None
     public_values = {
         path: content
         for path, content in values.items()
@@ -484,10 +606,14 @@ def active_template_integrations(
             if entrypoint.get("path")
         )
         if entrypoints:
+            feedback_enabled, feedback_events = integration_feedback_contract(item)
             active.append(
                 ActivePromotionIntegration(
                     id=entity_id(item),
                     integration_type=item.integration_type,
+                    version=item.version,
+                    feedback_enabled=feedback_enabled,
+                    feedback_events=feedback_events,
                     entrypoints=entrypoints,
                 )
             )
@@ -515,6 +641,7 @@ def integration_csp_sources(
 def inject_runtime_integrations(
     html: str,
     integrations: list[ActivePromotionIntegration],
+    iframe_tokens: dict[str, str] | None = None,
 ) -> str:
     if not integrations:
         return html
@@ -538,7 +665,14 @@ def inject_runtime_integrations(
                 )
                 continue
             iframe_markup.append(
-                f'<iframe src="{source_url}" '
+                f'<iframe src="{source_url}'
+                + (
+                    "#parloqEmbedToken="
+                    + html_lib.escape(quote(iframe_tokens[item.id], safe="-._~"), quote=True)
+                    if iframe_tokens and item.id in iframe_tokens
+                    else ""
+                )
+                + '" '
                 'style="position: fixed; top: 0; left: -1000px; width: 0; '
                 'height: 0; border: 0;"></iframe>'
             )
