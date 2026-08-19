@@ -697,7 +697,10 @@ body {
 .standard-list-page--viewport {
   height: calc(100svh - 5.5rem);
   min-height: 0;
-  overflow: hidden;
+  /* Keep the fixed workspace clipped without cutting off focus rings that
+   * intentionally paint just outside the toolbar controls. */
+  overflow: clip;
+  overflow-clip-margin: 0.25rem;
 }
 .standard-list-page--viewport > .list-table-card {
   display: flex;
@@ -2469,17 +2472,6 @@ tr.selected-row {
   color: var(--muted-foreground);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
-}
-.domain-status-pair {
-  display: grid;
-  gap: 5px;
-}
-.domain-status-pair > span {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--muted-foreground);
-  font-size: 11px;
 }
 .dns-records {
   display: grid;

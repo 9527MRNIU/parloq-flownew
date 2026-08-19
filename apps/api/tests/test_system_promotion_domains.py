@@ -51,16 +51,7 @@ def test_external_domain_inventories_and_namesilo_purchase_source(
                     "name_servers": ["one.ns.cloudflare.com", "two.ns.cloudflare.com"],
                     "created_on": "2026-01-01T00:00:00Z",
                     "modified_on": "2026-02-01T00:00:00Z",
-                }
-            ]
-
-        def list_registrations(self) -> list[dict[str, object]]:
-            return [
-                {
-                    "domain_name": "cloudflare-owned.example",
-                    "created_at": "2025-12-01T00:00:00Z",
-                    "expires_at": "2027-12-01T00:00:00Z",
-                    "status": "active",
+                    "meta": {"phishing_detected": False},
                 }
             ]
 
@@ -161,10 +152,11 @@ def test_external_domain_inventories_and_namesilo_purchase_source(
         cloudflare_row = cloudflare.json()["data"]["rows"][0]
         assert cloudflare_row["hostname"] == "cloudflare-owned.example"
         assert cloudflare_row["source"] == "account_existing"
-        assert cloudflare_row["createdAt"] == "2025-12-01T00:00:00Z"
-        assert cloudflare_row["expiresAt"] == "2027-12-01T00:00:00Z"
+        assert cloudflare_row["phishingDetected"] is False
         assert "accountName" not in cloudflare_row
         assert "nameServers" not in cloudflare_row
+        assert "createdAt" not in cloudflare_row
+        assert "expiresAt" not in cloudflare_row
 
         namesilo = admin_client.get("/api/domains/namesilo")
         assert namesilo.status_code == 200, namesilo.text
@@ -257,6 +249,31 @@ def test_provider_domains_can_be_imported_into_managed_onboarding(
             },
         )
         assert missing_confirmation.status_code == 422
+
+        current_system_domain = admin_client.post(
+            "/api/domains/provider-import",
+            headers={"X-Forwarded-Host": "cloudflare-import.example"},
+            json={
+                "provider": "cloudflare",
+                "hostname": "cloudflare-import.example",
+                "confirmDnsReplace": True,
+            },
+        )
+        assert current_system_domain.status_code == 409
+        assert current_system_domain.json()["detail"] == (
+            "当前管理后台正在使用该域名或其子域名，不能作为落地页域名接入"
+        )
+
+        current_system_parent_domain = admin_client.post(
+            "/api/domains/provider-import",
+            headers={"X-Forwarded-Host": "center.cloudflare-import.example"},
+            json={
+                "provider": "cloudflare",
+                "hostname": "cloudflare-import.example",
+                "confirmDnsReplace": True,
+            },
+        )
+        assert current_system_parent_domain.status_code == 409
 
         cloudflare = admin_client.post(
             "/api/domains/provider-import",

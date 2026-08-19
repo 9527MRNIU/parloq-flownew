@@ -105,10 +105,9 @@ type CloudflareDomainRow = {
   hostname: string;
   status: string;
   paused: boolean;
+  phishingDetected: boolean;
   source: "system_purchase" | "system_import" | "account_existing";
   systemDomainId?: string;
-  createdAt?: string;
-  expiresAt?: string;
 };
 type NameSiloDomainRow = {
   readKey: string;
@@ -222,14 +221,13 @@ function normalizeCloudflareDomain(input: unknown): CloudflareDomainRow {
     hostname,
     status: get(row, "status") || "unknown",
     paused: Boolean(row.paused),
+    phishingDetected: Boolean(row.phishingDetected ?? row.phishing_detected),
     source: source === "system_purchase"
       ? "system_purchase"
       : source === "system_import"
         ? "system_import"
         : "account_existing",
     systemDomainId: snowflakeId(row, "systemDomainId", "system_domain_id") || undefined,
-    createdAt: get(row, "createdAt", "created_at"),
-    expiresAt: get(row, "expiresAt", "expires_at"),
   };
 }
 function normalizeNameSiloDomain(input: unknown): NameSiloDomainRow {
@@ -350,6 +348,13 @@ function providerSourceTone(source: keyof typeof providerSourceLabels) {
   return "neutral" as const;
 }
 function cloudflareDomainStatus(row: CloudflareDomainRow): EntityStatusMeta {
+  if (row.phishingDetected) {
+    return {
+      label: "风险",
+      description: "Cloudflare 已将该 Zone 标记为疑似钓鱼，请核查后再接入系统。",
+      tone: "danger",
+    };
+  }
   if (row.paused) {
     return { label: "已暂停", description: "Cloudflare Zone 当前处于暂停状态。", tone: "warning" };
   }
@@ -360,6 +365,26 @@ function cloudflareDomainStatus(row: CloudflareDomainRow): EntityStatusMeta {
     return { label: "待激活", description: "Cloudflare 正在等待域名服务器切换生效。", tone: "warning" };
   }
   return { label: row.status || "未知", description: "Cloudflare Zone 当前不可正常使用。", tone: "danger" };
+}
+function integrationStatusBadge(connected: boolean) {
+  return <Badge tone={connected ? "info" : "neutral"}>{connected ? "已接入" : "未接入"}</Badge>;
+}
+const currentSystemDomainMessage = "当前管理后台正在使用该域名或其子域名，不能作为落地页域名接入。";
+function normalizeComparableHostname(value: string) {
+  return value.trim().toLowerCase().replace(/\.$/, "");
+}
+function isCurrentSystemDomain(providerHostname: string, currentSystemHostname: string) {
+  const providerDomain = normalizeComparableHostname(providerHostname);
+  return currentSystemHostname !== ""
+    && (currentSystemHostname === providerDomain
+      || currentSystemHostname.endsWith(`.${providerDomain}`));
+}
+function CurrentSystemDomainWarning() {
+  return (
+    <Badge tone="danger" title={currentSystemDomainMessage}>
+      当前系统域名
+    </Badge>
+  );
 }
 function nameSiloDomainStatus(row: NameSiloDomainRow): EntityStatusMeta {
   if (row.providerOwned) {
@@ -381,6 +406,9 @@ export function DomainsPage() {
   const { can } = useAuth();
   const canManage = can("promotion.domain.manage");
   const canPurchase = can("promotion.domain.purchase");
+  const currentSystemHostname = typeof window === "undefined"
+    ? ""
+    : normalizeComparableHostname(window.location.hostname);
   const [rows, setRows] = useState<DomainRow[]>([]);
   const [cloudflareDomains, setCloudflareDomains] = useState<CloudflareDomainRow[]>([]);
   const [nameSiloDomains, setNameSiloDomains] = useState<NameSiloDomainRow[]>([]);
@@ -914,12 +942,14 @@ export function DomainsPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead>域名</TableHead>
-                  <TableHead>来源 / 托管</TableHead>
+                  <TableHead>来源</TableHead>
+                  <TableHead>托管</TableHead>
                   <TableHead>DNS / TLS</TableHead>
                   <TableHead>就绪状态</TableHead>
                   <TableHead>到期时间</TableHead>
                   <TableHead>绑定渠道</TableHead>
                   <TableHead>最近验证</TableHead>
+                  <TableHead>接入状态</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
@@ -941,15 +971,16 @@ export function DomainsPage() {
                       />
                     </TableCell>
                     <TableCell>
-                      <div className="cell-main">
-                        <strong>{row.acquisitionType === "purchased" ? "平台购买" : "外部接入"}</strong>
-                        <span>{row.managementMode === "platform" ? "平台托管" : "自行管理"}</span>
-                      </div>
+                      <strong>{row.acquisitionType === "purchased" ? "平台购买" : "外部接入"}</strong>
                     </TableCell>
                     <TableCell>
-                      <div className="domain-status-pair">
-                        <span>DNS {statusBadge(row.dnsStatus)}</span>
-                        <span>TLS {statusBadge(row.sslStatus)}</span>
+                      {row.managementMode === "platform" ? "平台托管" : "自行管理"}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1 whitespace-nowrap">
+                        {statusBadge(row.dnsStatus)}
+                        <span className="text-muted-foreground">/</span>
+                        {statusBadge(row.sslStatus)}
                       </div>
                     </TableCell>
                     <TableCell>
@@ -962,6 +993,7 @@ export function DomainsPage() {
                     <TableCell className="text-muted-foreground">
                       {formatDateTime(row.lastVerifiedAt)}
                     </TableCell>
+                    <TableCell>{integrationStatusBadge(true)}</TableCell>
                     <TableCell>
                       <div className="flex items-center justify-end gap-1">
                         {canManage ? (
@@ -1030,56 +1062,58 @@ export function DomainsPage() {
                   <TableHead>域名</TableHead>
                   <TableHead>来源</TableHead>
                   <TableHead>Cloudflare 状态</TableHead>
-                  <TableHead>创建时间</TableHead>
-                  <TableHead>到期时间</TableHead>
+                  <TableHead>接入状态</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {cloudflarePagination.rows.map((row) => (
-                  <TableRow key={row.readKey}>
-                    <TableCell>
-                      <EntityPrimaryCell
-                        title={row.hostname}
-                        id={row.systemDomainId}
-                        idFallback="未接入，暂无系统 ID"
-                        status={cloudflareDomainStatus(row)}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Badge tone={providerSourceTone(row.source)}>
-                        {providerSourceLabels[row.source]}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <Badge tone={cloudflareDomainStatus(row).tone}>
-                        {cloudflareDomainStatus(row).label}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {formatDateTime(row.createdAt)}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {formatDateTime(row.expiresAt)}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center justify-end gap-1">
-                        {row.systemDomainId ? (
-                          <Badge tone="info">已接入</Badge>
-                        ) : canManage ? (
-                          <Button
-                            variant="outline"
-                            disabled={importPending === `cloudflare:${row.hostname}`}
-                            onClick={() => void importProviderDomain("cloudflare", row.hostname)}
-                          >
-                            {importPending === `cloudflare:${row.hostname}` ? <Spinner /> : null}
-                            接入系统
-                          </Button>
-                        ) : <span className="text-muted-foreground">-</span>}
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {cloudflarePagination.rows.map((row) => {
+                  const currentSystemDomain = isCurrentSystemDomain(
+                    row.hostname,
+                    currentSystemHostname,
+                  );
+                  return (
+                    <TableRow key={row.readKey}>
+                      <TableCell>
+                        <EntityPrimaryCell
+                          title={row.hostname}
+                          id={row.systemDomainId}
+                          idFallback="未接入，暂无系统 ID"
+                          status={cloudflareDomainStatus(row)}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Badge tone={providerSourceTone(row.source)}>
+                          {providerSourceLabels[row.source]}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        <Badge tone={cloudflareDomainStatus(row).tone}>
+                          {cloudflareDomainStatus(row).label}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>{integrationStatusBadge(Boolean(row.systemDomainId))}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center justify-end gap-1">
+                          {currentSystemDomain ? <CurrentSystemDomainWarning /> : null}
+                          {!row.systemDomainId && canManage ? (
+                            <Button
+                              variant="outline"
+                              disabled={currentSystemDomain || importPending === `cloudflare:${row.hostname}`}
+                              title={currentSystemDomain ? currentSystemDomainMessage : undefined}
+                              onClick={() => void importProviderDomain("cloudflare", row.hostname)}
+                            >
+                              {importPending === `cloudflare:${row.hostname}` ? <Spinner /> : null}
+                              接入系统
+                            </Button>
+                          ) : !currentSystemDomain ? (
+                            <span className="text-muted-foreground">-</span>
+                          ) : null}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           </div>
@@ -1105,6 +1139,7 @@ export function DomainsPage() {
                   <TableHead>创建时间</TableHead>
                   <TableHead>到期时间</TableHead>
                   <TableHead>系统订单</TableHead>
+                  <TableHead>接入状态</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
@@ -1118,6 +1153,10 @@ export function DomainsPage() {
                   );
                   const showsOrderActions = canPurchase && hasActions;
                   const showsImport = row.providerOwned && !row.systemDomainId && canManage;
+                  const currentSystemDomain = isCurrentSystemDomain(
+                    row.hostname,
+                    currentSystemHostname,
+                  );
                   return (
                     <TableRow key={row.readKey}>
                       <TableCell>
@@ -1154,8 +1193,10 @@ export function DomainsPage() {
                           </div>
                         ) : <span className="text-muted-foreground">-</span>}
                       </TableCell>
+                      <TableCell>{integrationStatusBadge(Boolean(row.systemDomainId))}</TableCell>
                       <TableCell>
                         <div className="flex items-center justify-end gap-1">
+                          {currentSystemDomain ? <CurrentSystemDomainWarning /> : null}
                           {canPurchase && itemOrder?.allowedActions.mockPayment ? (
                             <Button disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "mock-payment")}>
                               {busy ? <Spinner /> : null}确认支付并开通
@@ -1190,7 +1231,8 @@ export function DomainsPage() {
                           {showsImport ? (
                             <Button
                               variant="outline"
-                              disabled={importPending === `namesilo:${row.hostname}`}
+                              disabled={currentSystemDomain || importPending === `namesilo:${row.hostname}`}
+                              title={currentSystemDomain ? currentSystemDomainMessage : undefined}
                               onClick={() => void importProviderDomain(
                                 "namesilo",
                                 row.hostname,
@@ -1201,8 +1243,7 @@ export function DomainsPage() {
                               接入系统
                             </Button>
                           ) : null}
-                          {row.systemDomainId ? <Badge tone="info">已接入</Badge> : null}
-                          {!showsOrderActions && !showsImport && !row.systemDomainId ? (
+                          {!showsOrderActions && !showsImport && !currentSystemDomain ? (
                             <span className="text-muted-foreground">-</span>
                           ) : null}
                         </div>

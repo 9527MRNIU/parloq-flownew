@@ -563,59 +563,6 @@ def test_cloudflare_lists_all_zones_for_the_selected_account() -> None:
     assert rows[-1]["name"] == "last.example"
 
 
-def test_cloudflare_lists_registrar_dates_with_cursor_pagination() -> None:
-    cursors: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path.removeprefix("/client/v4")
-        assert path == "/accounts/account-1/registrar/registrations"
-        cursor = request.url.params.get("cursor", "")
-        cursors.append(cursor)
-        if not cursor:
-            rows = [
-                {
-                    "domain_name": "first.example",
-                    "created_at": "2026-01-01T00:00:00Z",
-                    "expires_at": "2027-01-01T00:00:00Z",
-                    "status": "active",
-                }
-            ]
-            next_cursor = "next-page"
-        else:
-            rows = [
-                {
-                    "domain_name": "last.example",
-                    "created_at": "2026-02-01T00:00:00Z",
-                    "expires_at": "2027-02-01T00:00:00Z",
-                    "status": "active",
-                }
-            ]
-            next_cursor = ""
-        return httpx.Response(
-            200,
-            json={
-                "success": True,
-                "result": rows,
-                "result_info": {"cursor": next_cursor, "per_page": 100},
-            },
-        )
-
-    client = CloudflareClient(
-        "cfat_account-token",
-        account_id="account-1",
-        client=httpx.Client(
-            base_url=CloudflareClient.base_url,
-            transport=httpx.MockTransport(handler),
-        ),
-    )
-    rows = client.list_registrations()
-
-    assert cursors == ["", "next-page"]
-    assert [row["domain_name"] for row in rows] == ["first.example", "last.example"]
-    assert rows[0]["created_at"] == "2026-01-01T00:00:00Z"
-    assert rows[0]["expires_at"] == "2027-01-01T00:00:00Z"
-
-
 def test_baota_creates_site_and_proxy_once_and_refuses_conflicts() -> None:
     site: dict[str, object] | None = None
     proxies: list[dict[str, object]] = []

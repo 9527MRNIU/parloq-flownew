@@ -589,40 +589,6 @@ class CloudflareClient:
             page += 1
         return zones
 
-    def list_registrations(self) -> list[dict[str, object]]:
-        """Return domains registered with Cloudflare Registrar when permitted.
-
-        Zone timestamps describe when a Zone was added to Cloudflare and must not
-        be presented as domain registration dates. The Registrar API is optional:
-        callers can keep listing Zones when the token has no Registrar permission.
-        """
-        if not self._account_id:
-            return []
-
-        registrations: list[dict[str, object]] = []
-        cursor = ""
-        for _ in range(1000):
-            params: dict[str, object] = {"per_page": 100}
-            if cursor:
-                params["cursor"] = cursor
-            payload = self._get(
-                f"/accounts/{self._account_id}/registrar/registrations",
-                **params,
-            )
-            rows = payload.get("result")
-            if not isinstance(rows, list):
-                raise PlatformClientError("Cloudflare Registrar 响应无效")
-            registrations.extend(
-                _mapping(value) for value in rows if _mapping(value)
-            )
-
-            result_info = _mapping(payload.get("result_info"))
-            next_cursor = str(result_info.get("cursor") or "").strip()
-            if not rows or not next_cursor or next_cursor == cursor:
-                break
-            cursor = next_cursor
-        return registrations
-
     def find_zone(self, domain: str) -> dict[str, object] | None:
         params: dict[str, object] = {"name": domain, "page": 1, "per_page": 50}
         if self._account_id:

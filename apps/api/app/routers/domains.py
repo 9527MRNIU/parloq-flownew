@@ -5,6 +5,7 @@ import logging
 import re
 import secrets
 from datetime import UTC, timedelta
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
@@ -57,6 +58,56 @@ order_router = APIRouter(prefix="/api/domain-orders", tags=["domain-orders"])
 logger = logging.getLogger(__name__)
 DOMAIN_SEARCH_KEY_PREFIX = "parloq:domain-search:"
 DOMAIN_SEARCH_TTL_SECONDS = 15 * 60
+CURRENT_SYSTEM_DOMAIN_IMPORT_ERROR = (
+    "当前管理后台正在使用该域名或其子域名，不能作为落地页域名接入"
+)
+
+
+def _control_plane_hostnames(request: Request) -> set[str]:
+    """Return the exact hostnames used to access the management application."""
+
+    hostnames: set[str] = set()
+
+    request_hostname = (request.url.hostname or "").lower().rstrip(".")
+    if request_hostname:
+        hostnames.add(request_hostname)
+
+    forwarded_host = (
+        request.headers.get("x-forwarded-host", "")
+        .split(",", 1)[0]
+        .strip()
+    )
+    authority = forwarded_host or request.headers.get("host", "").strip()
+    if authority:
+        try:
+            authority_hostname = (
+                (urlsplit(f"//{authority}").hostname or "")
+                .lower()
+                .rstrip(".")
+            )
+        except ValueError:
+            authority_hostname = ""
+        if authority_hostname:
+            hostnames.add(authority_hostname)
+
+    origins = (*get_settings().cors_origins, request.headers.get("origin", ""))
+    for origin in origins:
+        try:
+            origin_hostname = (urlsplit(origin).hostname or "").lower().rstrip(".")
+        except ValueError:
+            origin_hostname = ""
+        if origin_hostname:
+            hostnames.add(origin_hostname)
+
+    return hostnames
+
+
+def _is_control_plane_domain(hostname: str, request: Request) -> bool:
+    return any(
+        current_hostname == hostname
+        or current_hostname.endswith(f".{hostname}")
+        for current_hostname in _control_plane_hostnames(request)
+    )
 
 
 def _is_duplicate_quote_order_error(exc: IntegrityError) -> bool:
@@ -452,12 +503,6 @@ def list_cloudflare_domains(db: DbSession, current_user: CurrentUser) -> dict:
     )
     try:
         zones = client.list_zones()
-        try:
-            registrations = client.list_registrations()
-        except PlatformClientError:
-            # Cloudflare Registrar is optional. A token that can manage Zones and
-            # DNS must still be able to use this inventory and onboarding flow.
-            registrations = []
     except PlatformClientError as exc:
         raise HTTPException(
             status_code=502,
@@ -471,17 +516,12 @@ def list_cloudflare_domains(db: DbSession, current_user: CurrentUser) -> dict:
         domain_statement = domain_statement.where(DomainRecord.created_by == current_user.id)
     local_domains = db.scalars(domain_statement).all()
     domains_by_hostname = {item.hostname.lower(): item for item in local_domains}
-    registrations_by_hostname = {
-        str(item.get("domain_name") or "").lower().rstrip("."): item
-        for item in registrations
-        if str(item.get("domain_name") or "").strip()
-    }
 
     rows = []
     for zone in zones:
         hostname = str(zone.get("name") or "").lower().rstrip(".")
+        meta = zone.get("meta") if isinstance(zone.get("meta"), dict) else {}
         local_domain = domains_by_hostname.get(hostname)
-        registration = registrations_by_hostname.get(hostname, {})
         source = "account_existing"
         if local_domain is not None:
             source = (
@@ -494,10 +534,9 @@ def list_cloudflare_domains(db: DbSession, current_user: CurrentUser) -> dict:
                 "hostname": hostname,
                 "status": str(zone.get("status") or "unknown"),
                 "paused": bool(zone.get("paused")),
+                "phishingDetected": bool(meta.get("phishing_detected")),
                 "source": source,
                 "systemDomainId": entity_id(local_domain) if local_domain else None,
-                "createdAt": registration.get("created_at"),
-                "expiresAt": registration.get("expires_at"),
             }
         )
     rows.sort(key=lambda row: row["hostname"])
@@ -585,6 +624,7 @@ def list_namesilo_domains(db: DbSession, current_user: CurrentUser) -> dict:
 @router.post("/provider-import", status_code=status.HTTP_201_CREATED)
 def import_provider_domain(
     payload: ProviderDomainImport,
+    request: Request,
     db: DbSession,
     current_user: CurrentUser,
 ) -> dict:
@@ -592,6 +632,11 @@ def import_provider_domain(
         raise HTTPException(
             status_code=422,
             detail="接入前必须确认系统将重建根域名的冲突路由解析",
+        )
+    if _is_control_plane_domain(payload.hostname, request):
+        raise HTTPException(
+            status_code=409,
+            detail=CURRENT_SYSTEM_DOMAIN_IMPORT_ERROR,
         )
     existing = db.scalar(
         select(DomainRecord).where(DomainRecord.hostname == payload.hostname)
