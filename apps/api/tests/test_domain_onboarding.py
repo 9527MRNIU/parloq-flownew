@@ -10,7 +10,7 @@ from app.services import domain_onboarding
 from app.snowflake import new_public_id
 
 
-def test_purchased_domain_onboarding_advances_all_platforms_idempotently(
+def test_namesilo_managed_domain_onboarding_advances_all_platforms_idempotently(
     admin_client: TestClient,
     monkeypatch,
 ) -> None:
@@ -37,6 +37,9 @@ def test_purchased_domain_onboarding_advances_all_platforms_idempotently(
 
         def ensure_dns_record(self, zone_id: str, **values: object) -> None:
             calls.append(("dns", zone_id, values))
+
+        def reset_managed_dns_records(self, zone_id: str, **values: object) -> None:
+            calls.append(("reset_dns", zone_id, values))
 
         def ensure_zone_setting(self, zone_id: str, setting: str, value: object) -> None:
             calls.append(("setting", zone_id, setting, value))
@@ -113,13 +116,14 @@ def test_purchased_domain_onboarding_advances_all_platforms_idempotently(
         item = DomainRecord(
             public_id=new_public_id("dom"),
             hostname="automatic-purchase.example",
-            acquisition_type="purchased",
+            acquisition_type="connected",
             management_mode="platform",
             registrar_provider="namesilo",
             registration_status="active",
             hosting_provider="cloudflare",
             hosting_status="pending",
             verification_token="automatic-onboarding-proof",
+            onboarding_state_json={"replaceRoutingRecords": True},
             enabled=True,
             created_by=admin.id,
         )
@@ -137,6 +141,7 @@ def test_purchased_domain_onboarding_advances_all_platforms_idempotently(
         assert result.hosting_status == "active"
         assert result.onboarding_state_json["cloudflareZoneId"] == "zone-1"
         assert result.onboarding_state_json["registrarNameserversUpdated"] is True
+        assert result.onboarding_state_json["cloudflareRoutingResetCompleted"] is True
         assert result.onboarding_state_json["baotaSiteReady"] is True
 
     assert (
@@ -150,6 +155,7 @@ def test_purchased_domain_onboarding_advances_all_platforms_idempotently(
         "http://127.0.0.1:18100",
     ) in calls
     assert len([call for call in calls if call[0] == "dns"]) == 2
+    assert len([call for call in calls if call[0] == "reset_dns"]) == 1
     assert len([call for call in calls if call[0] == "setting"]) == 2
 
     with SessionLocal() as db:

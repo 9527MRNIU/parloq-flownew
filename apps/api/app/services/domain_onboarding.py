@@ -163,10 +163,10 @@ def continue_domain_onboarding(db: Session, item: DomainRecord) -> DomainRecord:
         )
 
         stage = "registrar_nameservers"
-        purchased_with_namesilo = (
-            item.acquisition_type == "purchased" and item.registrar_provider == "namesilo"
+        managed_with_namesilo = (
+            item.management_mode == "platform" and item.registrar_provider == "namesilo"
         )
-        if purchased_with_namesilo:
+        if managed_with_namesilo:
             ns_platform = _platform(db, "namesilo", "api_key")
             namesilo = NameSiloClient(
                 ns_platform.secret,
@@ -200,7 +200,7 @@ def continue_domain_onboarding(db: Session, item: DomainRecord) -> DomainRecord:
         state["cloudflareZoneStatus"] = zone_status
         state["cloudflareNameservers"] = nameservers
         if zone_status != "active":
-            if purchased_with_namesilo:
+            if managed_with_namesilo:
                 message = "域名服务器已提交，等待 Cloudflare 激活；稍后点击继续即可"
             else:
                 message = "请在域名注册商处改用下列 Cloudflare 域名服务器，生效后点击继续"
@@ -214,6 +214,27 @@ def continue_domain_onboarding(db: Session, item: DomainRecord) -> DomainRecord:
 
         stage = "cloudflare_dns"
         settings = get_settings()
+        verification_name = f"_parloq-verify.{item.hostname}"
+        verification_content = f"parloq-verification={item.verification_token}"
+        if state.get("replaceRoutingRecords") and not state.get(
+            "cloudflareRoutingResetCompleted"
+        ):
+            cloudflare.reset_managed_dns_records(
+                zone_id,
+                hostname=item.hostname,
+                cname_content=settings.promotion_ingress_host,
+                verification_name=verification_name,
+                verification_content=verification_content,
+            )
+            state["cloudflareRoutingResetCompleted"] = True
+            _save(
+                db,
+                item,
+                status="running",
+                stage=stage,
+                message="Cloudflare 冲突路由记录已整理",
+                state=state,
+            )
         cloudflare.ensure_dns_record(
             zone_id,
             record_type="CNAME",
@@ -224,8 +245,8 @@ def continue_domain_onboarding(db: Session, item: DomainRecord) -> DomainRecord:
         cloudflare.ensure_dns_record(
             zone_id,
             record_type="TXT",
-            name=f"_parloq-verify.{item.hostname}",
-            content=f"parloq-verification={item.verification_token}",
+            name=verification_name,
+            content=verification_content,
         )
         cloudflare.ensure_zone_setting(zone_id, "ssl", "flexible")
         cloudflare.ensure_zone_setting(zone_id, "always_use_https", "on")

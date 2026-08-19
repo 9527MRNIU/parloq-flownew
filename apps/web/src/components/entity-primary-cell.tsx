@@ -72,12 +72,14 @@ export function EntityPrimaryCell({
   id,
   status,
   description,
+  idFallback = "等待 ID 迁移",
   className,
 }: {
   title: ReactNode;
   id?: string;
   status: EntityStatusMeta;
   description?: ReactNode;
+  idFallback?: ReactNode;
   className?: string;
 }) {
   return (
@@ -85,7 +87,7 @@ export function EntityPrimaryCell({
       <EntityStatusIndicator status={status} />
       <div className="cell-main min-w-0 max-w-[220px]">
         <strong>{title || "未命名"}</strong>
-        <span title={id || undefined}>{id || "等待 ID 迁移"}</span>
+        <span title={id || undefined}>{id || idFallback}</span>
         {description ? <span>{description}</span> : null}
       </div>
     </div>

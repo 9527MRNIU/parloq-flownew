@@ -589,6 +589,40 @@ class CloudflareClient:
             page += 1
         return zones
 
+    def list_registrations(self) -> list[dict[str, object]]:
+        """Return domains registered with Cloudflare Registrar when permitted.
+
+        Zone timestamps describe when a Zone was added to Cloudflare and must not
+        be presented as domain registration dates. The Registrar API is optional:
+        callers can keep listing Zones when the token has no Registrar permission.
+        """
+        if not self._account_id:
+            return []
+
+        registrations: list[dict[str, object]] = []
+        cursor = ""
+        for _ in range(1000):
+            params: dict[str, object] = {"per_page": 100}
+            if cursor:
+                params["cursor"] = cursor
+            payload = self._get(
+                f"/accounts/{self._account_id}/registrar/registrations",
+                **params,
+            )
+            rows = payload.get("result")
+            if not isinstance(rows, list):
+                raise PlatformClientError("Cloudflare Registrar 响应无效")
+            registrations.extend(
+                _mapping(value) for value in rows if _mapping(value)
+            )
+
+            result_info = _mapping(payload.get("result_info"))
+            next_cursor = str(result_info.get("cursor") or "").strip()
+            if not rows or not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+        return registrations
+
     def find_zone(self, domain: str) -> dict[str, object] | None:
         params: dict[str, object] = {"name": domain, "page": 1, "per_page": 50}
         if self._account_id:
@@ -686,6 +720,66 @@ class CloudflareClient:
         if not row.get("id"):
             raise PlatformClientError("Cloudflare 未确认 DNS 记录写入", outcome_unknown=True)
         return row
+
+    def delete_dns_record(self, zone_id: str, record_id: str) -> None:
+        result = _mapping(
+            self._request(
+                "DELETE",
+                f"/zones/{zone_id}/dns_records/{record_id}",
+                mutation=True,
+            ).get("result")
+        )
+        if str(result.get("id") or "") != record_id:
+            raise PlatformClientError(
+                "Cloudflare 未确认 DNS 记录删除",
+                outcome_unknown=True,
+            )
+
+    def reset_managed_dns_records(
+        self,
+        zone_id: str,
+        *,
+        hostname: str,
+        cname_content: str,
+        verification_name: str,
+        verification_content: str,
+    ) -> None:
+        """Remove only records that conflict with Parloq-managed routing.
+
+        MX, unrelated TXT records, and records on other hostnames are deliberately
+        preserved. Re-running this method is safe after an uncertain response.
+        """
+
+        for record_type in ("A", "AAAA", "CNAME"):
+            for record in self.list_dns_records(
+                zone_id,
+                record_type=record_type,
+                name=hostname,
+            ):
+                keep = (
+                    record_type == "CNAME"
+                    and str(record.get("content") or "").rstrip(".").lower()
+                    == cname_content.rstrip(".").lower()
+                    and bool(record.get("proxied"))
+                )
+                if keep:
+                    continue
+                record_id = str(record.get("id") or "")
+                if not record_id:
+                    raise PlatformClientError("Cloudflare DNS 记录缺少 ID")
+                self.delete_dns_record(zone_id, record_id)
+
+        for record in self.list_dns_records(
+            zone_id,
+            record_type="TXT",
+            name=verification_name,
+        ):
+            if str(record.get("content") or "") == verification_content:
+                continue
+            record_id = str(record.get("id") or "")
+            if not record_id:
+                raise PlatformClientError("Cloudflare DNS 记录缺少 ID")
+            self.delete_dns_record(zone_id, record_id)
 
     def ensure_zone_setting(self, zone_id: str, setting: str, value: object) -> None:
         current = _mapping(self._get(f"/zones/{zone_id}/settings/{setting}").get("result"))

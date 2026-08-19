@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from app.business_schemas import (
     DomainCreate,
     DomainOrderCreate,
+    ProviderDomainImport,
     DomainQuoteRequest,
     DomainSearchRequest,
     DomainUpdate,
@@ -269,6 +270,9 @@ def _order_row(db: DbSession, item: DomainOrder) -> dict:
             ),
             "reconcile": can_reconcile,
             "cancel": item.status in {"pending_payment", "paid", "purchase_ready"},
+            "delete": item.status in {"failed", "cancelled"}
+            and item.provider_order_ref is None
+            and item.domain_id is None,
         },
         "createdAt": iso(item.created_at),
         "updatedAt": iso(item.updated_at),
@@ -441,7 +445,6 @@ def list_domains(db: DbSession, current_user: CurrentUser) -> dict:
 
 @router.get("/cloudflare")
 def list_cloudflare_domains(db: DbSession, current_user: CurrentUser) -> dict:
-    del current_user
     api_token, settings = _platform_secret(db, "cloudflare", "api_token")
     client = CloudflareClient(
         api_token,
@@ -449,6 +452,12 @@ def list_cloudflare_domains(db: DbSession, current_user: CurrentUser) -> dict:
     )
     try:
         zones = client.list_zones()
+        try:
+            registrations = client.list_registrations()
+        except PlatformClientError:
+            # Cloudflare Registrar is optional. A token that can manage Zones and
+            # DNS must still be able to use this inventory and onboarding flow.
+            registrations = []
     except PlatformClientError as exc:
         raise HTTPException(
             status_code=502,
@@ -457,24 +466,38 @@ def list_cloudflare_domains(db: DbSession, current_user: CurrentUser) -> dict:
     finally:
         client.close()
 
+    domain_statement = select(DomainRecord).where(DomainRecord.archived_at.is_(None))
+    if current_user.role != "admin":
+        domain_statement = domain_statement.where(DomainRecord.created_by == current_user.id)
+    local_domains = db.scalars(domain_statement).all()
+    domains_by_hostname = {item.hostname.lower(): item for item in local_domains}
+    registrations_by_hostname = {
+        str(item.get("domain_name") or "").lower().rstrip("."): item
+        for item in registrations
+        if str(item.get("domain_name") or "").strip()
+    }
+
     rows = []
     for zone in zones:
-        account = dict(zone.get("account") or {}) if isinstance(zone.get("account"), dict) else {}
+        hostname = str(zone.get("name") or "").lower().rstrip(".")
+        local_domain = domains_by_hostname.get(hostname)
+        registration = registrations_by_hostname.get(hostname, {})
+        source = "account_existing"
+        if local_domain is not None:
+            source = (
+                "system_purchase"
+                if local_domain.acquisition_type == "purchased"
+                else "system_import"
+            )
         rows.append(
             {
-                "hostname": str(zone.get("name") or "").lower().rstrip("."),
+                "hostname": hostname,
                 "status": str(zone.get("status") or "unknown"),
                 "paused": bool(zone.get("paused")),
-                "type": str(zone.get("type") or ""),
-                "accountName": str(account.get("name") or ""),
-                "nameServers": [
-                    str(value)
-                    for value in (zone.get("name_servers") or [])
-                    if str(value).strip()
-                ],
-                "createdAt": zone.get("created_on"),
-                "modifiedAt": zone.get("modified_on"),
-                "activatedAt": zone.get("activated_on"),
+                "source": source,
+                "systemDomainId": entity_id(local_domain) if local_domain else None,
+                "createdAt": registration.get("created_at"),
+                "expiresAt": registration.get("expires_at"),
             }
         )
     rows.sort(key=lambda row: row["hostname"])
@@ -514,7 +537,8 @@ def list_namesilo_domains(db: DbSession, current_user: CurrentUser) -> dict:
         hostname = provider_domain["domain"].lower()
         provider_hostnames.add(hostname)
         hostname_orders = orders_by_hostname.get(hostname, [])
-        system_order = next(
+        latest_order = hostname_orders[0] if hostname_orders else None
+        purchase_order = next(
             (
                 order
                 for order in hostname_orders
@@ -526,25 +550,25 @@ def list_namesilo_domains(db: DbSession, current_user: CurrentUser) -> dict:
         rows.append(
             {
                 "hostname": hostname,
-                "source": "system_purchase" if system_order else "account_existing",
+                "source": "system_purchase" if purchase_order else "account_existing",
                 "providerOwned": True,
                 "providerStatus": "active",
                 "createdAt": provider_domain.get("created") or None,
                 "expiresAt": provider_domain.get("expires") or None,
                 "systemDomainId": entity_id(local_domain) if local_domain else None,
-                "order": _order_row(db, system_order) if system_order else None,
+                "order": _order_row(db, latest_order) if latest_order else None,
             }
         )
 
     for order in orders:
         hostname = order.hostname.lower()
-        if hostname in provider_hostnames or order.status == "cancelled":
+        if hostname in provider_hostnames:
             continue
         local_domain = domains_by_hostname.get(hostname)
         rows.append(
             {
                 "hostname": hostname,
-                "source": "system_purchase",
+                "source": "system_order",
                 "providerOwned": False,
                 "providerStatus": order.status,
                 "createdAt": None,
@@ -556,6 +580,102 @@ def list_namesilo_domains(db: DbSession, current_user: CurrentUser) -> dict:
 
     rows.sort(key=lambda row: str(row["hostname"]))
     return {"data": {"rows": rows, "total": len(rows)}}
+
+
+@router.post("/provider-import", status_code=status.HTTP_201_CREATED)
+def import_provider_domain(
+    payload: ProviderDomainImport,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    if not payload.confirm_dns_replace:
+        raise HTTPException(
+            status_code=422,
+            detail="接入前必须确认系统将重建根域名的冲突路由解析",
+        )
+    existing = db.scalar(
+        select(DomainRecord).where(DomainRecord.hostname == payload.hostname)
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="该域名已存在于系统中，请在系统域名页继续处理",
+        )
+
+    state: dict[str, object] = {
+        "sourceProvider": payload.provider,
+        "replaceRoutingRecords": True,
+        "dnsReplacementConfirmed": True,
+    }
+    registrar_provider: str | None = None
+    if payload.provider == "cloudflare":
+        api_token, settings = _platform_secret(db, "cloudflare", "api_token")
+        client = CloudflareClient(
+            api_token,
+            account_id=str(settings.get("accountId") or "").strip() or None,
+        )
+        try:
+            zone = client.find_zone(payload.hostname)
+        except PlatformClientError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"核对 Cloudflare 域名失败：{exc}",
+            ) from exc
+        finally:
+            client.close()
+        if zone is None:
+            raise HTTPException(status_code=409, detail="Cloudflare 当前账户中未找到该域名")
+        state.update(
+            {
+                "cloudflareZoneId": str(zone.get("id") or ""),
+                "cloudflareZoneStatus": str(zone.get("status") or "unknown"),
+                "cloudflareNameservers": [
+                    str(value).lower().rstrip(".")
+                    for value in (zone.get("name_servers") or [])
+                    if str(value).strip()
+                ],
+            }
+        )
+    else:
+        api_key, _ = _platform_secret(db, "namesilo", "api_key")
+        client = NameSiloClient(api_key)
+        try:
+            owned = client.owns_domain(payload.hostname)
+        except PlatformClientError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"核对 NameSilo 域名失败：{exc}",
+            ) from exc
+        finally:
+            client.close()
+        if not owned:
+            raise HTTPException(status_code=409, detail="NameSilo 当前账户中未找到该域名")
+        registrar_provider = "namesilo"
+
+    item = DomainRecord(
+        public_id=new_public_id("dom"),
+        hostname=payload.hostname,
+        acquisition_type="connected",
+        management_mode="platform",
+        registrar_provider=registrar_provider,
+        registration_status="active",
+        hosting_provider="cloudflare",
+        hosting_status="pending",
+        verification_token=secrets.token_urlsafe(24),
+        enabled=True,
+        dns_status="untested",
+        ssl_status="untested",
+        onboarding_state_json=state,
+        created_by=current_user.id,
+    )
+    db.add(item)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="域名已存在") from None
+    db.refresh(item)
+    return {"data": {"domain": domain_row(db, item)}}
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -1053,6 +1173,27 @@ def cancel_domain_order(
     db.commit()
     db.refresh(item)
     return {"data": {"order": _order_row(db, item)}}
+
+
+@order_router.delete("/{order_id}")
+def delete_domain_order(
+    order_id: str,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    item = _order(db, order_id, current_user)
+    if (
+        item.status not in {"failed", "cancelled"}
+        or item.provider_order_ref is not None
+        or item.domain_id is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="仅可删除没有注册商订单号、也未生成域名的失败或已取消订单",
+        )
+    db.delete(item)
+    db.commit()
+    return {"data": {"ok": True}}
 
 
 @router.get("/{domain_id}")

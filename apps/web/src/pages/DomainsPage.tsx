@@ -95,6 +95,7 @@ type DomainOrderRow = {
     provision: boolean;
     reconcile: boolean;
     cancel: boolean;
+    delete: boolean;
   };
   createdAt?: string;
   updatedAt?: string;
@@ -104,16 +105,15 @@ type CloudflareDomainRow = {
   hostname: string;
   status: string;
   paused: boolean;
-  type: string;
-  accountName: string;
-  nameServers: string[];
+  source: "system_purchase" | "system_import" | "account_existing";
+  systemDomainId?: string;
   createdAt?: string;
-  modifiedAt?: string;
+  expiresAt?: string;
 };
 type NameSiloDomainRow = {
   readKey: string;
   hostname: string;
-  source: "system_purchase" | "account_existing";
+  source: "system_purchase" | "system_order" | "account_existing";
   providerOwned: boolean;
   providerStatus: string;
   createdAt?: string;
@@ -207,6 +207,7 @@ function normalizeOrder(input: unknown): DomainOrderRow {
       provision: Boolean(allowed.provision),
       reconcile: Boolean(allowed.reconcile),
       cancel: Boolean(allowed.cancel),
+      delete: Boolean(allowed.delete),
     },
     createdAt: get(row, "createdAt", "created_at"),
     updatedAt: get(row, "updatedAt", "updated_at"),
@@ -215,18 +216,20 @@ function normalizeOrder(input: unknown): DomainOrderRow {
 function normalizeCloudflareDomain(input: unknown): CloudflareDomainRow {
   const row = input as Record<string, unknown>;
   const hostname = get(row, "hostname", "name");
-  const accountName = get(row, "accountName", "account_name");
-  const nameServers = row.nameServers ?? row.name_servers;
+  const source = get(row, "source");
   return {
-    readKey: `cloudflare:${accountName}:${hostname}`,
+    readKey: `cloudflare:${hostname}`,
     hostname,
     status: get(row, "status") || "unknown",
     paused: Boolean(row.paused),
-    type: get(row, "type"),
-    accountName,
-    nameServers: Array.isArray(nameServers) ? nameServers.map(String) : [],
+    source: source === "system_purchase"
+      ? "system_purchase"
+      : source === "system_import"
+        ? "system_import"
+        : "account_existing",
+    systemDomainId: snowflakeId(row, "systemDomainId", "system_domain_id") || undefined,
     createdAt: get(row, "createdAt", "created_at"),
-    modifiedAt: get(row, "modifiedAt", "modified_at"),
+    expiresAt: get(row, "expiresAt", "expires_at"),
   };
 }
 function normalizeNameSiloDomain(input: unknown): NameSiloDomainRow {
@@ -236,7 +239,11 @@ function normalizeNameSiloDomain(input: unknown): NameSiloDomainRow {
   return {
     readKey: `namesilo:${hostname}`,
     hostname,
-    source: row.source === "system_purchase" ? "system_purchase" : "account_existing",
+    source: row.source === "system_purchase"
+      ? "system_purchase"
+      : row.source === "system_order"
+        ? "system_order"
+        : "account_existing",
     providerOwned: Boolean(row.providerOwned ?? row.provider_owned),
     providerStatus: get(row, "providerStatus", "provider_status") || "unknown",
     createdAt: get(row, "createdAt", "created_at"),
@@ -330,6 +337,46 @@ function domainOrderStatus(row: DomainOrderRow): EntityStatusMeta {
     tone,
   };
 }
+const providerSourceLabels = {
+  system_purchase: "系统购买",
+  system_import: "系统接入",
+  system_order: "系统订单",
+  account_existing: "账户已有",
+} as const;
+function providerSourceTone(source: keyof typeof providerSourceLabels) {
+  if (source === "system_purchase") return "primary" as const;
+  if (source === "system_import") return "info" as const;
+  if (source === "system_order") return "warning" as const;
+  return "neutral" as const;
+}
+function cloudflareDomainStatus(row: CloudflareDomainRow): EntityStatusMeta {
+  if (row.paused) {
+    return { label: "已暂停", description: "Cloudflare Zone 当前处于暂停状态。", tone: "warning" };
+  }
+  if (row.status === "active") {
+    return { label: "正常", description: "Cloudflare Zone 已激活。", tone: "success" };
+  }
+  if (row.status === "pending") {
+    return { label: "待激活", description: "Cloudflare 正在等待域名服务器切换生效。", tone: "warning" };
+  }
+  return { label: row.status || "未知", description: "Cloudflare Zone 当前不可正常使用。", tone: "danger" };
+}
+function nameSiloDomainStatus(row: NameSiloDomainRow): EntityStatusMeta {
+  if (row.providerOwned) {
+    return { label: "账户持有", description: "该域名当前存在于已配置的 NameSilo 账户中。", tone: "success" };
+  }
+  if (row.providerStatus === "failed") {
+    return { label: "购买失败", description: row.order?.failureReason || "系统订单未完成购买。", tone: "danger" };
+  }
+  if (row.providerStatus === "cancelled") {
+    return { label: "已取消", description: "系统订单已经取消，域名未进入 NameSilo 账户。", tone: "neutral" };
+  }
+  return {
+    label: orderStatusLabels[row.providerStatus] || "尚未持有",
+    description: "该域名尚未进入 NameSilo 账户。",
+    tone: "warning",
+  };
+}
 export function DomainsPage() {
   const { can } = useAuth();
   const canManage = can("promotion.domain.manage");
@@ -359,6 +406,7 @@ export function DomainsPage() {
   const [order, setOrder] = useState<DomainOrderRow | null>(null);
   const [purchasePending, setPurchasePending] = useState(false);
   const [orderPending, setOrderPending] = useState("");
+  const [importPending, setImportPending] = useState("");
   const load = useCallback(async () => {
     setLoading(true);
     const [systemResult, cloudflareResult, nameSiloResult] = await Promise.allSettled([
@@ -664,6 +712,65 @@ export function DomainsPage() {
       setOrderPending("");
     }
   }
+  async function importProviderDomain(
+    provider: "cloudflare" | "namesilo",
+    hostnameValue: string,
+    directPurchase = false,
+  ) {
+    const nameSiloFlow = provider === "namesilo";
+    if (!(await confirmAction({
+      title: `接入域名 ${hostnameValue}？`,
+      description: nameSiloFlow
+        ? `${directPurchase ? "" : "该域名不是由本系统直接购买。"}系统会先将 NameSilo 域名服务器切换到当前 Cloudflare 账户，再整理 Cloudflare 中根域名的 A、AAAA、CNAME 和验证记录。旧 DNS 服务商中的 MX、其他 TXT、子域名等记录不会自动迁移，切换后可能失效；请先备份并迁移需要保留的解析。`
+        : `${directPurchase ? "" : "该域名不是由本系统直接购买。"}系统会接管当前 Cloudflare Zone 中用于落地页的根域名解析，删除冲突的 A、AAAA、CNAME 记录并重建路由和验证记录。MX、其他 TXT 及其他子域名记录不会删除，请仍先备份现有解析。`,
+      confirmText: "确认接入",
+      destructive: true,
+    }))) return;
+    const pendingKey = `${provider}:${hostnameValue}`;
+    setImportPending(pendingKey);
+    try {
+      const payload = await apiRequest("/api/domains/provider-import", {
+        method: "POST",
+        body: JSON.stringify({
+          provider,
+          hostname: hostnameValue,
+          confirmDnsReplace: true,
+        }),
+      });
+      const saved = (payload as { data?: { domain?: unknown } }).data?.domain;
+      const savedRow = saved ? normalize(saved) : null;
+      await load();
+      if (!savedRow) {
+        toast.error("域名接入记录创建失败");
+        return;
+      }
+      toast.success("域名接入记录已创建，正在执行自动接入");
+      await continueOnboarding(savedRow);
+    } catch (caught) {
+      await load().catch(() => undefined);
+      toast.error(caught instanceof Error ? caught.message : "域名接入失败");
+    } finally {
+      setImportPending("");
+    }
+  }
+  async function deleteOrder(row: DomainOrderRow) {
+    if (!row.id || !(await confirmAction({
+      title: `删除订单记录 ${row.hostname}？`,
+      description: "只删除本系统中的失败或已取消订单记录，不会删除 NameSilo 账户中的域名，也不会发起退款。",
+      confirmText: "确认删除",
+      destructive: true,
+    }))) return;
+    setOrderPending(`${row.id}:delete`);
+    try {
+      await apiRequest(`/api/domain-orders/${row.id}`, { method: "DELETE" });
+      await load();
+      toast.success("订单记录已删除");
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "订单删除失败");
+    } finally {
+      setOrderPending("");
+    }
+  }
   async function remove(row: DomainRow) {
     if (!row.id) return;
     if (
@@ -921,30 +1028,56 @@ export function DomainsPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead>域名</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead>账户</TableHead>
-                  <TableHead>类型</TableHead>
-                  <TableHead>域名服务器</TableHead>
+                  <TableHead>来源</TableHead>
+                  <TableHead>Cloudflare 状态</TableHead>
                   <TableHead>创建时间</TableHead>
-                  <TableHead>最近修改</TableHead>
+                  <TableHead>到期时间</TableHead>
+                  <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {cloudflarePagination.rows.map((row) => (
                   <TableRow key={row.readKey}>
-                    <TableCell><strong>{row.hostname}</strong></TableCell>
                     <TableCell>
-                      <Badge tone={row.paused ? "warning" : row.status === "active" ? "success" : "danger"}>
-                        {row.paused ? "已暂停" : row.status === "active" ? "正常" : row.status}
+                      <EntityPrimaryCell
+                        title={row.hostname}
+                        id={row.systemDomainId}
+                        idFallback="未接入，暂无系统 ID"
+                        status={cloudflareDomainStatus(row)}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Badge tone={providerSourceTone(row.source)}>
+                        {providerSourceLabels[row.source]}
                       </Badge>
                     </TableCell>
-                    <TableCell>{row.accountName || "-"}</TableCell>
-                    <TableCell>{row.type || "-"}</TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {row.nameServers.length ? row.nameServers.join("、") : "-"}
+                    <TableCell>
+                      <Badge tone={cloudflareDomainStatus(row).tone}>
+                        {cloudflareDomainStatus(row).label}
+                      </Badge>
                     </TableCell>
-                    <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
-                    <TableCell className="text-muted-foreground">{formatDateTime(row.modifiedAt)}</TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {formatDateTime(row.createdAt)}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {formatDateTime(row.expiresAt)}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center justify-end gap-1">
+                        {row.systemDomainId ? (
+                          <Badge tone="info">已接入</Badge>
+                        ) : canManage ? (
+                          <Button
+                            variant="outline"
+                            disabled={importPending === `cloudflare:${row.hostname}`}
+                            onClick={() => void importProviderDomain("cloudflare", row.hostname)}
+                          >
+                            {importPending === `cloudflare:${row.hostname}` ? <Spinner /> : null}
+                            接入系统
+                          </Button>
+                        ) : <span className="text-muted-foreground">-</span>}
+                      </div>
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -983,25 +1116,29 @@ export function DomainsPage() {
                   const hasActions = Boolean(
                     itemOrder && Object.values(itemOrder.allowedActions).some(Boolean),
                   );
+                  const showsOrderActions = canPurchase && hasActions;
+                  const showsImport = row.providerOwned && !row.systemDomainId && canManage;
                   return (
                     <TableRow key={row.readKey}>
                       <TableCell>
-                        <div className="cell-main">
-                          <strong>{row.hostname}</strong>
-                          <span>{row.systemDomainId ? "已接入系统域名" : "尚未接入系统域名"}</span>
-                          {itemOrder?.failureReason ? <span className="text-destructive">{itemOrder.failureReason}</span> : null}
-                        </div>
+                        <EntityPrimaryCell
+                          title={row.hostname}
+                          id={row.systemDomainId}
+                          idFallback="未接入，暂无系统 ID"
+                          status={nameSiloDomainStatus(row)}
+                          description={itemOrder?.failureReason ? (
+                            <span className="text-destructive">{itemOrder.failureReason}</span>
+                          ) : undefined}
+                        />
                       </TableCell>
                       <TableCell>
-                        <Badge tone={row.source === "system_purchase" ? "success" : "neutral"}>
-                          {row.source === "system_purchase" ? "系统购买" : "账户已有"}
+                        <Badge tone={providerSourceTone(row.source)}>
+                          {providerSourceLabels[row.source]}
                         </Badge>
                       </TableCell>
                       <TableCell>
-                        <Badge tone={row.providerOwned ? "success" : row.providerStatus === "failed" ? "danger" : "warning"}>
-                          {row.providerOwned
-                            ? "账户持有"
-                            : orderStatusLabels[row.providerStatus] || "尚未持有"}
+                        <Badge tone={nameSiloDomainStatus(row).tone}>
+                          {nameSiloDomainStatus(row).label}
                         </Badge>
                       </TableCell>
                       <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
@@ -1039,7 +1176,35 @@ export function DomainsPage() {
                               取消
                             </Button>
                           ) : null}
-                          {!canPurchase || !hasActions ? <span className="text-muted-foreground">-</span> : null}
+                          {canPurchase && itemOrder?.allowedActions.delete ? (
+                            <IconButton
+                              label="删除订单记录"
+                              variant="ghost"
+                              className="danger"
+                              disabled={!itemOrder.id || busy}
+                              onClick={() => void deleteOrder(itemOrder)}
+                            >
+                              <Trash2Icon size={16} />
+                            </IconButton>
+                          ) : null}
+                          {showsImport ? (
+                            <Button
+                              variant="outline"
+                              disabled={importPending === `namesilo:${row.hostname}`}
+                              onClick={() => void importProviderDomain(
+                                "namesilo",
+                                row.hostname,
+                                row.source === "system_purchase",
+                              )}
+                            >
+                              {importPending === `namesilo:${row.hostname}` ? <Spinner /> : null}
+                              接入系统
+                            </Button>
+                          ) : null}
+                          {row.systemDomainId ? <Badge tone="info">已接入</Badge> : null}
+                          {!showsOrderActions && !showsImport && !row.systemDomainId ? (
+                            <span className="text-muted-foreground">-</span>
+                          ) : null}
                         </div>
                       </TableCell>
                     </TableRow>

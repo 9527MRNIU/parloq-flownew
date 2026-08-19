@@ -438,6 +438,53 @@ def test_cloudflare_ensures_zone_dns_and_settings_idempotently() -> None:
     ]
 
 
+def test_cloudflare_resets_only_conflicting_managed_dns_records() -> None:
+    records = [
+        {"id": "root-a", "type": "A", "name": "example.com", "content": "192.0.2.1"},
+        {"id": "mail-mx", "type": "MX", "name": "example.com", "content": "mail.example.com"},
+        {"id": "old-proof", "type": "TXT", "name": "_parloq-verify.example.com", "content": "old"},
+        {"id": "other-txt", "type": "TXT", "name": "example.com", "content": "keep-me"},
+        {"id": "sub-a", "type": "A", "name": "api.example.com", "content": "192.0.2.2"},
+    ]
+    deleted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/client/v4")
+        if request.method == "GET" and path == "/zones/zone-1/dns_records":
+            selected = [
+                row
+                for row in records
+                if row["type"] == request.url.params["type"]
+                and row["name"] == request.url.params["name"]
+            ]
+            return httpx.Response(200, json={"success": True, "result": selected})
+        if request.method == "DELETE" and path.startswith("/zones/zone-1/dns_records/"):
+            record_id = path.rsplit("/", 1)[-1]
+            deleted.append(record_id)
+            records[:] = [row for row in records if row["id"] != record_id]
+            return httpx.Response(200, json={"success": True, "result": {"id": record_id}})
+        raise AssertionError(f"unexpected request {request.method} {path}")
+
+    client = CloudflareClient(
+        "token",
+        account_id="account-1",
+        client=httpx.Client(
+            base_url=CloudflareClient.base_url,
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+    client.reset_managed_dns_records(
+        "zone-1",
+        hostname="example.com",
+        cname_content="center.parloq.com",
+        verification_name="_parloq-verify.example.com",
+        verification_content="parloq-verification=new",
+    )
+
+    assert deleted == ["root-a", "old-proof"]
+    assert {row["id"] for row in records} == {"mail-mx", "other-txt", "sub-a"}
+
+
 def test_cloudflare_accepts_user_and_account_api_tokens() -> None:
     requests: list[str] = []
 
@@ -514,6 +561,59 @@ def test_cloudflare_lists_all_zones_for_the_selected_account() -> None:
     assert pages == [1, 2]
     assert len(rows) == 51
     assert rows[-1]["name"] == "last.example"
+
+
+def test_cloudflare_lists_registrar_dates_with_cursor_pagination() -> None:
+    cursors: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix("/client/v4")
+        assert path == "/accounts/account-1/registrar/registrations"
+        cursor = request.url.params.get("cursor", "")
+        cursors.append(cursor)
+        if not cursor:
+            rows = [
+                {
+                    "domain_name": "first.example",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "expires_at": "2027-01-01T00:00:00Z",
+                    "status": "active",
+                }
+            ]
+            next_cursor = "next-page"
+        else:
+            rows = [
+                {
+                    "domain_name": "last.example",
+                    "created_at": "2026-02-01T00:00:00Z",
+                    "expires_at": "2027-02-01T00:00:00Z",
+                    "status": "active",
+                }
+            ]
+            next_cursor = ""
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "result": rows,
+                "result_info": {"cursor": next_cursor, "per_page": 100},
+            },
+        )
+
+    client = CloudflareClient(
+        "cfat_account-token",
+        account_id="account-1",
+        client=httpx.Client(
+            base_url=CloudflareClient.base_url,
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+    rows = client.list_registrations()
+
+    assert cursors == ["", "next-page"]
+    assert [row["domain_name"] for row in rows] == ["first.example", "last.example"]
+    assert rows[0]["created_at"] == "2026-01-01T00:00:00Z"
+    assert rows[0]["expires_at"] == "2027-01-01T00:00:00Z"
 
 
 def test_baota_creates_site_and_proxy_once_and_refuses_conflicts() -> None:

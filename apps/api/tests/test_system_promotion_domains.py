@@ -54,6 +54,16 @@ def test_external_domain_inventories_and_namesilo_purchase_source(
                 }
             ]
 
+        def list_registrations(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "domain_name": "cloudflare-owned.example",
+                    "created_at": "2025-12-01T00:00:00Z",
+                    "expires_at": "2027-12-01T00:00:00Z",
+                    "status": "active",
+                }
+            ]
+
         def close(self) -> None:
             pass
 
@@ -148,7 +158,13 @@ def test_external_domain_inventories_and_namesilo_purchase_source(
 
         cloudflare = admin_client.get("/api/domains/cloudflare")
         assert cloudflare.status_code == 200, cloudflare.text
-        assert cloudflare.json()["data"]["rows"][0]["hostname"] == "cloudflare-owned.example"
+        cloudflare_row = cloudflare.json()["data"]["rows"][0]
+        assert cloudflare_row["hostname"] == "cloudflare-owned.example"
+        assert cloudflare_row["source"] == "account_existing"
+        assert cloudflare_row["createdAt"] == "2025-12-01T00:00:00Z"
+        assert cloudflare_row["expiresAt"] == "2027-12-01T00:00:00Z"
+        assert "accountName" not in cloudflare_row
+        assert "nameServers" not in cloudflare_row
 
         namesilo = admin_client.get("/api/domains/namesilo")
         assert namesilo.status_code == 200, namesilo.text
@@ -177,6 +193,140 @@ def test_external_domain_inventories_and_namesilo_purchase_source(
             if quote is not None:
                 db.delete(quote)
             db.commit()
+
+
+def test_provider_domains_can_be_imported_into_managed_onboarding(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
+    class FakeCloudflareClient:
+        def __init__(self, _token: str, *, account_id: str | None = None) -> None:
+            assert account_id == "account-1"
+
+        def find_zone(self, domain: str) -> dict[str, object] | None:
+            if domain != "cloudflare-import.example":
+                return None
+            return {
+                "id": "zone-import",
+                "name": domain,
+                "status": "active",
+                "name_servers": ["one.ns.cloudflare.com", "two.ns.cloudflare.com"],
+            }
+
+        def close(self) -> None:
+            pass
+
+    class FakeNameSiloClient:
+        def __init__(self, _key: str) -> None:
+            pass
+
+        def owns_domain(self, domain: str) -> bool:
+            return domain == "namesilo-import.example"
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(domains_router, "CloudflareClient", FakeCloudflareClient)
+    monkeypatch.setattr(domains_router, "NameSiloClient", FakeNameSiloClient)
+    admin_client.delete("/api/system/configuration/cloudflare")
+    admin_client.delete("/api/system/configuration/namesilo")
+    try:
+        assert admin_client.put(
+            "/api/system/configuration/cloudflare",
+            json={
+                "value": "cloudflare-account-token-123456",
+                "enabled": True,
+                "accountId": "account-1",
+            },
+        ).status_code == 200
+        assert admin_client.put(
+            "/api/system/configuration/namesilo",
+            json={
+                "value": "namesilo-api-key-123456",
+                "enabled": True,
+                "paymentId": "2531590",
+            },
+        ).status_code == 200
+
+        missing_confirmation = admin_client.post(
+            "/api/domains/provider-import",
+            json={
+                "provider": "cloudflare",
+                "hostname": "cloudflare-import.example",
+                "confirmDnsReplace": False,
+            },
+        )
+        assert missing_confirmation.status_code == 422
+
+        cloudflare = admin_client.post(
+            "/api/domains/provider-import",
+            json={
+                "provider": "cloudflare",
+                "hostname": "cloudflare-import.example",
+                "confirmDnsReplace": True,
+            },
+        )
+        assert cloudflare.status_code == 201, cloudflare.text
+        cloudflare_row = cloudflare.json()["data"]["domain"]
+        assert cloudflare_row["managementMode"] == "platform"
+        assert cloudflare_row["registrarProvider"] is None
+
+        namesilo = admin_client.post(
+            "/api/domains/provider-import",
+            json={
+                "provider": "namesilo",
+                "hostname": "namesilo-import.example",
+                "confirmDnsReplace": True,
+            },
+        )
+        assert namesilo.status_code == 201, namesilo.text
+        namesilo_row = namesilo.json()["data"]["domain"]
+        assert namesilo_row["managementMode"] == "platform"
+        assert namesilo_row["registrarProvider"] == "namesilo"
+
+        with SessionLocal() as db:
+            cloudflare_item = db.get(DomainRecord, int(cloudflare_row["id"]))
+            namesilo_item = db.get(DomainRecord, int(namesilo_row["id"]))
+            assert cloudflare_item is not None
+            assert namesilo_item is not None
+            assert cloudflare_item.onboarding_state_json["cloudflareZoneId"] == "zone-import"
+            assert cloudflare_item.onboarding_state_json["replaceRoutingRecords"] is True
+            assert namesilo_item.onboarding_state_json["sourceProvider"] == "namesilo"
+    finally:
+        admin_client.delete("/api/system/configuration/cloudflare")
+        admin_client.delete("/api/system/configuration/namesilo")
+
+
+def test_failed_domain_order_without_provider_reference_can_be_deleted(
+    admin_client: TestClient,
+) -> None:
+    quote = admin_client.post(
+        "/api/domain-orders/quote",
+        json={"hostname": "deletable-failed-order.example", "years": 1},
+    ).json()["data"]["quote"]
+    order = admin_client.post(
+        "/api/domain-orders",
+        json={"quoteId": quote["quoteId"]},
+    ).json()["data"]["order"]
+    with SessionLocal() as db:
+        item = db.get(DomainOrder, int(order["id"]))
+        assert item is not None
+        item.status = "failed"
+        item.failure_reason = "注册商明确拒绝"
+        db.commit()
+
+    failed = next(
+        row
+        for row in admin_client.get("/api/domain-orders").json()["data"]["rows"]
+        if row["id"] == order["id"]
+    )
+    assert failed["allowedActions"]["delete"] is True
+    deleted = admin_client.delete(f"/api/domain-orders/{order['id']}")
+    assert deleted.status_code == 200, deleted.text
+    assert all(
+        row["id"] != order["id"]
+        for row in admin_client.get("/api/domain-orders").json()["data"]["rows"]
+    )
 
 
 def test_system_roles_menus_and_backend_permission(admin_client: TestClient) -> None:

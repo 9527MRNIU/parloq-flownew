@@ -407,6 +407,20 @@ class DomainCreate(Model):
         return hostname
 
 
+class ProviderDomainImport(Model):
+    provider: Literal["cloudflare", "namesilo"]
+    hostname: str = Field(min_length=1, max_length=255)
+    confirm_dns_replace: bool = Field(alias="confirmDnsReplace")
+
+    @field_validator("hostname")
+    @classmethod
+    def domain(cls, value: str) -> str:
+        hostname = value.lower().strip().rstrip(".")
+        if "/" in hostname or ":" in hostname or " " in hostname or "." not in hostname:
+            raise ValueError("域名格式不正确")
+        return hostname
+
+
 class DomainUpdate(Model):
     hostname: str | None = Field(default=None, min_length=1, max_length=255)
     enabled: bool | None = None
