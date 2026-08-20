@@ -110,6 +110,8 @@ bash deploy/release-production.sh
 后台域名，并规范化为 `https://域名` 后原子写回
 `/www/server/panel/data/compose/parloq-flow/.env`。该文件权限保持 `600`；后续发布
 直接复用。不同服务器可以保存不同管理域名，无需修改或重新维护 Web Nginx 源码。
+管理站点可使用宝塔默认的 `Host=127.0.0.1` 回环反代；容器会使用保存的管理域名
+完成内部路由。客户推广域名仍必须保留原始 Host，不能使用该管理入口标记。
 
 脚本使用 Token 执行 `git fetch`，以 fast-forward 方式更新服务器仓库到
 `origin/main`，然后以服务器本机 `/root/parloq-flow` 的源码目录作为 build

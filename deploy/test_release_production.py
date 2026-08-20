@@ -60,6 +60,8 @@ class ProductionReleaseScriptTests(unittest.TestCase):
         self.assertIn("${MANAGEMENT_HOST}", self.web_nginx)
         self.assertNotIn("server_name center.parloq.com", self.web_nginx)
         self.assertIn("$http_x_forwarded_host", self.web_nginx)
+        self.assertIn('"127.0.0.1" 1;', self.web_nginx)
+        self.assertIn("BaoTa loopback Host mode", self.script)
 
     def test_compose_builds_from_the_server_checkout(self) -> None:
         self.assertIn("PARLOQ_SOURCE_ROOT", self.compose)

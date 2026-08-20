@@ -296,6 +296,13 @@ case "${forwarded_management_page}" in
   *'<div id="root"></div>'*) ;;
   *) log "ERROR: management SPA did not load through forwarded-host proxy mode"; false ;;
 esac
+loopback_management_page="$(curl -fsS --max-time 20 \
+  -H 'Host: 127.0.0.1' \
+  http://127.0.0.1:18100/)"
+case "${loopback_management_page}" in
+  *'<div id="root"></div>'*) ;;
+  *) log "ERROR: management SPA did not load through BaoTa loopback Host mode"; false ;;
+esac
 curl -fsS --max-time 20 \
   "${management_origin}/api/auth/security?username=release-check" >/dev/null
 public_management_page="$(curl -fsS --max-time 20 \
