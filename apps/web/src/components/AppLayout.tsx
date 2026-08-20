@@ -10,6 +10,7 @@ import {
   ImagesIcon,
   MoonIcon,
   SettingsIcon,
+  ShieldCheckIcon,
   UsersRoundIcon,
   SunIcon,
   UserCircleIcon,
@@ -27,6 +28,7 @@ import {
   Button,
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -305,8 +307,8 @@ export const navigation: NavSection[] = [
   },
 ];
 
-const titleMap: Record<string, { section: string; title: string }> =
-  Object.fromEntries(
+const titleMap: Record<string, { section: string; title: string }> = {
+  ...Object.fromEntries(
     navigation.flatMap((section) =>
       section.items.flatMap((item) => {
         if (item.children) {
@@ -320,7 +322,9 @@ const titleMap: Record<string, { section: string; title: string }> =
           : [];
       }),
     ),
-  );
+  ),
+  "/account/security": { section: "个人账户", title: "账户安全" },
+};
 
 type MenuOverride = {
   name: string;
@@ -557,21 +561,29 @@ export function AppLayout() {
                     </span>
                   </DropdownMenuLabel>
                   <DropdownMenuSeparator />
-                  {can("system.users.manage") ? (
+                  <DropdownMenuGroup>
                     <DropdownMenuItem asChild>
-                      <NavLink to="/system/users">
-                        <UserCircleIcon />
-                        用户管理
+                      <NavLink to="/account/security">
+                        <ShieldCheckIcon />
+                        账户安全
                       </NavLink>
                     </DropdownMenuItem>
-                  ) : null}
-                  {can("system.users.manage") ? (
-                    <DropdownMenuSeparator />
-                  ) : null}
-                  <DropdownMenuItem onClick={() => void signOut()}>
-                    <LogOutIcon />
-                    退出登录
-                  </DropdownMenuItem>
+                    {can("system.users.manage") ? (
+                      <DropdownMenuItem asChild>
+                        <NavLink to="/system/users">
+                          <UserCircleIcon />
+                          用户管理
+                        </NavLink>
+                      </DropdownMenuItem>
+                    ) : null}
+                  </DropdownMenuGroup>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuGroup>
+                    <DropdownMenuItem onClick={() => void signOut()}>
+                      <LogOutIcon />
+                      退出登录
+                    </DropdownMenuItem>
+                  </DropdownMenuGroup>
                 </DropdownMenuContent>
               </DropdownMenu>
             </SidebarMenuItem>

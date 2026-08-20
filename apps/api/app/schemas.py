@@ -17,6 +17,23 @@ class LoginRequest(ApiModel):
     )
 
 
+class MfaLoginVerifyRequest(ApiModel):
+    challenge_token: str = Field(alias="challengeToken", min_length=32, max_length=512)
+    code: str = Field(min_length=6, max_length=64)
+
+
+class MfaPasswordRequest(ApiModel):
+    current_password: str = Field(alias="currentPassword", min_length=1, max_length=512)
+
+
+class MfaConfirmSetupRequest(ApiModel):
+    code: str = Field(min_length=6, max_length=16)
+
+
+class MfaProtectedActionRequest(MfaPasswordRequest):
+    code: str = Field(min_length=6, max_length=16)
+
+
 class UserCreate(ApiModel):
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=8, max_length=512)

@@ -60,6 +60,11 @@ def _request_permission(method: str, path: str) -> tuple[str | None, bool] | Non
     if path in {
         "/api/auth/me",
         "/api/auth/logout",
+        "/api/auth/mfa/status",
+        "/api/auth/mfa/setup",
+        "/api/auth/mfa/setup/confirm",
+        "/api/auth/mfa/recovery-codes",
+        "/api/auth/mfa/disable",
         "/api/system/metrics",
         "/api/system/menus/me",
     }:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
@@ -9,6 +9,7 @@ from app.models import AuthSession, UserAccount, UserGroup
 from app.schemas import UserCreate, UserUpdate
 from app.security import hash_password, utcnow
 from app.serializers import user_row
+from app.services.mfa import record_event
 from app.snowflake import parse_snowflake_id
 
 
@@ -79,6 +80,43 @@ def create_user(payload: UserCreate, db: DbSession, _admin: AdminUser) -> dict:
         raise HTTPException(status_code=409, detail="用户名已存在") from None
     db.refresh(user)
     return {"data": {"user": user_row(user, group)}}
+
+
+@router.post("/{user_id}/mfa/reset")
+def reset_user_mfa(
+    user_id: str,
+    request: Request,
+    db: DbSession,
+    current_admin: AdminUser,
+) -> dict:
+    try:
+        database_id = parse_snowflake_id(user_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="用户不存在") from None
+    user = db.get(UserAccount, database_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    credential = user.mfa_credential
+    if credential is not None:
+        db.delete(credential)
+    db.execute(
+        update(AuthSession)
+        .where(
+            AuthSession.user_id == user.id,
+            AuthSession.revoked_at.is_(None),
+        )
+        .values(revoked_at=utcnow())
+    )
+    record_event(
+        db,
+        "admin_reset",
+        user_id=user.id,
+        actor_user_id=current_admin.id,
+        source_ip=request.client.host if request.client else "unknown",
+        details={"credentialExisted": credential is not None},
+    )
+    db.commit()
+    return {"data": {"ok": True, "reset": credential is not None}}
 
 
 @router.patch("/{user_id}")

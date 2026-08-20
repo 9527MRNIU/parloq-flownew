@@ -2,6 +2,7 @@ import {
   LoaderCircleIcon,
   PlusIcon,
   RefreshCwIcon,
+  ShieldOffIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
@@ -41,6 +42,7 @@ type UserRow = {
   groupName?: string;
   enabled: boolean;
   isAdmin: boolean;
+  mfaEnabled: boolean;
   lastLoginAt?: string;
   createdAt?: string;
 };
@@ -61,6 +63,7 @@ function userRow(input: unknown): UserRow {
       row.enabled ?? row.isActive ?? row.is_active ?? status !== "disabled",
     ),
     isAdmin: Boolean(row.isAdmin ?? row.is_admin ?? role === "admin"),
+    mfaEnabled: Boolean(row.mfaEnabled ?? row.mfa_enabled),
     lastLoginAt: String(row.lastLoginAt || row.last_login_at || ""),
     createdAt: String(row.createdAt || row.created_at || ""),
   };
@@ -186,6 +189,26 @@ export function UsersPage() {
     }
   }
 
+  async function resetMfa(row: UserRow) {
+    if (!row.id || !row.mfaEnabled) return;
+    if (
+      !(await confirmAction({
+        title: `重置“${row.username}”的二步验证？`,
+        description: "身份验证器和全部恢复码将立即失效，该用户的所有登录会话也会被撤销。",
+        confirmText: "确认重置",
+        destructive: true,
+      }))
+    )
+      return;
+    try {
+      await apiRequest(`/api/users/${row.id}/mfa/reset`, { method: "POST" });
+      toast.success("二步验证已重置");
+      await load();
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "重置失败");
+    }
+  }
+
   return (
     <StandardListPage viewport>
       <ListToolbar
@@ -249,6 +272,7 @@ export function UsersPage() {
                   <TableHead adaptive>用户</TableHead>
                   <TableHead>角色</TableHead>
                   <TableHead>账号类型</TableHead>
+                  <TableHead>二步验证</TableHead>
                   <TableHead>最近登录</TableHead>
                   <TableHead>创建时间</TableHead>
                   <TableHead>操作</TableHead>
@@ -280,6 +304,11 @@ export function UsersPage() {
                         {row.isAdmin ? "管理员" : "普通用户"}
                       </Badge>
                     </TableCell>
+                    <TableCell>
+                      <Badge tone={row.mfaEnabled ? "success" : "neutral"}>
+                        {row.mfaEnabled ? "已开启" : "未开启"}
+                      </Badge>
+                    </TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatDateTime(row.lastLoginAt)}
                     </TableCell>
@@ -297,6 +326,17 @@ export function UsersPage() {
                         >
                           编辑
                         </Button>
+                        {row.mfaEnabled ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={!row.id}
+                            onClick={() => void resetMfa(row)}
+                          >
+                            <ShieldOffIcon />
+                            重置二步验证
+                          </Button>
+                        ) : null}
                         <Button
                           variant="destructive"
                           size="sm"

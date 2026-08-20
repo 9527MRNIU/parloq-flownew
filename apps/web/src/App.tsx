@@ -12,6 +12,7 @@ import type { GroupMarketingPageKind } from "./pages/GroupMarketingPages";
 
 const DirectShortLinksPage = lazy(() => import("./pages/DirectShortLinksPage").then((module) => ({ default: module.DirectShortLinksPage })));
 const LoginPage = lazy(() => import("./pages/LoginPage").then((module) => ({ default: module.LoginPage })));
+const AccountSecurityPage = lazy(() => import("./pages/AccountSecurityPage").then((module) => ({ default: module.AccountSecurityPage })));
 const IpManagementPage = lazy(() => import("./pages/IpManagementPage").then((module) => ({ default: module.IpManagementPage })));
 const PersonalAccountsPage = lazy(() => import("./pages/PersonalAccountsPage").then((module) => ({ default: module.PersonalAccountsPage })));
 const PromotionTemplatePreviewPage = lazy(() => import("./pages/PromotionPages").then((module) => ({ default: module.PromotionTemplatePreviewPage })));
@@ -108,6 +109,7 @@ export default function App() {
         />
         <Route element={<ProtectedLayout />}>
           <Route index element={<HomePage />} />
+          <Route path="/account/security" element={<AccountSecurityPage />} />
           <Route
             path="/promotion/templates"
             element={<PromotionTemplatesPage />}

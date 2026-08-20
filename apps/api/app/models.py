@@ -75,6 +75,12 @@ class UserAccount(Base, TimestampMixin):
     sessions: Mapped[list[AuthSession]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    mfa_credential: Mapped[UserMfaCredential | None] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        uselist=False,
+    )
 
 
 class AuthSession(Base, TimestampMixin):
@@ -91,6 +97,64 @@ class AuthSession(Base, TimestampMixin):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
     user: Mapped[UserAccount] = relationship(back_populates="sessions")
+
+
+class UserMfaCredential(Base, TimestampMixin):
+    __tablename__ = "user_mfa_credentials"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("user_accounts.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+    secret_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    recovery_code_hashes: Mapped[list[str]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    enabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_used_counter: Mapped[int | None] = mapped_column(BigInteger)
+
+    user: Mapped[UserAccount] = relationship(back_populates="mfa_credential")
+
+
+class MfaLoginChallenge(Base, TimestampMixin):
+    __tablename__ = "mfa_login_challenges"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("user_accounts.id", ondelete="CASCADE"),
+        index=True,
+    )
+    source_ip_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class MfaSecurityEvent(Base):
+    __tablename__ = "mfa_security_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
+    user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("user_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    actor_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("user_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source_ip_hash: Mapped[str | None] = mapped_column(String(64))
+    details_json: Mapped[dict[str, object]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
 
 
 class SystemMenu(Base, TimestampMixin):

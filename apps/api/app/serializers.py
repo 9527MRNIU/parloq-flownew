@@ -31,6 +31,9 @@ def user_row(user: UserAccount, group: UserGroup | None = None) -> dict[str, Any
         "isAdmin": user.role == "admin",
         "isActive": user.is_active,
         "enabled": user.is_active,
+        "mfaEnabled": bool(
+            user.mfa_credential and user.mfa_credential.enabled_at is not None
+        ),
         "lastLoginAt": iso(user.last_login_at),
         "createdAt": iso(user.created_at),
         "updatedAt": iso(user.updated_at),

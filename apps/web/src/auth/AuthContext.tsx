@@ -6,14 +6,20 @@ export type AuthUser = {
   username: string
   groupName?: string | null
   isAdmin?: boolean
+  mfaEnabled?: boolean
 }
+
+export type LoginResult =
+  | { mfaRequired: false }
+  | { mfaRequired: true; challengeToken: string; expiresAt?: string }
 
 type AuthValue = {
   user: AuthUser | null
   loading: boolean
   actionPermissions: ReadonlySet<string>
   can: (permissionKey: string) => boolean
-  login: (username: string, password: string, turnstileToken?: string) => Promise<void>
+  login: (username: string, password: string, turnstileToken?: string) => Promise<LoginResult>
+  verifyMfaLogin: (challengeToken: string, code: string) => Promise<void>
   logout: () => Promise<void>
 }
 
@@ -30,6 +36,7 @@ function normalizeUser(value: unknown): AuthUser {
     username: String(row.username || '用户'),
     groupName: String(row.groupName || row.group_name || (isAdmin ? '管理员' : '普通用户')),
     isAdmin,
+    mfaEnabled: Boolean(row.mfaEnabled ?? row.mfa_enabled),
   }
 }
 
@@ -76,9 +83,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [user])
 
   async function login(username: string, password: string, turnstileToken?: string) {
-    const response = await apiRequest<ApiEnvelope<{ token?: string; access_token?: string; user?: AuthUser }>>('/api/auth/login', {
+    const response = await apiRequest<ApiEnvelope<{
+      mfaRequired?: boolean
+      challengeToken?: string
+      expiresAt?: string
+      token?: string
+      access_token?: string
+      user?: AuthUser
+    }>>('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ username, password, turnstileToken }),
+    })
+    if (response.data.mfaRequired) {
+      if (!response.data.challengeToken) throw new Error('二步验证请求无效，请重新登录')
+      return {
+        mfaRequired: true as const,
+        challengeToken: response.data.challengeToken,
+        expiresAt: response.data.expiresAt,
+      }
+    }
+    if (response.data.user) setUser(normalizeUser(response.data.user))
+    else await loadMe()
+    return { mfaRequired: false as const }
+  }
+
+  async function verifyMfaLogin(challengeToken: string, code: string) {
+    const response = await apiRequest<ApiEnvelope<{ user?: AuthUser }>>('/api/auth/mfa/login/verify', {
+      method: 'POST',
+      body: JSON.stringify({ challengeToken, code }),
     })
     if (response.data.user) setUser(normalizeUser(response.data.user))
     else await loadMe()
@@ -98,7 +130,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [actionPermissions, user?.isAdmin],
   )
   const value = useMemo(
-    () => ({ user, loading, actionPermissions, can, login, logout }),
+    () => ({ user, loading, actionPermissions, can, login, verifyMfaLogin, logout }),
     [actionPermissions, can, loading, user],
   )
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
