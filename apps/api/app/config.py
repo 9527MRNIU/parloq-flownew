@@ -6,6 +6,7 @@ import json
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -107,18 +108,26 @@ class Settings:
     meta_capi_batch_size: int
     system_host_proc_path: str
     system_host_disk_path: str
+    management_origin: str
     cors_origins: tuple[str, ...]
 
 
 @lru_cache
 def get_settings() -> Settings:
+    management_origin = os.getenv("MANAGEMENT_ORIGIN", "").strip().rstrip("/")
+    additional_origins = os.getenv(
+        "CORS_ORIGINS",
+        "" if management_origin else "http://localhost:5173,http://127.0.0.1:5173",
+    )
     origins = tuple(
-        item.strip()
-        for item in os.getenv(
-            "CORS_ORIGINS",
-            "http://localhost:5173,http://127.0.0.1:5173",
-        ).split(",")
-        if item.strip()
+        dict.fromkeys(
+            item
+            for item in (
+                management_origin,
+                *(origin.strip().rstrip("/") for origin in additional_origins.split(",")),
+            )
+            if item
+        )
     )
     settings = Settings(
         app_name="Parloq Flow API",
@@ -217,6 +226,7 @@ def get_settings() -> Settings:
         ),
         system_host_proc_path=os.getenv("SYSTEM_HOST_PROC_PATH", "").strip(),
         system_host_disk_path=os.getenv("SYSTEM_HOST_DISK_PATH", "").strip(),
+        management_origin=management_origin,
         cors_origins=origins,
     )
     key_ids = {key_id for key_id, _ in settings.data_encryption_keys}
@@ -233,6 +243,19 @@ def get_settings() -> Settings:
         )
     if settings.environment.lower() in {"production", "prod"}:
         errors: list[str] = []
+        management_url = urlsplit(settings.management_origin)
+        if (
+            management_url.scheme != "https"
+            or not management_url.hostname
+            or "." not in management_url.hostname
+            or management_url.username is not None
+            or management_url.password is not None
+            or management_url.port is not None
+            or management_url.path not in {"", "/"}
+            or management_url.query
+            or management_url.fragment
+        ):
+            errors.append("MANAGEMENT_ORIGIN 必须是仅包含域名的 HTTPS 地址")
         if len(settings.app_secret_key) < 32 or settings.app_secret_key in {
             "parloq-dev-secret-change-me",
             "local-only-change-before-shared-environment",

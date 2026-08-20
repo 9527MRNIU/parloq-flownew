@@ -36,6 +36,7 @@ esac
 
 token_candidate=""
 askpass_file=""
+management_origin_candidate=""
 cleanup_local_files() {
   if [ -n "${token_candidate}" ]; then
     rm -f -- "${token_candidate}"
@@ -43,8 +44,67 @@ cleanup_local_files() {
   if [ -n "${askpass_file}" ]; then
     rm -f -- "${askpass_file}"
   fi
+  if [ -n "${management_origin_candidate}" ]; then
+    rm -f -- "${management_origin_candidate}"
+  fi
 }
 trap cleanup_local_files EXIT
+
+normalize_management_origin() {
+  raw_origin="$1"
+  case "${raw_origin}" in
+    ''|*[[:space:]]*|*'?'*|*'#'*|*'@'*) return 1 ;;
+  esac
+  raw_origin="$(printf '%s' "${raw_origin}" | tr '[:upper:]' '[:lower:]')"
+  case "${raw_origin}" in
+    https://*) management_host="${raw_origin#https://}" ;;
+    *://*) return 1 ;;
+    *) management_host="${raw_origin}" ;;
+  esac
+  case "${management_host}" in
+    ''|*'/'*|*':'*) return 1 ;;
+  esac
+  hostname_pattern='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+  if [ "${#management_host}" -gt 253 ] \
+    || ! printf '%s' "${management_host}" | grep -Eq "${hostname_pattern}"; then
+    return 1
+  fi
+  printf 'https://%s' "${management_host}"
+}
+
+read_env_value() {
+  key="$1"
+  awk -v key="${key}" 'index($0, key "=") == 1 { sub("^[^=]*=", ""); print; exit }' "${ENV_FILE}"
+}
+
+persist_management_origin() {
+  value="$1"
+  management_origin_candidate="$(mktemp "${ENV_FILE}.candidate-management-origin.XXXXXX")"
+  cp -p "${ENV_FILE}" "${management_origin_candidate}"
+  if grep -q '^MANAGEMENT_ORIGIN=' "${management_origin_candidate}"; then
+    sed -i "s|^MANAGEMENT_ORIGIN=.*|MANAGEMENT_ORIGIN=${value}|" "${management_origin_candidate}"
+  else
+    printf '%s=%s\n' MANAGEMENT_ORIGIN "${value}" >>"${management_origin_candidate}"
+  fi
+  chmod 600 "${management_origin_candidate}"
+  mv "${management_origin_candidate}" "${ENV_FILE}"
+  management_origin_candidate=""
+}
+
+configure_management_origin() {
+  if ! IFS= read -r -p '管理后台域名（例如 center.parloq.com）: ' origin_input; then
+    printf '\n'
+    die "management origin input was cancelled"
+  fi
+  if ! normalized_origin="$(normalize_management_origin "${origin_input}")"; then
+    unset origin_input
+    die "management origin must be a valid hostname or HTTPS origin without a port or path"
+  fi
+  unset origin_input
+  persist_management_origin "${normalized_origin}"
+  management_origin="${normalized_origin}"
+  log "管理后台域名已保存到 ${ENV_FILE}"
+}
 
 configure_github_token() {
   if ! IFS= read -r -s -p 'GitHub fine-grained token（输入不会显示）: ' github_token; then
@@ -77,6 +137,16 @@ if [ ! -s "${GITHUB_TOKEN_FILE}" ]; then
   configure_github_token
 fi
 chmod 600 "${GITHUB_TOKEN_FILE}"
+
+management_origin="$(read_env_value MANAGEMENT_ORIGIN)"
+if [ -z "${management_origin}" ]; then
+  log "服务器尚未配置管理后台域名，首次更新需要输入一次。"
+  configure_management_origin
+elif ! normalized_origin="$(normalize_management_origin "${management_origin}")" \
+  || [ "${normalized_origin}" != "${management_origin}" ]; then
+  die "MANAGEMENT_ORIGIN in ${ENV_FILE} is invalid; expected https://example.com"
+fi
+management_host="${management_origin#https://}"
 
 cd "${PROJECT_DIR}"
 [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ] || die "production updates must run from main"
@@ -177,6 +247,7 @@ update_env PARLOQ_APP_PULL_POLICY build
 update_env PARLOQ_API_IMAGE "${api_image}"
 update_env PARLOQ_WEB_IMAGE "${web_image}"
 update_env PARLOQ_WA_GATEWAY_IMAGE "${gateway_image}"
+update_env MANAGEMENT_ORIGIN "${management_origin}"
 chmod 600 "${env_candidate}"
 
 docker compose \
@@ -212,6 +283,28 @@ verify_service web "${web_image}"
 verify_service wa-gateway "${gateway_image}"
 curl -fsS --max-time 20 http://127.0.0.1:18100/healthz >/dev/null
 curl -fsS --max-time 20 http://127.0.0.1:18100/readyz >/dev/null
+management_page="$(curl -fsS --max-time 20 -H "Host: ${management_host}" http://127.0.0.1:18100/)"
+case "${management_page}" in
+  *'<div id="root"></div>'*) ;;
+  *) log "ERROR: management SPA did not load for ${management_host}"; false ;;
+esac
+forwarded_management_page="$(curl -fsS --max-time 20 \
+  -H 'Host: 127.0.0.1' \
+  -H "X-Forwarded-Host: ${management_host}" \
+  http://127.0.0.1:18100/)"
+case "${forwarded_management_page}" in
+  *'<div id="root"></div>'*) ;;
+  *) log "ERROR: management SPA did not load through forwarded-host proxy mode"; false ;;
+esac
+curl -fsS --max-time 20 \
+  "${management_origin}/api/auth/security?username=release-check" >/dev/null
+public_management_page="$(curl -fsS --max-time 20 \
+  "${management_origin}/?release-check=${short_sha}")"
+case "${public_management_page}" in
+  *'<div id="root"></div>'*) ;;
+  *) log "ERROR: public management SPA did not load from ${management_origin}"; false ;;
+esac
+log "管理后台 ${management_origin} 验证通过。"
 
 trap - ERR
 

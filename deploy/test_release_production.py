@@ -7,6 +7,7 @@ import unittest
 
 SCRIPT = Path(__file__).with_name("release-production.sh")
 COMPOSE = Path(__file__).with_name("docker-compose.production.yml")
+WEB_DIR = Path(__file__).parents[1] / "apps" / "web"
 
 
 class ProductionReleaseScriptTests(unittest.TestCase):
@@ -14,6 +15,13 @@ class ProductionReleaseScriptTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.script = SCRIPT.read_text(encoding="utf-8")
         cls.compose = COMPOSE.read_text(encoding="utf-8")
+        cls.web_dockerfile = (WEB_DIR / "Dockerfile").read_text(encoding="utf-8")
+        cls.web_nginx = (WEB_DIR / "nginx.production.conf").read_text(
+            encoding="utf-8"
+        )
+        cls.web_origin_entrypoint = (WEB_DIR / "management-origin.envsh").read_text(
+            encoding="utf-8"
+        )
 
     def test_script_is_valid_bash(self) -> None:
         checked = subprocess.run(
@@ -35,6 +43,23 @@ class ProductionReleaseScriptTests(unittest.TestCase):
         self.assertIn("github-token", self.script)
         self.assertIn('chmod 600 "${GITHUB_TOKEN_FILE}"', self.script)
         self.assertIn("GIT_ASKPASS", self.script)
+
+    def test_first_run_prompts_and_persists_management_origin(self) -> None:
+        self.assertIn("configure_management_origin", self.script)
+        self.assertIn("MANAGEMENT_ORIGIN", self.script)
+        self.assertIn("管理后台域名", self.script)
+        self.assertIn('chmod 600 "${management_origin_candidate}"', self.script)
+        self.assertIn('"${management_origin}/api/auth/security', self.script)
+        self.assertIn("public management SPA did not load", self.script)
+
+    def test_management_origin_is_runtime_configuration(self) -> None:
+        self.assertIn("MANAGEMENT_ORIGIN", self.compose)
+        self.assertIn("MANAGEMENT_ORIGIN", self.web_origin_entrypoint)
+        self.assertIn("MANAGEMENT_HOST", self.web_origin_entrypoint)
+        self.assertIn("/etc/nginx/templates/default.conf.template", self.web_dockerfile)
+        self.assertIn("${MANAGEMENT_HOST}", self.web_nginx)
+        self.assertNotIn("server_name center.parloq.com", self.web_nginx)
+        self.assertIn("$http_x_forwarded_host", self.web_nginx)
 
     def test_compose_builds_from_the_server_checkout(self) -> None:
         self.assertIn("PARLOQ_SOURCE_ROOT", self.compose)

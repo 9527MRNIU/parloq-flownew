@@ -1,0 +1,22 @@
+#!/bin/sh
+
+# This file is sourced by the official Nginx entrypoint before it renders
+# /etc/nginx/templates/default.conf.template.
+origin="${MANAGEMENT_ORIGIN:-}"
+case "${origin}" in
+  https://*) management_host="${origin#https://}" ;;
+  *)
+    echo >&2 "MANAGEMENT_ORIGIN must be an HTTPS origin"
+    return 1
+    ;;
+esac
+
+management_host="$(printf '%s' "${management_host}" | tr '[:upper:]' '[:lower:]')"
+hostname_pattern='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+if [ "${#management_host}" -gt 253 ] \
+  || ! printf '%s' "${management_host}" | grep -Eq "${hostname_pattern}"; then
+  echo >&2 "MANAGEMENT_ORIGIN must contain a valid hostname without a port or path"
+  return 1
+fi
+
+export MANAGEMENT_HOST="${management_host}"

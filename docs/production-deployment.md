@@ -106,10 +106,18 @@ API 容器设置 `AUTO_MIGRATE=true`，启动时先执行 Alembic，再开始监
 bash deploy/release-production.sh
 ```
 
+如果生产 `.env` 尚未包含 `MANAGEMENT_ORIGIN`，同一次首次发布还会提示输入管理
+后台域名，并规范化为 `https://域名` 后原子写回
+`/www/server/panel/data/compose/parloq-flow/.env`。该文件权限保持 `600`；后续发布
+直接复用。不同服务器可以保存不同管理域名，无需修改或重新维护 Web Nginx 源码。
+
 脚本使用 Token 执行 `git fetch`，以 fast-forward 方式更新服务器仓库到
 `origin/main`，然后以服务器本机 `/root/parloq-flow` 的源码目录作为 build
 context，使用 BuildKit 缓存构建三个镜像并直接更新宝塔登记的 Compose 项目。
 全程不调用宝塔 API、不重复下载构建源码，也不创建宝塔计划任务。
+
+发布完成前，脚本会同时验证容器健康、配置域名的 SPA 首页、登录安全接口以及宝塔
+默认转发 Host 模式。任一检查失败都会触发原镜像和 Compose 配置恢复。
 
 容器、revision 和健康检查全部成功后，脚本才会清理历史构建产物。API、Web、
 Baileys 三个组件分别保留最近 3 个 `server`/旧 `local` Git SHA 镜像，并额外保护

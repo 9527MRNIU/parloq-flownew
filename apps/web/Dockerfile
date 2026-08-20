@@ -15,7 +15,10 @@ FROM nginx:1.28-alpine AS production
 ARG BUILD_VERSION=dev
 LABEL org.opencontainers.image.title="Parloq Flow Web" \
       org.opencontainers.image.revision="${BUILD_VERSION}"
-COPY nginx.production.conf /etc/nginx/conf.d/default.conf
+ENV NGINX_ENVSUBST_FILTER="^MANAGEMENT_HOST$"
+COPY nginx.production.conf /etc/nginx/templates/default.conf.template
+COPY management-origin.envsh /docker-entrypoint.d/15-management-origin.envsh
+RUN chmod 755 /docker-entrypoint.d/15-management-origin.envsh
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
