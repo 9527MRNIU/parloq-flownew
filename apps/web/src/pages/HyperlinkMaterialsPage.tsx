@@ -1,5 +1,4 @@
 import {
-  ArchiveIcon,
   AudioLinesIcon,
   ContactIcon,
   DownloadIcon,
@@ -771,25 +770,26 @@ export function MaterialsPage() {
   }
 
   async function remove(row: MaterialRow) {
-    if (!(await confirmAction({ title: `归档“${row.name}”？`, description: "归档后不能再用于新模板。", confirmText: "确认归档" }))) return;
+    if (!(await confirmAction({ title: `删除“${row.name}”？`, description: "删除后无法恢复；仍被模板使用的素材不能删除。", confirmText: "确认删除", destructive: true }))) return;
     try {
       await apiRequest(`/api/materials/${row.id}`, { method: "DELETE" });
       setSelected((current) => { const next = new Set(current); next.delete(row.id); return next; });
       await load();
     } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "归档失败");
+      toast.error(caught instanceof Error ? caught.message : "删除失败");
     }
   }
 
-  async function batchChange(action: "enable" | "disable" | "archive") {
+  async function batchChange(action: "enable" | "disable" | "delete") {
     if (!selectedRows.length) return;
-    if (action === "archive" && !(await confirmAction({
-      title: `归档 ${selectedRows.length} 个素材？`,
-      description: "归档后这些素材不能再用于新模板。",
-      confirmText: "确认归档",
+    if (action === "delete" && !(await confirmAction({
+      title: `删除 ${selectedRows.length} 个素材？`,
+      description: "删除后无法恢复；仍被模板使用的素材会删除失败。",
+      confirmText: "确认删除",
+      destructive: true,
     }))) return;
     setPending(true);
-    const settled = await Promise.allSettled(selectedRows.map((row) => action === "archive"
+    const settled = await Promise.allSettled(selectedRows.map((row) => action === "delete"
       ? apiRequest(`/api/materials/${row.id}`, { method: "DELETE" })
       : apiRequest(`/api/materials/${row.id}`, { method: "PATCH", body: JSON.stringify({ enabled: action === "enable" }) })));
     const failed = settled.filter((item) => item.status === "rejected").length;
@@ -860,7 +860,7 @@ export function MaterialsPage() {
                 ) : null}
                 <Button variant="outline" disabled={pending} onClick={() => void batchChange("enable")}>启用</Button>
                 <Button variant="outline" disabled={pending} onClick={() => void batchChange("disable")}>停用</Button>
-                <Button variant="outline" className="text-destructive" disabled={pending} onClick={() => void batchChange("archive")}><ArchiveIcon size={15} />归档</Button>
+                <Button variant="outline" className="text-destructive" disabled={pending} onClick={() => void batchChange("delete")}><Trash2Icon size={15} />删除</Button>
               </>
             ) : null}
             <Button variant="outline" onClick={() => void load()}><RefreshCwIcon size={16} />刷新</Button>
@@ -1015,7 +1015,7 @@ export function MaterialsPage() {
                     <div className="flex shrink-0 items-center justify-end gap-1">
                       <IconButton label="预览" onClick={() => setPreview(row)}><EyeIcon size={16} /></IconButton>
                       {item.binary && row.hasFile ? <IconButton label="下载" onClick={() => void download(row)}><DownloadIcon size={16} /></IconButton> : null}
-                      {canManage ? <><IconButton label="编辑" onClick={() => open(row)}><PencilIcon size={16} /></IconButton><IconButton className="text-destructive" label="归档" onClick={() => void remove(row)}><Trash2Icon size={16} /></IconButton></> : null}
+                      {canManage ? <><IconButton label="编辑" onClick={() => open(row)}><PencilIcon size={16} /></IconButton><IconButton className="text-destructive" label="删除" onClick={() => void remove(row)}><Trash2Icon size={16} /></IconButton></> : null}
                     </div>
                   </div>
                 );

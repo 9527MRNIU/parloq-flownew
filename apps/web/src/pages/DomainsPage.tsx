@@ -803,18 +803,19 @@ export function DomainsPage() {
     if (!row.id) return;
     if (
       !(await confirmAction({
-        title: `归档域名 ${row.hostname}？`,
-        description: "归档后该域名将不再用于新的推广渠道。",
-        confirmText: "确认归档",
+        title: `删除域名 ${row.hostname}？`,
+        description: "只删除本系统记录，不会删除 NameSilo 注册、Cloudflare Zone、DNS 或宝塔站点；仍被渠道或集成使用时不能删除。",
+        confirmText: "确认删除",
+        destructive: true,
       }))
     )
       return;
     try {
       await apiRequest(`/api/domains/${row.id}`, { method: "DELETE" });
       await load();
-      toast.success("域名已归档");
+      toast.success("域名已删除");
     } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "归档失败");
+      toast.error(caught instanceof Error ? caught.message : "删除失败");
     }
   }
   return (
@@ -1026,7 +1027,7 @@ export function DomainsPage() {
                               <PencilIcon size={16} />
                             </IconButton>
                             <IconButton
-                              label="归档"
+                              label="删除"
                               variant="ghost"
                               className="danger"
                               disabled={!row.id}

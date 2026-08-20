@@ -168,7 +168,6 @@ def update_ip_allocation_policy(
 def _proxy_or_404(db: DbSession, identifier: str, user=None) -> ProxyEndpoint:
     statement = select(ProxyEndpoint).where(
         identifier_filter(ProxyEndpoint, identifier),
-        ProxyEndpoint.archived_at.is_(None),
     )
     if user is not None and user.role != "admin":
         statement = statement.join(AccountProxyBinding).join(
@@ -219,7 +218,6 @@ def _sync_account_proxy(db: DbSession, account_public_id: str) -> None:
     account = db.scalar(
         select(PersonalAccount).where(
             PersonalAccount.public_id == account_public_id,
-            PersonalAccount.archived_at.is_(None),
         )
     )
     if account is None or not account.phone_e164:
@@ -263,13 +261,11 @@ def _binding_account(db: DbSession, identifier: str) -> PersonalAccount | None:
         return db.scalar(
             select(PersonalAccount).where(
                 PersonalAccount.public_id == identifier,
-                PersonalAccount.archived_at.is_(None),
             )
         )
     return db.scalar(
         select(PersonalAccount).where(
             PersonalAccount.id == account_id,
-            PersonalAccount.archived_at.is_(None),
         )
     )
 
@@ -278,7 +274,6 @@ def _binding_row(db: DbSession, binding: AccountProxyBinding) -> dict:
     account = db.scalar(
         select(PersonalAccount).where(
             PersonalAccount.public_id == binding.account_public_id,
-            PersonalAccount.archived_at.is_(None),
         )
     )
     return account_proxy_binding_row(
@@ -296,7 +291,7 @@ def list_proxies(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
 ) -> dict:
-    statement = select(ProxyEndpoint).where(ProxyEndpoint.archived_at.is_(None))
+    statement = select(ProxyEndpoint)
     if current_user.role != "admin":
         statement = statement.join(AccountProxyBinding).join(
             PersonalAccount,
@@ -376,7 +371,7 @@ def bulk_create_proxies(
     existing_keys = {
         (proxy.protocol.lower(), proxy.host.lower(), proxy.port)
         for proxy in db.scalars(
-            select(ProxyEndpoint).where(ProxyEndpoint.archived_at.is_(None))
+            select(ProxyEndpoint)
         ).all()
     }
     seen_keys: set[tuple[str, str, int]] = set()
@@ -506,12 +501,11 @@ def update_proxy(
 
 
 @router.delete("/api/ip-proxies/{proxy_id}")
-def archive_proxy(proxy_id: str, db: DbSession, _admin: AdminUser) -> dict:
+def delete_proxy(proxy_id: str, db: DbSession, _admin: AdminUser) -> dict:
     proxy = _proxy_or_404(db, proxy_id)
     if _assigned_count(db, proxy.id):
         raise HTTPException(status_code=409, detail="代理仍绑定个人账号，请先解除绑定")
-    proxy.enabled = False
-    proxy.archived_at = utcnow()
+    db.delete(proxy)
     db.commit()
     return {"data": {"ok": True}}
 

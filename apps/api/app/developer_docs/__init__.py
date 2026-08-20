@@ -20,8 +20,8 @@ DOC_SECTIONS = (
             {
                 "slug": "conventions",
                 "title": "系统通用约定",
-                "summary": "系统 ID、手机号、权限和归档行为等跨菜单通用规则。",
-                "keywords": ("Snowflake", "ID", "手机号", "权限", "归档"),
+                "summary": "系统 ID、手机号、权限和删除行为等跨菜单通用规则。",
+                "keywords": ("Snowflake", "ID", "手机号", "权限", "删除"),
             },
         ),
     },
@@ -313,4 +313,3 @@ def page_content(slug: str) -> str | None:
     if not path.is_file():
         return None
     return path.read_text(encoding="utf-8")
-

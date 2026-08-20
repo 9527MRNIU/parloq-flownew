@@ -264,13 +264,14 @@ export function DirectShortLinksPage() {
     }
   }
 
-  async function archive(row: DirectShortLink) {
+  async function remove(row: DirectShortLink) {
     if (!row.id) return;
     if (
       !(await confirmAction({
-        title: `归档短链“${row.title || row.shortUrl}”？`,
-        description: "归档后该短链将不再出现在当前列表中。",
-        confirmText: "确认归档",
+        title: `删除短链“${row.title || row.shortUrl}”？`,
+        description: "只删除本系统记录，Bitly 上已创建的短链不会被删除。",
+        confirmText: "确认删除",
+        destructive: true,
       }))
     )
       return;
@@ -279,9 +280,9 @@ export function DirectShortLinksPage() {
         method: "DELETE",
       });
       await loadLinks();
-      toast.success("直接短链已归档");
+      toast.success("直接短链已删除");
     } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "归档失败");
+      toast.error(caught instanceof Error ? caught.message : "删除失败");
     }
   }
 
@@ -347,13 +348,14 @@ export function DirectShortLinksPage() {
     }
   }
 
-  async function archiveAccount(row: BitlyAccount) {
+  async function removeAccount(row: BitlyAccount) {
     if (!row.id) return;
     if (
       !(await confirmAction({
-        title: `归档 Bitly 账号“${row.name}”？`,
-        description: "归档后该账号不会再用于创建直接短链。",
-        confirmText: "确认归档",
+        title: `删除 Bitly 账号“${row.name}”？`,
+        description: "该账号及其本地短链记录会一并删除；Bitly 上的账号和短链不受影响。",
+        confirmText: "确认删除",
+        destructive: true,
       }))
     )
       return;
@@ -362,9 +364,9 @@ export function DirectShortLinksPage() {
         method: "DELETE",
       });
       await loadAccounts();
-      toast.success("Bitly 账号已归档");
+      toast.success("Bitly 账号已删除");
     } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "归档账号失败");
+      toast.error(caught instanceof Error ? caught.message : "删除账号失败");
     }
   }
 
@@ -531,11 +533,11 @@ export function DirectShortLinksPage() {
                               <PencilIcon size={16} />
                             </IconButton>
                             <IconButton
-                              label="归档"
+                              label="删除"
                               variant="ghost"
                               className="danger"
                               disabled={!row.id}
-                              onClick={() => void archive(row)}
+                              onClick={() => void remove(row)}
                             >
                               <Trash2Icon size={16} />
                             </IconButton>
@@ -779,11 +781,11 @@ export function DirectShortLinksPage() {
                     编辑
                   </Button>
                   <IconButton
-                    label="归档 Bitly 账号"
+                    label="删除 Bitly 账号"
                     variant="ghost"
                     className="danger"
                     disabled={!row.id}
-                    onClick={() => void archiveAccount(row)}
+                    onClick={() => void removeAccount(row)}
                   >
                     <Trash2Icon size={15} />
                   </IconButton>

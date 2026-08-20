@@ -293,12 +293,7 @@ def clear_system_configuration(
         db.delete(credential)
     config = _configuration(db, platform_key)
     if config is not None:
-        config.enabled = False
-        config.settings_json = {}
-        config.last_test_status = "untested"
-        config.last_test_message = None
-        config.last_test_at = None
-        config.updated_by = admin.id
+        db.delete(config)
     db.commit()
     _no_store(response)
     return {"data": {"cleared": True, "platformKey": platform_key}}

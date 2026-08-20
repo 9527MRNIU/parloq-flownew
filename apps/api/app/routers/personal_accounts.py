@@ -6,7 +6,7 @@ from urllib.parse import quote
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile, status
-from sqlalchemy import case, exists, func, or_, select
+from sqlalchemy import case, delete, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.business_schemas import (
@@ -81,7 +81,6 @@ def _group(db: DbSession, group_id: str, user) -> AccountGroup:
         raise HTTPException(status_code=404, detail="账号分组不存在") from None
     statement = select(AccountGroup).where(
         AccountGroup.id == database_id,
-        AccountGroup.archived_at.is_(None),
     )
     if user.role != "admin":
         statement = statement.where(AccountGroup.created_by == user.id)
@@ -117,7 +116,6 @@ def _group_row(db: DbSession, item: AccountGroup) -> dict:
             .select_from(PersonalAccount)
             .where(
                 PersonalAccount.group_id == item.id,
-                PersonalAccount.archived_at.is_(None),
                 PersonalAccount.admission_status == "active",
             )
         )
@@ -136,7 +134,7 @@ def _group_row(db: DbSession, item: AccountGroup) -> dict:
 
 @group_router.get("")
 def list_account_groups(db: DbSession, current_user: CurrentUser) -> dict:
-    statement = select(AccountGroup).where(AccountGroup.archived_at.is_(None))
+    statement = select(AccountGroup)
     if current_user.role != "admin":
         statement = statement.where(AccountGroup.created_by == current_user.id)
     items = db.scalars(statement.order_by(AccountGroup.name, AccountGroup.id)).all()
@@ -185,14 +183,13 @@ def update_account_group(
 
 
 @group_router.delete("/{group_id}")
-def archive_account_group(
+def delete_account_group(
     group_id: str, db: DbSession, current_user: CurrentUser
 ) -> dict:
     item = _group(db, group_id, current_user)
     channel_in_use = db.scalar(
         select(PromotionChannel.id).where(
             PromotionChannel.account_group_id == item.id,
-            PromotionChannel.archived_at.is_(None),
         ).limit(1)
     )
     if channel_in_use is not None:
@@ -203,10 +200,6 @@ def archive_account_group(
     task_in_use = db.scalar(
         select(HyperlinkTask.id).where(
             HyperlinkTask.account_group_id == item.id,
-            HyperlinkTask.archived_at.is_(None),
-            HyperlinkTask.status.in_(
-                ("draft", "queued", "running", "waiting_accounts", "paused")
-            ),
         ).limit(1)
     )
     if task_in_use is not None:
@@ -217,7 +210,12 @@ def archive_account_group(
     db.query(PersonalAccount).filter(PersonalAccount.group_id == item.id).update(
         {PersonalAccount.group_id: None}, synchronize_session=False
     )
-    item.archived_at = utcnow()
+    db.execute(
+        delete(AccountPairingAttempt).where(
+            AccountPairingAttempt.account_group_id == item.id
+        )
+    )
+    db.delete(item)
     db.commit()
     return {"data": {"ok": True}}
 
@@ -229,7 +227,6 @@ def _account(db: DbSession, account_id: str, user) -> PersonalAccount:
         raise HTTPException(status_code=404, detail="个人账号不存在") from None
     statement = select(PersonalAccount).where(
         PersonalAccount.id == database_id,
-        PersonalAccount.archived_at.is_(None),
         PersonalAccount.admission_status == "active",
         )
     if user.role != "admin":
@@ -300,12 +297,12 @@ def account_row(db: DbSession, item: PersonalAccount) -> dict:
                 "ingressEnabled": protocol.ingress_enabled,
                 "marketingEnabled": protocol.marketing_enabled,
             }
-            if protocol is not None and protocol.archived_at is None
+            if protocol is not None
             else None
         ),
         "group": (
             {"id": str(group.id), "name": group.name}
-            if group is not None and group.archived_at is None
+            if group is not None
             else None
         ),
         "quality": {
@@ -428,7 +425,6 @@ def _set_binding(db: DbSession, account_id: str, proxy_id: str | None) -> None:
     proxy = db.scalar(
         select(ProxyEndpoint).where(
             identifier_filter(ProxyEndpoint, proxy_id),
-            ProxyEndpoint.archived_at.is_(None),
             ProxyEndpoint.enabled.is_(True),
         )
     )
@@ -479,7 +475,6 @@ def _auto_proxy(
         )
         .where(
             ProxyEndpoint.enabled.is_(True),
-            ProxyEndpoint.archived_at.is_(None),
         )
         .group_by(ProxyEndpoint.id)
     )
@@ -538,7 +533,6 @@ def list_accounts(
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
 ) -> dict:
     statement = select(PersonalAccount).where(
-        PersonalAccount.archived_at.is_(None),
         PersonalAccount.admission_status == "active",
     )
     if current_user.role != "admin":
@@ -785,7 +779,6 @@ def _unknown_aware_metric(values: list[object], predicate) -> dict:
 @router.get("/statistics")
 def account_statistics(db: DbSession, current_user: CurrentUser) -> dict:
     statement = select(PersonalAccount).where(
-        PersonalAccount.archived_at.is_(None),
         PersonalAccount.admission_status == "active",
     )
     if current_user.role != "admin":
@@ -935,7 +928,6 @@ def export_accounts_batch(
     database_ids = [parse_snowflake_id(value) for value in payload.account_ids]
     statement = select(PersonalAccount).where(
         PersonalAccount.id.in_(database_ids),
-        PersonalAccount.archived_at.is_(None),
         PersonalAccount.admission_status == "active",
     )
     if current_user.role != "admin":
@@ -1010,7 +1002,6 @@ def export_accounts_batch(
 @router.post("/sync-all")
 def sync_all_accounts(db: DbSession, current_user: CurrentUser) -> dict:
     statement = select(PersonalAccount).where(
-        PersonalAccount.archived_at.is_(None),
         PersonalAccount.admission_status == "active",
     )
     if current_user.role != "admin":
@@ -1038,7 +1029,6 @@ def list_intake_attempts(
     statement = (
         select(AccountPairingAttempt, PersonalAccount)
         .join(PersonalAccount, PersonalAccount.id == AccountPairingAttempt.account_id)
-        .where(PersonalAccount.archived_at.is_(None))
     )
     if current_user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == current_user.id)
@@ -1231,7 +1221,7 @@ def update_account(account_id: str, payload: PersonalAccountUpdate, db: DbSessio
 
 
 @router.delete("/{account_id}")
-def archive_account(account_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+def delete_account(account_id: str, db: DbSession, current_user: CurrentUser) -> dict:
     item = _account(db, account_id, current_user)
     try:
         WaGatewayClient().logout(item.gateway_account_id)
@@ -1240,9 +1230,8 @@ def archive_account(account_id: str, db: DbSession, current_user: CurrentUser) -
     binding = db.scalar(select(AccountProxyBinding).where(AccountProxyBinding.account_public_id == item.gateway_account_id))
     if binding:
         db.delete(binding)
-    item.enabled = False
-    item.status = "disabled"
-    item.archived_at = utcnow()
+    db.execute(delete(MessageDelivery).where(MessageDelivery.account_id == item.id))
+    db.delete(item)
     db.commit()
     return {"data": {"ok": True}}
 

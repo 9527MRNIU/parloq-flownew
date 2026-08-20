@@ -321,4 +321,4 @@ def test_non_admin_has_read_only_ip_management_access(admin_client: TestClient) 
         "/api/auth/login", json={"username": "admin", "password": "admin"}
     ).status_code == 200
     assert admin_client.delete(f"/api/users/{user_id}").status_code == 200
-    assert admin_client.delete(f"/api/user-groups/{group_id}").status_code == 409
+    assert admin_client.delete(f"/api/user-groups/{group_id}").status_code == 200

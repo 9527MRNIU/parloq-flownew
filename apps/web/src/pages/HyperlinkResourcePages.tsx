@@ -143,8 +143,8 @@ function normalize(input: unknown): AnyRow {
 function resourceStatus(row: AnyRow): EntityStatusMeta {
   const rawStatus = String(read(row, "status") || "").toLowerCase();
   const enabled = read(row, "enabled");
-  if (enabled === false || ["disabled", "archived"].includes(rawStatus)) {
-    return { label: rawStatus === "archived" ? "已归档" : "已停用", description: "该资源当前不会参与新的营销任务。", tone: "neutral" };
+  if (enabled === false || rawStatus === "disabled") {
+    return { label: "已停用", description: "该资源当前不会参与新的营销任务。", tone: "neutral" };
   }
   if (["failed", "error", "invalid", "rejected", "cancelled", "canceled"].includes(rawStatus)) {
     return {
@@ -660,9 +660,10 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
     if (!row.id) return;
     if (
       !(await confirmAction({
-        title: `归档“${String(read(row, "name"))}”？`,
-        description: "归档后该资源将不再用于新任务。",
-        confirmText: "确认归档",
+        title: `删除“${String(read(row, "name"))}”？`,
+        description: "删除后无法恢复；仍被其他资源使用时系统会拒绝。",
+        confirmText: "确认删除",
+        destructive: true,
       }))
     )
       return;
@@ -670,7 +671,7 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
       await apiRequest(`${config.endpoint}/${row.id}`, { method: "DELETE" });
       await load();
     } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "归档失败");
+      toast.error(caught instanceof Error ? caught.message : "删除失败");
     }
   }
   async function taskAction(row: AnyRow, action: string) {
@@ -778,7 +779,7 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
         ) : null}
         <IconButton
           className="text-destructive"
-          label="归档"
+          label="删除"
           disabled={!row.id}
           onClick={() => void remove(row)}
         >

@@ -73,7 +73,6 @@ def dispatch_pending_group_wakeups(
                     HyperlinkTask.account_group_id.in_(group_ids),
                     HyperlinkTask.sender_mode == "dynamic_group",
                     HyperlinkTask.status.in_(("running", "waiting_accounts")),
-                    HyperlinkTask.archived_at.is_(None),
                 )
             ).all()
         )

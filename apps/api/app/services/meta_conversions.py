@@ -132,7 +132,6 @@ def enqueue_meta_conversion(
     if (
         pixel is None
         or not pixel.enabled
-        or pixel.archived_at is not None
         or not pixel.capi_token_ciphertext
     ):
         return None
@@ -189,9 +188,7 @@ def probe_meta_conversion(
 ) -> dict[str, Any]:
     """Send one isolated CAPI probe without creating a delivery-ledger row."""
     if (
-        not pixel.enabled
-        or pixel.archived_at is not None
-        or not pixel.capi_token_ciphertext
+        not pixel.enabled or not pixel.capi_token_ciphertext
     ):
         raise ValueError("Meta Pixel 已停用或缺少 CAPI Token")
 
@@ -319,7 +316,6 @@ def _deliver_one(delivery_id: int) -> str:
         if (
             pixel is None
             or not pixel.enabled
-            or pixel.archived_at is not None
             or not pixel.capi_token_ciphertext
         ):
             row.status = "failed"

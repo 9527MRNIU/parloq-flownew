@@ -2492,9 +2492,10 @@ export function PromotionChannelsPage() {
     if (!row.id) return;
     if (
       !(await confirmAction({
-        title: `归档 Pixel“${row.name}”？`,
-        description: "归档后新渠道将无法继续选择该 Pixel。",
-        confirmText: "确认归档",
+        title: `删除 Pixel“${row.name}”？`,
+        description: "删除后无法恢复，相关 CAPI 投递记录会一并删除，已有渠道将解除 Pixel 绑定。",
+        confirmText: "确认删除",
+        destructive: true,
       }))
     )
       return;
@@ -2502,7 +2503,7 @@ export function PromotionChannelsPage() {
       await apiRequest(`/api/meta-pixels/${row.id}`, { method: "DELETE" });
       await load();
     } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "归档 Pixel 失败");
+      toast.error(caught instanceof Error ? caught.message : "删除 Pixel 失败");
     }
   }
   return (
@@ -3282,7 +3283,7 @@ export function PromotionChannelsPage() {
                     {row.enabled ? "停用" : "启用"}
                   </Button>
                   <IconButton
-                    label="归档 Pixel"
+                    label="删除 Pixel"
                     className="text-destructive"
                     disabled={!row.id}
                     onClick={() => void removePixel(row)}

@@ -167,14 +167,13 @@ def delete_user(user_id: str, db: DbSession, current_admin: AdminUser) -> dict:
         )
         if not other_admins:
             raise HTTPException(status_code=400, detail="不能删除最后一个管理员")
-    user.is_active = False
-    db.execute(
-        update(AuthSession)
-        .where(
-            AuthSession.user_id == user.id,
-            AuthSession.revoked_at.is_(None),
-        )
-        .values(revoked_at=utcnow())
-    )
-    db.commit()
+    db.delete(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="用户仍有关联业务数据，请先删除或移交相关资源",
+        ) from None
     return {"data": {"ok": True}}

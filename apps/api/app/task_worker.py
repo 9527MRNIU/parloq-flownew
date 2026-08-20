@@ -187,7 +187,6 @@ def _dispatchable_account_filter(task: HyperlinkTask):
         PersonalAccount.created_by == task.created_by,
         PersonalAccount.enabled.is_(True),
         PersonalAccount.marketing_eligible.is_(True),
-        PersonalAccount.archived_at.is_(None),
         PersonalAccount.admission_status == "active",
         PersonalAccount.validation_status == "ready",
         or_(
@@ -203,7 +202,6 @@ def _dispatchable_account_filter(task: HyperlinkTask):
         ),
         ProtocolNode.marketing_enabled.is_(True),
         ProtocolNode.online_enabled.is_(True),
-        ProtocolNode.archived_at.is_(None),
     )
 
 
@@ -398,7 +396,6 @@ def _legacy_records(db, task: HyperlinkTask, policy: HyperlinkStrategyPolicy):
                 PersonalAccount.status.in_(("online_idle", "sending")),
                 ProtocolNode.marketing_enabled.is_(True),
                 ProtocolNode.online_enabled.is_(True),
-                ProtocolNode.archived_at.is_(None),
             )
             .order_by(HyperlinkTaskDelivery.id)
             .limit(policy.buffer_size)
@@ -420,7 +417,6 @@ def _prepare_batch(
         )
         if (
             task is None
-            or task.archived_at is not None
             or task.status not in {"running", "waiting_accounts"}
         ):
             return None
@@ -931,7 +927,6 @@ def recover_running_tasks() -> int:
             db.scalars(
                 select(HyperlinkTask.id).where(
                     HyperlinkTask.status.in_(("running", "waiting_accounts")),
-                    HyperlinkTask.archived_at.is_(None),
                     unresolved > 0,
                 )
             ).all()

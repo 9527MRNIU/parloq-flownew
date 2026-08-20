@@ -11,9 +11,9 @@ from app.deps import AdminUser, CurrentUser, DbSession
 from app.entity_ids import identifier_filter
 from app.snowflake import new_public_id
 
-from app.models import BitlyProviderAccount
+from app.models import BitlyProviderAccount, DirectShortLink
 from app.schemas import BitlyAccountCreate, BitlyAccountUpdate
-from app.security import encrypt_secret, secret_fingerprint, utcnow
+from app.security import encrypt_secret, secret_fingerprint
 from app.serializers import bitly_account_row
 from app.services.bitly import BitlyClient, BitlyServiceError
 
@@ -32,7 +32,6 @@ def _account_or_404(db: DbSession, identifier: str) -> BitlyProviderAccount:
     account = db.scalar(
         select(BitlyProviderAccount).where(
             identifier_filter(BitlyProviderAccount, identifier),
-            BitlyProviderAccount.archived_at.is_(None),
         )
     )
     if account is None:
@@ -43,9 +42,7 @@ def _account_or_404(db: DbSession, identifier: str) -> BitlyProviderAccount:
 def _list_accounts(db: DbSession) -> list[BitlyProviderAccount]:
     return list(
         db.scalars(
-            select(BitlyProviderAccount)
-            .where(BitlyProviderAccount.archived_at.is_(None))
-            .order_by(BitlyProviderAccount.id)
+            select(BitlyProviderAccount).order_by(BitlyProviderAccount.id)
         ).all()
     )
 
@@ -138,10 +135,11 @@ def update_account(
 
 
 @router.delete("/api/bitly-accounts/{account_id}")
-def archive_account(account_id: str, db: DbSession, _admin: AdminUser) -> dict:
+def delete_account(account_id: str, db: DbSession, _admin: AdminUser) -> dict:
     account = _account_or_404(db, account_id)
-    account.enabled = False
-    account.status = "archived"
-    account.archived_at = utcnow()
+    db.query(DirectShortLink).filter(
+        DirectShortLink.provider_account_id == account.id
+    ).delete(synchronize_session=False)
+    db.delete(account)
     db.commit()
     return {"data": {"ok": True}}

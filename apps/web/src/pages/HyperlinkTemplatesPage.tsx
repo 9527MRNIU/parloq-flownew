@@ -16,7 +16,6 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
-  ArchiveIcon,
   BoldIcon,
   ChevronDownIcon,
   Code2Icon,
@@ -710,13 +709,13 @@ export function HyperlinkTemplatesPage() {
     }
   }
 
-  async function archive(row: TemplateRow) {
-    if (!(await confirmAction({ title: `归档“${row.name}”？`, description: "归档后不能再用于新建任务。", confirmText: "确认归档" }))) return;
+  async function remove(row: TemplateRow) {
+    if (!(await confirmAction({ title: `删除“${row.name}”？`, description: "删除后无法恢复；仍被任务使用的模板不能删除。", confirmText: "确认删除", destructive: true }))) return;
     try {
       await apiRequest(`/api/hyperlink/templates/${row.id}`, { method: "DELETE" });
       await load();
     } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "归档失败");
+      toast.error(caught instanceof Error ? caught.message : "删除失败");
     }
   }
 
@@ -810,7 +809,7 @@ export function HyperlinkTemplatesPage() {
                     </button>
                     <div className="flex items-center justify-end gap-1 border-t border-border/70 px-3 py-2">
                       <IconButton label="预览" onClick={() => setPreviewing(row)}><EyeIcon size={16} /></IconButton>
-                      {canManage ? <><IconButton label="编辑" onClick={() => open(row)}><PencilIcon size={16} /></IconButton><IconButton label="归档" className="text-destructive" onClick={() => void archive(row)}><ArchiveIcon size={16} /></IconButton></> : null}
+                      {canManage ? <><IconButton label="编辑" onClick={() => open(row)}><PencilIcon size={16} /></IconButton><IconButton label="删除" className="text-destructive" onClick={() => void remove(row)}><Trash2Icon size={16} /></IconButton></> : null}
                     </div>
                   </div>
                 </article>

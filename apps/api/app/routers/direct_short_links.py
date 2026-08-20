@@ -10,7 +10,7 @@ from app.snowflake import new_public_id
 
 from app.models import BitlyProviderAccount, DirectShortLink
 from app.schemas import DirectShortLinkCreate, DirectShortLinkUpdate
-from app.security import decrypt_secret, utcnow
+from app.security import decrypt_secret
 from app.serializers import direct_short_link_row
 from app.services.bitly import BitlyClient, BitlyServiceError
 
@@ -20,7 +20,6 @@ router = APIRouter(prefix="/api/direct-short-links", tags=["direct-short-links"]
 
 def _account_for_create(db: DbSession, identifier: str | None) -> BitlyProviderAccount:
     statement = select(BitlyProviderAccount).where(
-        BitlyProviderAccount.archived_at.is_(None),
         BitlyProviderAccount.enabled.is_(True),
         BitlyProviderAccount.status == "active",
     )
@@ -35,7 +34,6 @@ def _account_for_create(db: DbSession, identifier: str | None) -> BitlyProviderA
 def _link_or_404(db: DbSession, identifier: str, user) -> DirectShortLink:
     statement = select(DirectShortLink).where(
         identifier_filter(DirectShortLink, identifier),
-        DirectShortLink.archived_at.is_(None),
     )
     if user.role != "admin":
         statement = statement.where(DirectShortLink.created_by == user.id)
@@ -63,7 +61,7 @@ def list_links(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
 ) -> dict:
-    statement = select(DirectShortLink).where(DirectShortLink.archived_at.is_(None))
+    statement = select(DirectShortLink)
     if current_user.role != "admin":
         statement = statement.where(DirectShortLink.created_by == current_user.id)
     if keyword and keyword.strip():
@@ -171,17 +169,8 @@ def update_link(
 
 
 @router.delete("/{link_id}")
-def archive_link(link_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+def delete_link(link_id: str, db: DbSession, current_user: CurrentUser) -> dict:
     link = _link_or_404(db, link_id, current_user)
-    try:
-        _client(link.provider_account).update_bitlink(link.bitlink_id, archived=True)
-    except BitlyServiceError as exc:
-        link.last_error = str(exc)[:2000]
-        db.commit()
-        raise HTTPException(status_code=502, detail=str(exc)) from None
-    link.enabled = False
-    link.status = "archived"
-    link.archived_at = utcnow()
-    link.last_error = None
+    db.delete(link)
     db.commit()
     return {"data": {"ok": True}}

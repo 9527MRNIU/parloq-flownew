@@ -379,7 +379,7 @@ def _recorded_pairing_failure_response(
 
 
 def _template(db: DbSession, identifier: str, user) -> PromotionTemplate:
-    statement = select(PromotionTemplate).where(identifier_filter(PromotionTemplate, identifier), PromotionTemplate.archived_at.is_(None))
+    statement = select(PromotionTemplate).where(identifier_filter(PromotionTemplate, identifier))
     if user.role != "admin": statement = statement.where(PromotionTemplate.created_by == user.id)
     item = db.scalar(statement)
     if item is None: raise HTTPException(status_code=404, detail="推广模板不存在")
@@ -387,7 +387,7 @@ def _template(db: DbSession, identifier: str, user) -> PromotionTemplate:
 
 
 def _channel(db: DbSession, identifier: str, user) -> PromotionChannel:
-    statement = select(PromotionChannel).where(identifier_filter(PromotionChannel, identifier), PromotionChannel.archived_at.is_(None))
+    statement = select(PromotionChannel).where(identifier_filter(PromotionChannel, identifier))
     if user.role != "admin": statement = statement.where(PromotionChannel.created_by == user.id)
     item = db.scalar(statement)
     if item is None: raise HTTPException(status_code=404, detail="推广渠道不存在")
@@ -426,7 +426,7 @@ def channel_row(db: DbSession, item: PromotionChannel) -> dict:
     from app.services.protocol_nodes import protocol_health
 
     manifest = template.manifest_json if template else {}
-    pixel_ready = bool(pixel and pixel.enabled and pixel.archived_at is None)
+    pixel_ready = bool(pixel and pixel.enabled)
     meta_domain_monitored = bool(
         hostname and item.meta_browser_pixel_enabled and pixel_ready
     )
@@ -502,7 +502,7 @@ def channel_row(db: DbSession, item: PromotionChannel) -> dict:
             },
             "accountGroupReady": account_group is not None,
             "meta": {
-                "pixelReady": bool(pixel and pixel.enabled and pixel.archived_at is None),
+                "pixelReady": bool(pixel and pixel.enabled),
                 "browserEnabled": bool(item.meta_browser_pixel_enabled and pixel),
                 "capiEnabled": bool(item.meta_capi_enabled and pixel and pixel.capi_token_ciphertext),
             },
@@ -729,7 +729,6 @@ def _set_template_integrations(
     if integration_pks:
         statement = select(PromotionIntegration).where(
             PromotionIntegration.id.in_(integration_pks),
-            PromotionIntegration.archived_at.is_(None),
         )
         if user.role != "admin":
             statement = statement.where(PromotionIntegration.created_by == user.id)
@@ -947,7 +946,7 @@ def download_account_link_starter(_current_user: CurrentUser) -> Response:
 
 @router.get("/api/promotion/templates")
 def list_templates(db: DbSession, current_user: CurrentUser) -> dict:
-    statement = select(PromotionTemplate).where(PromotionTemplate.archived_at.is_(None))
+    statement = select(PromotionTemplate)
     if current_user.role != "admin": statement = statement.where(PromotionTemplate.created_by == current_user.id)
     items = db.scalars(statement.order_by(PromotionTemplate.created_at.desc())).all(); return {"data": {"rows": [template_row(db, x) for x in items], "total": len(items)}}
 
@@ -1153,7 +1152,6 @@ def preview_pairing_status(
     item = db.scalar(
         select(PromotionTemplate).where(
             identifier_filter(PromotionTemplate, template_id),
-            PromotionTemplate.archived_at.is_(None),
         )
     )
     if item is None:
@@ -1188,7 +1186,6 @@ def signed_preview_asset(
     item = db.scalar(
         select(PromotionTemplate).where(
             identifier_filter(PromotionTemplate, template_id),
-            PromotionTemplate.archived_at.is_(None),
         )
     )
     if item is None:
@@ -1209,10 +1206,10 @@ def preview_asset(template_id: str, asset_path: str, db: DbSession, current_user
 
 
 @router.delete("/api/promotion/templates/{template_id}")
-def archive_template(template_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+def delete_template(template_id: str, db: DbSession, current_user: CurrentUser) -> dict:
     item = _template(db, template_id, current_user)
-    if db.scalar(select(func.count()).select_from(PromotionChannel).where(PromotionChannel.template_id == item.id, PromotionChannel.archived_at.is_(None))): raise HTTPException(status_code=409, detail="模板仍被推广渠道使用")
-    item.status = "archived"; item.archived_at = utcnow(); db.commit(); return {"data": {"ok": True}}
+    if db.scalar(select(func.count()).select_from(PromotionChannel).where(PromotionChannel.template_id == item.id)): raise HTTPException(status_code=409, detail="模板仍被推广渠道使用")
+    db.delete(item); db.commit(); return {"data": {"ok": True}}
 
 
 def _resolve_channel_refs(db: DbSession, user, template_id: str | None, domain_id: str | None, pixel_id: str | None, current: PromotionChannel | None = None) -> tuple[int, int | None, int | None]:
@@ -1224,7 +1221,7 @@ def _resolve_channel_refs(db: DbSession, user, template_id: str | None, domain_i
     if template_pk is None: raise HTTPException(status_code=422, detail="必须选择模板")
     domain_pk = current.domain_id if current else None
     if domain_id is not None:
-        domain = db.scalar(select(DomainRecord).where(identifier_filter(DomainRecord, domain_id), DomainRecord.archived_at.is_(None)))
+        domain = db.scalar(select(DomainRecord).where(identifier_filter(DomainRecord, domain_id)))
         if domain is not None and user.role != "admin" and domain.created_by != user.id: domain = None
         if domain is None: raise HTTPException(status_code=404, detail="域名不存在")
         if not (
@@ -1238,7 +1235,7 @@ def _resolve_channel_refs(db: DbSession, user, template_id: str | None, domain_i
         domain_pk = domain.id
     pixel_pk = current.pixel_id if current else None
     if pixel_id is not None:
-        pixel = db.scalar(select(MetaPixel).where(identifier_filter(MetaPixel, pixel_id), MetaPixel.archived_at.is_(None)))
+        pixel = db.scalar(select(MetaPixel).where(identifier_filter(MetaPixel, pixel_id)))
         if pixel is not None and user.role != "admin" and pixel.created_by != user.id: pixel = None
         if pixel is None: raise HTTPException(status_code=404, detail="Pixel 不存在")
         if not pixel.enabled:
@@ -1277,7 +1274,6 @@ def _validate_channel_contract(
                 .where(
                     ProtocolPoolMember.pool_id == protocol_pool_id,
                     ProtocolPoolMember.enabled.is_(True),
-                    ProtocolNode.archived_at.is_(None),
                 )
             ).all()
         )
@@ -1287,7 +1283,7 @@ def _validate_channel_contract(
         raise HTTPException(status_code=409, detail="协议路由不支持模板声明的账号接入能力")
     if browser_enabled or capi_enabled:
         pixel = db.get(MetaPixel, pixel_id) if pixel_id else None
-        if pixel is None or not pixel.enabled or pixel.archived_at is not None:
+        if pixel is None or not pixel.enabled:
             raise HTTPException(status_code=422, detail="启用 Meta 事件前必须绑定可用 Pixel")
         if capi_enabled and not pixel.capi_token_ciphertext:
             raise HTTPException(status_code=422, detail="启用 Meta CAPI 前必须配置 CAPI Token")
@@ -1306,7 +1302,6 @@ def _resolve_channel_account_group(
         select(AccountGroup).where(
             identifier_filter(AccountGroup, account_group_id),
             AccountGroup.created_by == owner_id,
-            AccountGroup.archived_at.is_(None),
         )
     )
     if group is None:
@@ -1331,7 +1326,6 @@ def _resolve_channel_protocol_route(
             select(ProtocolNode).where(
                 identifier_filter(ProtocolNode, protocol_node_id),
                 ProtocolNode.created_by == owner_id,
-                ProtocolNode.archived_at.is_(None),
             )
         )
         if node is None:
@@ -1342,7 +1336,6 @@ def _resolve_channel_protocol_route(
             select(ProtocolPool).where(
                 identifier_filter(ProtocolPool, protocol_pool_id),
                 ProtocolPool.created_by == owner_id,
-                ProtocolPool.archived_at.is_(None),
             )
         )
         if pool is None:
@@ -1355,7 +1348,6 @@ def _resolve_channel_protocol_route(
         select(ProtocolNode)
         .where(
             ProtocolNode.created_by == owner_id,
-            ProtocolNode.archived_at.is_(None),
         )
         .order_by(ProtocolNode.id)
         .limit(1)
@@ -1369,7 +1361,7 @@ def _resolve_channel_protocol_route(
 
 @router.get("/api/promotion/channels")
 def list_channels(db: DbSession, current_user: CurrentUser) -> dict:
-    statement = select(PromotionChannel).where(PromotionChannel.archived_at.is_(None))
+    statement = select(PromotionChannel)
     if current_user.role != "admin": statement = statement.where(PromotionChannel.created_by == current_user.id)
     items = db.scalars(statement.order_by(PromotionChannel.created_at.desc())).all(); return {"data": {"rows": [channel_row(db, x) for x in items], "total": len(items)}}
 
@@ -1518,8 +1510,8 @@ def update_channel(channel_id: str, payload: PromotionChannelUpdate, db: DbSessi
 
 
 @router.delete("/api/promotion/channels/{channel_id}")
-def archive_channel(channel_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _channel(db, channel_id, current_user); item.status = "archived"; item.archived_at = utcnow(); db.commit(); return {"data": {"ok": True}}
+def delete_channel(channel_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+    item = _channel(db, channel_id, current_user); db.delete(item); db.commit(); return {"data": {"ok": True}}
 
 
 @router.post("/api/promotion/channels/{channel_id}/meta-capi-probe")
@@ -1534,7 +1526,6 @@ def probe_channel_meta_capi(
     if (
         pixel is None
         or not pixel.enabled
-        or pixel.archived_at is not None
         or not pixel.capi_token_ciphertext
     ):
         raise HTTPException(
@@ -1673,7 +1664,6 @@ def _public_channel(
     )
     statement = select(PromotionChannel).where(
         PromotionChannel.slug == slug,
-        PromotionChannel.archived_at.is_(None),
     )
     if require_active:
         statement = statement.where(PromotionChannel.status == "active")
@@ -1688,7 +1678,6 @@ def _public_channel(
     domains = db.scalars(
         select(DomainRecord).where(
             DomainRecord.hostname.in_(host_candidates),
-            DomainRecord.archived_at.is_(None),
             DomainRecord.enabled.is_(True),
             DomainRecord.registration_status == "active",
             DomainRecord.dns_status == "verified",
@@ -1739,8 +1728,7 @@ def _public_channel(
     ):
         raise HTTPException(status_code=404, detail="推广渠道不存在或尚未上线")
     if not preview_mode and domain is not None and not (
-        domain.archived_at is None
-        and domain.enabled
+        domain.enabled
         and domain.registration_status == "active"
         and domain.dns_status == "verified"
         and domain.ssl_status == "verified"
@@ -1897,7 +1885,7 @@ def _localize_template_html(
 @router.get("/api/public/promotion/channels/{slug}")
 def public_channel(slug: str, request: Request, db: DbSession, lang: str | None = None) -> dict:
     item = _public_channel(db, slug, request); tpl = db.get(PromotionTemplate, item.template_id); pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None; token = _session_token(item)
-    if pixel is not None and (not pixel.enabled or pixel.archived_at is not None):
+    if pixel is not None and not pixel.enabled:
         pixel = None
     from app.services.meta_conversions import normalized_meta_event_mapping
     policy = _runtime_template_policy(db, item.created_by)
@@ -1974,7 +1962,7 @@ def render_channel(slug: str, request: Request, db: DbSession, lang: str | None 
     item = _public_channel(db, slug, request)
     tpl = db.get(PromotionTemplate, item.template_id)
     pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None
-    if pixel is not None and (not pixel.enabled or pixel.archived_at is not None):
+    if pixel is not None and not pixel.enabled:
         pixel = None
     policy = _runtime_template_policy(db, item.created_by)
     html, resolved_locale, runtime_integrations = _render_html(
@@ -2010,7 +1998,7 @@ def render_fission_channel(
     item = _public_channel(db, slug, request)
     tpl = db.get(PromotionTemplate, item.template_id)
     pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None
-    if pixel is not None and (not pixel.enabled or pixel.archived_at is not None):
+    if pixel is not None and not pixel.enabled:
         pixel = None
     policy = _runtime_template_policy(db, item.created_by)
     html, resolved_locale, runtime_integrations = _render_html(
@@ -2311,7 +2299,6 @@ async def report_meta_domain_unavailable(
     if (
         pixel is None
         or not pixel.enabled
-        or pixel.archived_at is not None
         or not channel.meta_browser_pixel_enabled
     ):
         raise HTTPException(status_code=409, detail="当前渠道未启用浏览器 Pixel")
@@ -2331,9 +2318,7 @@ async def report_meta_domain_unavailable(
                 == (channel.subdomain_prefix or ""),
                 PromotionChannel.meta_browser_pixel_enabled.is_(True),
                 PromotionChannel.pixel_id.is_not(None),
-                PromotionChannel.archived_at.is_(None),
                 MetaPixel.enabled.is_(True),
-                MetaPixel.archived_at.is_(None),
             )
         ).all()
     )
@@ -2525,7 +2510,6 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
         select(PersonalAccount)
         .where(
             PersonalAccount.phone_e164 == payload.phone,
-            PersonalAccount.archived_at.is_(None),
         )
         .with_for_update()
     )
@@ -2634,7 +2618,6 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
         protocol = db.get(ProtocolNode, item.protocol_id)
         if (
             protocol is None
-            or protocol.archived_at is not None
             or not protocol.online_enabled
         ):
             db.rollback()
@@ -2706,7 +2689,6 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             select(AccountGroup).where(
                 AccountGroup.id == channel.account_group_id,
                 AccountGroup.created_by == channel.created_by,
-                AccountGroup.archived_at.is_(None),
             )
         )
         if landing_group is None:
@@ -3154,7 +3136,6 @@ def public_pairing_status(
         select(PersonalAccount).where(
             PersonalAccount.id == database_id,
             PersonalAccount.created_by == channel.created_by,
-            PersonalAccount.archived_at.is_(None),
         )
     )
     if item is None:
@@ -3388,7 +3369,6 @@ def cancel_public_pairing(
         select(PersonalAccount).where(
             PersonalAccount.id == database_id,
             PersonalAccount.created_by == channel.created_by,
-            PersonalAccount.archived_at.is_(None),
         )
     )
     if item is None:
@@ -3469,7 +3449,6 @@ async def report_internal_success(request: Request, db: DbSession) -> JSONRespon
     channel = db.scalar(
         select(PromotionChannel).where(
             identifier_filter(PromotionChannel, payload.promotion_channel_id),
-            PromotionChannel.archived_at.is_(None),
         )
     )
     if channel is None:
@@ -4079,7 +4058,7 @@ def _analytics_data(
     if user.role != "admin" and creator_ids and creator_ids != {user.id}:
         raise HTTPException(status_code=403, detail="不能查询其他用户的数据")
 
-    statement = select(PromotionChannel).where(PromotionChannel.archived_at.is_(None))
+    statement = select(PromotionChannel)
     if user.role != "admin":
         statement = statement.where(PromotionChannel.created_by == user.id)
     if channel_ids:

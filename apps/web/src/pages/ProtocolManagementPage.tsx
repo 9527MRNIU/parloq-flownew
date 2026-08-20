@@ -464,13 +464,13 @@ export function ProtocolManagementPage() {
       setSpecLoading(false);
     }
   }
-  async function archiveNode(row: ProtocolNode) {
-    if (!(await confirmAction({ title: `归档协议“${row.name}”？`, description: "仅空协议可以归档；仍有账号、渠道或协议池引用时系统会拒绝。", confirmText: "确认归档", destructive: true }))) return;
+  async function removeNode(row: ProtocolNode) {
+    if (!(await confirmAction({ title: `删除协议“${row.name}”？`, description: "删除后无法恢复；仍有账号、渠道或协议池引用时系统会拒绝。", confirmText: "确认删除", destructive: true }))) return;
     try {
       await apiRequest(`/api/protocol-nodes/${row.id}`, { method: "DELETE" });
-      toast.success("协议已归档");
+      toast.success("协议已删除");
       await load();
-    } catch (caught) { toast.error(caught instanceof Error ? caught.message : "协议归档失败"); }
+    } catch (caught) { toast.error(caught instanceof Error ? caught.message : "协议删除失败"); }
   }
   function openPool(pool?: ProtocolPool) {
     setPoolEditing(pool || "new");
@@ -506,13 +506,13 @@ export function ProtocolManagementPage() {
       setPoolSaving(false);
     }
   }
-  async function archivePool(pool: ProtocolPool) {
-    if (!(await confirmAction({ title: `归档协议池“${pool.name}”？`, description: "仍被推广渠道使用的协议池不能归档。", confirmText: "确认归档", destructive: true }))) return;
+  async function removePool(pool: ProtocolPool) {
+    if (!(await confirmAction({ title: `删除协议池“${pool.name}”？`, description: "删除后无法恢复；仍被推广渠道使用的协议池不能删除。", confirmText: "确认删除", destructive: true }))) return;
     try {
       await apiRequest(`/api/protocol-pools/${pool.id}`, { method: "DELETE" });
-      toast.success("协议池已归档");
+      toast.success("协议池已删除");
       await load();
-    } catch (caught) { toast.error(caught instanceof Error ? caught.message : "协议池归档失败"); }
+    } catch (caught) { toast.error(caught instanceof Error ? caught.message : "协议池删除失败"); }
   }
   async function batch(operation: "connect" | "disconnect") {
     if (!selected.length || remainingSeconds > 0) return;
@@ -626,7 +626,7 @@ export function ProtocolManagementPage() {
               <TableCell><div className="flex justify-end gap-1">
                 <Button variant="ghost" size="sm" disabled={!row.id || specLoading} onClick={() => void openSpec(row)}><BracesIcon size={14} />接口规范</Button>
                 {canManage ? <IconButton label="编辑协议" disabled={!row.id} onClick={() => openEdit(row)}><PencilIcon size={15} /></IconButton> : null}
-                {canManage ? <IconButton label="归档协议" disabled={!row.id} onClick={() => void archiveNode(row)}><Trash2Icon size={15} /></IconButton> : null}
+                {canManage ? <IconButton label="删除协议" disabled={!row.id} onClick={() => void removeNode(row)}><Trash2Icon size={15} /></IconButton> : null}
               </div></TableCell>
             </TableRow>)}</TableBody>
           </Table>
@@ -652,7 +652,7 @@ export function ProtocolManagementPage() {
             <TableCell><EntityPrimaryCell title={pool.name} id={pool.id} status={{ label: pool.members.some((member) => member.available) ? "可回退" : "无可用成员", description: pool.members.some((member) => member.available) ? "池中至少有一个成员可接入。" : "当前所有成员不可接入，渠道请求会明确失败。", tone: pool.members.some((member) => member.available) ? "success" : "warning" }} /></TableCell>
             <TableCell><div className="flex flex-wrap gap-1">{pool.members.map((member, index) => <Badge key={member.protocolNodeId} tone={member.available ? "success" : "neutral"}>{index + 1}. {member.protocolNodeName}</Badge>)}</div></TableCell>
             <TableCell><span className="block max-w-64 truncate text-muted-foreground">{pool.remark || "-"}</span></TableCell>
-            <TableCell><div className="flex justify-end">{canManage ? <><IconButton label="编辑协议池" onClick={() => openPool(pool)}><PencilIcon size={15} /></IconButton><IconButton label="归档协议池" onClick={() => void archivePool(pool)}><Trash2Icon size={15} /></IconButton></> : null}</div></TableCell>
+            <TableCell><div className="flex justify-end">{canManage ? <><IconButton label="编辑协议池" onClick={() => openPool(pool)}><PencilIcon size={15} /></IconButton><IconButton label="删除协议池" onClick={() => void removePool(pool)}><Trash2Icon size={15} /></IconButton></> : null}</div></TableCell>
           </TableRow>)}</TableBody>
         </Table> : <EmptyState title="暂无协议池" description="默认拒绝不可用节点；需要回退时再显式创建协议池并绑定渠道。" />}
       </ListTableCard>

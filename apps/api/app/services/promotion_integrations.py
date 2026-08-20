@@ -112,7 +112,6 @@ class ActivePromotionIntegration:
 def domain_is_ready(domain: DomainRecord | None) -> bool:
     return bool(
         domain
-        and domain.archived_at is None
         and domain.enabled
         and domain.registration_status == "active"
         and domain.dns_status == "verified"
@@ -633,8 +632,6 @@ def active_template_integrations(
             PromotionTemplateIntegration.template_id == template_id,
             PromotionTemplateIntegration.enabled.is_(True),
             PromotionIntegration.enabled.is_(True),
-            PromotionIntegration.archived_at.is_(None),
-            DomainRecord.archived_at.is_(None),
             DomainRecord.enabled.is_(True),
             DomainRecord.registration_status == "active",
             DomainRecord.dns_status == "verified",

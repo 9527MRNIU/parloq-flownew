@@ -168,7 +168,7 @@ def process_pending_account_metadata_sync_jobs(limit: int = 1) -> dict[str, int]
             if job is None:
                 continue
             try:
-                if account is None or account.archived_at is not None:
+                if account is None:
                     raise GatewayError("账号已不存在")
                 if account.admission_status != "active":
                     raise GatewayError("账号尚未正式入池")

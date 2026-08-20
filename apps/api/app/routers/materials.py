@@ -22,7 +22,6 @@ from app.message_capabilities import (
     normalize_text_role,
     validate_text_material_content,
 )
-from app.security import utcnow
 from app.serializers import iso
 from app.snowflake import new_public_id
 
@@ -43,7 +42,6 @@ internal_router = APIRouter(
 def _one(db: DbSession, identifier: str, current_user) -> Material:
     statement = select(Material).where(
         identifier_filter(Material, identifier),
-        Material.archived_at.is_(None),
     )
     if current_user.role != "admin":
         statement = statement.where(Material.created_by == current_user.id)
@@ -86,7 +84,7 @@ def list_materials(
     material_type: str | None = Query(default=None, alias="type"),
     text_role: str | None = Query(default=None, alias="textRole"),
 ) -> dict:
-    statement = select(Material).where(Material.archived_at.is_(None))
+    statement = select(Material)
     if material_type:
         statement = statement.where(Material.material_type == material_type.strip().lower())
     if text_role:
@@ -227,7 +225,7 @@ def get_internal_material_content(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="素材不存在") from exc
     item = db.get(Material, numeric_id)
-    if item is None or item.archived_at is not None or not item.enabled:
+    if item is None or not item.enabled:
         raise HTTPException(status_code=404, detail="素材不存在")
     token = authorization[7:] if authorization and authorization.startswith("Bearer ") else ""
     if not item.file_sha256 or not verify_material_access_token(
@@ -301,7 +299,7 @@ def update_material(
 
 @router.delete("/{material_id}")
 @legacy_router.delete("/{material_id}")
-def archive_material(
+def delete_material(
     material_id: str,
     db: DbSession,
     current_user: CurrentUser,
@@ -312,12 +310,10 @@ def archive_material(
         .select_from(HyperlinkTemplate)
         .where(
             HyperlinkTemplate.material_id == item.id,
-            HyperlinkTemplate.archived_at.is_(None),
         )
     )
     if template_count:
         raise HTTPException(status_code=409, detail="素材仍被模板使用")
-    item.enabled = False
-    item.archived_at = utcnow()
+    db.delete(item)
     db.commit()
     return {"data": {"ok": True}}

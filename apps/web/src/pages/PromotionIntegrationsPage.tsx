@@ -6,6 +6,7 @@ import {
   PlayIcon,
   PlusIcon,
   RefreshCwIcon,
+  Trash2Icon,
   UploadCloudIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -35,6 +36,7 @@ import {
   TableHead,
   TableHeader,
   TableRow,
+  confirmAction,
   toast,
 } from "../components/ui";
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
@@ -438,6 +440,23 @@ export default function PromotionIntegrationsPage() {
     }
   }
 
+  async function remove(row: PromotionIntegration) {
+    if (!canManage || !row.id) return;
+    if (!(await confirmAction({
+      title: `删除集成“${row.name}”？`,
+      description: "删除后资源包、模板绑定和本地回传记录会一并删除，且无法恢复。",
+      confirmText: "确认删除",
+      destructive: true,
+    }))) return;
+    try {
+      await apiRequest(`/api/promotion/integrations/${row.id}`, { method: "DELETE" });
+      toast.success("集成已删除");
+      await load();
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "集成删除失败");
+    }
+  }
+
   const createDisabled =
     pending ||
     packageInspecting ||
@@ -587,6 +606,13 @@ export default function PromotionIntegrationsPage() {
                             ) : (
                               <PlayIcon size={16} />
                             )}
+                          </IconButton>
+                          <IconButton
+                            label="删除集成"
+                            className="text-destructive"
+                            onClick={() => void remove(row)}
+                          >
+                            <Trash2Icon size={16} />
                           </IconButton>
                         </>
                       ) : null}

@@ -530,7 +530,7 @@ def test_data_package_revision_is_frozen_per_started_task(
     removed = admin_client.delete(
         f"/api/hyperlink/data-packages/{package_id}/recipients/{before[1]['id']}"
     )
-    assert removed.status_code == 200, removed.text
+    assert removed.status_code == 409, removed.text
     added = admin_client.post(
         f"/api/hyperlink/data-packages/{package_id}/recipients",
         json={"recipients": [{"phone": "+12025553959", "countryCode": "US"}]},
@@ -552,7 +552,7 @@ def test_data_package_revision_is_frozen_per_started_task(
         f"/api/hyperlink/tasks/{second_task['id']}/recipients?page=1&pageSize=1"
     )
     assert detail_page.status_code == 200, detail_page.text
-    assert detail_page.json()["data"]["total"] == 2
+    assert detail_page.json()["data"]["total"] == 3
     assert len(detail_page.json()["data"]["rows"]) == 1
     assert detail_page.json()["data"]["rows"][0]["executionStatus"] == "pending"
 
@@ -576,6 +576,7 @@ def test_data_package_revision_is_frozen_per_started_task(
         }
         assert phones_for(second_task["id"]) == {
             "+12025553000",
+            "+12025553001",
             "+12025553959",
         }
 

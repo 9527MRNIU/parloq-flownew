@@ -700,7 +700,7 @@ def test_legacy_promotion_channel_gets_a_default_account_group(
         group = connection.execute(
             sa.text(
                 """
-                SELECT g.id, g.name, g.description, g.archived_at
+                SELECT g.id, g.name, g.description
                   FROM account_groups AS g
                   JOIN promotion_channels AS c ON c.account_group_id = g.id
                  WHERE c.id = :channel_id
@@ -721,7 +721,6 @@ def test_legacy_promotion_channel_gets_a_default_account_group(
 
     assert group.name == "落地页账号"
     assert group.description == "推广渠道自动接入的账号分组"
-    assert group.archived_at is None
     assert group_count == 1
     assert version == _head_revision()
 

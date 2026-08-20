@@ -100,8 +100,7 @@ def _snapshot_at(
 
 def _active_at(account: PersonalAccount, cutoff: datetime) -> bool:
     created_at = _as_utc(account.created_at)
-    archived_at = _as_utc(account.archived_at) if account.archived_at else None
-    return created_at < cutoff and (archived_at is None or archived_at >= cutoff)
+    return created_at < cutoff
 
 
 def _collection_started_at(db: Session) -> datetime:
@@ -174,11 +173,7 @@ def _load_successful_marketing(
 
 
 def overview(db: Session, user: UserAccount) -> dict:
-    accounts = [
-        item
-        for item in _load_accounts(db, user)
-        if item.archived_at is None
-    ]
+    accounts = _load_accounts(db, user)
     lifecycle = _load_lifecycle(db, [item.id for item in accounts])
     valid = 0
     online = 0
@@ -211,11 +206,7 @@ def overview(db: Session, user: UserAccount) -> dict:
 
 
 def countries(db: Session, user: UserAccount) -> list[dict]:
-    accounts = [
-        item
-        for item in _load_accounts(db, user)
-        if item.archived_at is None and item.country_code
-    ]
+    accounts = [item for item in _load_accounts(db, user) if item.country_code]
     lifecycle = _load_lifecycle(db, [item.id for item in accounts])
     grouped: dict[str, list[PersonalAccount]] = defaultdict(list)
     for account in accounts:

@@ -42,9 +42,8 @@ def test_user_and_group_crud(admin_client: TestClient) -> None:
     assert admin_client.delete(f"/api/user-groups/{group_id}").status_code == 409
     assert admin_client.delete(f"/api/users/{user_id}").status_code == 200
     users = admin_client.get("/api/users").json()["data"]["rows"]
-    assert next(user for user in users if user["id"] == user_id)["enabled"] is False
-    # Soft-disabled users retain their group and resource ownership for audit.
-    assert admin_client.delete(f"/api/user-groups/{group_id}").status_code == 409
+    assert all(user["id"] != user_id for user in users)
+    assert admin_client.delete(f"/api/user-groups/{group_id}").status_code == 200
 
 
 def test_current_admin_cannot_delete_itself(admin_client: TestClient) -> None:
@@ -79,7 +78,7 @@ def test_user_list_is_server_paginated_and_searchable(admin_client: TestClient) 
     assert len(second.json()["data"]["rows"]) == 1
 
 
-def test_user_delete_soft_disables_revokes_sessions_and_keeps_owned_resources(
+def test_user_delete_requires_owned_resources_to_be_removed_then_hard_deletes(
     admin_client: TestClient,
 ) -> None:
     groups = admin_client.get("/api/user-groups").json()["data"]["rows"]
@@ -105,12 +104,15 @@ def test_user_delete_soft_disables_revokes_sessions_and_keeps_owned_resources(
         )
         assert domain.status_code == 201
         domain_id = domain.json()["data"]["domain"]["id"]
+        blocked = admin_client.delete(f"/api/users/{user_id}")
+        assert blocked.status_code == 409, blocked.text
+        assert owner.delete(f"/api/domains/{domain_id}").status_code == 200
         assert admin_client.delete(f"/api/users/{user_id}").status_code == 200
         assert owner.get("/api/auth/me").status_code == 401
         assert owner.post(
             "/api/auth/login",
             json={"username": "lifecycle-owner", "password": "secure-pass-123"},
-        ).status_code == 403
+        ).status_code == 401
         with SessionLocal() as db:
             user = db.scalar(
                 select(UserAccount).where(UserAccount.username == "lifecycle-owner")
@@ -118,8 +120,8 @@ def test_user_delete_soft_disables_revokes_sessions_and_keeps_owned_resources(
             resource = db.scalar(
                 select(DomainRecord).where(DomainRecord.id == int(domain_id))
             )
-            assert user is not None and user.is_active is False
-            assert resource is not None and resource.created_by == user.id
+            assert user is None
+            assert resource is None
     finally:
         owner.close()
 

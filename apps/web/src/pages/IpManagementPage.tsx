@@ -621,13 +621,14 @@ export function IpManagementPage() {
       setTestingIds((current) => current.filter((id) => id !== row.id));
     }
   }
-  async function archive(row: IpProxy) {
+  async function remove(row: IpProxy) {
     if (!row.id) return;
     if (
       !(await confirmAction({
-        title: `归档代理“${row.name}”？`,
-        description: "已有绑定时需先解绑账号，归档后不会再自动分配。",
-        confirmText: "确认归档",
+        title: `删除代理“${row.name}”？`,
+        description: "删除后无法恢复；已有绑定时需先解绑账号。",
+        confirmText: "确认删除",
+        destructive: true,
       }))
     )
       return;
@@ -635,7 +636,7 @@ export function IpManagementPage() {
       await apiRequest(`/api/ip-proxies/${row.id}`, { method: "DELETE" });
       await load();
     } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "归档失败");
+      toast.error(caught instanceof Error ? caught.message : "删除失败");
     }
   }
   async function bindAccount() {
@@ -912,9 +913,9 @@ export function IpManagementPage() {
                           </IconButton>
                           <IconButton
                             variant="destructive"
-                            label="归档"
+                            label="删除"
                             disabled={!row.id}
-                            onClick={() => void archive(row)}
+                            onClick={() => void remove(row)}
                           >
                             <Trash2Icon size={16} />
                           </IconButton>

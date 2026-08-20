@@ -37,9 +37,7 @@ router = APIRouter(prefix="/api/hyperlink", tags=["hyperlink"])
 
 
 def _one(db: DbSession, model: type, identifier: str, label: str, user):
-    statement = select(model).where(
-        identifier_filter(model, identifier), model.archived_at.is_(None)
-    )
+    statement = select(model).where(identifier_filter(model, identifier))
     if user.role != "admin": statement = statement.where(model.created_by == user.id)
     item = db.scalar(statement)
     if item is None: raise HTTPException(status_code=404, detail=f"{label}不存在")
@@ -67,7 +65,7 @@ def template_row(db: DbSession, x: HyperlinkTemplate) -> dict:
 
 def package_row(db: DbSession, x: DataPackage) -> dict:
     count = int(db.scalar(select(func.count()).select_from(DataPackageRecipient).where(DataPackageRecipient.data_package_id == x.id, DataPackageRecipient.removed_revision.is_(None))) or 0)
-    task_count = int(db.scalar(select(func.count()).select_from(HyperlinkTask).where(HyperlinkTask.data_package_id == x.id, HyperlinkTask.archived_at.is_(None))) or 0)
+    task_count = int(db.scalar(select(func.count()).select_from(HyperlinkTask).where(HyperlinkTask.data_package_id == x.id)) or 0)
     return {**_base(x), "name": x.name, "status": x.status, "revision": x.revision, "sealedAt": iso(x.sealed_at), "recipientCount": count, "taskCount": task_count}
 
 
@@ -262,7 +260,7 @@ def task_row(db: DbSession, x: HyperlinkTask) -> dict:
 
 
 def _list(db, model, user):
-    statement = select(model).where(model.archived_at.is_(None))
+    statement = select(model)
     if user.role != "admin": statement = statement.where(model.created_by == user.id)
     return db.scalars(statement.order_by(model.created_at.desc())).all()
 
@@ -285,7 +283,7 @@ def _ensure_template_media(
     if header_type not in {"image", "video", "document"}:
         return
     material = db.get(Material, material_id) if material_id else None
-    if material is None or material.archived_at is not None:
+    if material is None:
         raise HTTPException(status_code=422, detail="媒体页头需要选择已上传的关联素材")
     if material.material_type != header_type:
         raise HTTPException(status_code=422, detail="关联素材类型与模板页头类型不一致")
@@ -330,8 +328,8 @@ def update_template(pid:str,p:HyperlinkTemplateUpdate,db:DbSession,current_user:
 @router.delete("/templates/{pid}")
 def delete_template(pid:str,db:DbSession,current_user:CurrentUser)->dict:
     x=_one(db,HyperlinkTemplate,pid,"模板",current_user)
-    if db.scalar(select(func.count()).select_from(HyperlinkTask).where(HyperlinkTask.template_id==x.id,HyperlinkTask.archived_at.is_(None))):raise HTTPException(409,"模板仍被任务使用")
-    x.enabled=False;x.archived_at=utcnow();db.commit();return {"data":{"ok":True}}
+    if db.scalar(select(func.count()).select_from(HyperlinkTask).where(HyperlinkTask.template_id==x.id)):raise HTTPException(409,"模板仍被任务使用")
+    db.delete(x);db.commit();return {"data":{"ok":True}}
 
 
 @router.get("/strategies")
@@ -368,8 +366,8 @@ def update_strategy(pid:str,p:StrategyUpdate,db:DbSession,current_user:CurrentUs
 @router.delete("/strategies/{pid}")
 def delete_strategy(pid:str,db:DbSession,current_user:CurrentUser)->dict:
     x=_one(db,HyperlinkStrategy,pid,"策略",current_user)
-    if db.scalar(select(func.count()).select_from(HyperlinkTask).where(HyperlinkTask.strategy_id==x.id,HyperlinkTask.archived_at.is_(None))):raise HTTPException(409,"策略仍被任务使用")
-    x.enabled=False;x.archived_at=utcnow();db.commit();return {"data":{"ok":True}}
+    if db.scalar(select(func.count()).select_from(HyperlinkTask).where(HyperlinkTask.strategy_id==x.id)):raise HTTPException(409,"策略仍被任务使用")
+    db.delete(x);db.commit();return {"data":{"ok":True}}
 
 
 def _add_recipients(db, package, values, *, bump_revision: bool = True):
@@ -434,8 +432,8 @@ def update_package(pid:str,p:DataPackageUpdate,db:DbSession,current_user:Current
 @router.delete("/data-packages/{pid}")
 def delete_package(pid:str,db:DbSession,current_user:CurrentUser)->dict:
     x=_one(db,DataPackage,pid,"数据包",current_user)
-    if db.scalar(select(func.count()).select_from(HyperlinkTask).where(HyperlinkTask.data_package_id==x.id,HyperlinkTask.archived_at.is_(None))):raise HTTPException(409,"数据包仍被任务使用")
-    x.status="archived";x.archived_at=utcnow();db.commit();return {"data":{"ok":True}}
+    if db.scalar(select(func.count()).select_from(HyperlinkTask).where(HyperlinkTask.data_package_id==x.id)):raise HTTPException(409,"数据包仍被任务使用")
+    db.delete(x);db.commit();return {"data":{"ok":True}}
 @router.get("/data-packages/{pid}/recipients")
 def recipients(pid:str,db:DbSession,current_user:CurrentUser)->dict:
     x=_one(db,DataPackage,pid,"数据包",current_user);rows=db.scalars(select(DataPackageRecipient).where(DataPackageRecipient.data_package_id==x.id,DataPackageRecipient.removed_revision.is_(None)).order_by(DataPackageRecipient.id)).all();return {"data":{"rows":[recipient_row(r) for r in rows],"total":len(rows)}}
@@ -446,7 +444,8 @@ def import_recipients(pid:str,p:RecipientsImport,db:DbSession,current_user:Curre
 def delete_recipient(pid:str,rid:str,db:DbSession,current_user:CurrentUser)->dict:
     x=_one(db,DataPackage,pid,"数据包",current_user);r=db.scalar(select(DataPackageRecipient).where(identifier_filter(DataPackageRecipient,rid),DataPackageRecipient.data_package_id==x.id,DataPackageRecipient.removed_revision.is_(None)))
     if not r:raise HTTPException(404,"收件人不存在")
-    x.revision=max(int(x.revision or 1),1)+1;r.removed_revision=x.revision;db.commit();return {"data":{"ok":True,"dataPackage":package_row(db,x)}}
+    if db.scalar(select(func.count()).select_from(HyperlinkTaskDelivery).where(HyperlinkTaskDelivery.recipient_id==r.id)):raise HTTPException(409,"收件人仍被任务明细使用")
+    db.delete(r);x.revision=max(int(x.revision or 1),1)+1;db.commit();return {"data":{"ok":True,"dataPackage":package_row(db,x)}}
 
 
 def _task_group(db: DbSession, group_id: str, user) -> AccountGroup:
@@ -458,7 +457,6 @@ def _task_group(db: DbSession, group_id: str, user) -> AccountGroup:
         select(AccountGroup).where(
             AccountGroup.id == database_id,
             AccountGroup.created_by == user.id,
-            AccountGroup.archived_at.is_(None),
         )
     )
     if group is None:
@@ -576,7 +574,7 @@ def update_task(pid:str,p:TaskUpdate,db:DbSession,current_user:CurrentUser)->dic
 def delete_task(pid:str,db:DbSession,current_user:CurrentUser)->dict:
     x=_one(db,HyperlinkTask,pid,"任务",current_user)
     if x.status in {"running","waiting_accounts"}:raise HTTPException(409,"运行中的任务不能删除")
-    x.archived_at=utcnow();db.commit();return {"data":{"ok":True}}
+    db.delete(x);db.commit();return {"data":{"ok":True}}
 
 
 def _dynamic_eligible_accounts(db: DbSession, task: HyperlinkTask) -> list[PersonalAccount]:
@@ -592,7 +590,6 @@ def _dynamic_eligible_accounts(db: DbSession, task: HyperlinkTask) -> list[Perso
                 PersonalAccount.group_id == task.account_group_id,
                 PersonalAccount.created_by == task.created_by,
                 PersonalAccount.enabled.is_(True),
-                PersonalAccount.archived_at.is_(None),
                 PersonalAccount.admission_status == "active",
                 PersonalAccount.validation_status == "ready",
                 PersonalAccount.status.in_(("online_idle", "sending")),
@@ -602,7 +599,6 @@ def _dynamic_eligible_accounts(db: DbSession, task: HyperlinkTask) -> list[Perso
                 ),
                 ProtocolNode.marketing_enabled.is_(True),
                 ProtocolNode.online_enabled.is_(True),
-                ProtocolNode.archived_at.is_(None),
             )
             .order_by(PersonalAccount.id)
         ).all()
@@ -616,7 +612,7 @@ def start_task(pid:str,db:DbSession,current_user:CurrentUser)->dict:
     if task.status in {"running", "waiting_accounts"}:
         return {"data":{"task":task_row(db,task),"alreadyRunning":True}}
     strategy = db.get(HyperlinkStrategy, task.strategy_id)
-    if strategy is None or strategy.archived_at is not None:
+    if strategy is None:
         raise HTTPException(409,"任务发送策略不存在")
     if not strategy.enabled:
         raise HTTPException(409,"任务发送策略已停用")
@@ -628,12 +624,12 @@ def start_task(pid:str,db:DbSession,current_user:CurrentUser)->dict:
         for value in task.account_public_ids:
             try:account_ids.append(parse_snowflake_id(value))
             except ValueError:pass
-        accounts=list(db.scalars(select(PersonalAccount).join(ProtocolNode,ProtocolNode.id==PersonalAccount.protocol_id).where(PersonalAccount.id.in_(account_ids),PersonalAccount.created_by==task.created_by,PersonalAccount.status.in_(("online_idle","sending")),PersonalAccount.enabled.is_(True),PersonalAccount.admission_status=="active",PersonalAccount.archived_at.is_(None),ProtocolNode.marketing_enabled.is_(True),ProtocolNode.online_enabled.is_(True),ProtocolNode.archived_at.is_(None))).all())
+        accounts=list(db.scalars(select(PersonalAccount).join(ProtocolNode,ProtocolNode.id==PersonalAccount.protocol_id).where(PersonalAccount.id.in_(account_ids),PersonalAccount.created_by==task.created_by,PersonalAccount.status.in_(("online_idle","sending")),PersonalAccount.enabled.is_(True),PersonalAccount.admission_status=="active",ProtocolNode.marketing_enabled.is_(True),ProtocolNode.online_enabled.is_(True))).all())
         if not accounts:raise HTTPException(409,"没有在线可发送的个人账号")
     else:
         if task.account_group_id is None:
             raise HTTPException(409,"任务没有配置账号分组")
-        group = db.scalar(select(AccountGroup.id).where(AccountGroup.id==task.account_group_id,AccountGroup.created_by==task.created_by,AccountGroup.archived_at.is_(None)))
+        group = db.scalar(select(AccountGroup.id).where(AccountGroup.id==task.account_group_id,AccountGroup.created_by==task.created_by))
         if group is None:raise HTTPException(409,"任务账号分组不存在")
         accounts=_dynamic_eligible_accounts(db,task)
     package = db.get(DataPackage, task.data_package_id)

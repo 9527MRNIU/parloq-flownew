@@ -119,7 +119,6 @@ def protocol_capacity(db: Session, item: ProtocolNode) -> ProtocolCapacity:
         db.scalar(
             select(func.count(PersonalAccount.id)).where(
                 PersonalAccount.protocol_id == item.id,
-                PersonalAccount.archived_at.is_(None),
                 PersonalAccount.admission_status.in_(("reserved", "active")),
             )
         )
@@ -130,7 +129,6 @@ def protocol_capacity(db: Session, item: ProtocolNode) -> ProtocolCapacity:
             select(func.count(PersonalAccount.id)).where(
                 PersonalAccount.protocol_id == item.id,
                 PersonalAccount.status.in_(ONLINE_ACCOUNT_STATES),
-                PersonalAccount.archived_at.is_(None),
                 PersonalAccount.admission_status == "active",
             )
         )
@@ -153,8 +151,6 @@ def ingress_unavailable_reason(
     item: ProtocolNode,
     capacity: ProtocolCapacity,
 ) -> str | None:
-    if item.archived_at is not None:
-        return "协议节点已归档"
     if not item.online_enabled:
         return "协议节点已下线"
     if not item.ingress_enabled:
@@ -217,7 +213,6 @@ def select_ingress_protocol(
     statement = select(ProtocolNode).where(
         ProtocolNode.created_by == owner_id,
         ProtocolNode.protocol_type == "baileys",
-        ProtocolNode.archived_at.is_(None),
     )
     if requested_public_id:
         statement = statement.where(
@@ -230,7 +225,6 @@ def select_ingress_protocol(
         existing_node = db.scalar(
             select(ProtocolNode.id).where(
                 ProtocolNode.created_by == owner_id,
-                ProtocolNode.archived_at.is_(None),
             ).limit(1)
         )
         if existing_node is None:
@@ -281,7 +275,6 @@ def resolve_channel_ingress_protocol(
             select(ProtocolPool).where(
                 ProtocolPool.id == channel.protocol_pool_id,
                 ProtocolPool.created_by == channel.created_by,
-                ProtocolPool.archived_at.is_(None),
             )
         )
         if pool is None:
@@ -362,7 +355,6 @@ def marketing_protocol_available(db: Session, protocol_id: int | None) -> bool:
                 ProtocolNode.protocol_type == "baileys",
                 ProtocolNode.marketing_enabled.is_(True),
                 ProtocolNode.online_enabled.is_(True),
-                ProtocolNode.archived_at.is_(None),
             )
         )
         is not None

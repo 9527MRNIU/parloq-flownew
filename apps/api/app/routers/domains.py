@@ -33,6 +33,7 @@ from app.models import (
     DomainQuote,
     DomainRecord,
     PromotionChannel,
+    PromotionIntegration,
     SystemCredential,
     SystemPlatformConfiguration,
 )
@@ -209,7 +210,6 @@ def _platform_secret(
 def _domain(db: DbSession, identifier: str, user) -> DomainRecord:
     statement = select(DomainRecord).where(
         identifier_filter(DomainRecord, identifier),
-        DomainRecord.archived_at.is_(None),
     )
     if user.role != "admin": statement = statement.where(DomainRecord.created_by == user.id)
     item = db.scalar(statement)
@@ -219,7 +219,7 @@ def _domain(db: DbSession, identifier: str, user) -> DomainRecord:
 
 
 def domain_row(db: DbSession, item: DomainRecord) -> dict:
-    count = int(db.scalar(select(func.count()).select_from(PromotionChannel).where(PromotionChannel.domain_id == item.id, PromotionChannel.archived_at.is_(None))) or 0)
+    count = int(db.scalar(select(func.count()).select_from(PromotionChannel).where(PromotionChannel.domain_id == item.id)) or 0)
     selectable = (
         item.enabled
         and item.registration_status == "active"
@@ -348,7 +348,7 @@ def _hostname_occupied(db: DbSession, hostname: str) -> bool:
     return bool(
         db.scalar(
             select(func.count()).select_from(DomainRecord).where(
-                DomainRecord.hostname == hostname, DomainRecord.archived_at.is_(None)
+                DomainRecord.hostname == hostname
             )
         )
         or db.scalar(
@@ -488,7 +488,7 @@ def _run_domain_search(
 
 @router.get("")
 def list_domains(db: DbSession, current_user: CurrentUser) -> dict:
-    statement = select(DomainRecord).where(DomainRecord.archived_at.is_(None))
+    statement = select(DomainRecord)
     if current_user.role != "admin": statement = statement.where(DomainRecord.created_by == current_user.id)
     items = db.scalars(statement.order_by(DomainRecord.created_at.desc())).all()
     return {"data": {"rows": [domain_row(db, item) for item in items], "total": len(items)}}
@@ -511,7 +511,7 @@ def list_cloudflare_domains(db: DbSession, current_user: CurrentUser) -> dict:
     finally:
         client.close()
 
-    domain_statement = select(DomainRecord).where(DomainRecord.archived_at.is_(None))
+    domain_statement = select(DomainRecord)
     if current_user.role != "admin":
         domain_statement = domain_statement.where(DomainRecord.created_by == current_user.id)
     local_domains = db.scalars(domain_statement).all()
@@ -558,7 +558,7 @@ def list_namesilo_domains(db: DbSession, current_user: CurrentUser) -> dict:
         client.close()
 
     order_statement = select(DomainOrder).where(DomainOrder.provider == "namesilo")
-    domain_statement = select(DomainRecord).where(DomainRecord.archived_at.is_(None))
+    domain_statement = select(DomainRecord)
     if current_user.role != "admin":
         order_statement = order_statement.where(DomainOrder.created_by == current_user.id)
         domain_statement = domain_statement.where(DomainRecord.created_by == current_user.id)
@@ -804,7 +804,7 @@ def search_domains(
     search_id = uuid4().hex
     occupied_hostnames = frozenset(
         db.scalars(
-            select(DomainRecord.hostname).where(DomainRecord.archived_at.is_(None))
+            select(DomainRecord.hostname)
         ).all()
     ) | frozenset(
         db.scalars(
@@ -919,7 +919,6 @@ def create_domain_quote(
 @router.get("/available-for-channels")
 def available_for_channels(db: DbSession, current_user: CurrentUser) -> dict:
     statement = select(DomainRecord).where(
-        DomainRecord.archived_at.is_(None),
         DomainRecord.enabled.is_(True),
         DomainRecord.registration_status == "active",
         DomainRecord.dns_status == "verified",
@@ -944,7 +943,6 @@ def public_domain_routing_proof(
             DomainRecord.hostname == request_host,
             DomainRecord.verification_token == verification_token,
             DomainRecord.enabled.is_(True),
-            DomainRecord.archived_at.is_(None),
         )
     )
     if item is None:
@@ -1327,9 +1325,12 @@ def verify_domain(domain_id: str, db: DbSession, current_user: CurrentUser) -> d
 
 
 @router.delete("/{domain_id}")
-def archive_domain(domain_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+def delete_domain(domain_id: str, db: DbSession, current_user: CurrentUser) -> dict:
     item = _domain(db, domain_id, current_user)
-    if db.scalar(select(func.count()).select_from(PromotionChannel).where(PromotionChannel.domain_id == item.id, PromotionChannel.archived_at.is_(None))):
+    if db.scalar(select(func.count()).select_from(PromotionChannel).where(PromotionChannel.domain_id == item.id)):
         raise HTTPException(status_code=409, detail="域名仍绑定推广渠道")
-    item.enabled = False; item.archived_at = utcnow(); db.commit()
+    if db.scalar(select(func.count()).select_from(PromotionIntegration).where(PromotionIntegration.source_domain_id == item.id)):
+        raise HTTPException(status_code=409, detail="域名仍被推广集成使用")
+    db.delete(item)
+    db.commit()
     return {"data": {"ok": True}}

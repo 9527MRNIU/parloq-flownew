@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.business_schemas import (
@@ -16,13 +16,14 @@ from app.business_schemas import (
 from app.deps import CurrentUser, DbSession
 from app.entity_ids import entity_id, identifier_filter, identifiers_filter, matches_identifier
 from app.models import (
+    AccountMetadataSyncJob,
+    AccountPairingAttempt,
     PersonalAccount,
     PromotionChannel,
     ProtocolNode,
     ProtocolPool,
     ProtocolPoolMember,
 )
-from app.security import utcnow
 from app.snowflake import new_public_id
 from app.services.protocol_nodes import (
     DEFAULT_SYNC_POLICY,
@@ -83,7 +84,6 @@ def _node(db: DbSession, identifier: str, user) -> ProtocolNode:
         _scope(
             select(ProtocolNode).where(
                 identifier_filter(ProtocolNode, identifier),
-                ProtocolNode.archived_at.is_(None),
             ),
             user,
         )
@@ -98,7 +98,6 @@ def _row(db: DbSession, item: ProtocolNode) -> dict:
         db.execute(
             select(PersonalAccount.status, PersonalAccount.validation_status).where(
                 PersonalAccount.protocol_id == item.id,
-                PersonalAccount.archived_at.is_(None),
                 PersonalAccount.admission_status == "active",
             )
         ).all()
@@ -193,15 +192,12 @@ def list_protocol_nodes(db: DbSession, current_user: CurrentUser) -> dict:
     owner_has_node = db.scalar(
         select(ProtocolNode.id).where(
             ProtocolNode.created_by == current_user.id,
-            ProtocolNode.archived_at.is_(None),
         ).limit(1)
     )
     if current_user.role != "admin" and owner_has_node is None:
         select_ingress_protocol(db, current_user.id)
         db.commit()
-    statement = _scope(
-        select(ProtocolNode).where(ProtocolNode.archived_at.is_(None)), current_user
-    )
+    statement = _scope(select(ProtocolNode), current_user)
     items = db.scalars(statement.order_by(ProtocolNode.id)).all()
     return {"data": {"rows": [_row(db, item) for item in items], "total": len(items)}}
 
@@ -273,7 +269,6 @@ def update_protocol_node(
                     PersonalAccount.enabled.is_(True),
                     PersonalAccount.validation_status == "ready",
                     PersonalAccount.status.in_(("online_idle", "sending")),
-                    PersonalAccount.archived_at.is_(None),
                 )
                 .distinct()
             ).all()
@@ -295,7 +290,7 @@ def update_protocol_node(
 
 
 @router.delete("/{protocol_id}")
-def archive_protocol_node(
+def delete_protocol_node(
     protocol_id: str,
     db: DbSession,
     current_user: CurrentUser,
@@ -305,8 +300,6 @@ def archive_protocol_node(
         db.scalar(
             select(func.count(PersonalAccount.id)).where(
                 PersonalAccount.protocol_id == item.id,
-                PersonalAccount.archived_at.is_(None),
-                PersonalAccount.admission_status.in_(("reserved", "active")),
             )
         )
         or 0
@@ -315,7 +308,6 @@ def archive_protocol_node(
         db.scalar(
             select(func.count(PromotionChannel.id)).where(
                 PromotionChannel.protocol_node_id == item.id,
-                PromotionChannel.archived_at.is_(None),
             )
         )
         or 0
@@ -333,10 +325,17 @@ def archive_protocol_node(
             status_code=409,
             detail="协议仍有账号、渠道或协议池引用，请先解除引用；只需停用时请使用下线",
         )
-    item.ingress_enabled = False
-    item.marketing_enabled = False
-    item.online_enabled = False
-    item.archived_at = utcnow()
+    db.execute(
+        delete(AccountMetadataSyncJob).where(
+            AccountMetadataSyncJob.protocol_node_id == item.id
+        )
+    )
+    db.execute(
+        delete(AccountPairingAttempt).where(
+            AccountPairingAttempt.protocol_node_id == item.id
+        )
+    )
+    db.delete(item)
     db.commit()
     return {"data": {"ok": True}}
 
@@ -353,7 +352,6 @@ def protocol_integration_spec(
         ProtocolPoolMember.enabled.is_(True),
     )
     channel_statement = select(PromotionChannel).where(
-        PromotionChannel.archived_at.is_(None),
         (
             (PromotionChannel.protocol_node_id == item.id)
             | (PromotionChannel.protocol_pool_id.in_(pool_ids))
@@ -476,7 +474,6 @@ def _batch(
             _scope(
                 select(ProtocolNode).where(
                     identifiers_filter(ProtocolNode, payload.protocol_ids),
-                    ProtocolNode.archived_at.is_(None),
                 ),
                 user,
             )
@@ -503,7 +500,6 @@ def _batch(
             db.scalars(
                 select(PersonalAccount).where(
                     PersonalAccount.protocol_id == item.id,
-                    PersonalAccount.archived_at.is_(None),
                     PersonalAccount.enabled.is_(True),
                 )
             ).all()
@@ -607,7 +603,6 @@ def _pool(db: DbSession, identifier: str, user) -> ProtocolPool:
         _pool_scope(
             select(ProtocolPool).where(
                 identifier_filter(ProtocolPool, identifier),
-                ProtocolPool.archived_at.is_(None),
             ),
             user,
         )
@@ -662,7 +657,6 @@ def _replace_pool_members(db: DbSession, item: ProtocolPool, members) -> None:
             select(ProtocolNode).where(
                 ProtocolNode.id.in_(node_ids) if node_ids else False,
                 ProtocolNode.created_by == item.created_by,
-                ProtocolNode.archived_at.is_(None),
             )
         ).all()
     )
@@ -694,7 +688,7 @@ def list_protocol_pools(db: DbSession, current_user: CurrentUser) -> dict:
     items = list(
         db.scalars(
             _pool_scope(
-                select(ProtocolPool).where(ProtocolPool.archived_at.is_(None)),
+                select(ProtocolPool),
                 current_user,
             ).order_by(ProtocolPool.id)
         ).all()
@@ -751,7 +745,7 @@ def update_protocol_pool(
 
 
 @pool_router.delete("/{pool_id}")
-def archive_protocol_pool(
+def delete_protocol_pool(
     pool_id: str,
     db: DbSession,
     current_user: CurrentUser,
@@ -761,13 +755,12 @@ def archive_protocol_pool(
         db.scalar(
             select(func.count(PromotionChannel.id)).where(
                 PromotionChannel.protocol_pool_id == item.id,
-                PromotionChannel.archived_at.is_(None),
             )
         )
         or 0
     )
     if channel_count:
         raise HTTPException(status_code=409, detail="协议池仍被推广渠道使用")
-    item.archived_at = utcnow()
+    db.delete(item)
     db.commit()
     return {"data": {"ok": True}}

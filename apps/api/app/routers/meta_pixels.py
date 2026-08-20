@@ -2,16 +2,16 @@ from __future__ import annotations
 
 
 from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from app.deps import CurrentUser, DbSession
 from app.entity_ids import identifier_filter
 from app.snowflake import new_public_id
 
-from app.models import MetaPixel, PromotionChannel
+from app.models import MetaConversionDelivery, MetaPixel, PromotionChannel
 from app.schemas import MetaPixelCreate, MetaPixelUpdate
-from app.security import encrypt_secret, utcnow
+from app.security import encrypt_secret
 from app.serializers import meta_pixel_row
 
 
@@ -22,7 +22,6 @@ def _reset_domain_monitoring(db: DbSession, pixel_id: int) -> None:
     channels = db.scalars(
         select(PromotionChannel).where(
             PromotionChannel.pixel_id == pixel_id,
-            PromotionChannel.archived_at.is_(None),
         )
     ).all()
     for channel in channels:
@@ -33,7 +32,6 @@ def _reset_domain_monitoring(db: DbSession, pixel_id: int) -> None:
 def _pixel_or_404(db: DbSession, identifier: str, user) -> MetaPixel:
     statement = select(MetaPixel).where(
         identifier_filter(MetaPixel, identifier),
-        MetaPixel.archived_at.is_(None),
     )
     if user.role != "admin":
         statement = statement.where(MetaPixel.created_by == user.id)
@@ -45,7 +43,7 @@ def _pixel_or_404(db: DbSession, identifier: str, user) -> MetaPixel:
 
 @router.get("")
 def list_pixels(db: DbSession, current_user: CurrentUser) -> dict:
-    statement = select(MetaPixel).where(MetaPixel.archived_at.is_(None))
+    statement = select(MetaPixel)
     if current_user.role != "admin":
         statement = statement.where(MetaPixel.created_by == current_user.id)
     pixels = db.scalars(statement.order_by(MetaPixel.created_at.desc())).all()
@@ -110,10 +108,14 @@ def update_pixel(
 
 
 @router.delete("/{pixel_id}")
-def archive_pixel(pixel_id: str, db: DbSession, current_user: CurrentUser) -> dict:
+def delete_pixel(pixel_id: str, db: DbSession, current_user: CurrentUser) -> dict:
     pixel = _pixel_or_404(db, pixel_id, current_user)
-    pixel.enabled = False
-    pixel.archived_at = utcnow()
     _reset_domain_monitoring(db, pixel.id)
+    db.execute(
+        delete(MetaConversionDelivery).where(
+            MetaConversionDelivery.pixel_id == pixel.id
+        )
+    )
+    db.delete(pixel)
     db.commit()
     return {"data": {"ok": True}}

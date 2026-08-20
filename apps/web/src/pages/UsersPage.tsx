@@ -172,18 +172,19 @@ export function UsersPage() {
     if (!row.id) return;
     if (
       !(await confirmAction({
-        title: `停用用户“${row.username}”？`,
-        description: "该用户将无法登录，但业务资源和审计记录会保留。",
-        confirmText: "确认停用",
+        title: `删除用户“${row.username}”？`,
+        description: "删除后无法恢复；用户仍有关联业务数据时系统会拒绝，请先清理或移交资源。",
+        confirmText: "确认删除",
+        destructive: true,
       }))
     )
       return;
     try {
       await apiRequest(`/api/users/${row.id}`, { method: "DELETE" });
       await load();
-      toast.success("用户已停用");
+      toast.success("用户已删除");
     } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "停用失败");
+      toast.error(caught instanceof Error ? caught.message : "删除失败");
     }
   }
 
@@ -297,14 +298,10 @@ export function UsersPage() {
                           <PencilIcon size={16} />
                         </IconButton>
                         <IconButton
-                          label={
-                            row.enabled
-                              ? "停用用户"
-                              : "用户已停用，可在编辑中恢复"
-                          }
+                          label="删除用户"
                           variant="ghost"
                           className="danger"
-                          disabled={!row.id || row.username === "admin" || !row.enabled}
+                          disabled={!row.id || row.username === "admin"}
                           onClick={() => void remove(row)}
                         >
                           <BanIcon size={16} />

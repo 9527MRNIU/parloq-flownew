@@ -231,7 +231,6 @@ def test_protocol_batch_tenant_scope_and_gateway_error_summary(
         account = db.scalar(
             select(PersonalAccount).where(
                 PersonalAccount.protocol_id == protocol.id,
-                PersonalAccount.archived_at.is_(None),
             )
         )
         assert account is not None

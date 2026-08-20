@@ -78,7 +78,6 @@ def _integration(
 ) -> PromotionIntegration:
     statement = select(PromotionIntegration).where(
         identifier_filter(PromotionIntegration, identifier),
-        PromotionIntegration.archived_at.is_(None),
     )
     if user.role != "admin":
         statement = statement.where(PromotionIntegration.created_by == user.id)
@@ -91,7 +90,6 @@ def _integration(
 def _source_domain(db: DbSession, identifier: str, user) -> DomainRecord:
     statement = select(DomainRecord).where(
         identifier_filter(DomainRecord, identifier),
-        DomainRecord.archived_at.is_(None),
     )
     if user.role != "admin":
         statement = statement.where(DomainRecord.created_by == user.id)
@@ -184,9 +182,7 @@ def integration_row(db: DbSession, item: PromotionIntegration) -> dict:
 
 @router.get("")
 def list_integrations(db: DbSession, current_user: CurrentUser) -> dict:
-    statement = select(PromotionIntegration).where(
-        PromotionIntegration.archived_at.is_(None)
-    )
+    statement = select(PromotionIntegration)
     if current_user.role != "admin":
         statement = statement.where(PromotionIntegration.created_by == current_user.id)
     items = db.scalars(
@@ -267,6 +263,18 @@ def create_integration(
         raise HTTPException(status_code=409, detail="集成标识已存在") from None
     db.refresh(item)
     return {"data": {"integration": integration_row(db, item)}}
+
+
+@router.delete("/{integration_id}")
+def delete_integration(
+    integration_id: str,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    item = _integration(db, integration_id, current_user)
+    db.delete(item)
+    db.commit()
+    return {"data": {"ok": True}}
 
 
 @router.get("/{integration_id}")
@@ -426,7 +434,6 @@ def _public_runtime_context(
             identifier_filter(PromotionIntegration, integration_id),
             PromotionIntegration.integration_type == "iframe",
             PromotionIntegration.enabled.is_(True),
-            PromotionIntegration.archived_at.is_(None),
         )
     ).first()
     if row is None:
@@ -461,12 +468,10 @@ def _public_runtime_context(
     if (
         not feedback_enabled
         or channel is None
-        or channel.archived_at is not None
         or channel.status != "active"
         or channel.template_id != template_id
         or channel.created_by != item.created_by
         or template is None
-        or template.archived_at is not None
         or template.created_by != item.created_by
         or binding is None
     ):
@@ -726,7 +731,6 @@ def public_integration_asset(
             identifier_filter(PromotionIntegration, integration_id),
             PromotionIntegration.version == version,
             PromotionIntegration.enabled.is_(True),
-            PromotionIntegration.archived_at.is_(None),
         )
     ).first()
     if row is None:

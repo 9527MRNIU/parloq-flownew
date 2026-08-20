@@ -215,7 +215,6 @@ class BitlyProviderAccount(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), default="active", index=True)
     is_mock: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
     links: Mapped[list[DirectShortLink]] = relationship(back_populates="provider_account")
 
@@ -239,7 +238,6 @@ class DirectShortLink(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), default="active", index=True)
     last_error: Mapped[str | None] = mapped_column(Text)
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
@@ -258,7 +256,6 @@ class MetaPixel(Base, TimestampMixin):
     capi_token_ciphertext: Mapped[str | None] = mapped_column(Text)
     capi_token_last4: Mapped[str] = mapped_column(String(4), default="", nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
@@ -297,7 +294,6 @@ class ProxyEndpoint(Base, TimestampMixin):
     )
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     last_error: Mapped[str | None] = mapped_column(Text)
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
     bindings: Mapped[list[AccountProxyBinding]] = relationship(back_populates="proxy")
 
@@ -361,7 +357,6 @@ class AccountGroup(Base, TimestampMixin):
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
     description: Mapped[str | None] = mapped_column(Text)
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
@@ -430,9 +425,6 @@ class ProtocolNode(Base, TimestampMixin):
     rate_limit_policy_json: Mapped[dict] = mapped_column(
         JSON, default=dict, nullable=False
     )
-    archived_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), index=True
-    )
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
@@ -453,9 +445,6 @@ class ProtocolPool(Base, TimestampMixin):
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(64), index=True)
     remark: Mapped[str | None] = mapped_column(String(512))
-    archived_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), index=True
-    )
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="CASCADE"),
@@ -555,7 +544,6 @@ class PersonalAccount(Base, TimestampMixin):
     sending_cooldown_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True
     )
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(BigInteger, ForeignKey("user_accounts.id", ondelete="RESTRICT"))
 
     @property
@@ -699,7 +687,6 @@ class DomainRecord(Base, TimestampMixin):
     onboarding_message: Mapped[str | None] = mapped_column(Text)
     onboarding_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
@@ -779,7 +766,6 @@ class PromotionTemplate(Base, TimestampMixin):
     asset_count: Mapped[int] = mapped_column(Integer, default=0)
     total_size: Mapped[int] = mapped_column(Integer, default=0)
     quality_report_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
@@ -862,7 +848,6 @@ class PromotionIntegration(Base, TimestampMixin):
     package_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     integrities_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"),
@@ -1075,7 +1060,6 @@ class PromotionChannel(Base, TimestampMixin):
     locale: Mapped[str | None] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
     launch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
@@ -1381,7 +1365,6 @@ class Material(Base, TimestampMixin):
     file_sha256: Mapped[str | None] = mapped_column(String(64), index=True)
     content: Mapped[bytes | None] = mapped_column(LargeBinary, deferred=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
@@ -1404,7 +1387,6 @@ class HyperlinkTemplate(Base, TimestampMixin):
         ForeignKey("promotion_channels.id", ondelete="SET NULL"), index=True
     )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
@@ -1423,7 +1405,6 @@ class HyperlinkStrategy(Base, TimestampMixin):
     retry_limit: Mapped[int] = mapped_column(Integer, default=1)
     rules_json: Mapped[dict] = mapped_column(JSON, default=dict)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
@@ -1439,7 +1420,6 @@ class DataPackage(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(16), default="ready", index=True)
     revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     sealed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
@@ -1524,7 +1504,6 @@ class HyperlinkTask(Base, TimestampMixin):
     paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True
