@@ -34,6 +34,7 @@ import {
   StandardListPage,
 } from "../components/list-page";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
+import { DrawerFieldLabel } from "../components/drawer-form";
 
 type UserRow = {
   id: string;
@@ -355,7 +356,7 @@ export function UsersPage() {
       >
         <div className="drawer-form">
           <label className="field">
-            <span>用户名</span>
+            <DrawerFieldLabel required>用户名</DrawerFieldLabel>
             <Input
               value={username}
               disabled={Boolean(editing)}
@@ -364,7 +365,9 @@ export function UsersPage() {
             />
           </label>
           <label className="field">
-            <span>{editing ? "重置密码（留空则不修改）" : "登录密码"}</span>
+            <DrawerFieldLabel required={!editing}>
+              {editing ? "重置密码（留空则不修改）" : "登录密码"}
+            </DrawerFieldLabel>
             <Input
               type="password"
               value={password}
@@ -373,7 +376,7 @@ export function UsersPage() {
             />
           </label>
           <label className="field">
-            <span>角色</span>
+            <DrawerFieldLabel required>角色</DrawerFieldLabel>
             <SelectField
               value={groupId}
               onValueChange={setGroupId}

@@ -853,7 +853,7 @@ export function HyperlinkTemplatesPage() {
           }
         >
           <DrawerFormSection title="基础信息">
-            <DrawerFormField label="模板名称" htmlFor="hyperlink-template-name">
+            <DrawerFormField label="模板名称" htmlFor="hyperlink-template-name" required>
               <Input
                 id="hyperlink-template-name"
                 value={form.name}
@@ -899,6 +899,7 @@ export function HyperlinkTemplatesPage() {
                 label="页头内容"
                 htmlFor="hyperlink-template-header"
                 meta={`${form.headerText.length}/60`}
+                required={form.headerType === "text"}
               >
                 <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_200px]">
                   <Input
@@ -927,7 +928,7 @@ export function HyperlinkTemplatesPage() {
               </DrawerFormField>
             ) : null}
             {["image", "video", "document"].includes(form.headerType) ? (
-              <DrawerFormField label="选择素材">
+              <DrawerFormField label="选择素材" required>
                 <SearchableSelect
                   value={form.materialId}
                   onValueChange={(value) => setForm({ ...form, materialId: value })}
@@ -953,6 +954,7 @@ export function HyperlinkTemplatesPage() {
               htmlFor="hyperlink-template-body"
               align="start"
               meta={`${form.body.length}/4096`}
+              required
             >
               <div className="overflow-hidden rounded-lg border border-input bg-background focus-within:ring-3 focus-within:ring-primary/20">
                 <div className="flex min-w-0 flex-wrap items-center gap-1 border-b border-input bg-muted/25 p-1.5">
@@ -1070,6 +1072,7 @@ export function HyperlinkTemplatesPage() {
                         <DrawerFormField
                           label="按钮文本"
                           htmlFor={`hyperlink-button-text-${button.key}`}
+                          required
                         >
                           <div className="grid gap-2 xl:grid-cols-[minmax(0,1fr)_200px]">
                             <Input
@@ -1103,6 +1106,7 @@ export function HyperlinkTemplatesPage() {
                               htmlFor={`hyperlink-button-rows-${button.key}`}
                               align="start"
                               hint="每行一个选项，格式：标题|说明"
+                              required
                             >
                               <Textarea
                                 id={`hyperlink-button-rows-${button.key}`}
@@ -1117,6 +1121,7 @@ export function HyperlinkTemplatesPage() {
                           <DrawerFormField
                             label={button.type === "url" ? "链接地址" : button.type === "call" ? "电话号码" : "复制内容"}
                             htmlFor={`hyperlink-button-value-${button.key}`}
+                            required
                           >
                             <Input
                               id={`hyperlink-button-value-${button.key}`}

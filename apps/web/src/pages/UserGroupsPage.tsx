@@ -36,6 +36,7 @@ import {
   useClientPagination,
 } from "../components/list-page";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
+import { DrawerFieldLabel } from "../components/drawer-form";
 
 type GroupRow = {
   id: string;
@@ -359,7 +360,7 @@ export function UserGroupsPage() {
       >
         <div className="drawer-form">
           <label className="field">
-            <span>角色名称</span>
+            <DrawerFieldLabel required>角色名称</DrawerFieldLabel>
             <Input
               value={name}
               disabled={Boolean(editing?.builtin)}
@@ -368,7 +369,7 @@ export function UserGroupsPage() {
             />
           </label>
           <label className="field">
-            <span>组织归类说明（可选）</span>
+            <DrawerFieldLabel>组织归类说明</DrawerFieldLabel>
             <Textarea
               value={description}
               onChange={(event) => setDescription(event.target.value)}
@@ -377,7 +378,7 @@ export function UserGroupsPage() {
             />
           </label>
           <label className="field">
-            <span>授权菜单</span>
+            <DrawerFieldLabel>授权菜单</DrawerFieldLabel>
             <MultiSelect
               value={menuIds}
               onValueChange={setMenuIds}
@@ -386,7 +387,7 @@ export function UserGroupsPage() {
             />
           </label>
           <label className="field">
-            <span>操作权限</span>
+            <DrawerFieldLabel>操作权限</DrawerFieldLabel>
             <MultiSelect
               value={permissionKeys}
               onValueChange={setPermissionKeys}

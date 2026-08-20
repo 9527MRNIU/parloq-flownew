@@ -1051,7 +1051,7 @@ class PromotionChannel(Base, TimestampMixin):
         JSON, default=dict, nullable=False
     )
     in_app_browser_mode: Mapped[str] = mapped_column(
-        String(24), default="allow", nullable=False
+        String(24), default="guide_external", nullable=False
     )
     new_account_marketing_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False

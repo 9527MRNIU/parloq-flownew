@@ -67,7 +67,11 @@ import {
   useClientPagination,
 } from "../components/list-page";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
-import { DrawerFormSection } from "../components/drawer-form";
+import {
+  DrawerFieldLabel,
+  DrawerFormField,
+  DrawerFormSection,
+} from "../components/drawer-form";
 import { useAuth } from "../auth/AuthContext";
 import { countryOptions } from "../lib/countries";
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
@@ -77,18 +81,21 @@ import {
   templateAiCreationPrompt,
 } from "../content/promotion-template-design";
 
-const CHANNEL_SLUG_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
+const CHANNEL_RANDOM_CODE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
 
-function randomChannelSlug(existing: Iterable<string>, length = 8): string {
+function randomChannelCode(existing: Iterable<string>, length = 8): string {
   const reserved = new Set(Array.from(existing, (value) => value.toLowerCase()));
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const random = new Uint8Array(length);
     globalThis.crypto.getRandomValues(random);
-    const slug = Array.from(
+    const code = Array.from(
       random,
-      (value) => CHANNEL_SLUG_ALPHABET[value % CHANNEL_SLUG_ALPHABET.length],
+      (value) =>
+        CHANNEL_RANDOM_CODE_ALPHABET[
+          value % CHANNEL_RANDOM_CODE_ALPHABET.length
+        ],
     ).join("");
-    if (!reserved.has(slug)) return slug;
+    if (!reserved.has(code)) return code;
   }
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
@@ -1666,7 +1673,7 @@ export function PromotionTemplatesPage() {
               </div>
             ) : null}
             <label className="field">
-              <span>防护级别</span>
+              <DrawerFieldLabel required>防护级别</DrawerFieldLabel>
               <SelectField
                 value={policy.protectionMode}
                 disabled={!canManage || policySaving}
@@ -1691,7 +1698,7 @@ export function PromotionTemplatesPage() {
               </small>
             </label>
             <label className="field">
-              <span>检测到开发者工具时</span>
+              <DrawerFieldLabel required>检测到开发者工具时</DrawerFieldLabel>
               <SelectField
                 value={policy.devtoolsAction}
                 disabled={
@@ -1733,7 +1740,7 @@ export function PromotionTemplatesPage() {
               />
             </label>
             <label className="field">
-              <span>设备环境信号</span>
+              <DrawerFieldLabel required>设备环境信号</DrawerFieldLabel>
               <SelectField
                 value={policy.deviceSignals}
                 disabled={!canManage || policySaving}
@@ -1764,7 +1771,7 @@ export function PromotionTemplatesPage() {
                 <span>{label}</span>
                 <div className="grid min-w-0 grid-cols-2 gap-2">
                   <label className="grid min-w-0 gap-1 text-xs text-muted-foreground">
-                    <span>最多请求</span>
+                    <DrawerFieldLabel required>最多请求</DrawerFieldLabel>
                     <Input
                       type="number"
                       min={1}
@@ -1786,7 +1793,7 @@ export function PromotionTemplatesPage() {
                     />
                   </label>
                   <label className="grid min-w-0 gap-1 text-xs text-muted-foreground">
-                    <span>统计窗口（秒）</span>
+                    <DrawerFieldLabel required>统计窗口（秒）</DrawerFieldLabel>
                     <Input
                       type="number"
                       min={1}
@@ -1891,7 +1898,7 @@ export function PromotionTemplatesPage() {
               }
             />
             <UploadCloudIcon size={27} />
-            <strong>{file?.name || "选择模板 ZIP 文件"}</strong>
+            <strong><DrawerFieldLabel required>{file?.name || "选择模板 ZIP 文件"}</DrawerFieldLabel></strong>
             <span>
               {packageInspecting
                 ? "正在读取包内名称和说明…"
@@ -1901,7 +1908,7 @@ export function PromotionTemplatesPage() {
           {!replacing ? (
             <>
               <label className="field">
-                <span>模板名称</span>
+                <DrawerFieldLabel required>模板名称</DrawerFieldLabel>
                 <Input
                   value={name}
                   maxLength={120}
@@ -1910,7 +1917,7 @@ export function PromotionTemplatesPage() {
                 />
               </label>
               <label className="field">
-                <span>内部说明（可选）</span>
+                <DrawerFieldLabel>内部说明</DrawerFieldLabel>
                 <Input
                   value={description}
                   maxLength={2000}
@@ -2005,7 +2012,7 @@ export function PromotionChannelsPage() {
     metaBrowserPixelEnabled: false,
     metaCapiEnabled: false,
     metaEventMapping: { ...defaultMetaEventMapping },
-    inAppBrowserMode: "allow" as "allow" | "guide_external",
+    inAppBrowserMode: "guide_external" as "allow" | "guide_external",
     newAccountMarketingEnabled: true,
     localeMode: "auto",
     locale: "",
@@ -2154,12 +2161,12 @@ export function PromotionChannelsPage() {
             protocolRouteId: protocolNodes[0]?.id || "",
             domainId: "",
             subdomainPrefix: "",
-            slug: randomChannelSlug(rows.map((item) => item.slug)),
+            slug: randomChannelCode(rows.map((item) => item.slug)),
             pixelId: "",
             metaBrowserPixelEnabled: false,
             metaCapiEnabled: false,
             metaEventMapping: { ...defaultMetaEventMapping },
-            inAppBrowserMode: "allow",
+            inAppBrowserMode: "guide_external",
             newAccountMarketingEnabled: true,
             localeMode: "auto",
             locale: "",
@@ -2765,7 +2772,7 @@ export function PromotionChannelsPage() {
         <div className="drawer-form">
           <DrawerFormSection title="基础信息">
           <label className="field">
-            <span>渠道名称</span>
+            <DrawerFieldLabel required>渠道名称</DrawerFieldLabel>
             <Input
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
@@ -2774,11 +2781,11 @@ export function PromotionChannelsPage() {
           </label>
           <div className="form-grid">
             <label className="field">
-              <span>平台</span>
+              <DrawerFieldLabel>平台</DrawerFieldLabel>
               <Input value="Facebook" disabled />
             </label>
             <div className="field">
-              <span>投放国家</span>
+              <DrawerFieldLabel required>投放国家</DrawerFieldLabel>
               <SearchableSelect
                 value={form.countryCode}
                 onValueChange={(value) =>
@@ -2793,7 +2800,7 @@ export function PromotionChannelsPage() {
             </div>
           </div>
           <label className="field">
-            <span>推广模板</span>
+            <DrawerFieldLabel required>推广模板</DrawerFieldLabel>
             <SelectField
               className="w-full"
               value={form.templateId}
@@ -2806,8 +2813,11 @@ export function PromotionChannelsPage() {
               }))}
             />
           </label>
-          <label className="field">
-            <span>账号入库分组</span>
+          <DrawerFormField
+            label="账号入库分组"
+            hint="通过此渠道成功链接的账号会自动进入该分组；发送任务实时使用分组内当前可用账号。"
+            required
+          >
             <SelectField
               className="w-full"
               value={form.accountGroupId}
@@ -2820,10 +2830,7 @@ export function PromotionChannelsPage() {
                 label: row.label,
               }))}
             />
-            <small className="text-muted-foreground">
-              通过此渠道成功链接的账号会自动进入该分组；发送任务实时使用分组内当前可用账号。
-            </small>
-          </label>
+          </DrawerFormField>
           </DrawerFormSection>
           <DrawerFormSection
             title="新账号协议路由"
@@ -2831,14 +2838,14 @@ export function PromotionChannelsPage() {
           >
             <div className="form-grid">
               <label className="field">
-                <span>路由类型</span>
+                <DrawerFieldLabel required>路由类型</DrawerFieldLabel>
                 <SelectField className="w-full" value={form.protocolRouteType} onValueChange={(value) => {
                   const routeType = value as "node" | "pool";
                   setForm({ ...form, protocolRouteType: routeType, protocolRouteId: routeType === "node" ? protocolNodes[0]?.id || "" : protocolPools[0]?.id || "" });
                 }} options={[{ value: "node", label: "指定协议节点（不可用即拒绝）" }, { value: "pool", label: "协议池（显式回退）" }]} />
               </label>
               <label className="field">
-                <span>{form.protocolRouteType === "node" ? "协议节点" : "协议池"}</span>
+                <DrawerFieldLabel required>{form.protocolRouteType === "node" ? "协议节点" : "协议池"}</DrawerFieldLabel>
                 <SelectField className="w-full" value={form.protocolRouteId} onValueChange={(value) => setForm({ ...form, protocolRouteId: value })} placeholder={form.protocolRouteType === "node" ? "选择协议节点" : "选择协议池"} options={(form.protocolRouteType === "node" ? protocolNodes : protocolPools).map((row) => ({ value: row.id, label: row.label }))} />
               </label>
             </div>
@@ -2862,7 +2869,7 @@ export function PromotionChannelsPage() {
           <DrawerFormSection title="访问与语言">
           <div className="form-grid">
             <label className="field">
-              <span>语言模式</span>
+              <DrawerFieldLabel required>语言模式</DrawerFieldLabel>
               <SelectField
                 className="w-full"
                 value={form.localeMode}
@@ -2877,7 +2884,7 @@ export function PromotionChannelsPage() {
             </label>
             {form.localeMode === "fixed" ? (
               <label className="field">
-                <span>固定语言</span>
+                <DrawerFieldLabel required>固定语言</DrawerFieldLabel>
                 <SelectField
                   className="w-full"
                   value={form.locale}
@@ -2890,14 +2897,14 @@ export function PromotionChannelsPage() {
               </label>
             ) : (
               <label className="field">
-                <span>语言解析</span>
+                <DrawerFieldLabel>语言解析</DrawerFieldLabel>
                 <Input disabled value="投放国家 → 浏览器语言 → 模板默认" />
               </label>
             )}
           </div>
           <div className="form-grid">
             <label className="field">
-              <span>基础域名</span>
+              <DrawerFieldLabel required>基础域名</DrawerFieldLabel>
               <SelectField
                 className="w-full"
                 value={form.domainId}
@@ -2910,27 +2917,52 @@ export function PromotionChannelsPage() {
               />
             </label>
             <label className="field">
-              <span>子域名前缀（可选）</span>
-              <Input
-                value={form.subdomainPrefix}
-                maxLength={63}
-                placeholder="例如：cn；不填使用根域名"
-                onChange={(event) =>
-                  setForm({
-                    ...form,
-                    subdomainPrefix: event.target.value
-                      .toLowerCase()
-                      .replace(/[^a-z0-9-]/g, "")
-                      .replace(/^-+/, "")
-                      .slice(0, 63),
-                  })
-                }
-              />
+              <DrawerFieldLabel>子域名前缀</DrawerFieldLabel>
+              <div className="flex gap-2">
+                <Input
+                  value={form.subdomainPrefix}
+                  maxLength={63}
+                  placeholder="例如：cn；不填使用根域名"
+                  onChange={(event) =>
+                    setForm({
+                      ...form,
+                      subdomainPrefix: event.target.value
+                        .toLowerCase()
+                        .replace(/[^a-z0-9-]/g, "")
+                        .replace(/^-+/, "")
+                        .slice(0, 63),
+                    })
+                  }
+                />
+                <IconButton
+                  label="重新生成随机子域名前缀"
+                  onClick={() =>
+                    setForm({
+                      ...form,
+                      subdomainPrefix: randomChannelCode(
+                        rows
+                          .filter(
+                            (item) =>
+                              item.id !== editing?.id &&
+                              (!form.domainId || item.domainId === form.domainId),
+                          )
+                          .map((item) => item.subdomainPrefix)
+                          .filter(Boolean),
+                      ),
+                    })
+                  }
+                >
+                  <RefreshCwIcon size={16} />
+                </IconButton>
+              </div>
             </label>
           </div>
           <div className="form-grid">
-            <label className="field">
-              <span>访问短码（Slug）</span>
+            <DrawerFormField
+              label="访问短码（Slug）"
+              hint="新建时自动生成 8 位随机短码，也可以手动修改。"
+              required
+            >
               <div className="flex gap-2">
                 <Input
                   value={form.slug}
@@ -2949,7 +2981,7 @@ export function PromotionChannelsPage() {
                   onClick={() =>
                     setForm({
                       ...form,
-                      slug: randomChannelSlug(
+                      slug: randomChannelCode(
                         rows
                           .filter((item) => item.id !== editing?.id)
                           .map((item) => item.slug),
@@ -2960,21 +2992,17 @@ export function PromotionChannelsPage() {
                   <RefreshCwIcon size={16} />
                 </IconButton>
               </div>
-              <small className="text-muted-foreground">
-                新建时自动生成 8 位随机短码，也可以手动修改。
-              </small>
-            </label>
-            <label className="field">
-              <span>最终访问地址</span>
+            </DrawerFormField>
+            <DrawerFormField
+              label="最终访问地址"
+              hint="子域名需要该基础域名已配置通配符 DNS 和证书。"
+            >
               <Input
                 value={previewPublicUrl}
                 readOnly
                 placeholder="选择基础域名后生成"
               />
-              <small className="text-muted-foreground">
-                子域名需要该基础域名已配置通配符 DNS 和证书。
-              </small>
-            </label>
+            </DrawerFormField>
           </div>
           </DrawerFormSection>
           <DrawerFormSection
@@ -2982,7 +3010,7 @@ export function PromotionChannelsPage() {
             description="浏览器 Pixel 与服务端 CAPI 共用 eventId 去重。模板不携带 Pixel ID、Token 或事件 SDK，全部由渠道运行时注入。"
           >
             <label className="field">
-              <span>Meta Pixel / Dataset（可选）</span>
+              <DrawerFieldLabel>Meta Pixel / Dataset</DrawerFieldLabel>
               <SelectField
                 className="w-full"
                 value={form.pixelId}
@@ -3002,38 +3030,40 @@ export function PromotionChannelsPage() {
               />
             </label>
             <div className="mt-3 grid gap-2">
-              <label className="switch-row">
-                <span>
-                  <strong>浏览器 Pixel</strong>
-                  <small>在公开落地页加载 Meta Pixel，并按下方映射发送浏览器事件。</small>
-                </span>
-                <Switch
-                  checked={form.metaBrowserPixelEnabled}
-                  disabled={!form.pixelId}
-                  onCheckedChange={(checked) =>
-                    setForm({ ...form, metaBrowserPixelEnabled: checked })
-                  }
-                  aria-label="启用浏览器 Pixel"
-                />
-              </label>
-              <label className="switch-row">
-                <span>
-                  <strong>服务端 Conversions API</strong>
-                  <small>
-                    {selectedPixel?.tokenConfigured
-                      ? "异步投递、失败重试，并保留可审计账本。"
-                      : "当前 Pixel 未配置 CAPI Token，需先在 Pixel 管理中保存。"}
-                  </small>
-                </span>
-                <Switch
-                  checked={form.metaCapiEnabled}
-                  disabled={!form.pixelId || !selectedPixel?.tokenConfigured}
-                  onCheckedChange={(checked) =>
-                    setForm({ ...form, metaCapiEnabled: checked })
-                  }
-                  aria-label="启用 Meta CAPI"
-                />
-              </label>
+              <DrawerFormField
+                label="浏览器 Pixel"
+                hint="在公开落地页加载 Meta Pixel，并按下方映射发送浏览器事件。"
+              >
+                <div className="flex h-8 items-center">
+                  <Switch
+                    checked={form.metaBrowserPixelEnabled}
+                    disabled={!form.pixelId}
+                    onCheckedChange={(checked) =>
+                      setForm({ ...form, metaBrowserPixelEnabled: checked })
+                    }
+                    aria-label="启用浏览器 Pixel"
+                  />
+                </div>
+              </DrawerFormField>
+              <DrawerFormField
+                label="服务端 Conversions API"
+                hint={
+                  selectedPixel?.tokenConfigured
+                    ? "异步投递、失败重试，并保留可审计账本。"
+                    : "当前 Pixel 未配置 CAPI Token，需先在 Pixel 管理中保存。"
+                }
+              >
+                <div className="flex h-8 items-center">
+                  <Switch
+                    checked={form.metaCapiEnabled}
+                    disabled={!form.pixelId || !selectedPixel?.tokenConfigured}
+                    onCheckedChange={(checked) =>
+                      setForm({ ...form, metaCapiEnabled: checked })
+                    }
+                    aria-label="启用 Meta CAPI"
+                  />
+                </div>
+              </DrawerFormField>
             </div>
             <div className="form-grid mt-3">
               {(
@@ -3045,7 +3075,7 @@ export function PromotionChannelsPage() {
                 ] as Array<[keyof MetaEventMapping, string]>
               ).map(([key, label]) => (
                 <label className="field" key={key}>
-                  <span>{label}上报事件</span>
+                  <DrawerFieldLabel required>{label}上报事件</DrawerFieldLabel>
                   <SelectField
                     className="w-full"
                     value={form.metaEventMapping[key]}
@@ -3065,8 +3095,11 @@ export function PromotionChannelsPage() {
             </div>
           </DrawerFormSection>
           <DrawerFormSection title="发布设置">
-          <label className="field">
-            <span>Facebook / Instagram 内置浏览器</span>
+          <DrawerFormField
+            label="Facebook / Instagram 内置浏览器"
+            hint="浏览器无法可靠强制跳出 App；“提示使用系统浏览器”只展示明确引导，不虚构强制打开能力。"
+            required
+          >
             <SelectField
               className="w-full"
               value={form.inAppBrowserMode}
@@ -3081,43 +3114,43 @@ export function PromotionChannelsPage() {
                 { value: "guide_external", label: "提示使用系统浏览器" },
               ]}
             />
-            <small className="text-muted-foreground">
-              浏览器无法可靠强制跳出 App；“提示使用系统浏览器”只展示明确引导，不虚构强制打开能力。
-            </small>
-          </label>
-          <label className="switch-row">
-            <span>
-              <strong>新接入账号参与营销</strong>
-              <small>只在账号首次创建时固化；之后切换本项不会改变存量账号。</small>
-            </span>
-            <Switch
-              checked={form.newAccountMarketingEnabled}
-              onCheckedChange={(checked) =>
-                setForm({ ...form, newAccountMarketingEnabled: checked })
-              }
-              aria-label="新接入账号参与营销"
-            />
-          </label>
+          </DrawerFormField>
+          <DrawerFormField
+            label="新接入账号参与营销"
+            hint="只在账号首次创建时固化；之后切换本项不会改变存量账号。"
+          >
+            <div className="flex h-8 items-center">
+              <Switch
+                checked={form.newAccountMarketingEnabled}
+                onCheckedChange={(checked) =>
+                  setForm({ ...form, newAccountMarketingEnabled: checked })
+                }
+                aria-label="新接入账号参与营销"
+              />
+            </div>
+          </DrawerFormField>
           <label className="field">
-            <span>计划上线时间</span>
+            <DrawerFieldLabel>计划上线时间</DrawerFieldLabel>
             <Input
               type="datetime-local"
               value={form.goLiveAt}
               onChange={(e) => setForm({ ...form, goLiveAt: e.target.value })}
             />
           </label>
-          <label className="switch-row">
-            <span>
-              <strong>启用渠道</strong>
-              <small>启用后到达上线时间即可对外访问。</small>
-            </span>
-            <Switch
-              checked={form.enabled}
-              onCheckedChange={(checked) =>
-                setForm({ ...form, enabled: checked })
-              }
-            />
-          </label>
+          <DrawerFormField
+            label="启用渠道"
+            hint="启用后到达上线时间即可对外访问。"
+          >
+            <div className="flex h-8 items-center">
+              <Switch
+                checked={form.enabled}
+                onCheckedChange={(checked) =>
+                  setForm({ ...form, enabled: checked })
+                }
+                aria-label="启用渠道"
+              />
+            </div>
+          </DrawerFormField>
           </DrawerFormSection>
         </div>
       </Drawer>
@@ -3185,7 +3218,7 @@ export function PromotionChannelsPage() {
               </div>
             </div>
             <label className="field">
-              <span>事件 ID</span>
+              <DrawerFieldLabel>事件 ID</DrawerFieldLabel>
               <Input readOnly value={capiProbeResult.eventId || "-"} />
             </label>
             {!capiProbeResult.ok ? (
@@ -3207,7 +3240,7 @@ export function PromotionChannelsPage() {
           <div className="pixel-create-card">
             <strong>添加 Pixel</strong>
             <label className="field">
-              <span>内部名称</span>
+              <DrawerFieldLabel required>内部名称</DrawerFieldLabel>
               <Input
                 value={pixelForm.name}
                 onChange={(e) =>
@@ -3217,7 +3250,7 @@ export function PromotionChannelsPage() {
               />
             </label>
             <label className="field">
-              <span>Dataset / Pixel ID</span>
+              <DrawerFieldLabel required>Dataset / Pixel ID</DrawerFieldLabel>
               <Input
                 value={pixelForm.datasetId}
                 onChange={(e) =>
@@ -3226,7 +3259,7 @@ export function PromotionChannelsPage() {
               />
             </label>
             <label className="field">
-              <span>CAPI Token（可选）</span>
+              <DrawerFieldLabel>CAPI Token</DrawerFieldLabel>
               <Input
                 type="password"
                 autoComplete="new-password"
@@ -3512,7 +3545,7 @@ export function PromotionChannelsPage() {
       >
         <div className="drawer-form">
           <label className="field">
-            <span>日期</span>
+            <DrawerFieldLabel required>日期</DrawerFieldLabel>
             <DatePickerField
               ariaLabel="广告数据日期"
               value={metricForm.date}
@@ -3523,7 +3556,7 @@ export function PromotionChannelsPage() {
           </label>
           <div className="form-grid">
             <label className="field">
-              <span>花费（USD）</span>
+              <DrawerFieldLabel>花费（USD）</DrawerFieldLabel>
               <Input
                 type="number"
                 min="0"
@@ -3535,7 +3568,7 @@ export function PromotionChannelsPage() {
               />
             </label>
             <label className="field">
-              <span>展示</span>
+              <DrawerFieldLabel>展示</DrawerFieldLabel>
               <Input
                 type="number"
                 min="0"
@@ -3549,7 +3582,7 @@ export function PromotionChannelsPage() {
               />
             </label>
             <label className="field">
-              <span>点击</span>
+              <DrawerFieldLabel>点击</DrawerFieldLabel>
               <Input
                 type="number"
                 min="0"

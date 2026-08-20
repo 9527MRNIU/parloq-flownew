@@ -10,6 +10,7 @@ import { apiRequest, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { snowflakeId } from "../lib/account-identifiers";
 import { Button, Drawer, Input, SelectField, Spinner, toast } from "./ui";
+import { DrawerFieldLabel } from "./drawer-form";
 
 type PairingState = {
   accountId: string;
@@ -232,7 +233,7 @@ export function PhonePairingModal({
           <>
           <div className="phone-fields">
             <label className="field country-code-field">
-              <span>国家区号</span>
+              <DrawerFieldLabel required>国家区号</DrawerFieldLabel>
               <Input
                 value={countryCode}
                 inputMode="numeric"
@@ -243,7 +244,7 @@ export function PhonePairingModal({
               />
             </label>
             <label className="field">
-              <span>手机号码</span>
+              <DrawerFieldLabel required>手机号码</DrawerFieldLabel>
               <Input
                 value={phoneNumber}
                 inputMode="tel"
@@ -255,7 +256,7 @@ export function PhonePairingModal({
             </label>
           </div>
           <label className="field">
-            <span>账号隔离代理</span>
+            <DrawerFieldLabel>账号隔离代理</DrawerFieldLabel>
             {user?.isAdmin ? (
               <SelectField
                 ariaLabel="账号隔离代理"

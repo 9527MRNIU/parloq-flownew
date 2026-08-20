@@ -22,6 +22,7 @@ import {
 } from "../components/list-page";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
 import {
+  DrawerFieldLabel,
   DrawerFormField,
   DrawerFormLayout,
   DrawerFormSection,
@@ -665,7 +666,7 @@ export function ProtocolManagementPage() {
       >
         <DrawerFormLayout>
           <DrawerFormSection title="基础信息">
-            <DrawerFormField label="协议名称" meta={`${form.name.length}/64`}>
+            <DrawerFormField label="协议名称" meta={`${form.name.length}/64`} required>
               <Input maxLength={64} value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="请输入协议名称，用于识别区分不同协议" />
             </DrawerFormField>
             <DrawerFormField label="进号开关" hint="关闭后暂停新账号通过该节点接入，不影响已在线账号。">
@@ -683,9 +684,9 @@ export function ProtocolManagementPage() {
           </DrawerFormSection>
 
           <DrawerFormSection title="连接策略" description="按需在线会在配对同步、发送和人工操作时持有连接租约；空闲后仅断开 Socket，不退出 WhatsApp 登录。">
-            <DrawerFormField label="账号连接模式"><SelectField className="w-full" value={form.connectionPolicy} onValueChange={(next) => setForm((current) => ({ ...current, connectionPolicy: next as "on_demand" | "always_on" }))} options={[{ value: "on_demand", label: "按需在线（推荐）" }, { value: "always_on", label: "持续连接" }]} /></DrawerFormField>
-            <DrawerFormField label="空闲断开（秒）"><Input type="number" min={60} max={86400} value={form.idleDisconnectSeconds} onChange={(event) => setForm((current) => ({ ...current, idleDisconnectSeconds: event.target.value }))} /></DrawerFormField>
-            <DrawerFormField label="验证后保活（秒）"><Input type="number" min={0} max={3600} value={form.postVerifyGraceSeconds} onChange={(event) => setForm((current) => ({ ...current, postVerifyGraceSeconds: event.target.value }))} /></DrawerFormField>
+            <DrawerFormField label="账号连接模式" required><SelectField className="w-full" value={form.connectionPolicy} onValueChange={(next) => setForm((current) => ({ ...current, connectionPolicy: next as "on_demand" | "always_on" }))} options={[{ value: "on_demand", label: "按需在线（推荐）" }, { value: "always_on", label: "持续连接" }]} /></DrawerFormField>
+            <DrawerFormField label="空闲断开（秒）" required><Input type="number" min={60} max={86400} value={form.idleDisconnectSeconds} onChange={(event) => setForm((current) => ({ ...current, idleDisconnectSeconds: event.target.value }))} /></DrawerFormField>
+            <DrawerFormField label="验证后保活（秒）" required><Input type="number" min={0} max={3600} value={form.postVerifyGraceSeconds} onChange={(event) => setForm((current) => ({ ...current, postVerifyGraceSeconds: event.target.value }))} /></DrawerFormField>
           </DrawerFormSection>
 
           <DrawerFormSection title="公共配对风控与限速" description="设备和 IP 规则限制每次开始配对请求；设备、号码和渠道的新建规则只限制新配对任务；状态查询和取消请求按单个配对任务限制。">
@@ -693,11 +694,11 @@ export function ProtocolManagementPage() {
               <DrawerFormField key={key} label={label} hint={description} align="start">
                 <div className="grid min-w-0 grid-cols-2 gap-2">
                   <label className="grid min-w-0 gap-1 text-xs text-muted-foreground">
-                    <span>{key === "channelAttempt" ? "最多请求（留空不限）" : "最多请求"}</span>
+                    <DrawerFieldLabel required={key !== "channelAttempt"}>{key === "channelAttempt" ? "最多请求（留空不限）" : "最多请求"}</DrawerFieldLabel>
                     <Input type="number" min={1} max={100000} placeholder={key === "channelAttempt" ? "不限制" : undefined} value={form.rateLimitPolicy[key].maxRequests} onChange={(event) => setForm((current) => ({ ...current, rateLimitPolicy: { ...current.rateLimitPolicy, [key]: { ...current.rateLimitPolicy[key], maxRequests: event.target.value } } }))} />
                   </label>
                   <label className="grid min-w-0 gap-1 text-xs text-muted-foreground">
-                    <span>统计窗口（秒）</span>
+                    <DrawerFieldLabel required={key !== "channelAttempt" || Boolean(form.rateLimitPolicy[key].maxRequests.trim())}>统计窗口（秒）</DrawerFieldLabel>
                     <Input type="number" min={1} max={86400} disabled={key === "channelAttempt" && form.rateLimitPolicy[key].maxRequests.trim() === ""} value={form.rateLimitPolicy[key].windowSeconds} onChange={(event) => setForm((current) => ({ ...current, rateLimitPolicy: { ...current.rateLimitPolicy, [key]: { ...current.rateLimitPolicy[key], windowSeconds: event.target.value } } }))} />
                   </label>
                 </div>
@@ -726,7 +727,7 @@ export function ProtocolManagementPage() {
 
           <DrawerFormSection title="备注">
             <DrawerFormField label="备注内容" align="start" meta={`${form.remark.length}/512`}>
-              <Textarea rows={5} maxLength={512} value={form.remark} onChange={(event) => setForm((current) => ({ ...current, remark: event.target.value }))} placeholder="请输入备注（可选，最多 512 字）" />
+              <Textarea rows={5} maxLength={512} value={form.remark} onChange={(event) => setForm((current) => ({ ...current, remark: event.target.value }))} placeholder="请输入备注，最多 512 字" />
             </DrawerFormField>
           </DrawerFormSection>
         </DrawerFormLayout>
@@ -739,12 +740,12 @@ export function ProtocolManagementPage() {
         footer={<><Button variant="outline" disabled={poolSaving} onClick={() => setPoolEditing(null)}>取消</Button><Button disabled={poolSaving || !poolForm.name.trim() || !poolForm.memberIds.length} onClick={() => void savePool()}>{poolSaving ? <Spinner /> : null}保存</Button></>}
       >
         <div className="drawer-form">
-          <label className="field"><span>协议池名称</span><Input maxLength={64} value={poolForm.name} onChange={(event) => setPoolForm((current) => ({ ...current, name: event.target.value }))} /></label>
-          <div className="field"><span>成员与回退顺序</span><div className="rounded-lg border p-3 space-y-2">{rows.map((row) => {
+          <label className="field"><DrawerFieldLabel required>协议池名称</DrawerFieldLabel><Input maxLength={64} value={poolForm.name} onChange={(event) => setPoolForm((current) => ({ ...current, name: event.target.value }))} /></label>
+          <div className="field"><DrawerFieldLabel required>成员与回退顺序</DrawerFieldLabel><div className="rounded-lg border p-3 space-y-2">{rows.map((row) => {
             const selectedIndex = poolForm.memberIds.indexOf(row.id);
             return <label className="flex items-center justify-between gap-3" key={row.id}><span className="flex items-center gap-2"><Checkbox checked={selectedIndex >= 0} onCheckedChange={(checked) => setPoolForm((current) => ({ ...current, memberIds: checked ? [...current.memberIds, row.id] : current.memberIds.filter((id) => id !== row.id) }))} /><span>{row.name}</span></span><small className="text-muted-foreground">{selectedIndex >= 0 ? `优先级 ${selectedIndex + 1}` : "未启用"}</small></label>;
           })}</div><small>若要调整优先级，可取消后按目标顺序重新勾选。</small></div>
-          <label className="field"><span>备注</span><Textarea rows={4} maxLength={512} value={poolForm.remark} onChange={(event) => setPoolForm((current) => ({ ...current, remark: event.target.value }))} /></label>
+          <label className="field"><DrawerFieldLabel>备注</DrawerFieldLabel><Textarea rows={4} maxLength={512} value={poolForm.remark} onChange={(event) => setPoolForm((current) => ({ ...current, remark: event.target.value }))} /></label>
         </div>
       </Drawer>
       <Drawer

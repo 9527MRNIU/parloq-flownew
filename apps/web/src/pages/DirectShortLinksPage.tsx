@@ -23,6 +23,7 @@ import {
   EntityPrimaryCell,
   type EntityStatusMeta,
 } from "../components/entity-primary-cell";
+import { DrawerFieldLabel } from "../components/drawer-form";
 import {
   Badge,
   Button,
@@ -592,7 +593,7 @@ export function DirectShortLinksPage() {
       >
         <div className="drawer-form">
           <label className="field">
-            <span>目标地址</span>
+            <DrawerFieldLabel required>目标地址</DrawerFieldLabel>
             <Input
               value={targetUrl}
               onChange={(event) => setTargetUrl(event.target.value)}
@@ -600,7 +601,7 @@ export function DirectShortLinksPage() {
             />
           </label>
           <label className="field">
-            <span>内部标题（可选）</span>
+            <DrawerFieldLabel>内部标题</DrawerFieldLabel>
             <Input
               value={title}
               onChange={(event) => setTitle(event.target.value)}
@@ -609,7 +610,7 @@ export function DirectShortLinksPage() {
           </label>
           {user?.isAdmin ? (
             <label className="field">
-              <span>Bitly 账号</span>
+              <DrawerFieldLabel>Bitly 账号</DrawerFieldLabel>
               <SelectField
                 value={providerAccountId || "__auto__"}
                 onValueChange={(value) =>
@@ -661,7 +662,7 @@ export function DirectShortLinksPage() {
                 : "添加 Bitly 账号"}
             </strong>
             <label className="field">
-              <span>账号名称</span>
+              <DrawerFieldLabel required>账号名称</DrawerFieldLabel>
               <Input
                 value={accountForm.name}
                 onChange={(event) =>
@@ -671,7 +672,7 @@ export function DirectShortLinksPage() {
             </label>
             <div className="form-grid">
               <label className="field">
-                <span>短域名</span>
+                <DrawerFieldLabel required>短域名</DrawerFieldLabel>
                 <Input
                   value={accountForm.shortDomain}
                   onChange={(event) =>
@@ -684,7 +685,7 @@ export function DirectShortLinksPage() {
                 />
               </label>
               <label className="field">
-                <span>Group GUID（可选）</span>
+                <DrawerFieldLabel>Group GUID</DrawerFieldLabel>
                 <Input
                   value={accountForm.groupGuid}
                   onChange={(event) =>
@@ -698,7 +699,9 @@ export function DirectShortLinksPage() {
               </label>
             </div>
             <label className="field">
-              <span>Access Token{editingAccount ? "（留空不修改）" : ""}</span>
+              <DrawerFieldLabel required={!editingAccount}>
+                Access Token{editingAccount ? "（留空不修改）" : ""}
+              </DrawerFieldLabel>
               <Input
                 type="password"
                 autoComplete="new-password"

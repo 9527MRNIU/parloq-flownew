@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
+import { DrawerFieldLabel } from "../components/drawer-form";
 import {
   ListPagination,
   ListTableCard,
@@ -670,7 +671,11 @@ export default function PromotionIntegrationsPage() {
                 }
               />
               <UploadCloudIcon size={27} />
-              <strong>{file?.name || "选择集成 ZIP 文件"}</strong>
+              <strong>
+                <DrawerFieldLabel required>
+                  {file?.name || "选择集成 ZIP 文件"}
+                </DrawerFieldLabel>
+              </strong>
               <span>
                 {packageInspecting
                   ? "正在读取包内名称、标识和说明…"
@@ -681,7 +686,7 @@ export default function PromotionIntegrationsPage() {
           {!replacing ? (
             <>
               <label className="field">
-                <span>集成名称</span>
+                <DrawerFieldLabel required>集成名称</DrawerFieldLabel>
                 <Input
                   value={form.name}
                   maxLength={120}
@@ -692,7 +697,7 @@ export default function PromotionIntegrationsPage() {
                 />
               </label>
               <label className="field">
-                <span>集成标识</span>
+                <DrawerFieldLabel required>集成标识</DrawerFieldLabel>
                 <Input
                   value={form.integrationKey}
                   maxLength={80}
@@ -707,7 +712,7 @@ export default function PromotionIntegrationsPage() {
                 <small>用于模板绑定，租户内保持唯一。</small>
               </label>
               <label className="field">
-                <span>源域名</span>
+                <DrawerFieldLabel required>源域名</DrawerFieldLabel>
                 <SearchableSelect
                   value={form.domainId}
                   onValueChange={(value) =>
@@ -726,7 +731,7 @@ export default function PromotionIntegrationsPage() {
                 <small>系统会在这个域名下自动生成资源地址，不需要填写路径。</small>
               </label>
               <label className="field">
-                <span>内部说明（可选）</span>
+                <DrawerFieldLabel>内部说明</DrawerFieldLabel>
                 <Input
                   value={form.description}
                   maxLength={2000}

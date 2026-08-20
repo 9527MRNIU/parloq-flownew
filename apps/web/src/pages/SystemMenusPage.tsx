@@ -33,6 +33,7 @@ import {
   useClientPagination,
 } from "../components/list-page";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
+import { DrawerFieldLabel } from "../components/drawer-form";
 
 type MenuRow = {
   id: string;
@@ -279,11 +280,11 @@ export function SystemMenusPage() {
       >
         <div className="drawer-form">
           <label className="field">
-            <span>菜单名称</span>
+            <DrawerFieldLabel required>菜单名称</DrawerFieldLabel>
             <Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
           </label>
           <label className="field">
-            <span>排序</span>
+            <DrawerFieldLabel required>排序</DrawerFieldLabel>
             <Input type="number" min="0" value={String(form.sortOrder)} onChange={(event) => setForm({ ...form, sortOrder: Number(event.target.value) })} />
           </label>
           <label className="switch-row">

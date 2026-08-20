@@ -538,7 +538,7 @@ class PromotionChannelCreate(Model):
         alias="metaEventMapping",
     )
     in_app_browser_mode: Literal["allow", "guide_external"] = Field(
-        default="allow", alias="inAppBrowserMode"
+        default="guide_external", alias="inAppBrowserMode"
     )
     new_account_marketing_enabled: bool = Field(
         default=True, alias="newAccountMarketingEnabled"

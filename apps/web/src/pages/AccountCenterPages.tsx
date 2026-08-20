@@ -48,6 +48,7 @@ import {
   snowflakeId,
 } from "../lib/account-identifiers";
 import { formatPhoneDisplay } from "../lib/utils";
+import { DrawerFieldLabel } from "../components/drawer-form";
 
 const field = (row: Record<string, unknown>, ...keys: string[]) => {
   for (const key of keys) if (row[key] != null) return String(row[key]);
@@ -599,7 +600,7 @@ export function AccountGroupsPage() {
         ) : <EmptyState title="还没有账号分组" description="创建分组后可按用途、国家或客户业务组织统一账号池。" />}
       </ListTableCard>
       <Drawer open={open} onClose={() => !pending && setOpen(false)} title={editing ? "编辑账号分组" : "新建账号分组"} description="分组仅用于组织和筛选，不改变账号凭据或连接状态。" footer={<><Button variant="outline" onClick={() => setOpen(false)}>取消</Button><Button disabled={pending || !name.trim()} onClick={() => void save()}>{pending ? <Spinner /> : null}保存</Button></>}>
-        <div className="drawer-form"><label className="field"><span>分组名称</span><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：美国推广账号" /></label><label className="field"><span>分组说明（可选）</span><Textarea rows={4} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="说明用途、地区或运营规则" /></label></div>
+        <div className="drawer-form"><label className="field"><DrawerFieldLabel required>分组名称</DrawerFieldLabel><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：美国推广账号" /></label><label className="field"><DrawerFieldLabel>分组说明</DrawerFieldLabel><Textarea rows={4} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="说明用途、地区或运营规则" /></label></div>
       </Drawer>
     </StandardListPage>
   );

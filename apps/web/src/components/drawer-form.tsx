@@ -37,6 +37,32 @@ function DrawerHelpTip({
   );
 }
 
+export function DrawerRequiredMark() {
+  return (
+    <>
+      <span aria-hidden="true" className="ml-1 text-destructive">
+        *
+      </span>
+      <span className="sr-only">（必填）</span>
+    </>
+  );
+}
+
+export function DrawerFieldLabel({
+  children,
+  required = false,
+}: {
+  children: ReactNode;
+  required?: boolean;
+}) {
+  return (
+    <span>
+      {children}
+      {required ? <DrawerRequiredMark /> : null}
+    </span>
+  );
+}
+
 export function DrawerFormLayout({
   children,
   aside,
@@ -106,6 +132,7 @@ export function DrawerFormField({
   children,
   hint,
   meta,
+  required = false,
   align = "center",
   className,
 }: {
@@ -114,6 +141,7 @@ export function DrawerFormField({
   children: ReactNode;
   hint?: ReactNode;
   meta?: ReactNode;
+  required?: boolean;
   align?: "center" | "start";
   className?: string;
 }) {
@@ -132,9 +160,13 @@ export function DrawerFormField({
       {htmlFor ? (
         <label htmlFor={htmlFor} className={labelClassName}>
           {label}
+          {required ? <DrawerRequiredMark /> : null}
         </label>
       ) : (
-        <div className={labelClassName}>{label}</div>
+        <div className={labelClassName}>
+          {label}
+          {required ? <DrawerRequiredMark /> : null}
+        </div>
       )}
       {hint ? <DrawerHelpTip label={String(label)}>{hint}</DrawerHelpTip> : null}
     </div>

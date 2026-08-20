@@ -39,6 +39,7 @@ import {
   type MessagePreviewButtonType,
   type MessagePreviewHeaderType,
 } from "../components/message-template-preview";
+import { DrawerFieldLabel } from "../components/drawer-form";
 import {
   Badge,
   Button,
@@ -936,7 +937,9 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
         <div className="drawer-form">
           {config.fields.map((item) => (
             <label className="field" key={item.key}>
-              <span>{item.label}</span>
+              <DrawerFieldLabel required={item.required}>
+                {item.label}
+              </DrawerFieldLabel>
               {item.type === "textarea" ? (
                 <>
                   {item.key === "recipients" ? (
@@ -1286,13 +1289,13 @@ const configs: Record<string, ModuleConfig> = {
       },
       {
         key: "materialId",
-        label: "关联素材（可选）",
+        label: "关联素材",
         type: "select",
         optionSource: "materials",
       },
       {
         key: "promotionChannelId",
-        label: "关联推广渠道（可选）",
+        label: "关联推广渠道",
         type: "select",
         optionSource: "promotionChannels",
       },

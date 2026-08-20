@@ -24,6 +24,7 @@ import {
   useClientPagination,
 } from "../components/list-page";
 import {
+  DrawerFieldLabel,
   DrawerFormField,
   DrawerFormLayout,
   DrawerFormSection,
@@ -1095,7 +1096,7 @@ export function IpManagementPage() {
               </div>
             ) : null}
             <DrawerFormSection title="分配规则">
-              <DrawerFormField label="分配模式" hint={allocationDescriptions[policy.allocationMode]}>
+              <DrawerFormField required label="分配模式" hint={allocationDescriptions[policy.allocationMode]}>
                 <SelectField
                   ariaLabel="IP 分配模式"
                   className="w-full"
@@ -1119,7 +1120,7 @@ export function IpManagementPage() {
                   ]}
                 />
               </DrawerFormField>
-              <DrawerFormField label="国家匹配" hint={countryDescriptions[policy.countryMatch]}>
+              <DrawerFormField required label="国家匹配" hint={countryDescriptions[policy.countryMatch]}>
                 <SelectField
                   ariaLabel="国家匹配策略"
                   className="w-full"
@@ -1139,6 +1140,7 @@ export function IpManagementPage() {
                 />
               </DrawerFormField>
               <DrawerFormField
+                required
                 label="每个 IP 最多账号数"
                 hint={policy.allocationMode === "strict_one_to_one" ? "严格 1:1 模式固定按 1 个账号执行。" : "达到上限的 IP 不再参与自动分配。"}
               >
@@ -1229,7 +1231,7 @@ export function IpManagementPage() {
       >
         <div className="drawer-form">
           <label className="field">
-            <span>代理列表</span>
+            <DrawerFieldLabel required>代理列表</DrawerFieldLabel>
             <Textarea
               className="min-h-64 resize-y font-mono"
               value={bulkText}
@@ -1254,7 +1256,7 @@ export function IpManagementPage() {
 
           <div className="form-grid">
             <label className="field">
-              <span>默认协议</span>
+              <DrawerFieldLabel required>默认协议</DrawerFieldLabel>
               <SelectField
                 value={bulkDefaults.protocol}
                 onValueChange={(value) =>
@@ -1271,7 +1273,7 @@ export function IpManagementPage() {
               />
             </label>
             <label className="field">
-              <span>国家代码（可选）</span>
+              <DrawerFieldLabel>国家代码</DrawerFieldLabel>
               <Input
                 value={bulkDefaults.countryCode}
                 maxLength={2}
@@ -1285,7 +1287,7 @@ export function IpManagementPage() {
               />
             </label>
             <label className="field">
-              <span>代理供应商（可选）</span>
+              <DrawerFieldLabel>代理供应商</DrawerFieldLabel>
               <Input
                 value={bulkDefaults.provider}
                 maxLength={120}
@@ -1391,7 +1393,7 @@ export function IpManagementPage() {
         <div className="drawer-form">
           <div className="form-grid">
             <label className="field form-span-2">
-              <span>代理名称</span>
+              <DrawerFieldLabel required>代理名称</DrawerFieldLabel>
               <Input
                 value={form.name}
                 onChange={(event) => updateForm("name", event.target.value)}
@@ -1399,7 +1401,7 @@ export function IpManagementPage() {
               />
             </label>
             <label className="field">
-              <span>协议</span>
+              <DrawerFieldLabel required>协议</DrawerFieldLabel>
               <SelectField
                 value={form.protocol}
                 onValueChange={(value) => updateForm("protocol", value)}
@@ -1411,7 +1413,7 @@ export function IpManagementPage() {
               />
             </label>
             <label className="field">
-              <span>端口</span>
+              <DrawerFieldLabel required>端口</DrawerFieldLabel>
               <Input
                 type="number"
                 min="1"
@@ -1422,7 +1424,7 @@ export function IpManagementPage() {
               />
             </label>
             <label className="field form-span-2">
-              <span>主机地址</span>
+              <DrawerFieldLabel required>主机地址</DrawerFieldLabel>
               <Input
                 value={form.host}
                 onChange={(event) => updateForm("host", event.target.value)}
@@ -1430,7 +1432,7 @@ export function IpManagementPage() {
               />
             </label>
             <label className="field">
-              <span>用户名（留空不修改）</span>
+              <DrawerFieldLabel>用户名（留空不修改）</DrawerFieldLabel>
               <Input
                 value={form.username}
                 onChange={(event) => updateForm("username", event.target.value)}
@@ -1439,7 +1441,7 @@ export function IpManagementPage() {
               />
             </label>
             <label className="field">
-              <span>密码（留空不修改）</span>
+              <DrawerFieldLabel>密码（留空不修改）</DrawerFieldLabel>
               <Input
                 type="password"
                 value={form.password}
@@ -1449,7 +1451,7 @@ export function IpManagementPage() {
               />
             </label>
             <label className="field">
-              <span>国家代码</span>
+              <DrawerFieldLabel>国家代码</DrawerFieldLabel>
               <Input
                 value={form.countryCode}
                 maxLength={2}
@@ -1460,7 +1462,7 @@ export function IpManagementPage() {
               />
             </label>
             <label className="field">
-              <span>代理供应商（可选）</span>
+              <DrawerFieldLabel>代理供应商</DrawerFieldLabel>
               <Input
                 value={form.provider}
                 onChange={(event) => updateForm("provider", event.target.value)}

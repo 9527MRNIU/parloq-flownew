@@ -21,6 +21,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiDownload, apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { EntityStatusIndicator } from "../components/entity-primary-cell";
+import { DrawerFieldLabel } from "../components/drawer-form";
 import {
   ListPagination,
   ListTableCard,
@@ -1036,7 +1037,7 @@ export function MaterialsPage() {
       >
         <div className="drawer-form">
           <div className="field">
-            <span>素材类型</span>
+            <DrawerFieldLabel required>素材类型</DrawerFieldLabel>
             <div className="grid grid-cols-3 gap-2">
               {MATERIAL_TYPES.map((item) => {
                 const Icon = item.icon;
@@ -1049,12 +1050,12 @@ export function MaterialsPage() {
             </div>
           </div>
 
-          {!isNewBinary ? <label className="field"><span>素材名称</span><Input maxLength={120} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder={`输入${currentDefinition.label}素材名称`} /></label> : null}
+          {!isNewBinary ? <label className="field"><DrawerFieldLabel required>素材名称</DrawerFieldLabel><Input maxLength={120} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder={`输入${currentDefinition.label}素材名称`} /></label> : null}
 
           {form.type === "text" ? (
             <>
               <div className="field">
-                <span>文本用途</span>
+                <DrawerFieldLabel required>文本用途</DrawerFieldLabel>
                 <div className="grid grid-cols-4 gap-2">
                   {TEXT_ROLE_OPTIONS.map((role) => (
                     <button
@@ -1085,12 +1086,12 @@ export function MaterialsPage() {
                 return (
                   <>
                     <label className="field">
-                      <span>原文</span>
+                      <DrawerFieldLabel required>原文</DrawerFieldLabel>
                       <Textarea rows={role.multiline ? 7 : 3} maxLength={role.maxLength} value={form.originalText} onChange={(event) => updateText("originalText", event.target.value)} placeholder={`输入${role.label}原文`} />
                       <span className="text-right text-xs text-muted-foreground">{characterCount(form.originalText)}/{role.maxLength}</span>
                     </label>
                     <label className="field">
-                      <span>译文（可选）</span>
+                      <DrawerFieldLabel>译文</DrawerFieldLabel>
                       <Textarea rows={role.multiline ? 7 : 3} maxLength={role.maxLength} value={form.translatedText} onChange={(event) => updateText("translatedText", event.target.value)} placeholder={`输入${role.label}译文`} />
                       <span className="text-right text-xs text-muted-foreground">{characterCount(form.translatedText)}/{role.maxLength}</span>
                     </label>
@@ -1100,13 +1101,13 @@ export function MaterialsPage() {
             </>
           ) : form.type === "contact" ? (
             <>
-              <label className="field"><span>联系人名称</span><Input value={form.contactName} onChange={(event) => setForm({ ...form, contactName: event.target.value })} placeholder="输入联系人名称" /></label>
-              <label className="field"><span>电话号码</span><Input value={form.contactPhone} onChange={(event) => setForm({ ...form, contactPhone: formatPhoneDisplay(event.target.value) })} placeholder="8613800000000" /></label>
+              <label className="field"><DrawerFieldLabel required>联系人名称</DrawerFieldLabel><Input value={form.contactName} onChange={(event) => setForm({ ...form, contactName: event.target.value })} placeholder="输入联系人名称" /></label>
+              <label className="field"><DrawerFieldLabel required>电话号码</DrawerFieldLabel><Input value={form.contactPhone} onChange={(event) => setForm({ ...form, contactPhone: formatPhoneDisplay(event.target.value) })} placeholder="8613800000000" /></label>
             </>
           ) : isNewBinary ? (
             <>
               <div className="field">
-                <span>批量命名</span>
+                <DrawerFieldLabel required>批量命名</DrawerFieldLabel>
                 <div className="grid grid-cols-3 gap-2">
                   {([
                     { value: "filename", label: "保留原文件名" },
@@ -1149,7 +1150,7 @@ export function MaterialsPage() {
                   if (!pending) addBatchFiles(event.dataTransfer.files);
                 }}
               >
-                <span>选择文件</span>
+                <DrawerFieldLabel required>选择文件</DrawerFieldLabel>
                 <input
                   className="sr-only"
                   type="file"
@@ -1214,7 +1215,9 @@ export function MaterialsPage() {
             </>
           ) : (
             <label className="field">
-              <span>{editing?.hasFile ? "替换文件（可选）" : "上传文件"}</span>
+              <DrawerFieldLabel required={!editing?.hasFile}>
+                {editing?.hasFile ? "替换文件" : "上传文件"}
+              </DrawerFieldLabel>
               <input className="sr-only" type="file" accept={currentDefinition.accept} onChange={(event) => { const file = event.target.files?.[0] || null; setForm((current) => ({ ...current, file, name: current.name || file?.name.replace(/\.[^.]+$/, "") || "" })); }} />
               <span className="flex min-h-36 cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-primary/40 bg-primary/[0.03] px-5 text-center transition-colors hover:bg-primary/[0.06]">
                 <UploadCloudIcon className="text-primary" size={30} />

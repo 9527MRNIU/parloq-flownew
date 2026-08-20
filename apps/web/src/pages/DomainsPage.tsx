@@ -1284,7 +1284,7 @@ export function DomainsPage() {
         <div className="drawer-form">
           <DrawerFormLayout>
             <DrawerFormSection title="基础信息">
-              <DrawerFormField label="域名">
+              <DrawerFormField label="域名" required>
                 <Input
                   value={hostname}
                   disabled={Boolean(editing)}
@@ -1431,7 +1431,7 @@ export function DomainsPage() {
               title="查询条件"
               description="输入域名主体后，系统会读取 NameSilo 当前后缀价格，并分批查询可注册状态。"
             >
-              <DrawerFormField label="域名主体" htmlFor="domain-purchase-label">
+              <DrawerFormField label="域名主体" htmlFor="domain-purchase-label" required>
                 <Input
                   id="domain-purchase-label"
                   value={purchaseLabel}
@@ -1445,7 +1445,7 @@ export function DomainsPage() {
                   placeholder="例如：brand 或 brand.shop"
                 />
               </DrawerFormField>
-              <DrawerFormField label="购买年限" htmlFor="domain-purchase-years">
+              <DrawerFormField label="购买年限" htmlFor="domain-purchase-years" required>
                 <Input
                   id="domain-purchase-years"
                   type="number"

@@ -18,6 +18,7 @@ import {
   AccountStatusIndicator,
   accountUnifiedStatusKey,
 } from "../components/account-status-indicator";
+import { DrawerFieldLabel } from "../components/drawer-form";
 import {
   ListPagination,
   ListTableCard,
@@ -912,7 +913,11 @@ export function PersonalAccountsPage() {
               }
             />
             {importValidating ? <Spinner /> : <UploadCloudIcon size={30} />}
-            <strong>{importFile?.name || "选择账号 JSON 文件"}</strong>
+            <strong>
+              <DrawerFieldLabel required>
+                {importFile?.name || "选择账号 JSON 文件"}
+              </DrawerFieldLabel>
+            </strong>
             <span>
               支持账号 JSON 与完整备份，最大 10 MB
             </span>
@@ -930,7 +935,7 @@ export function PersonalAccountsPage() {
           ) : null}
           {user?.isAdmin ? (
             <label className="field">
-              <span>固定 IP（可选）</span>
+              <DrawerFieldLabel>固定 IP</DrawerFieldLabel>
               <SelectField
                 value={importProxyId}
                 onValueChange={setImportProxyId}
