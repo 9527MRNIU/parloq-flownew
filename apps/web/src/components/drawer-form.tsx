@@ -99,27 +99,36 @@ export function DrawerFormSection({
   description,
   action,
   children,
+  hideHeader = false,
   className,
 }: {
   title: string;
   description?: string;
   action?: ReactNode;
   children: ReactNode;
+  hideHeader?: boolean;
   className?: string;
 }) {
   return (
     <section className={cn("min-w-0", className)}>
-      <header className="flex min-h-8 min-w-0 items-center gap-2.5">
-        <div className="flex shrink-0 items-center gap-1">
-          <h3 className="drawer-form-section-title">{title}</h3>
-          {description ? (
-            <DrawerHelpTip label={title}>{description}</DrawerHelpTip>
-          ) : null}
-        </div>
-        <div className="h-px min-w-4 flex-1 bg-border" aria-hidden="true" />
-        {action ? <div className="shrink-0">{action}</div> : null}
-      </header>
-      <div className="mt-4 grid min-w-0 gap-[var(--drawer-form-field-gap)]">
+      {!hideHeader ? (
+        <header className="flex min-h-8 min-w-0 items-center gap-2.5">
+          <div className="flex shrink-0 items-center gap-1">
+            <h3 className="drawer-form-section-title">{title}</h3>
+            {description ? (
+              <DrawerHelpTip label={title}>{description}</DrawerHelpTip>
+            ) : null}
+          </div>
+          <div className="h-px min-w-4 flex-1 bg-border" aria-hidden="true" />
+          {action ? <div className="shrink-0">{action}</div> : null}
+        </header>
+      ) : null}
+      <div
+        className={cn(
+          "grid min-w-0 gap-[var(--drawer-form-field-gap)]",
+          !hideHeader && "mt-4",
+        )}
+      >
         {children}
       </div>
     </section>
@@ -151,12 +160,15 @@ export function DrawerFormField({
   const labelNode = (
     <div
       className={cn(
-        "flex min-w-0 gap-1 md:self-start",
+        "drawer-form-field-label flex min-w-0 gap-1 md:self-start",
         align === "start"
           ? "items-start md:min-h-8 md:pt-1.5"
           : "items-center md:h-8",
       )}
     >
+      {hint ? (
+        <DrawerHelpTip label={String(label)}>{hint}</DrawerHelpTip>
+      ) : null}
       {htmlFor ? (
         <label htmlFor={htmlFor} className={labelClassName}>
           {label}
@@ -168,14 +180,13 @@ export function DrawerFormField({
           {required ? <DrawerRequiredMark /> : null}
         </div>
       )}
-      {hint ? <DrawerHelpTip label={String(label)}>{hint}</DrawerHelpTip> : null}
     </div>
   );
 
   return (
     <div
       className={cn(
-        "grid min-w-0 gap-2 md:grid-cols-[var(--drawer-form-label-width)_minmax(0,1fr)] md:gap-x-[var(--drawer-form-label-gap)]",
+        "drawer-form-field grid min-w-0 gap-2 md:grid-cols-[var(--drawer-form-label-width)_minmax(0,1fr)] md:gap-x-[var(--drawer-form-label-gap)]",
         className,
       )}
     >

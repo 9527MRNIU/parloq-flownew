@@ -482,8 +482,12 @@ def channel_row(db: DbSession, item: PromotionChannel) -> dict:
 
     manifest = template.manifest_json if template else {}
     pixel_ready = bool(pixel and pixel.enabled)
+    browser_enabled = bool(pixel_ready and pixel.browser_pixel_enabled)
+    capi_enabled = bool(
+        pixel_ready and pixel.capi_enabled and pixel.capi_token_ciphertext
+    )
     meta_domain_monitored = bool(
-        hostname and item.meta_browser_pixel_enabled and pixel_ready
+        hostname and browser_enabled
     )
     if protocol_node is not None:
         route_health, route_reason = protocol_health(db, protocol_node)
@@ -531,13 +535,15 @@ def channel_row(db: DbSession, item: PromotionChannel) -> dict:
         "protocolPoolId": entity_id(protocol_pool) if protocol_pool else None,
         "protocolPoolName": protocol_pool.name if protocol_pool else None,
         "routeVersion": item.route_version,
-        "metaBrowserPixelEnabled": item.meta_browser_pixel_enabled,
-        "metaCapiEnabled": item.meta_capi_enabled,
-        "metaCapiProbeReady": bool(pixel_ready and pixel.capi_token_ciphertext),
+        "metaBrowserPixelEnabled": browser_enabled,
+        "metaCapiEnabled": capi_enabled,
+        "metaCapiProbeReady": capi_enabled,
         "metaDomainMonitored": meta_domain_monitored,
         "metaDomainBlocked": bool(item.meta_domain_blocked),
         "metaDomainBlockedAt": iso(item.meta_domain_blocked_at),
-        "metaEventMapping": normalized_meta_event_mapping(item.meta_event_mapping_json),
+        "metaEventMapping": normalized_meta_event_mapping(
+            pixel.event_mapping_json if pixel else None
+        ),
         "inAppBrowserMode": item.in_app_browser_mode,
         "newAccountMarketingEnabled": item.new_account_marketing_enabled,
         "effectiveConfig": {
@@ -558,14 +564,13 @@ def channel_row(db: DbSession, item: PromotionChannel) -> dict:
             "accountGroupReady": account_group is not None,
             "meta": {
                 "pixelReady": bool(pixel and pixel.enabled),
-                "browserEnabled": bool(item.meta_browser_pixel_enabled and pixel),
-                "capiEnabled": bool(item.meta_capi_enabled and pixel and pixel.capi_token_ciphertext),
+                "browserEnabled": browser_enabled,
+                "capiEnabled": capi_enabled,
             },
         },
         "localeMode": item.locale_mode,
         "locale": item.locale,
         "status": item.status,
-        "launchAt": iso(item.launch_at),
         "publicUrl": f"https://{hostname}/{item.slug}" if hostname else f"/api/public/promotion/channels/{item.slug}/render",
         "fissionPublicUrl": f"https://{hostname}/{item.slug}/1" if hostname else f"/api/public/promotion/channels/{item.slug}/fission/render",
         "createdAt": iso(item.created_at),
@@ -1574,8 +1579,6 @@ def _validate_channel_contract(
     protocol_node_id: int | None,
     protocol_pool_id: int | None,
     pixel_id: int | None,
-    browser_enabled: bool,
-    capi_enabled: bool,
 ) -> None:
     template = db.get(PromotionTemplate, template_id)
     manifest = template.manifest_json if template else {}
@@ -1604,11 +1607,11 @@ def _validate_channel_contract(
         nodes = []
     if not nodes or any(node is None or node.protocol_type != "baileys" for node in nodes):
         raise HTTPException(status_code=409, detail="协议路由不支持模板声明的账号接入能力")
-    if browser_enabled or capi_enabled:
-        pixel = db.get(MetaPixel, pixel_id) if pixel_id else None
+    pixel = db.get(MetaPixel, pixel_id) if pixel_id else None
+    if pixel and (pixel.browser_pixel_enabled or pixel.capi_enabled):
         if pixel is None or not pixel.enabled:
             raise HTTPException(status_code=422, detail="启用 Meta 事件前必须绑定可用 Pixel")
-        if capi_enabled and not pixel.capi_token_ciphertext:
+        if pixel.capi_enabled and not pixel.capi_token_ciphertext:
             raise HTTPException(status_code=422, detail="启用 Meta CAPI 前必须配置 CAPI Token")
 
 
@@ -1630,6 +1633,23 @@ def _resolve_channel_account_group(
     if group is None:
         raise HTTPException(status_code=404, detail="账号入库分组不存在")
     return group.id
+
+
+_CHANNEL_SLUG_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
+
+
+def _new_channel_slug(db: DbSession, length: int = 8) -> str:
+    for _ in range(32):
+        slug = "".join(
+            secrets.choice(_CHANNEL_SLUG_ALPHABET) for _ in range(length)
+        )
+        if db.scalar(
+            select(PromotionChannel.id)
+            .where(PromotionChannel.slug == slug)
+            .limit(1)
+        ) is None:
+            return slug
+    raise HTTPException(status_code=503, detail="暂时无法生成访问短码，请稍后重试")
 
 
 def _resolve_channel_protocol_route(
@@ -1707,17 +1727,14 @@ def create_channel(payload: PromotionChannelCreate, db: DbSession, current_user:
         raise HTTPException(status_code=422, detail="启用渠道前必须选择账号入库分组")
     template = db.get(PromotionTemplate, tpl); supported = (template.manifest_json or {}).get("supportedLocales", [])
     if payload.locale_mode == "fixed" and (not payload.locale or payload.locale not in supported): raise HTTPException(status_code=422, detail="固定 locale 必须属于模板 supportedLocales")
-    browser_enabled = bool(pix and payload.meta_browser_pixel_enabled)
     _validate_channel_contract(
         db,
         template_id=tpl,
         protocol_node_id=protocol_node_id,
         protocol_pool_id=protocol_pool_id,
         pixel_id=pix,
-        browser_enabled=browser_enabled,
-        capi_enabled=payload.meta_capi_enabled,
     )
-    item = PromotionChannel(public_id=new_public_id("pchn"), channel_type=payload.channel_type, name=payload.name, country_code=payload.country_code, template_id=tpl, domain_id=dom, subdomain_prefix=payload.subdomain_prefix or "", slug=payload.slug, pixel_id=pix, account_group_id=account_group_id, protocol_node_id=protocol_node_id, protocol_pool_id=protocol_pool_id, route_version=1, meta_browser_pixel_enabled=browser_enabled, meta_capi_enabled=payload.meta_capi_enabled, meta_event_mapping_json=payload.meta_event_mapping, in_app_browser_mode=payload.in_app_browser_mode, new_account_marketing_enabled=payload.new_account_marketing_enabled, locale_mode=payload.locale_mode, locale=payload.locale, status=payload.status, launch_at=payload.launch_at, created_by=current_user.id)
+    item = PromotionChannel(public_id=new_public_id("pchn"), channel_type=payload.channel_type, name=payload.name, country_code=payload.country_code, template_id=tpl, domain_id=dom, subdomain_prefix=payload.subdomain_prefix or "", slug=payload.slug or _new_channel_slug(db), pixel_id=pix, account_group_id=account_group_id, protocol_node_id=protocol_node_id, protocol_pool_id=protocol_pool_id, route_version=1, in_app_browser_mode=payload.in_app_browser_mode, new_account_marketing_enabled=payload.new_account_marketing_enabled, locale_mode=payload.locale_mode, locale=payload.locale, status=payload.status, created_by=current_user.id)
     db.add(item)
     try: db.commit()
     except IntegrityError: db.rollback(); raise HTTPException(status_code=409, detail="该域名和子域名下的推广渠道 slug 已存在") from None
@@ -1735,7 +1752,6 @@ def update_channel(channel_id: str, payload: PromotionChannelUpdate, db: DbSessi
         item.domain_id,
         item.subdomain_prefix,
         item.pixel_id,
-        item.meta_browser_pixel_enabled,
     )
     tpl, dom, pix = _resolve_channel_refs(db, current_user, payload.template_id, payload.domain_id if "domain_id" in payload.model_fields_set else None, payload.pixel_id if "pixel_id" in payload.model_fields_set else None, item)
     if payload.name is not None: item.name = payload.name
@@ -1745,7 +1761,6 @@ def update_channel(channel_id: str, payload: PromotionChannelUpdate, db: DbSessi
     if payload.status is not None: item.status = payload.status
     if payload.locale_mode is not None: item.locale_mode = payload.locale_mode
     if "locale" in payload.model_fields_set: item.locale = payload.locale
-    if "launch_at" in payload.model_fields_set: item.launch_at = payload.launch_at
     item.template_id = tpl
     template = db.get(PromotionTemplate, tpl); supported = (template.manifest_json or {}).get("supportedLocales", [])
     if item.locale_mode == "fixed" and (not item.locale or item.locale not in supported): raise HTTPException(status_code=422, detail="固定 locale 必须属于模板 supportedLocales")
@@ -1754,26 +1769,14 @@ def update_channel(channel_id: str, payload: PromotionChannelUpdate, db: DbSessi
         raise HTTPException(status_code=422, detail="生产环境渠道必须绑定已验证域名")
     if "pixel_id" in payload.model_fields_set:
         item.pixel_id = pix if payload.pixel_id else None
-        if item.pixel_id is None:
-            item.meta_browser_pixel_enabled = False
-            item.meta_capi_enabled = False
-    if payload.meta_browser_pixel_enabled is not None:
-        item.meta_browser_pixel_enabled = payload.meta_browser_pixel_enabled
-    if payload.meta_capi_enabled is not None:
-        item.meta_capi_enabled = payload.meta_capi_enabled
-    if payload.meta_event_mapping is not None:
-        item.meta_event_mapping_json = payload.meta_event_mapping
     if payload.in_app_browser_mode is not None:
         item.in_app_browser_mode = payload.in_app_browser_mode
     if payload.new_account_marketing_enabled is not None:
         item.new_account_marketing_enabled = payload.new_account_marketing_enabled
-    if item.pixel_id is None:
-        item.meta_browser_pixel_enabled = False
     monitored_config_after = (
         item.domain_id,
         item.subdomain_prefix,
         item.pixel_id,
-        item.meta_browser_pixel_enabled,
     )
     if monitored_config_after != monitored_config_before:
         item.meta_domain_blocked = False
@@ -1824,8 +1827,6 @@ def update_channel(channel_id: str, payload: PromotionChannelUpdate, db: DbSessi
         protocol_node_id=item.protocol_node_id,
         protocol_pool_id=item.protocol_pool_id,
         pixel_id=item.pixel_id,
-        browser_enabled=item.meta_browser_pixel_enabled,
-        capi_enabled=item.meta_capi_enabled,
     )
     try: db.commit()
     except IntegrityError: db.rollback(); raise HTTPException(status_code=409, detail="该域名和子域名下的推广渠道 slug 已存在") from None
@@ -1849,6 +1850,7 @@ def probe_channel_meta_capi(
     if (
         pixel is None
         or not pixel.enabled
+        or not pixel.capi_enabled
         or not pixel.capi_token_ciphertext
     ):
         raise HTTPException(
@@ -2045,11 +2047,8 @@ def _public_channel(
                 PromotionChannel.subdomain_prefix == requested_subdomain,
             )
         )
-    if item is None or (
-        item.launch_at
-        and item.launch_at.replace(tzinfo=item.launch_at.tzinfo or UTC) > utcnow()
-    ):
-        raise HTTPException(status_code=404, detail="推广渠道不存在或尚未上线")
+    if item is None:
+        raise HTTPException(status_code=404, detail="推广渠道不存在")
     if not preview_mode and domain is not None and not (
         domain.enabled
         and domain.registration_status == "active"
@@ -2213,7 +2212,7 @@ def public_channel(slug: str, request: Request, db: DbSession, lang: str | None 
     from app.services.meta_conversions import normalized_meta_event_mapping
     policy = _runtime_template_policy(db, item.created_by)
     resolved, default, supported = _resolved_locale(item, tpl, lang)
-    return {"data": {"channel": {"id": entity_id(item), "type": item.channel_type, "name": item.name, "countryCode": item.country_code, "slug": item.slug, "localeMode": item.locale_mode}, "template": {"id": entity_id(tpl), "version": tpl.version, "manifest": tpl.manifest_json}, "templatePolicy": policy, "meta": {"datasetId": pixel.dataset_id if pixel else None, "browserEnabled": bool(pixel and item.meta_browser_pixel_enabled), "capiEnabled": bool(pixel and item.meta_capi_enabled), "eventMapping": normalized_meta_event_mapping(item.meta_event_mapping_json)}, "inAppBrowserMode": item.in_app_browser_mode, "countryCode": item.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "renderUrl": f"/api/public/promotion/channels/{slug}/render", "fissionRenderUrl": f"/api/public/promotion/channels/{slug}/fission/render", "assetBaseUrl": f"/api/public/promotion/channels/{slug}/assets/", "eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "metaDomainReportUrl": f"/api/public/promotion/channels/{slug}/meta-domain-unavailable", "sessionToken": token, "sessionExpiresIn": 1800, "rateLimitPolicy": "reserved", "serverTimestamp": utcnow().isoformat()}}
+    return {"data": {"channel": {"id": entity_id(item), "type": item.channel_type, "name": item.name, "countryCode": item.country_code, "slug": item.slug, "localeMode": item.locale_mode}, "template": {"id": entity_id(tpl), "version": tpl.version, "manifest": tpl.manifest_json}, "templatePolicy": policy, "meta": {"datasetId": pixel.dataset_id if pixel else None, "browserEnabled": bool(pixel and pixel.browser_pixel_enabled), "capiEnabled": bool(pixel and pixel.capi_enabled), "eventMapping": normalized_meta_event_mapping(pixel.event_mapping_json if pixel else None)}, "inAppBrowserMode": item.in_app_browser_mode, "countryCode": item.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "renderUrl": f"/api/public/promotion/channels/{slug}/render", "fissionRenderUrl": f"/api/public/promotion/channels/{slug}/fission/render", "assetBaseUrl": f"/api/public/promotion/channels/{slug}/assets/", "eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "metaDomainReportUrl": f"/api/public/promotion/channels/{slug}/meta-domain-unavailable", "sessionToken": token, "sessionExpiresIn": 1800, "rateLimitPolicy": "reserved", "serverTimestamp": utcnow().isoformat()}}
 
 
 def _render_html(
@@ -2247,7 +2246,11 @@ def _render_html(
     }
     from app.services.meta_conversions import normalized_meta_event_mapping
 
-    config = json.dumps({"eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "metaDomainReportUrl": f"/api/public/promotion/channels/{slug}/meta-domain-unavailable", "sessionToken": _session_token(channel, traffic_source), "trafficSource": traffic_source, "countryCode": channel.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "localizedCopy": localized_copy, "pixelDatasetId": pixel_dataset_id, "meta": {"datasetId": pixel_dataset_id, "browserEnabled": bool(pixel_dataset_id and channel.meta_browser_pixel_enabled), "eventMapping": normalized_meta_event_mapping(channel.meta_event_mapping_json)}, "inAppBrowserMode": channel.in_app_browser_mode, "templatePolicy": template_policy or {}}, ensure_ascii=False).replace("<", "\\u003c")
+    pixel = db.get(MetaPixel, channel.pixel_id) if channel.pixel_id else None
+    if pixel is not None and not pixel.enabled:
+        pixel = None
+
+    config = json.dumps({"eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "metaDomainReportUrl": f"/api/public/promotion/channels/{slug}/meta-domain-unavailable", "sessionToken": _session_token(channel, traffic_source), "trafficSource": traffic_source, "countryCode": channel.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "localizedCopy": localized_copy, "pixelDatasetId": pixel_dataset_id, "meta": {"datasetId": pixel_dataset_id, "browserEnabled": bool(pixel and pixel.browser_pixel_enabled), "eventMapping": normalized_meta_event_mapping(pixel.event_mapping_json if pixel else None)}, "inAppBrowserMode": channel.in_app_browser_mode, "templatePolicy": template_policy or {}}, ensure_ascii=False).replace("<", "\\u003c")
     html = _apply_viewport_policy(html, template_policy or {})
     base = f'<base href="/api/public/promotion/channels/{slug}/assets/">'
     runtime = (
@@ -2622,7 +2625,7 @@ async def report_meta_domain_unavailable(
     if (
         pixel is None
         or not pixel.enabled
-        or not channel.meta_browser_pixel_enabled
+        or not pixel.browser_pixel_enabled
     ):
         raise HTTPException(status_code=409, detail="当前渠道未启用浏览器 Pixel")
     if pixel.dataset_id != payload.dataset_id:
@@ -2639,9 +2642,9 @@ async def report_meta_domain_unavailable(
                 PromotionChannel.domain_id == channel.domain_id,
                 PromotionChannel.subdomain_prefix
                 == (channel.subdomain_prefix or ""),
-                PromotionChannel.meta_browser_pixel_enabled.is_(True),
                 PromotionChannel.pixel_id.is_not(None),
                 MetaPixel.enabled.is_(True),
+                MetaPixel.browser_pixel_enabled.is_(True),
             )
         ).all()
     )

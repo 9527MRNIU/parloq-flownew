@@ -55,6 +55,33 @@ def test_revision_ids_fit_postgresql_alembic_version_column() -> None:
     assert all(len(revision.revision) <= 32 for revision in revisions)
 
 
+def test_channel_launch_at_column_removal_is_reversible(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'channel-launch-at.db'}"
+    _alembic(database_url, "0053_pixel_runtime_config")
+    engine = sa.create_engine(database_url)
+    assert "launch_at" in {
+        column["name"]
+        for column in sa.inspect(engine).get_columns("promotion_channels")
+    }
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    assert "launch_at" not in {
+        column["name"]
+        for column in sa.inspect(engine).get_columns("promotion_channels")
+    }
+    engine.dispose()
+
+    _alembic_downgrade(database_url, "0053_pixel_runtime_config")
+    engine = sa.create_engine(database_url)
+    assert "launch_at" in {
+        column["name"]
+        for column in sa.inspect(engine).get_columns("promotion_channels")
+    }
+    engine.dispose()
+
+
 def test_custom_role_is_not_expanded_by_forward_repairs(tmp_path: Path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'custom-role-upgrade.db'}"
     _alembic(database_url, "0005_system_promotion_domains")

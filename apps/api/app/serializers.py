@@ -90,12 +90,17 @@ def direct_short_link_row(link: DirectShortLink) -> dict[str, Any]:
 
 
 def meta_pixel_row(pixel: MetaPixel) -> dict[str, Any]:
+    from app.services.meta_conversions import normalized_meta_event_mapping
+
     return {
         "id": entity_id(pixel),
         "name": pixel.name,
         "datasetId": pixel.dataset_id,
         "capiTokenMasked": f"••••{pixel.capi_token_last4}" if pixel.capi_token_last4 else None,
         "capiTokenConfigured": bool(pixel.capi_token_ciphertext),
+        "browserPixelEnabled": pixel.browser_pixel_enabled,
+        "capiEnabled": pixel.capi_enabled,
+        "eventMapping": normalized_meta_event_mapping(pixel.event_mapping_json),
         "enabled": pixel.enabled,
         "createdAt": iso(pixel.created_at),
         "updatedAt": iso(pixel.updated_at),

@@ -166,6 +166,17 @@ class MetaPixelCreate(ApiModel):
     name: str = Field(min_length=1, max_length=120)
     dataset_id: str = Field(alias="datasetId", min_length=1, max_length=120)
     capi_token: str | None = Field(default=None, alias="capiToken", max_length=4096)
+    browser_pixel_enabled: bool = Field(default=True, alias="browserPixelEnabled")
+    capi_enabled: bool = Field(default=False, alias="capiEnabled")
+    event_mapping: dict[str, str | None] = Field(
+        default_factory=lambda: {
+            "page_view": "PageView",
+            "phone_submit": "Lead",
+            "pairing_started": "InitiateCheckout",
+            "pairing_verified": "CompleteRegistration",
+        },
+        alias="eventMapping",
+    )
     enabled: bool = True
 
     @field_validator("dataset_id")
@@ -175,11 +186,25 @@ class MetaPixelCreate(ApiModel):
             raise ValueError("Pixel / Dataset ID 包含不安全字符")
         return value
 
+    @field_validator("event_mapping")
+    @classmethod
+    def valid_event_mapping(
+        cls, value: dict[str, str | None]
+    ) -> dict[str, str]:
+        return _valid_meta_event_mapping(value)
+
 
 class MetaPixelUpdate(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     dataset_id: str | None = Field(default=None, alias="datasetId", min_length=1, max_length=120)
     capi_token: str | None = Field(default=None, alias="capiToken", max_length=4096)
+    browser_pixel_enabled: bool | None = Field(
+        default=None, alias="browserPixelEnabled"
+    )
+    capi_enabled: bool | None = Field(default=None, alias="capiEnabled")
+    event_mapping: dict[str, str | None] | None = Field(
+        default=None, alias="eventMapping"
+    )
     enabled: bool | None = None
 
     @field_validator("dataset_id")
@@ -190,6 +215,35 @@ class MetaPixelUpdate(ApiModel):
         ):
             raise ValueError("Pixel / Dataset ID 包含不安全字符")
         return value
+
+    @field_validator("event_mapping")
+    @classmethod
+    def valid_event_mapping(
+        cls, value: dict[str, str | None] | None
+    ) -> dict[str, str] | None:
+        return _valid_meta_event_mapping(value) if value is not None else None
+
+
+def _valid_meta_event_mapping(
+    value: dict[str, str | None],
+) -> dict[str, str]:
+    from app.services.meta_conversions import (
+        META_EVENT_KEYS,
+        META_STANDARD_EVENTS,
+        normalized_meta_event_mapping,
+    )
+
+    unknown = set(value).difference(META_EVENT_KEYS)
+    if unknown:
+        raise ValueError(f"包含不支持的 Meta 事件键：{', '.join(sorted(unknown))}")
+    invalid = {
+        item
+        for item in value.values()
+        if item not in {None, "", "disabled"} and item not in META_STANDARD_EVENTS
+    }
+    if invalid:
+        raise ValueError(f"包含不支持的 Meta 标准事件：{', '.join(sorted(invalid))}")
+    return normalized_meta_event_mapping(value)
 
 
 class ProxyEndpointCreate(ApiModel):

@@ -852,7 +852,7 @@ export function HyperlinkTemplatesPage() {
             <TemplatePreview form={form} materials={materials} />
           }
         >
-          <DrawerFormSection title="基础信息">
+          <DrawerFormSection title="基础信息" hideHeader>
             <DrawerFormField label="模板名称" htmlFor="hyperlink-template-name" required>
               <Input
                 id="hyperlink-template-name"

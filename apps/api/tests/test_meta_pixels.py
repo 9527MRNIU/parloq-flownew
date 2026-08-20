@@ -58,6 +58,8 @@ def test_meta_pixel_placeholder_crud_masks_capi_token(admin_client: TestClient) 
             "name": "Promotion Pixel",
             "datasetId": "1234567890",
             "capiToken": "meta-capi-secret",
+            "browserPixelEnabled": True,
+            "capiEnabled": True,
         },
     )
     assert created.status_code == 201
@@ -65,6 +67,9 @@ def test_meta_pixel_placeholder_crud_masks_capi_token(admin_client: TestClient) 
     assert pixel["id"].isdecimal()
     assert "publicId" not in pixel
     assert pixel["capiTokenMasked"] == "••••cret"
+    assert pixel["browserPixelEnabled"] is True
+    assert pixel["capiEnabled"] is True
+    assert pixel["eventMapping"]["phone_submit"] == "Lead"
     assert "meta-capi-secret" not in created.text
 
     updated = admin_client.patch(
@@ -88,6 +93,14 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
             "name": "Meta delivery test",
             "datasetId": "meta-delivery-test-001",
             "capiToken": "meta-delivery-secret",
+            "browserPixelEnabled": True,
+            "capiEnabled": True,
+            "eventMapping": {
+                "page_view": "PageView",
+                "phone_submit": "Lead",
+                "pairing_started": "InitiateCheckout",
+                "pairing_verified": "CompleteRegistration",
+            },
         },
     )
     assert pixel_response.status_code == 201, pixel_response.text
@@ -117,14 +130,6 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
             "accountGroupId": group["id"],
             "slug": "meta-delivery-test",
             "status": "active",
-            "metaBrowserPixelEnabled": True,
-            "metaCapiEnabled": True,
-            "metaEventMapping": {
-                "page_view": "PageView",
-                "phone_submit": "Lead",
-                "pairing_started": "InitiateCheckout",
-                "pairing_verified": "CompleteRegistration",
-            },
             "inAppBrowserMode": "guide_external",
             "newAccountMarketingEnabled": False,
         },
@@ -218,18 +223,24 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
     assert monitored["metaDomainBlockedAt"]
 
     reset = admin_client.patch(
-        f"/api/promotion/channels/{channel['id']}",
-        json={"metaBrowserPixelEnabled": False},
+        f"/api/meta-pixels/{pixel['id']}",
+        json={"browserPixelEnabled": False},
     )
     assert reset.status_code == 200, reset.text
-    assert reset.json()["data"]["channel"]["metaDomainBlocked"] is False
-    assert reset.json()["data"]["channel"]["metaDomainMonitored"] is False
+    reset_channel = admin_client.get(
+        f"/api/promotion/channels/{channel['id']}"
+    ).json()["data"]["channel"]
+    assert reset_channel["metaDomainBlocked"] is False
+    assert reset_channel["metaDomainMonitored"] is False
     reenabled = admin_client.patch(
-        f"/api/promotion/channels/{channel['id']}",
-        json={"metaBrowserPixelEnabled": True},
+        f"/api/meta-pixels/{pixel['id']}",
+        json={"browserPixelEnabled": True},
     )
     assert reenabled.status_code == 200, reenabled.text
-    assert reenabled.json()["data"]["channel"]["metaDomainMonitored"] is True
+    reenabled_channel = admin_client.get(
+        f"/api/promotion/channels/{channel['id']}"
+    ).json()["data"]["channel"]
+    assert reenabled_channel["metaDomainMonitored"] is True
     stale_report = admin_client.post(
         public["metaDomainReportUrl"],
         content=json.dumps(

@@ -1321,7 +1321,7 @@ export function DomainsPage() {
       >
         <div className="drawer-form">
           <DrawerFormLayout>
-            <DrawerFormSection title="基础信息">
+            <DrawerFormSection title="基础信息" hideHeader>
               <DrawerFormField label="域名" required>
                 <Input
                   value={hostname}

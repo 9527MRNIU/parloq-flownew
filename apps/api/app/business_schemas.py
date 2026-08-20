@@ -516,7 +516,7 @@ class PromotionChannelCreate(Model):
     subdomain_prefix: str | None = Field(
         default=None, alias="subdomainPrefix", max_length=63
     )
-    slug: str
+    slug: str | None = None
     pixel_id: str | None = Field(
         default=None,
         alias="pixelId",
@@ -533,19 +533,6 @@ class PromotionChannelCreate(Model):
     protocol_pool_id: str | None = Field(
         default=None, alias="protocolPoolId", max_length=20
     )
-    meta_browser_pixel_enabled: bool = Field(
-        default=True, alias="metaBrowserPixelEnabled"
-    )
-    meta_capi_enabled: bool = Field(default=False, alias="metaCapiEnabled")
-    meta_event_mapping: dict[str, str | None] = Field(
-        default_factory=lambda: {
-            "page_view": "PageView",
-            "phone_submit": "Lead",
-            "pairing_started": "InitiateCheckout",
-            "pairing_verified": "CompleteRegistration",
-        },
-        alias="metaEventMapping",
-    )
     in_app_browser_mode: Literal["allow", "guide_external"] = Field(
         default="guide_external", alias="inAppBrowserMode"
     )
@@ -555,10 +542,11 @@ class PromotionChannelCreate(Model):
     locale_mode: Literal["auto", "fixed"] = Field(default="auto", alias="localeMode")
     locale: str | None = Field(default=None, max_length=16)
     status: Literal["draft", "active", "paused"] = "draft"
-    launch_at: datetime | None = Field(default=None, alias="launchAt")
 
     _country = field_validator("country_code")(normalize_country)
-    _slug = field_validator("slug")(normalize_slug)
+    _slug = field_validator("slug")(
+        lambda value: normalize_slug(value) if value else None
+    )
     _protocol_node_id = field_validator("protocol_node_id")(
         lambda value: str(parse_snowflake_id(value)) if value else None
     )
@@ -571,29 +559,6 @@ class PromotionChannelCreate(Model):
         if self.protocol_node_id and self.protocol_pool_id:
             raise ValueError("渠道只能绑定协议节点或协议池中的一种")
         return self
-
-    @field_validator("meta_event_mapping")
-    @classmethod
-    def valid_meta_event_mapping(
-        cls, value: dict[str, str | None]
-    ) -> dict[str, str]:
-        from app.services.meta_conversions import (
-            META_EVENT_KEYS,
-            META_STANDARD_EVENTS,
-            normalized_meta_event_mapping,
-        )
-
-        unknown = set(value).difference(META_EVENT_KEYS)
-        if unknown:
-            raise ValueError(f"包含不支持的 Meta 事件键：{', '.join(sorted(unknown))}")
-        invalid = {
-            item
-            for item in value.values()
-            if item not in {None, "", "disabled"} and item not in META_STANDARD_EVENTS
-        }
-        if invalid:
-            raise ValueError(f"包含不支持的 Meta 标准事件：{', '.join(sorted(invalid))}")
-        return normalized_meta_event_mapping(value)
 
     @field_validator("subdomain_prefix")
     @classmethod
@@ -647,15 +612,6 @@ class PromotionChannelUpdate(Model):
     protocol_pool_id: str | None = Field(
         default=None, alias="protocolPoolId", max_length=20
     )
-    meta_browser_pixel_enabled: bool | None = Field(
-        default=None, alias="metaBrowserPixelEnabled"
-    )
-    meta_capi_enabled: bool | None = Field(
-        default=None, alias="metaCapiEnabled"
-    )
-    meta_event_mapping: dict[str, str | None] | None = Field(
-        default=None, alias="metaEventMapping"
-    )
     in_app_browser_mode: Literal["allow", "guide_external"] | None = Field(
         default=None, alias="inAppBrowserMode"
     )
@@ -665,7 +621,6 @@ class PromotionChannelUpdate(Model):
     locale_mode: Literal["auto", "fixed"] | None = Field(default=None, alias="localeMode")
     locale: str | None = Field(default=None, max_length=16)
     status: Literal["draft", "active", "paused"] | None = None
-    launch_at: datetime | None = Field(default=None, alias="launchAt")
 
     _country = field_validator("country_code")(normalize_country)
     _slug = field_validator("slug")(lambda value: normalize_slug(value) if value else None)
@@ -681,31 +636,6 @@ class PromotionChannelUpdate(Model):
         if self.protocol_node_id and self.protocol_pool_id:
             raise ValueError("渠道只能绑定协议节点或协议池中的一种")
         return self
-
-    @field_validator("meta_event_mapping")
-    @classmethod
-    def valid_meta_event_mapping(
-        cls, value: dict[str, str | None] | None
-    ) -> dict[str, str] | None:
-        if value is None:
-            return None
-        from app.services.meta_conversions import (
-            META_EVENT_KEYS,
-            META_STANDARD_EVENTS,
-            normalized_meta_event_mapping,
-        )
-
-        unknown = set(value).difference(META_EVENT_KEYS)
-        if unknown:
-            raise ValueError(f"包含不支持的 Meta 事件键：{', '.join(sorted(unknown))}")
-        invalid = {
-            item
-            for item in value.values()
-            if item not in {None, "", "disabled"} and item not in META_STANDARD_EVENTS
-        }
-        if invalid:
-            raise ValueError(f"包含不支持的 Meta 标准事件：{', '.join(sorted(invalid))}")
-        return normalized_meta_event_mapping(value)
 
     @field_validator("subdomain_prefix")
     @classmethod

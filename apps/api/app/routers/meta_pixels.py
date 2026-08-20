@@ -54,12 +54,17 @@ def list_pixels(db: DbSession, current_user: CurrentUser) -> dict:
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_pixel(payload: MetaPixelCreate, db: DbSession, current_user: CurrentUser) -> dict:
     token = (payload.capi_token or "").strip()
+    if payload.capi_enabled and not token:
+        raise HTTPException(status_code=422, detail="启用 Meta CAPI 前必须配置 CAPI Token")
     pixel = MetaPixel(
         public_id=new_public_id("pxl"),
         name=payload.name,
         dataset_id=payload.dataset_id,
         capi_token_ciphertext=encrypt_secret(token) if token else None,
         capi_token_last4=token[-4:] if token else "",
+        browser_pixel_enabled=payload.browser_pixel_enabled,
+        capi_enabled=payload.capi_enabled,
+        event_mapping_json=payload.event_mapping,
         enabled=payload.enabled,
         created_by=current_user.id,
     )
@@ -92,10 +97,24 @@ def update_pixel(
             monitoring_config_changed or pixel.enabled != payload.enabled
         )
         pixel.enabled = payload.enabled
+    if payload.browser_pixel_enabled is not None:
+        monitoring_config_changed = (
+            monitoring_config_changed
+            or pixel.browser_pixel_enabled != payload.browser_pixel_enabled
+        )
+        pixel.browser_pixel_enabled = payload.browser_pixel_enabled
+    if payload.event_mapping is not None:
+        pixel.event_mapping_json = payload.event_mapping
     if "capi_token" in payload.model_fields_set:
         token = (payload.capi_token or "").strip()
         pixel.capi_token_ciphertext = encrypt_secret(token) if token else None
         pixel.capi_token_last4 = token[-4:] if token else ""
+        if not token:
+            pixel.capi_enabled = False
+    if payload.capi_enabled is not None:
+        pixel.capi_enabled = payload.capi_enabled
+    if pixel.capi_enabled and not pixel.capi_token_ciphertext:
+        raise HTTPException(status_code=422, detail="启用 Meta CAPI 前必须配置 CAPI Token")
     if monitoring_config_changed:
         _reset_domain_monitoring(db, pixel.id)
     try:

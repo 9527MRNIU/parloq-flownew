@@ -104,6 +104,7 @@
   --drawer-footer-padding-block: 16px;
   --drawer-form-label-width: 112px;
   --drawer-form-label-gap: 20px;
+  --drawer-form-control-width: 400px;
   --drawer-form-field-gap: 16px;
   --drawer-form-section-gap: 28px;
   --drawer-form-section-title-size: 15px;
@@ -1336,8 +1337,27 @@ tr.selected-row {
   font-weight: 500;
   line-height: 20px;
 }
+@media (min-width: 561px) {
+  .drawer-standard-body .drawer-form .field,
+  .drawer-standard-body .drawer-form .switch-row,
+  .drawer-standard-body .drawer-form-field {
+    grid-template-columns:
+      minmax(var(--drawer-form-label-width), 1fr)
+      minmax(0, var(--drawer-form-control-width));
+    column-gap: var(--drawer-form-label-gap);
+  }
+  .drawer-standard-body .drawer-form .field > span:first-child,
+  .drawer-standard-body .drawer-form-field-label {
+    justify-content: flex-end;
+    text-align: right;
+  }
+  .drawer-standard-body .drawer-form .switch-row strong {
+    text-align: right;
+  }
+}
 .drawer-form .field > :not(span):not(small) {
   min-width: 0;
+  width: 100%;
   grid-column: 2;
 }
 .drawer-form .field > small,
@@ -2111,7 +2131,7 @@ tr.selected-row {
 }
 .pixel-list > div {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto 31px;
+  grid-template-columns: minmax(0, 1fr) auto auto auto 31px;
   gap: 9px;
   align-items: center;
   padding: 11px 12px;

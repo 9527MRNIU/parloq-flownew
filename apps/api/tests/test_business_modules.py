@@ -406,6 +406,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
             "slug": "de-facebook-demo",
             "status": "active",
             "localeMode": "auto",
+            "launchAt": "2099-01-01T00:00:00Z",
         },
     )
     assert channel.status_code == 201, channel.text
@@ -417,6 +418,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert channel_row["pixelId"] == pixel_id
     assert channel_row["accountGroupId"] == landing_group_id
     assert channel_row["accountGroupName"] == "Germany Landing Accounts"
+    assert "launchAt" not in channel_row
     assert not any(key.endswith("PublicId") for key in channel_row)
 
     public_config = admin_client.get("/api/public/promotion/channels/de-facebook-demo?lang=de")

@@ -661,7 +661,7 @@ export function ProtocolManagementPage() {
         footer={<><Button variant="outline" disabled={saving} onClick={() => { setEditing(null); setCreating(false); }}>取消</Button><Button disabled={saving || !form.name.trim() || form.name.trim().length > 64 || form.remark.length > 512 || Number(form.idleDisconnectSeconds) < 60 || Number(form.postVerifyGraceSeconds) < 0 || !validRateLimitForm(form.rateLimitPolicy)} onClick={() => void save()}>{saving ? <LoaderCircleIcon className="spin" size={16} /> : null}{creating ? "创建" : "保存"}</Button></>}
       >
         <DrawerFormLayout>
-          <DrawerFormSection title="基础信息">
+          <DrawerFormSection title="基础信息" hideHeader>
             <DrawerFormField label="协议名称" meta={`${form.name.length}/64`} required>
               <Input maxLength={64} value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="请输入协议名称，用于识别区分不同协议" />
             </DrawerFormField>

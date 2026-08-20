@@ -95,7 +95,7 @@ export function Drawer({
             <SheetDescription>{description}</SheetDescription>
           ) : null}
         </SheetHeader>
-        <SheetBody>{children}</SheetBody>
+        <SheetBody className="drawer-standard-body">{children}</SheetBody>
         {footer ? <SheetFooter>{footer}</SheetFooter> : null}
       </SheetContent>
     </Sheet>

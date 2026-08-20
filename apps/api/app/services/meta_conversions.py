@@ -9,7 +9,7 @@ from uuid import uuid4
 import httpx
 from fastapi import Request
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -65,10 +65,12 @@ def browser_event_descriptor(
     event_key: str,
     event_id: str,
 ) -> dict[str, str] | None:
-    if not channel.pixel_id or not channel.meta_browser_pixel_enabled:
+    session = object_session(channel)
+    pixel = session.get(MetaPixel, channel.pixel_id) if session and channel.pixel_id else None
+    if pixel is None or not pixel.enabled or not pixel.browser_pixel_enabled:
         return None
     event_name = normalized_meta_event_mapping(
-        channel.meta_event_mapping_json
+        pixel.event_mapping_json
     ).get(event_key)
     if not event_name:
         return None
@@ -126,17 +128,18 @@ def enqueue_meta_conversion(
     visitor_id: str | None = None,
     custom_data: dict | None = None,
 ) -> MetaConversionDelivery | None:
-    if not channel.pixel_id or not channel.meta_capi_enabled:
+    if not channel.pixel_id:
         return None
     pixel = db.get(MetaPixel, channel.pixel_id)
     if (
         pixel is None
         or not pixel.enabled
+        or not pixel.capi_enabled
         or not pixel.capi_token_ciphertext
     ):
         return None
     event_name = normalized_meta_event_mapping(
-        channel.meta_event_mapping_json
+        pixel.event_mapping_json
     ).get(event_key)
     if not event_name:
         return None
@@ -188,7 +191,7 @@ def probe_meta_conversion(
 ) -> dict[str, Any]:
     """Send one isolated CAPI probe without creating a delivery-ledger row."""
     if (
-        not pixel.enabled or not pixel.capi_token_ciphertext
+        not pixel.enabled or not pixel.capi_enabled or not pixel.capi_token_ciphertext
     ):
         raise ValueError("Meta Pixel 已停用或缺少 CAPI Token")
 

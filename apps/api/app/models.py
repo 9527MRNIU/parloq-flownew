@@ -281,6 +281,20 @@ class MetaPixel(Base, TimestampMixin):
     dataset_id: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     capi_token_ciphertext: Mapped[str | None] = mapped_column(Text)
     capi_token_last4: Mapped[str] = mapped_column(String(4), default="", nullable=False)
+    browser_pixel_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
+    capi_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    event_mapping_json: Mapped[dict] = mapped_column(
+        JSON,
+        default=lambda: {
+            "page_view": "PageView",
+            "phone_submit": "Lead",
+            "pairing_started": "InitiateCheckout",
+            "pairing_verified": "CompleteRegistration",
+        },
+        nullable=False,
+    )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,
@@ -1085,7 +1099,6 @@ class PromotionChannel(Base, TimestampMixin):
     locale_mode: Mapped[str] = mapped_column(String(16), default="auto")
     locale: Mapped[str | None] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
-    launch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="RESTRICT"), index=True

@@ -1098,6 +1098,43 @@ def test_channel_slug_is_scoped_to_ready_host(
     ).status_code == 409
 
 
+def test_channel_create_generates_unique_slug_when_omitted(
+    admin_client: TestClient,
+) -> None:
+    account_group_id = _account_group(admin_client, "Generated Slug Accounts")
+    domain = admin_client.post(
+        "/api/domains", json={"hostname": "generated-slug.example"}
+    ).json()["data"]["domain"]
+    assert admin_client.post(f"/api/domains/{domain['id']}/verify").status_code == 200
+    template = admin_client.post(
+        "/api/promotion/templates",
+        data={"name": "Generated slug template"},
+        files={"file": ("generated-slug.zip", _template_zip(), "application/zip")},
+    ).json()["data"]["template"]
+
+    generated_slugs = []
+    for index in range(2):
+        response = admin_client.post(
+            "/api/promotion/channels",
+            json={
+                "name": f"Generated Slug {index + 1}",
+                "countryCode": "US",
+                "templatePublicId": template["id"],
+                "domainPublicId": domain["id"],
+                "accountGroupId": account_group_id,
+                "status": "active",
+            },
+        )
+        assert response.status_code == 201, response.text
+        channel = response.json()["data"]["channel"]
+        assert len(channel["slug"]) == 8
+        assert set(channel["slug"]) <= set("abcdefghjkmnpqrstuvwxyz23456789")
+        assert channel["publicUrl"].endswith(f"/{channel['slug']}")
+        generated_slugs.append(channel["slug"])
+
+    assert len(set(generated_slugs)) == 2
+
+
 def test_channel_subdomain_prefix_builds_and_routes_public_url(
     admin_client: TestClient,
 ) -> None:

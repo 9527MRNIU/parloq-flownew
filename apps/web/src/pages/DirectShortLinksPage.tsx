@@ -718,11 +718,6 @@ export function DirectShortLinksPage() {
       >
         <div className="drawer-form">
           <div className="pixel-create-card">
-            <strong>
-              {editingAccount
-                ? `编辑 · ${editingAccount.name}`
-                : "添加 Bitly 账号"}
-            </strong>
             {editingAccount ? (
               <label className="field">
                 <DrawerFieldLabel required>账号名称</DrawerFieldLabel>

@@ -176,6 +176,28 @@ function PlatformLogo({ platform }: { platform: string }) {
   );
 }
 
+function PromotionPlatformTabs() {
+  return (
+    <div
+      className="flex min-h-8 min-w-0 items-center gap-2"
+      role="tablist"
+      aria-label="推广平台"
+    >
+      <Button
+        type="button"
+        role="tab"
+        aria-selected="true"
+        variant="secondary"
+        size="sm"
+        className="h-8 min-w-32 justify-center gap-2"
+      >
+        <SiFacebook aria-hidden="true" className="h-4 w-4 text-[#0866ff]" />
+        Facebook
+      </Button>
+    </div>
+  );
+}
+
 function randomChannelCode(existing: Iterable<string>, length = 8): string {
   const reserved = new Set(Array.from(existing, (value) => value.toLowerCase()));
   for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -335,14 +357,13 @@ type PromotionChannel = {
   enabled: boolean;
   localeMode: string;
   locale: string;
-  goLiveAt?: string;
   createdAt?: string;
   visits: number;
   clicks: number;
   leads: number;
   updatedAt?: string;
 };
-type Option = { id: string; label: string; locales?: string[] };
+type Option = { id: string; label: string };
 type TemplateOption = Option & {
   schema: string;
   runtime: string;
@@ -359,6 +380,9 @@ type PixelOption = Option & {
   enabled: boolean;
   tokenMasked: string;
   tokenConfigured: boolean;
+  browserPixelEnabled: boolean;
+  capiEnabled: boolean;
+  eventMapping: MetaEventMapping;
 };
 type MetaEventMapping = {
   page_view: string;
@@ -400,6 +424,14 @@ const defaultMetaEventMapping: MetaEventMapping = {
   pairing_started: "InitiateCheckout",
   pairing_verified: "CompleteRegistration",
 };
+const emptyPixelForm = () => ({
+  name: "",
+  datasetId: "",
+  capiToken: "",
+  browserPixelEnabled: true,
+  capiEnabled: false,
+  eventMapping: { ...defaultMetaEventMapping },
+});
 const metaEventOptions = [
   { value: "", label: "不上报" },
   { value: "PageView", label: "浏览页面 (PageView)" },
@@ -774,7 +806,6 @@ function channelRow(input: unknown): PromotionChannel {
     enabled: Boolean(row.enabled ?? status === "active"),
     localeMode: field(row, "localeMode", "locale_mode") || "auto",
     locale: field(row, "locale"),
-    goLiveAt: field(row, "launchAt", "launch_at", "goLiveAt", "go_live_at"),
     createdAt: field(row, "createdAt", "created_at"),
     visits: Number(row.visits ?? stats.visits ?? 0),
     clicks: Number(row.clicks ?? stats.clicks ?? 0),
@@ -791,6 +822,7 @@ function pixelRow(input: unknown): PixelOption {
     "dataset_id",
   );
   const id = snowflakeId(row, "id");
+  const mapping = object(row.eventMapping || row.event_mapping);
   return {
     id,
     readKey: entityRowKey(row, id, "meta-pixel", `${name}:${datasetId}`),
@@ -804,6 +836,22 @@ function pixelRow(input: unknown): PixelOption {
         row.capi_token_configured ??
         field(row, "capiTokenMasked", "capi_token_masked"),
     ),
+    browserPixelEnabled: Boolean(
+      row.browserPixelEnabled ?? row.browser_pixel_enabled ?? true,
+    ),
+    capiEnabled: Boolean(row.capiEnabled ?? row.capi_enabled ?? false),
+    eventMapping: {
+      page_view: String(mapping.page_view ?? defaultMetaEventMapping.page_view),
+      phone_submit: String(
+        mapping.phone_submit ?? defaultMetaEventMapping.phone_submit,
+      ),
+      pairing_started: String(
+        mapping.pairing_started ?? defaultMetaEventMapping.pairing_started,
+      ),
+      pairing_verified: String(
+        mapping.pairing_verified ?? defaultMetaEventMapping.pairing_verified,
+      ),
+    },
   };
 }
 function metricRow(input: unknown): AdMetric {
@@ -2307,11 +2355,9 @@ export function PromotionChannelsPage() {
   const [pending, setPending] = useState(false);
   const [pixelDrawer, setPixelDrawer] = useState(false);
   const [pixelPending, setPixelPending] = useState(false);
-  const [pixelForm, setPixelForm] = useState({
-    name: "",
-    datasetId: "",
-    capiToken: "",
-  });
+  const pixelFormTopRef = useRef<HTMLDivElement>(null);
+  const [pixelEditingId, setPixelEditingId] = useState("");
+  const [pixelForm, setPixelForm] = useState(emptyPixelForm);
   const [capiProbeOpen, setCapiProbeOpen] = useState(false);
   const [capiProbePending, setCapiProbePending] = useState(false);
   const [capiProbeChannelId, setCapiProbeChannelId] = useState("");
@@ -2351,16 +2397,9 @@ export function PromotionChannelsPage() {
     protocolRouteId: "",
     domainId: "",
     subdomainPrefix: "",
-    slug: "",
     pixelId: "",
-    metaBrowserPixelEnabled: false,
-    metaCapiEnabled: false,
-    metaEventMapping: { ...defaultMetaEventMapping },
     inAppBrowserMode: "guide_external" as "allow" | "guide_external",
     newAccountMarketingEnabled: true,
-    localeMode: "auto",
-    locale: "",
-    goLiveAt: "",
     enabled: true,
   });
   const load = useCallback(async () => {
@@ -2380,16 +2419,9 @@ export function PromotionChannelsPage() {
         unwrapList<unknown>(t).rows.map((input) => {
           const row = object(input);
           const manifest = object(row.manifest);
-          const rawLocales = row.supportedLocales || row.supported_locales;
-          const locales = Array.isArray(rawLocales)
-            ? rawLocales.map(String)
-            : Array.isArray(manifest.supportedLocales)
-              ? manifest.supportedLocales.map(String)
-              : [String(row.defaultLocale || manifest.defaultLocale || "en")];
           return {
             id: snowflakeId(row, "id"),
             label: `${field(row, "name")} · ${field(row, "version") || "v1"}`,
-            locales,
             schema: field(manifest, "schema") || "promotion-template/v1",
             runtime: field(manifest, "runtime") || "promotion-browser-bridge/v1",
             pairingContract:
@@ -2484,16 +2516,9 @@ export function PromotionChannelsPage() {
             protocolRouteId: row.protocolPoolId || row.protocolNodeId,
             domainId: row.domainId,
             subdomainPrefix: row.subdomainPrefix,
-            slug: row.slug,
             pixelId: row.pixelId,
-            metaBrowserPixelEnabled: row.metaBrowserPixelEnabled,
-            metaCapiEnabled: row.metaCapiEnabled,
-            metaEventMapping: { ...row.metaEventMapping },
             inAppBrowserMode: row.inAppBrowserMode,
             newAccountMarketingEnabled: row.newAccountMarketingEnabled,
-            localeMode: row.localeMode,
-            locale: row.locale,
-            goLiveAt: row.goLiveAt?.slice(0, 16) || "",
             enabled: row.enabled,
           }
         : {
@@ -2505,16 +2530,9 @@ export function PromotionChannelsPage() {
             protocolRouteId: protocolNodes[0]?.id || "",
             domainId: "",
             subdomainPrefix: "",
-            slug: randomChannelCode(rows.map((item) => item.slug)),
             pixelId: "",
-            metaBrowserPixelEnabled: false,
-            metaCapiEnabled: false,
-            metaEventMapping: { ...defaultMetaEventMapping },
             inAppBrowserMode: "guide_external",
             newAccountMarketingEnabled: true,
-            localeMode: "auto",
-            locale: "",
-            goLiveAt: "",
             enabled: true,
           },
     );
@@ -2527,7 +2545,6 @@ export function PromotionChannelsPage() {
       !form.accountGroupId ||
       !form.protocolRouteId ||
       !form.domainId ||
-      !form.slug.trim() ||
       (editing && !editing.id)
     )
       return;
@@ -2543,22 +2560,10 @@ export function PromotionChannelsPage() {
         protocolPoolId: form.protocolRouteType === "pool" ? form.protocolRouteId : null,
         domainId: form.domainId || undefined,
         subdomainPrefix: form.subdomainPrefix || undefined,
-        slug: form.slug.trim(),
         pixelId: form.pixelId || null,
-        metaBrowserPixelEnabled: Boolean(
-          form.pixelId && form.metaBrowserPixelEnabled,
-        ),
-        metaCapiEnabled: Boolean(form.pixelId && form.metaCapiEnabled),
-        metaEventMapping: form.metaEventMapping,
         inAppBrowserMode: form.inAppBrowserMode,
         newAccountMarketingEnabled: form.newAccountMarketingEnabled,
-        localeMode: form.localeMode,
-        locale:
-          form.localeMode === "fixed" ? form.locale || undefined : undefined,
         status: form.enabled ? "active" : "draft",
-        launchAt: form.goLiveAt
-          ? new Date(form.goLiveAt).toISOString()
-          : undefined,
       };
       await apiRequest(
         editing
@@ -2574,19 +2579,6 @@ export function PromotionChannelsPage() {
       setPending(false);
     }
   }
-  const selectedDomain = domains.find((row) => row.id === form.domainId);
-  const previewHostname = selectedDomain
-    ? `${form.subdomainPrefix ? `${form.subdomainPrefix}.` : ""}${selectedDomain.label}`
-    : "";
-  const previewPublicUrl = previewHostname
-    ? `https://${previewHostname}/${form.slug || "短码"}`
-    : "";
-  const selectedTemplate = templates.find((row) => row.id === form.templateId);
-  const selectedRoute = (form.protocolRouteType === "node"
-    ? protocolNodes
-    : protocolPools
-  ).find((row) => row.id === form.protocolRouteId);
-  const selectedPixel = pixels.find((row) => row.id === form.pixelId);
   const capiProbeChannel = rows.find(
     (row) => row.id === capiProbeChannelId,
   );
@@ -2806,20 +2798,52 @@ export function PromotionChannelsPage() {
       );
     }
   }
-  async function createPixel() {
+  const pixelBeingEdited = pixels.find((row) => row.id === pixelEditingId);
+  const pixelHasCapiToken = Boolean(
+    pixelForm.capiToken.trim() || pixelBeingEdited?.tokenConfigured,
+  );
+  function resetPixelForm() {
+    setPixelEditingId("");
+    setPixelForm(emptyPixelForm());
+  }
+  function editPixel(row: PixelOption) {
+    setPixelEditingId(row.id);
+    setPixelForm({
+      name: row.name,
+      datasetId: row.datasetId,
+      capiToken: "",
+      browserPixelEnabled: row.browserPixelEnabled,
+      capiEnabled: row.capiEnabled,
+      eventMapping: { ...row.eventMapping },
+    });
+    requestAnimationFrame(() => {
+      const drawerBody = pixelFormTopRef.current?.closest(
+        '[data-slot="sheet-body"]',
+      );
+      drawerBody?.scrollTo({ top: 0, behavior: "smooth" });
+    });
+  }
+  async function savePixel() {
     if (!pixelForm.name.trim() || !pixelForm.datasetId.trim()) return;
     setPixelPending(true);
     try {
-      await apiRequest("/api/meta-pixels", {
-        method: "POST",
+      const token = pixelForm.capiToken.trim();
+      await apiRequest(
+        pixelEditingId ? `/api/meta-pixels/${pixelEditingId}` : "/api/meta-pixels",
+        {
+        method: pixelEditingId ? "PATCH" : "POST",
         body: JSON.stringify({
           name: pixelForm.name.trim(),
           datasetId: pixelForm.datasetId.trim(),
-          capiToken: pixelForm.capiToken.trim() || undefined,
+          ...(token ? { capiToken: token } : {}),
+          browserPixelEnabled: pixelForm.browserPixelEnabled,
+          capiEnabled: pixelForm.capiEnabled,
+          eventMapping: pixelForm.eventMapping,
           enabled: true,
         }),
-      });
-      setPixelForm({ name: "", datasetId: "", capiToken: "" });
+      },
+      );
+      resetPixelForm();
       await load();
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "保存 Pixel 失败");
@@ -2852,6 +2876,7 @@ export function PromotionChannelsPage() {
       return;
     try {
       await apiRequest(`/api/meta-pixels/${row.id}`, { method: "DELETE" });
+      if (row.id === pixelEditingId) resetPixelForm();
       await load();
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "删除 Pixel 失败");
@@ -3131,8 +3156,7 @@ export function PromotionChannelsPage() {
                 !form.templateId ||
                 !form.accountGroupId ||
                 !form.protocolRouteId ||
-                !form.domainId ||
-                !form.slug.trim()
+                !form.domainId
               }
               onClick={() => void save()}
             >
@@ -3141,8 +3165,10 @@ export function PromotionChannelsPage() {
           </>
         }
       >
-        <div className="drawer-form">
-          <DrawerFormSection title="基础信息">
+        <div
+          className="drawer-form"
+        >
+          <DrawerFormSection title="基础信息" hideHeader>
           <label className="field">
             <DrawerFieldLabel required>渠道名称</DrawerFieldLabel>
             <Input
@@ -3152,10 +3178,6 @@ export function PromotionChannelsPage() {
             />
           </label>
           <div className="form-grid">
-            <label className="field">
-              <DrawerFieldLabel>平台</DrawerFieldLabel>
-              <Input value="Facebook" disabled />
-            </label>
             <div className="field">
               <DrawerFieldLabel required>投放国家</DrawerFieldLabel>
               <SearchableSelect
@@ -3176,9 +3198,7 @@ export function PromotionChannelsPage() {
             <SelectField
               className="w-full"
               value={form.templateId}
-              onValueChange={(value) =>
-                setForm({ ...form, templateId: value, locale: "" })
-              }
+              onValueChange={(value) => setForm({ ...form, templateId: value })}
               options={templates.map((row) => ({
                 value: row.id,
                 label: row.label,
@@ -3186,7 +3206,7 @@ export function PromotionChannelsPage() {
             />
           </label>
           <DrawerFormField
-            label="账号入库分组"
+            label="入库分组"
             hint="通过此渠道成功链接的账号会自动进入该分组；发送任务实时使用分组内当前可用账号。"
             required
           >
@@ -3203,10 +3223,26 @@ export function PromotionChannelsPage() {
               }))}
             />
           </DrawerFormField>
+          <DrawerFormField label="推广平台">
+            <PromotionPlatformTabs />
+          </DrawerFormField>
+          <DrawerFormField label="像素绑定">
+            <SelectField
+              className="w-full"
+              value={form.pixelId}
+              clearable
+              onValueChange={(value) => setForm({ ...form, pixelId: value })}
+              placeholder="不绑定"
+              options={pixels
+                .filter((row) => row.enabled && row.id)
+                .map((row) => ({ value: row.id, label: row.label }))}
+            />
+          </DrawerFormField>
           </DrawerFormSection>
           <DrawerFormSection
             title="新账号协议路由"
             description="切换只影响之后新建的接入任务；存量账号和进行中的配对保持原节点。直接节点不可用时默认拒绝，只有选择协议池才按优先级回退。"
+            hideHeader
           >
             <div className="form-grid">
               <label className="field">
@@ -3221,59 +3257,8 @@ export function PromotionChannelsPage() {
                 <SelectField className="w-full" value={form.protocolRouteId} onValueChange={(value) => setForm({ ...form, protocolRouteId: value })} placeholder={form.protocolRouteType === "node" ? "选择协议节点" : "选择协议池"} options={(form.protocolRouteType === "node" ? protocolNodes : protocolPools).map((row) => ({ value: row.id, label: row.label }))} />
               </label>
             </div>
-            <div className="mt-3 grid gap-2 rounded-md bg-muted/35 p-3 text-xs text-muted-foreground">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge tone={selectedTemplate?.runtime === "promotion-browser-bridge/v2" ? "success" : "warning"}>
-                  {selectedTemplate?.runtime || "未选择模板运行时"}
-                </Badge>
-                <Badge tone={selectedRoute?.health === "available" ? "success" : "warning"}>
-                  {selectedRoute?.health === "available" ? "路由可接入" : "路由当前不可接入"}
-                </Badge>
-                <Badge tone={form.protocolRouteType === "pool" ? "success" : "neutral"}>
-                  {form.protocolRouteType === "pool" ? "显式池回退" : "节点不可用即拒绝"}
-                </Badge>
-              </div>
-              <span>
-                模板声明 {selectedTemplate?.pairingContract || "-"}；保存时后端会校验协议路由兼容性。{selectedRoute?.healthReason ? ` 当前原因：${selectedRoute.healthReason}` : ""}
-              </span>
-            </div>
           </DrawerFormSection>
-          <DrawerFormSection title="访问与语言">
-          <div className="form-grid">
-            <label className="field">
-              <DrawerFieldLabel required>语言模式</DrawerFieldLabel>
-              <SelectField
-                className="w-full"
-                value={form.localeMode}
-                onValueChange={(value) =>
-                  setForm({ ...form, localeMode: value, locale: "" })
-                }
-                options={[
-                  { value: "auto", label: "自动（国家 / 浏览器）" },
-                  { value: "fixed", label: "固定语言" },
-                ]}
-              />
-            </label>
-            {form.localeMode === "fixed" ? (
-              <label className="field">
-                <DrawerFieldLabel required>固定语言</DrawerFieldLabel>
-                <SelectField
-                  className="w-full"
-                  value={form.locale}
-                  onValueChange={(value) => setForm({ ...form, locale: value })}
-                  options={(
-                    templates.find((row) => row.id === form.templateId)
-                      ?.locales || []
-                  ).map((locale) => ({ value: locale, label: locale }))}
-                />
-              </label>
-            ) : (
-              <label className="field">
-                <DrawerFieldLabel>语言解析</DrawerFieldLabel>
-                <Input disabled value="投放国家 → 浏览器语言 → 模板默认" />
-              </label>
-            )}
-          </div>
+          <DrawerFormSection title="访问设置" hideHeader>
           <div className="form-grid">
             <label className="field">
               <DrawerFieldLabel required>基础域名</DrawerFieldLabel>
@@ -3329,166 +3314,27 @@ export function PromotionChannelsPage() {
               </div>
             </label>
           </div>
-          <div className="form-grid">
-            <DrawerFormField
-              label="访问短码（Slug）"
-              hint="新建时自动生成 8 位随机短码，也可以手动修改。"
-              required
-            >
-              <div className="flex gap-2">
-                <Input
-                  value={form.slug}
-                  maxLength={120}
-                  onChange={(e) =>
-                    setForm({
-                      ...form,
-                      slug: e.target.value
-                        .toLowerCase()
-                        .replace(/[^a-z0-9-]/g, ""),
-                    })
-                  }
-                />
-                <IconButton
-                  label="重新生成随机短码"
-                  onClick={() =>
-                    setForm({
-                      ...form,
-                      slug: randomChannelCode(
-                        rows
-                          .filter((item) => item.id !== editing?.id)
-                          .map((item) => item.slug),
-                      ),
-                    })
-                  }
-                >
-                  <RefreshCwIcon size={16} />
-                </IconButton>
-              </div>
-            </DrawerFormField>
-            <DrawerFormField
-              label="最终访问地址"
-              hint="子域名需要该基础域名已配置通配符 DNS 和证书。"
-            >
-              <Input
-                value={previewPublicUrl}
-                readOnly
-                placeholder="选择基础域名后生成"
-              />
-            </DrawerFormField>
-          </div>
           </DrawerFormSection>
-          <DrawerFormSection
-            title="Meta 事件与投放归因"
-            description="浏览器 Pixel 与服务端 CAPI 共用 eventId 去重。模板不携带 Pixel ID、Token 或事件 SDK，全部由渠道运行时注入。"
+          <DrawerFormSection title="发布设置" hideHeader>
+          <DrawerFormField
+            label="App内打开"
+            hint="关闭时会提示用户改用系统浏览器。"
           >
-            <label className="field">
-              <DrawerFieldLabel>Meta Pixel / Dataset</DrawerFieldLabel>
-              <SelectField
-                className="w-full"
-                value={form.pixelId}
-                clearable
-                onValueChange={(value) =>
+            <div className="flex h-8 items-center">
+              <Switch
+                checked={form.inAppBrowserMode === "allow"}
+                onCheckedChange={(checked) =>
                   setForm({
                     ...form,
-                    pixelId: value,
-                    metaBrowserPixelEnabled: Boolean(value),
-                    metaCapiEnabled: value ? form.metaCapiEnabled : false,
+                    inAppBrowserMode: checked ? "allow" : "guide_external",
                   })
                 }
-                placeholder="不绑定"
-                options={pixels
-                  .filter((row) => row.enabled && row.id)
-                  .map((row) => ({ value: row.id, label: row.label }))}
+                aria-label="App内打开"
               />
-            </label>
-            <div className="mt-3 grid gap-2">
-              <DrawerFormField
-                label="浏览器 Pixel"
-                hint="在公开落地页加载 Meta Pixel，并按下方映射发送浏览器事件。"
-              >
-                <div className="flex h-8 items-center">
-                  <Switch
-                    checked={form.metaBrowserPixelEnabled}
-                    disabled={!form.pixelId}
-                    onCheckedChange={(checked) =>
-                      setForm({ ...form, metaBrowserPixelEnabled: checked })
-                    }
-                    aria-label="启用浏览器 Pixel"
-                  />
-                </div>
-              </DrawerFormField>
-              <DrawerFormField
-                label="服务端 Conversions API"
-                hint={
-                  selectedPixel?.tokenConfigured
-                    ? "异步投递、失败重试，并保留可审计账本。"
-                    : "当前 Pixel 未配置 CAPI Token，需先在 Pixel 管理中保存。"
-                }
-              >
-                <div className="flex h-8 items-center">
-                  <Switch
-                    checked={form.metaCapiEnabled}
-                    disabled={!form.pixelId || !selectedPixel?.tokenConfigured}
-                    onCheckedChange={(checked) =>
-                      setForm({ ...form, metaCapiEnabled: checked })
-                    }
-                    aria-label="启用 Meta CAPI"
-                  />
-                </div>
-              </DrawerFormField>
             </div>
-            <div className="form-grid mt-3">
-              {(
-                [
-                  ["page_view", "页面访问"],
-                  ["phone_submit", "提交号码"],
-                  ["pairing_started", "生成配对码"],
-                  ["pairing_verified", "账号链接成功"],
-                ] as Array<[keyof MetaEventMapping, string]>
-              ).map(([key, label]) => (
-                <label className="field" key={key}>
-                  <DrawerFieldLabel required>{label}上报事件</DrawerFieldLabel>
-                  <SelectField
-                    className="w-full"
-                    value={form.metaEventMapping[key]}
-                    onValueChange={(value) =>
-                      setForm({
-                        ...form,
-                        metaEventMapping: {
-                          ...form.metaEventMapping,
-                          [key]: value,
-                        },
-                      })
-                    }
-                    options={metaEventOptions}
-                  />
-                </label>
-              ))}
-            </div>
-          </DrawerFormSection>
-          <DrawerFormSection title="发布设置">
-          <DrawerFormField
-            label="Facebook / Instagram 内置浏览器"
-            hint="浏览器无法可靠强制跳出 App；“提示使用系统浏览器”只展示明确引导，不虚构强制打开能力。"
-            required
-          >
-            <SelectField
-              className="w-full"
-              value={form.inAppBrowserMode}
-              onValueChange={(value) =>
-                setForm({
-                  ...form,
-                  inAppBrowserMode: value as "allow" | "guide_external",
-                })
-              }
-              options={[
-                { value: "allow", label: "允许直接完成账号链接" },
-                { value: "guide_external", label: "提示使用系统浏览器" },
-              ]}
-            />
           </DrawerFormField>
           <DrawerFormField
-            label="新接入账号参与营销"
+            label="参加营销"
             hint="只在账号首次创建时固化；之后切换本项不会改变存量账号。"
           >
             <div className="flex h-8 items-center">
@@ -3497,21 +3343,13 @@ export function PromotionChannelsPage() {
                 onCheckedChange={(checked) =>
                   setForm({ ...form, newAccountMarketingEnabled: checked })
                 }
-                aria-label="新接入账号参与营销"
+                aria-label="参加营销"
               />
             </div>
           </DrawerFormField>
-          <label className="field">
-            <DrawerFieldLabel>计划上线时间</DrawerFieldLabel>
-            <Input
-              type="datetime-local"
-              value={form.goLiveAt}
-              onChange={(e) => setForm({ ...form, goLiveAt: e.target.value })}
-            />
-          </label>
           <DrawerFormField
             label="启用渠道"
-            hint="启用后到达上线时间即可对外访问。"
+            hint="启用后即可对外访问。"
           >
             <div className="flex h-8 items-center">
               <Switch
@@ -3603,14 +3441,34 @@ export function PromotionChannelsPage() {
       </Drawer>
       <Drawer
         open={pixelDrawer}
-        onClose={() => !pixelPending && setPixelDrawer(false)}
+        onClose={() => {
+          if (!pixelPending) {
+            setPixelDrawer(false);
+            resetPixelForm();
+          }
+        }}
         title="Meta Pixel 管理"
-        description="保存 Dataset ID 与加密 CAPI Token；渠道启用 CAPI 后由异步账本投递并自动重试，Token 之后仅显示掩码。"
-        footer={<Button onClick={() => setPixelDrawer(false)}>完成</Button>}
+        description="Pixel 统一管理浏览器上报、CAPI 与事件映射；渠道只需选择像素绑定。Token 保存后仅显示掩码。"
+        footer={
+          <Button
+            onClick={() => {
+              setPixelDrawer(false);
+              resetPixelForm();
+            }}
+          >
+            完成
+          </Button>
+        }
       >
         <div className="drawer-form">
-          <div className="pixel-create-card">
-            <strong>添加 Pixel</strong>
+          <div ref={pixelFormTopRef} className="pixel-create-card">
+            {pixelEditingId ? (
+              <div className="flex justify-end">
+                <Button size="sm" variant="ghost" onClick={resetPixelForm}>
+                  取消编辑
+                </Button>
+              </div>
+            ) : null}
             <label className="field">
               <DrawerFieldLabel required>内部名称</DrawerFieldLabel>
               <Input
@@ -3637,20 +3495,96 @@ export function PromotionChannelsPage() {
                 autoComplete="new-password"
                 value={pixelForm.capiToken}
                 onChange={(e) =>
-                  setPixelForm({ ...pixelForm, capiToken: e.target.value })
+                  setPixelForm({
+                    ...pixelForm,
+                    capiToken: e.target.value,
+                    capiEnabled:
+                      e.target.value || pixelBeingEdited?.tokenConfigured
+                        ? pixelForm.capiEnabled
+                        : false,
+                  })
                 }
-                placeholder="保存后不会回显"
+                placeholder={
+                  pixelBeingEdited?.tokenConfigured
+                    ? "已保存；留空保持不变"
+                    : "保存后不会回显"
+                }
               />
             </label>
+            <DrawerFormField
+              label="浏览器 Pixel"
+              hint="在绑定该 Pixel 的公开落地页加载浏览器事件。"
+            >
+              <div className="flex h-8 items-center">
+                <Switch
+                  checked={pixelForm.browserPixelEnabled}
+                  onCheckedChange={(checked) =>
+                    setPixelForm({
+                      ...pixelForm,
+                      browserPixelEnabled: checked,
+                    })
+                  }
+                  aria-label="启用浏览器 Pixel"
+                />
+              </div>
+            </DrawerFormField>
+            <DrawerFormField
+              label="服务端 Conversions API"
+              hint={
+                pixelHasCapiToken
+                  ? "异步投递、失败重试，并保留可审计账本。"
+                  : "请先填写 CAPI Token。"
+              }
+            >
+              <div className="flex h-8 items-center">
+                <Switch
+                  checked={pixelForm.capiEnabled}
+                  disabled={!pixelHasCapiToken}
+                  onCheckedChange={(checked) =>
+                    setPixelForm({ ...pixelForm, capiEnabled: checked })
+                  }
+                  aria-label="启用 Meta CAPI"
+                />
+              </div>
+            </DrawerFormField>
+            <div className="form-grid">
+              {(
+                [
+                  ["page_view", "页面访问"],
+                  ["phone_submit", "提交号码"],
+                  ["pairing_started", "生成配对码"],
+                  ["pairing_verified", "账号链接成功"],
+                ] as Array<[keyof MetaEventMapping, string]>
+              ).map(([key, label]) => (
+                <label className="field" key={key}>
+                  <DrawerFieldLabel required>{label}上报事件</DrawerFieldLabel>
+                  <SelectField
+                    className="w-full"
+                    value={pixelForm.eventMapping[key]}
+                    onValueChange={(value) =>
+                      setPixelForm({
+                        ...pixelForm,
+                        eventMapping: {
+                          ...pixelForm.eventMapping,
+                          [key]: value,
+                        },
+                      })
+                    }
+                    options={metaEventOptions}
+                  />
+                </label>
+              ))}
+            </div>
             <Button
               disabled={
                 pixelPending ||
                 !pixelForm.name.trim() ||
                 !pixelForm.datasetId.trim()
               }
-              onClick={() => void createPixel()}
+              onClick={() => void savePixel()}
             >
-              {pixelPending ? <Spinner /> : <PlusIcon size={16} />}添加 Pixel
+              {pixelPending ? <Spinner /> : <PlusIcon size={16} />}
+              {pixelEditingId ? "保存配置" : "添加 Pixel"}
             </Button>
           </div>
           <div className="binding-list-header">
@@ -3679,6 +3613,14 @@ export function PromotionChannelsPage() {
                   <Badge tone={row.enabled ? "success" : "neutral"}>
                     {row.enabled ? "启用" : "停用"}
                   </Badge>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!row.id}
+                    onClick={() => editPixel(row)}
+                  >
+                    配置
+                  </Button>
                   <Button
                     size="sm"
                     variant="outline"
