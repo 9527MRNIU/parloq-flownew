@@ -64,6 +64,157 @@ CURRENT_SYSTEM_DOMAIN_IMPORT_ERROR = (
 )
 
 
+def _dev_provider_domain_fixtures_enabled() -> bool:
+    settings = get_settings()
+    return (
+        settings.dev_provider_domain_fixtures
+        and settings.environment.lower() not in {"production", "prod"}
+    )
+
+
+def _dev_cloudflare_domain_rows() -> list[dict[str, object]]:
+    return [
+        {
+            "hostname": "dev-cf-active.localhost.test",
+            "status": "active",
+            "paused": False,
+            "phishingDetected": False,
+            "source": "account_existing",
+            "systemDomainId": None,
+        },
+        {
+            "hostname": "dev-cf-pending.localhost.test",
+            "status": "pending",
+            "paused": False,
+            "phishingDetected": False,
+            "source": "account_existing",
+            "systemDomainId": None,
+        },
+        {
+            "hostname": "dev-cf-paused.localhost.test",
+            "status": "active",
+            "paused": True,
+            "phishingDetected": False,
+            "source": "account_existing",
+            "systemDomainId": None,
+        },
+        {
+            "hostname": "dev-cf-risk.localhost.test",
+            "status": "active",
+            "paused": False,
+            "phishingDetected": True,
+            "source": "account_existing",
+            "systemDomainId": None,
+        },
+        {
+            "hostname": "dev-cf-error.localhost.test",
+            "status": "deactivated",
+            "paused": False,
+            "phishingDetected": False,
+            "source": "account_existing",
+            "systemDomainId": None,
+        },
+        {
+            "hostname": "dev-cf-system-import.localhost.test",
+            "status": "active",
+            "paused": False,
+            "phishingDetected": False,
+            "source": "system_import",
+            "systemDomainId": "9900000000000101",
+        },
+        {
+            "hostname": "dev-cf-system-purchase.localhost.test",
+            "status": "active",
+            "paused": False,
+            "phishingDetected": False,
+            "source": "system_purchase",
+            "systemDomainId": "9900000000000102",
+        },
+    ]
+
+
+def _dev_domain_order_row(
+    hostname: str,
+    status_value: str,
+    sequence: int,
+    *,
+    failure_reason: str | None = None,
+) -> dict[str, object]:
+    return {
+        "id": str(9900000000000200 + sequence),
+        "hostname": hostname,
+        "years": 1,
+        "amount": 12.99,
+        "currency": "USD",
+        "status": status_value,
+        "provider": "namesilo",
+        "autoRenew": False,
+        "failureReason": failure_reason,
+        "domainId": None,
+        "allowedActions": {
+            "mockPayment": False,
+            "provision": False,
+            "reconcile": False,
+            "cancel": False,
+            "delete": False,
+        },
+        "createdAt": "2026-08-18T08:00:00Z",
+        "updatedAt": "2026-08-20T08:00:00Z",
+    }
+
+
+def _dev_namesilo_domain_rows() -> list[dict[str, object]]:
+    statuses = [
+        ("pending-payment", "pending_payment", None),
+        ("provisioning", "provisioning", None),
+        ("unknown", "unknown", None),
+        ("failed", "failed", "模拟：NameSilo 购买请求失败"),
+        ("cancelled", "cancelled", None),
+    ]
+    rows: list[dict[str, object]] = [
+        {
+            "hostname": "dev-ns-owned.localhost.test",
+            "source": "account_existing",
+            "providerOwned": True,
+            "providerStatus": "active",
+            "createdAt": "2025-08-20",
+            "expiresAt": "2027-08-20",
+            "systemDomainId": None,
+            "order": None,
+        },
+        {
+            "hostname": "dev-ns-purchased.localhost.test",
+            "source": "system_purchase",
+            "providerOwned": True,
+            "providerStatus": "active",
+            "createdAt": "2026-08-01",
+            "expiresAt": "2027-08-01",
+            "systemDomainId": "9900000000000200",
+            "order": None,
+        },
+    ]
+    for sequence, (label, status_value, failure_reason) in enumerate(statuses, start=1):
+        hostname = f"dev-ns-{label}.localhost.test"
+        rows.append(
+            {
+                "hostname": hostname,
+                "source": "system_order",
+                "providerOwned": False,
+                "providerStatus": status_value,
+                "createdAt": None,
+                "expiresAt": None,
+                "systemDomainId": None,
+                "order": _dev_domain_order_row(
+                    hostname,
+                    status_value,
+                    sequence,
+                    failure_reason=failure_reason,
+                ),
+            }
+        )
+    return rows
+
+
 def _control_plane_hostnames(request: Request) -> set[str]:
     """Return the exact hostnames used to access the management application."""
 
@@ -496,20 +647,29 @@ def list_domains(db: DbSession, current_user: CurrentUser) -> dict:
 
 @router.get("/cloudflare")
 def list_cloudflare_domains(db: DbSession, current_user: CurrentUser) -> dict:
-    api_token, settings = _platform_secret(db, "cloudflare", "api_token")
-    client = CloudflareClient(
-        api_token,
-        account_id=str(settings.get("accountId") or "").strip() or None,
-    )
+    fixture_mode = _dev_provider_domain_fixtures_enabled()
+    zones: list[dict[str, object]] = []
     try:
-        zones = client.list_zones()
+        api_token, settings = _platform_secret(db, "cloudflare", "api_token")
+        client = CloudflareClient(
+            api_token,
+            account_id=str(settings.get("accountId") or "").strip() or None,
+        )
+        try:
+            zones = client.list_zones()
+        finally:
+            client.close()
+    except HTTPException:
+        if not fixture_mode:
+            raise
+        logger.warning("Cloudflare 配置不可用，开发环境仅展示模拟域名")
     except PlatformClientError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"读取 Cloudflare 域名失败：{exc}",
-        ) from exc
-    finally:
-        client.close()
+        if not fixture_mode:
+            raise HTTPException(
+                status_code=502,
+                detail=f"读取 Cloudflare 域名失败：{exc}",
+            ) from exc
+        logger.warning("读取 Cloudflare 域名失败，开发环境仅展示模拟域名：%s", exc)
 
     domain_statement = select(DomainRecord)
     if current_user.role != "admin":
@@ -539,23 +699,39 @@ def list_cloudflare_domains(db: DbSession, current_user: CurrentUser) -> dict:
                 "systemDomainId": entity_id(local_domain) if local_domain else None,
             }
         )
+    if fixture_mode:
+        existing_hostnames = {str(row["hostname"]).lower() for row in rows}
+        rows.extend(
+            row
+            for row in _dev_cloudflare_domain_rows()
+            if str(row["hostname"]).lower() not in existing_hostnames
+        )
     rows.sort(key=lambda row: row["hostname"])
     return {"data": {"rows": rows, "total": len(rows)}}
 
 
 @router.get("/namesilo")
 def list_namesilo_domains(db: DbSession, current_user: CurrentUser) -> dict:
-    api_key, _ = _platform_secret(db, "namesilo", "api_key")
-    client = NameSiloClient(api_key)
+    fixture_mode = _dev_provider_domain_fixtures_enabled()
+    provider_domains: list[dict[str, object]] = []
     try:
-        provider_domains = client.list_domains()
+        api_key, _ = _platform_secret(db, "namesilo", "api_key")
+        client = NameSiloClient(api_key)
+        try:
+            provider_domains = client.list_domains()
+        finally:
+            client.close()
+    except HTTPException:
+        if not fixture_mode:
+            raise
+        logger.warning("NameSilo 配置不可用，开发环境仅展示模拟域名")
     except PlatformClientError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"读取 NameSilo 域名失败：{exc}",
-        ) from exc
-    finally:
-        client.close()
+        if not fixture_mode:
+            raise HTTPException(
+                status_code=502,
+                detail=f"读取 NameSilo 域名失败：{exc}",
+            ) from exc
+        logger.warning("读取 NameSilo 域名失败，开发环境仅展示模拟域名：%s", exc)
 
     order_statement = select(DomainOrder).where(DomainOrder.provider == "namesilo")
     domain_statement = select(DomainRecord)
@@ -617,6 +793,13 @@ def list_namesilo_domains(db: DbSession, current_user: CurrentUser) -> dict:
             }
         )
 
+    if fixture_mode:
+        existing_hostnames = {str(row["hostname"]).lower() for row in rows}
+        rows.extend(
+            row
+            for row in _dev_namesilo_domain_rows()
+            if str(row["hostname"]).lower() not in existing_hostnames
+        )
     rows.sort(key=lambda row: str(row["hostname"]))
     return {"data": {"rows": rows, "total": len(rows)}}
 

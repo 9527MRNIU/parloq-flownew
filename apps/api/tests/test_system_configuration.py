@@ -239,6 +239,75 @@ def test_baota_connection_test_uses_saved_panel_address(
         admin_client.delete("/api/system/configuration/baota")
 
 
+def test_github_repository_configuration_and_read_only_connection_test(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
+    calls: list[object] = []
+
+    class FakeGitHubRepositoryClient:
+        def __init__(
+            self,
+            token: str,
+            *,
+            repository: str,
+            ref: str,
+            catalog_path: str,
+        ) -> None:
+            calls.append((token, repository, ref, catalog_path))
+
+        def verify_connection(self) -> dict[str, str]:
+            calls.append("verified")
+            return {
+                "repository": "zaptel099/parloq-flow-template-kit",
+                "defaultBranch": "main",
+            }
+
+        def close(self) -> None:
+            calls.append("closed")
+
+    monkeypatch.setattr(
+        configuration_router,
+        "GitHubRepositoryClient",
+        FakeGitHubRepositoryClient,
+    )
+    admin_client.delete("/api/system/configuration/github")
+    try:
+        saved = admin_client.put(
+            "/api/system/configuration/github",
+            json={
+                "value": "github-fine-grained-token-123456",
+                "enabled": True,
+                "repository": "https://github.com/zaptel099/parloq-flow-template-kit.git",
+                "ref": "main",
+                "catalogPath": "artifacts/catalog.json",
+            },
+        )
+        assert saved.status_code == 200, saved.text
+        platform = saved.json()["data"]["platform"]
+        assert platform["settings"] == {
+            "repository": "zaptel099/parloq-flow-template-kit",
+            "ref": "main",
+            "catalogPath": "artifacts/catalog.json",
+        }
+        tested = admin_client.post("/api/system/configuration/github/test")
+        assert tested.status_code == 200, tested.text
+        assert tested.json()["data"]["ok"] is True
+        assert "zaptel099/parloq-flow-template-kit" in tested.json()["data"]["message"]
+        assert calls == [
+            (
+                "github-fine-grained-token-123456",
+                "zaptel099/parloq-flow-template-kit",
+                "main",
+                "artifacts/catalog.json",
+            ),
+            "verified",
+            "closed",
+        ]
+    finally:
+        admin_client.delete("/api/system/configuration/github")
+
+
 def test_platform_credentials_are_admin_only(admin_client: TestClient) -> None:
     groups = admin_client.get("/api/user-groups").json()["data"]["rows"]
     operator_group = next(row for row in groups if row["systemKey"] == "operator")

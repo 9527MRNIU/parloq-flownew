@@ -220,7 +220,7 @@ function applyBatchNaming(items: BatchUploadItem[], mode: BatchNamingMode, value
 }
 
 function uploadStatusMeta(status: BatchUploadStatus) {
-  if (status === "uploading") return { label: "上传中", tone: "primary" as const };
+  if (status === "uploading") return { label: "上传中", tone: "warning" as const };
   if (status === "success") return { label: "成功", tone: "success" as const };
   if (status === "failed") return { label: "失败", tone: "danger" as const };
   return { label: "待上传", tone: "neutral" as const };
@@ -848,7 +848,7 @@ export function MaterialsPage() {
           <>
             {selected.size ? (
               <>
-                <Badge tone="primary">已选择 {selected.size}</Badge>
+                <Badge tone="neutral">已选择 {selected.size}</Badge>
                 {activeType === "text" ? (
                   <SelectField
                     value=""
@@ -974,7 +974,7 @@ export function MaterialsPage() {
                     >
                       <div className="flex min-w-0 items-start gap-2">
                         <div className="min-w-0 flex-1"><strong className="block truncate text-sm" title={row.name}>{row.name}</strong><span className="mt-0.5 block truncate text-xs text-muted-foreground" title={row.id}>{row.id}</span></div>
-                        {row.type === "text" ? <Badge tone="info">{textRoleDefinition(row.textRole).label}</Badge> : null}
+                        {row.type === "text" ? <Badge tone="neutral">{textRoleDefinition(row.textRole).label}</Badge> : null}
                         <Badge tone={state.tone}>{state.label}</Badge>
                       </div>
                       <div className={cn("min-w-0 text-xs text-muted-foreground", row.type === "text" ? "grid gap-0.5" : "flex items-center justify-between gap-2")}>
@@ -985,9 +985,9 @@ export function MaterialsPage() {
                         <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground" onClick={(event) => event.stopPropagation()}>
                           <Checkbox checked={isSelected} onCheckedChange={(checked) => toggleSelected(row.id, checked === true)} />选择
                         </label>
-                        <div className="flex items-center gap-1">
-                          <IconButton label="预览" onClick={(event) => { event.stopPropagation(); setPreview(row); }}><EyeIcon size={15} /></IconButton>
-                          {canManage ? <IconButton label="编辑" onClick={(event) => { event.stopPropagation(); open(row); }}><PencilIcon size={15} /></IconButton> : null}
+                        <div className="flex min-w-max items-center gap-2">
+                          <Button variant="outline" size="sm" onClick={(event) => { event.stopPropagation(); setPreview(row); }}>预览</Button>
+                          {canManage ? <Button variant="outline" size="sm" onClick={(event) => { event.stopPropagation(); open(row); }}>编辑</Button> : null}
                         </div>
                       </div>
                     </div>
@@ -1013,10 +1013,10 @@ export function MaterialsPage() {
                     {row.type === "audio" && url ? <audio className="hidden w-64 max-w-[24vw] md:block" controls preload="none" src={url} /> : null}
                     <div className="hidden min-w-0 max-w-sm flex-1 lg:block"><p className="truncate text-sm text-muted-foreground" title={materialContent(row)}>{materialContent(row) || "-"}</p></div>
                     <div className="hidden w-28 shrink-0 text-right text-xs text-muted-foreground xl:block">{formatDateTime(row.updatedAt || row.createdAt)}</div>
-                    <div className="flex shrink-0 items-center justify-end gap-1">
-                      <IconButton label="预览" onClick={() => setPreview(row)}><EyeIcon size={16} /></IconButton>
-                      {item.binary && row.hasFile ? <IconButton label="下载" onClick={() => void download(row)}><DownloadIcon size={16} /></IconButton> : null}
-                      {canManage ? <><IconButton label="编辑" onClick={() => open(row)}><PencilIcon size={16} /></IconButton><IconButton className="text-destructive" label="删除" onClick={() => void remove(row)}><Trash2Icon size={16} /></IconButton></> : null}
+                    <div className="flex min-w-max shrink-0 items-center justify-end gap-2">
+                      <Button variant="outline" size="sm" onClick={() => setPreview(row)}>预览</Button>
+                      {item.binary && row.hasFile ? <Button variant="outline" size="sm" onClick={() => void download(row)}>下载</Button> : null}
+                      {canManage ? <><Button variant="outline" size="sm" onClick={() => open(row)}>编辑</Button><Button variant="destructive" size="sm" onClick={() => void remove(row)}>删除</Button></> : null}
                     </div>
                   </div>
                 );

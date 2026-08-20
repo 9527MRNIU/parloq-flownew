@@ -1,9 +1,7 @@
 import {
   CircleAlertIcon,
   CircleCheckIcon,
-  CircleHelpIcon,
   Clock3Icon,
-  InfoIcon,
   PowerIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -22,8 +20,6 @@ const toneIcons = {
   success: CircleCheckIcon,
   warning: Clock3Icon,
   danger: CircleAlertIcon,
-  info: InfoIcon,
-  primary: CircleHelpIcon,
   neutral: PowerIcon,
 } satisfies Record<BadgeTone, typeof CircleCheckIcon>;
 
@@ -73,6 +69,7 @@ export function EntityPrimaryCell({
   status,
   description,
   idFallback = "等待 ID 迁移",
+  showId = true,
   className,
 }: {
   title: ReactNode;
@@ -80,14 +77,18 @@ export function EntityPrimaryCell({
   status: EntityStatusMeta;
   description?: ReactNode;
   idFallback?: ReactNode;
+  showId?: boolean;
   className?: string;
 }) {
   return (
-    <div className={cn("flex min-w-[210px] items-start gap-3", className)}>
+    <div
+      data-entity-primary-cell=""
+      className={cn("flex min-w-[210px] items-start gap-3", className)}
+    >
       <EntityStatusIndicator status={status} />
       <div className="cell-main min-w-0 max-w-[220px]">
         <strong>{title || "未命名"}</strong>
-        <span title={id || undefined}>{id || idFallback}</span>
+        {showId ? <span title={id || undefined}>{id || idFallback}</span> : null}
         {description ? <span>{description}</span> : null}
       </div>
     </div>

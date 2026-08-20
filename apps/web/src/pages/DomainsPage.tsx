@@ -1,11 +1,9 @@
 import {
   LoaderCircleIcon,
-  PencilIcon,
   PlayCircleIcon,
   PlusIcon,
   RefreshCwIcon,
   ShoppingCartIcon,
-  Trash2Icon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
@@ -15,7 +13,6 @@ import {
   confirmAction,
   Drawer,
   EmptyState,
-  IconButton,
   Input,
   Spinner,
   Switch,
@@ -342,11 +339,35 @@ const providerSourceLabels = {
   account_existing: "账户已有",
 } as const;
 function providerSourceTone(source: keyof typeof providerSourceLabels) {
-  if (source === "system_purchase") return "primary" as const;
-  if (source === "system_import") return "info" as const;
-  if (source === "system_order") return "warning" as const;
-  return "neutral" as const;
+  return source === "account_existing" ? "neutral" as const : "success" as const;
 }
+const cloudflareStatusMeta: Record<string, EntityStatusMeta> = {
+  active: {
+    label: "正常",
+    description: "Cloudflare Zone 已激活。",
+    tone: "success",
+  },
+  pending: {
+    label: "待激活",
+    description: "Cloudflare 正在等待域名服务器切换生效。",
+    tone: "warning",
+  },
+  initializing: {
+    label: "初始化中",
+    description: "Cloudflare 正在初始化该 Zone。",
+    tone: "warning",
+  },
+  moved: {
+    label: "已迁移",
+    description: "Cloudflare Zone 已迁移，当前不能直接接入系统。",
+    tone: "danger",
+  },
+  deactivated: {
+    label: "已停用",
+    description: "Cloudflare Zone 已停用，当前不能接入系统。",
+    tone: "danger",
+  },
+};
 function cloudflareDomainStatus(row: CloudflareDomainRow): EntityStatusMeta {
   if (row.phishingDetected) {
     return {
@@ -358,16 +379,14 @@ function cloudflareDomainStatus(row: CloudflareDomainRow): EntityStatusMeta {
   if (row.paused) {
     return { label: "已暂停", description: "Cloudflare Zone 当前处于暂停状态。", tone: "warning" };
   }
-  if (row.status === "active") {
-    return { label: "正常", description: "Cloudflare Zone 已激活。", tone: "success" };
-  }
-  if (row.status === "pending") {
-    return { label: "待激活", description: "Cloudflare 正在等待域名服务器切换生效。", tone: "warning" };
-  }
-  return { label: row.status || "未知", description: "Cloudflare Zone 当前不可正常使用。", tone: "danger" };
+  return cloudflareStatusMeta[row.status] || {
+    label: "未知状态",
+    description: "Cloudflare 返回了未识别的 Zone 状态，当前按不可用处理。",
+    tone: "danger",
+  };
 }
 function integrationStatusBadge(connected: boolean) {
-  return <Badge tone={connected ? "info" : "neutral"}>{connected ? "已接入" : "未接入"}</Badge>;
+  return <Badge tone={connected ? "success" : "neutral"}>{connected ? "已接入" : "未接入"}</Badge>;
 }
 const currentSystemDomainMessage = "当前管理后台正在使用该域名或其子域名，不能作为落地页域名接入。";
 function normalizeComparableHostname(value: string) {
@@ -939,10 +958,10 @@ export function DomainsPage() {
           </div>
         ) : visible.length ? (
           <div className="table-scroll">
-            <Table>
+            <Table layout="list">
               <TableHeader>
                 <TableRow>
-                  <TableHead>域名</TableHead>
+                  <TableHead adaptive>域名</TableHead>
                   <TableHead>来源</TableHead>
                   <TableHead>托管</TableHead>
                   <TableHead>DNS / TLS</TableHead>
@@ -951,7 +970,7 @@ export function DomainsPage() {
                   <TableHead>绑定渠道</TableHead>
                   <TableHead>最近验证</TableHead>
                   <TableHead>接入状态</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
+                  <TableHead>操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -972,10 +991,28 @@ export function DomainsPage() {
                       />
                     </TableCell>
                     <TableCell>
-                      <strong>{row.acquisitionType === "purchased" ? "平台购买" : "外部接入"}</strong>
+                      <Badge
+                        tone={row.acquisitionType === "purchased" ? "success" : "neutral"}
+                        title={
+                          row.acquisitionType === "purchased"
+                            ? "域名通过平台购买并纳入系统管理。"
+                            : "域名由外部注册商接入系统。"
+                        }
+                      >
+                        {row.acquisitionType === "purchased" ? "平台购买" : "外部接入"}
+                      </Badge>
                     </TableCell>
                     <TableCell>
-                      {row.managementMode === "platform" ? "平台托管" : "自行管理"}
+                      <Badge
+                        tone="neutral"
+                        title={
+                          row.managementMode === "platform"
+                            ? "系统可通过已配置的 NameSilo、Cloudflare 凭据自动切换域名服务器并配置解析。"
+                            : "注册商侧由用户自行管理；接入完成后，系统仍会配置 Cloudflare DNS、TLS 和站点。"
+                        }
+                      >
+                        {row.managementMode === "platform" ? "平台托管" : "自行管理"}
+                      </Badge>
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-1 whitespace-nowrap">
@@ -996,45 +1033,45 @@ export function DomainsPage() {
                     </TableCell>
                     <TableCell>{integrationStatusBadge(true)}</TableCell>
                     <TableCell>
-                      <div className="flex items-center justify-end gap-1">
+                      <div className="flex min-w-max items-center justify-end gap-2">
                         {canManage ? (
                           <>
                             {row.onboarding.canContinue ? (
-                              <IconButton
-                                label="继续自动接入"
+                              <Button
+                                variant="outline"
+                                size="sm"
                                 disabled={!row.id || onboardingPending === row.id}
                                 onClick={() => void continueOnboarding(row)}
                               >
-                                {onboardingPending === row.id ? (
-                                  <LoaderCircleIcon className="spin" size={16} />
-                                ) : (
-                                  <PlayCircleIcon size={16} />
-                                )}
-                              </IconButton>
+                                {onboardingPending === row.id ? <Spinner /> : null}
+                                继续自动接入
+                              </Button>
                             ) : null}
-                            <IconButton
-                              label="立即验证"
+                            <Button
+                              variant="outline"
+                              size="sm"
                               disabled={!row.id || testing === row.id}
                               onClick={() => void verify(row)}
                             >
-                              {testing === row.id ? (
-                                <LoaderCircleIcon className="spin" size={16} />
-                              ) : (
-                                <RefreshCwIcon size={16} />
-                              )}
-                            </IconButton>
-                            <IconButton label="编辑" disabled={!row.id} onClick={() => open(row)}>
-                              <PencilIcon size={16} />
-                            </IconButton>
-                            <IconButton
-                              label="删除"
-                              variant="ghost"
-                              className="danger"
+                              {testing === row.id ? <Spinner /> : null}
+                              立即验证
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={!row.id}
+                              onClick={() => open(row)}
+                            >
+                              编辑
+                            </Button>
+                            <Button
+                              variant="destructive"
+                              size="sm"
                               disabled={!row.id}
                               onClick={() => void remove(row)}
                             >
-                              <Trash2Icon size={16} />
-                            </IconButton>
+                              删除
+                            </Button>
                           </>
                         ) : null}
                       </div>
@@ -1057,14 +1094,14 @@ export function DomainsPage() {
           <div className="loading-state"><Spinner /></div>
         ) : visibleCloudflareDomains.length ? (
           <div className="table-scroll">
-            <Table>
+            <Table layout="list">
               <TableHeader>
                 <TableRow>
-                  <TableHead>域名</TableHead>
+                  <TableHead adaptive>域名</TableHead>
                   <TableHead>来源</TableHead>
                   <TableHead>Cloudflare 状态</TableHead>
                   <TableHead>接入状态</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
+                  <TableHead>操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -1095,11 +1132,12 @@ export function DomainsPage() {
                       </TableCell>
                       <TableCell>{integrationStatusBadge(Boolean(row.systemDomainId))}</TableCell>
                       <TableCell>
-                        <div className="flex items-center justify-end gap-1">
+                        <div className="flex min-w-max items-center justify-end gap-2">
                           {currentSystemDomain ? <CurrentSystemDomainWarning /> : null}
                           {!row.systemDomainId && canManage ? (
                             <Button
                               variant="outline"
+                              size="sm"
                               disabled={currentSystemDomain || importPending === `cloudflare:${row.hostname}`}
                               title={currentSystemDomain ? currentSystemDomainMessage : undefined}
                               onClick={() => void importProviderDomain("cloudflare", row.hostname)}
@@ -1131,17 +1169,17 @@ export function DomainsPage() {
           <div className="loading-state"><Spinner /></div>
         ) : visibleNameSiloDomains.length ? (
           <div className="table-scroll">
-            <Table>
+            <Table layout="list">
               <TableHeader>
                 <TableRow>
-                  <TableHead>域名</TableHead>
+                  <TableHead adaptive>域名</TableHead>
                   <TableHead>来源</TableHead>
                   <TableHead>NameSilo 状态</TableHead>
                   <TableHead>创建时间</TableHead>
                   <TableHead>到期时间</TableHead>
                   <TableHead>系统订单</TableHead>
                   <TableHead>接入状态</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
+                  <TableHead>操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -1196,42 +1234,42 @@ export function DomainsPage() {
                       </TableCell>
                       <TableCell>{integrationStatusBadge(Boolean(row.systemDomainId))}</TableCell>
                       <TableCell>
-                        <div className="flex items-center justify-end gap-1">
+                        <div className="flex min-w-max items-center justify-end gap-2">
                           {currentSystemDomain ? <CurrentSystemDomainWarning /> : null}
                           {canPurchase && itemOrder?.allowedActions.mockPayment ? (
-                            <Button disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "mock-payment")}>
+                            <Button size="sm" disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "mock-payment")}>
                               {busy ? <Spinner /> : null}确认支付并开通
                             </Button>
                           ) : null}
                           {canPurchase && itemOrder?.allowedActions.provision ? (
-                            <Button disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "provision")}>
+                            <Button size="sm" disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "provision")}>
                               {busy ? <Spinner /> : null}确认购买
                             </Button>
                           ) : null}
                           {canPurchase && itemOrder?.allowedActions.reconcile ? (
-                            <Button variant="outline" disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "reconcile")}>
+                            <Button size="sm" variant="outline" disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "reconcile")}>
                               {busy ? <Spinner /> : null}订单对账
                             </Button>
                           ) : null}
                           {canPurchase && itemOrder?.allowedActions.cancel ? (
-                            <Button variant="ghost" className="danger" disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "cancel")}>
+                            <Button size="sm" variant="outline" className="text-destructive" disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "cancel")}>
                               取消
                             </Button>
                           ) : null}
                           {canPurchase && itemOrder?.allowedActions.delete ? (
-                            <IconButton
-                              label="删除订单记录"
-                              variant="ghost"
-                              className="danger"
+                            <Button
+                              variant="destructive"
+                              size="sm"
                               disabled={!itemOrder.id || busy}
                               onClick={() => void deleteOrder(itemOrder)}
                             >
-                              <Trash2Icon size={16} />
-                            </IconButton>
+                              删除订单
+                            </Button>
                           ) : null}
                           {showsImport ? (
                             <Button
                               variant="outline"
+                              size="sm"
                               disabled={currentSystemDomain || importPending === `namesilo:${row.hostname}`}
                               title={currentSystemDomain ? currentSystemDomainMessage : undefined}
                               onClick={() => void importProviderDomain(

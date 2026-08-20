@@ -20,6 +20,7 @@ os.environ["PROMOTION_SUCCESS_WEBHOOK_SECRET"] = "pytest-promotion-success-secre
 os.environ["TASK_QUEUE_MOCK"] = "true"
 os.environ["PAIRING_RATE_LIMIT_MOCK"] = "true"
 os.environ["PROMOTION_EVENT_RATE_LIMIT_MOCK"] = "true"
+os.environ["DEV_PROVIDER_DOMAIN_FIXTURES"] = "false"
 os.environ["AUTO_CREATE_TABLES"] = "true"
 
 from app.main import app  # noqa: E402

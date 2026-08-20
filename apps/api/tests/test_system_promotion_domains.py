@@ -33,6 +33,46 @@ def _account_group(admin_client: TestClient, name: str) -> str:
     return response.json()["data"]["group"]["id"]
 
 
+def test_dev_provider_domain_fixtures_cover_badge_states(monkeypatch) -> None:
+    cloudflare_rows = domains_router._dev_cloudflare_domain_rows()
+    assert len(cloudflare_rows) == 7
+    assert {row["status"] for row in cloudflare_rows} >= {
+        "active",
+        "pending",
+        "deactivated",
+    }
+    assert any(row["paused"] for row in cloudflare_rows)
+    assert any(row["phishingDetected"] for row in cloudflare_rows)
+    assert {row["source"] for row in cloudflare_rows} == {
+        "account_existing",
+        "system_import",
+        "system_purchase",
+    }
+
+    namesilo_rows = domains_router._dev_namesilo_domain_rows()
+    assert len(namesilo_rows) == 7
+    assert {row["source"] for row in namesilo_rows} == {
+        "account_existing",
+        "system_order",
+        "system_purchase",
+    }
+    assert {
+        row["providerStatus"] for row in namesilo_rows if not row["providerOwned"]
+    } == {"pending_payment", "provisioning", "unknown", "failed", "cancelled"}
+
+    settings = domains_router.get_settings()
+    monkeypatch.setattr(
+        domains_router,
+        "get_settings",
+        lambda: replace(
+            settings,
+            environment="production",
+            dev_provider_domain_fixtures=True,
+        ),
+    )
+    assert domains_router._dev_provider_domain_fixtures_enabled() is False
+
+
 def test_external_domain_inventories_and_namesilo_purchase_source(
     admin_client: TestClient,
     monkeypatch,

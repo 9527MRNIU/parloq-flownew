@@ -1,35 +1,45 @@
 import {
   ActivityIcon,
-  ArchiveIcon,
   BookOpenIcon,
   ChevronLeftIcon,
   CopyIcon,
   DownloadIcon,
   EyeIcon,
   ExternalLinkIcon,
+  Globe2Icon,
   LoaderCircleIcon,
   MonitorIcon,
   PauseIcon,
   PencilIcon,
   PlayIcon,
-  PlugZapIcon,
   PlusIcon,
   RefreshCwIcon,
-  RocketIcon,
   Settings2Icon,
   SmartphoneIcon,
   TabletIcon,
   Trash2Icon,
   UploadCloudIcon,
 } from "lucide-react";
+import * as CountryFlags from "country-flag-icons/react/3x2";
 import {
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  type ComponentType,
   type FormEvent,
+  type SVGProps,
 } from "react";
+import type { IconType } from "react-icons";
+import {
+  SiFacebook,
+  SiGoogle,
+  SiInstagram,
+  SiMeta,
+  SiTiktok,
+  SiYoutube,
+} from "react-icons/si";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   apiDownload,
@@ -67,6 +77,7 @@ import {
   useClientPagination,
 } from "../components/list-page";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
+import { RepositorySourceTabs } from "../components/repository-source-tabs";
 import {
   DrawerFieldLabel,
   DrawerFormField,
@@ -77,11 +88,93 @@ import { countryOptions } from "../lib/countries";
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
 import { formatPhoneDisplay } from "../lib/utils";
 import {
+  formatRepositorySize,
+  localRepositorySourceRow,
+  remotePromotionArtifactRow,
+  type LocalRepositorySource,
+  type RemotePromotionArtifact,
+  type RepositoryView,
+} from "../lib/promotion-repository";
+import {
   TEMPLATE_DESIGN_SECTIONS,
   templateAiCreationPrompt,
 } from "../content/promotion-template-design";
 
 const CHANNEL_RANDOM_CODE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
+
+const COUNTRY_NAME_BY_CODE = new Map(
+  countryOptions.map((option) => [
+    option.value,
+    option.label.split(" · ")[0] || option.value,
+  ]),
+);
+
+const PLATFORM_CONFIG: Record<
+  string,
+  { label: string; icon: IconType; color: string }
+> = {
+  facebook: { label: "Facebook", icon: SiFacebook, color: "#0866ff" },
+  google: { label: "Google", icon: SiGoogle, color: "#4285f4" },
+  instagram: { label: "Instagram", icon: SiInstagram, color: "#e4405f" },
+  meta: { label: "Meta", icon: SiMeta, color: "#0467df" },
+  tiktok: { label: "TikTok", icon: SiTiktok, color: "#000000" },
+  youtube: { label: "YouTube", icon: SiYoutube, color: "#ff0000" },
+};
+
+function countryDisplayName(code: string): string {
+  const normalized = code.trim().toUpperCase();
+  return COUNTRY_NAME_BY_CODE.get(normalized) || normalized || "-";
+}
+
+function CountryFlag({ code }: { code: string }) {
+  const normalized = code.trim().toUpperCase();
+  const Flag = (
+    CountryFlags as unknown as Record<
+      string,
+      ComponentType<SVGProps<SVGSVGElement>>
+    >
+  )[normalized];
+
+  if (!Flag) {
+    return <Globe2Icon aria-hidden="true" className="h-4 w-6 text-muted-foreground" />;
+  }
+
+  return (
+    <Flag
+      aria-hidden="true"
+      className="block h-4 w-6 shrink-0 overflow-hidden rounded-[2px] shadow-sm ring-1 ring-black/10"
+    />
+  );
+}
+
+function platformDisplayName(platform: string): string {
+  const normalized = platform.trim().toLowerCase();
+  return PLATFORM_CONFIG[normalized]?.label || platform || "-";
+}
+
+function PlatformLogo({ platform }: { platform: string }) {
+  const normalized = platform.trim().toLowerCase();
+  const config = PLATFORM_CONFIG[normalized];
+
+  if (config) {
+    const Icon = config.icon;
+    return (
+      <Icon
+        aria-hidden="true"
+        className="h-5 w-5 shrink-0"
+        color={config.color}
+      />
+    );
+  }
+  return (
+    <span
+      aria-hidden="true"
+      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] text-muted-foreground"
+    >
+      {platform.trim().slice(0, 1).toUpperCase() || "-"}
+    </span>
+  );
+}
 
 function randomChannelCode(existing: Iterable<string>, length = 8): string {
   const reserved = new Set(Array.from(existing, (value) => value.toLowerCase()));
@@ -110,6 +203,7 @@ type PromotionTemplate = {
   id: string;
   readKey: string;
   name: string;
+  description: string;
   version: string;
   status: string;
   previewUrl: string;
@@ -118,7 +212,9 @@ type PromotionTemplate = {
   defaultLocale: string;
   supportedLocales: string[];
   integrationIds: string[];
+  repositorySource: LocalRepositorySource | null;
   qualityReport: TemplateQualityReport;
+  createdAt?: string;
   updatedAt?: string;
 };
 type TemplateQualityWarning = {
@@ -240,6 +336,7 @@ type PromotionChannel = {
   localeMode: string;
   locale: string;
   goLiveAt?: string;
+  createdAt?: string;
   visits: number;
   clicks: number;
   leads: number;
@@ -525,6 +622,7 @@ function templateRow(input: unknown): PromotionTemplate {
     id,
     readKey: entityRowKey(row, id, "promotion-template", `${field(row, "name")}:${field(row, "updatedAt", "updated_at")}`),
     name: field(row, "name"),
+    description: field(row, "description"),
     version: `${rawVersion} · ${defaultLocale} / ${locales.length} 语言`,
     status:
       field(row, "status") || (row.enabled === false ? "disabled" : "ready"),
@@ -536,11 +634,15 @@ function templateRow(input: unknown): PromotionTemplate {
     integrationIds: Array.isArray(rawIntegrationIds)
       ? rawIntegrationIds.map(String)
       : [],
+    repositorySource: localRepositorySourceRow(
+      row.repositorySource ?? row.repository_source,
+    ),
     qualityReport: templateQualityReport(
       row.qualityReport ?? row.quality_report,
     ),
     defaultLocale,
     supportedLocales: locales,
+    createdAt: field(row, "createdAt", "created_at"),
     updatedAt: field(row, "updatedAt", "updated_at"),
   };
 }
@@ -673,6 +775,7 @@ function channelRow(input: unknown): PromotionChannel {
     localeMode: field(row, "localeMode", "locale_mode") || "auto",
     locale: field(row, "locale"),
     goLiveAt: field(row, "launchAt", "launch_at", "goLiveAt", "go_live_at"),
+    createdAt: field(row, "createdAt", "created_at"),
     visits: Number(row.visits ?? stats.visits ?? 0),
     clicks: Number(row.clicks ?? stats.clicks ?? 0),
     leads: Number(row.leads ?? stats.leads ?? 0),
@@ -1003,7 +1106,7 @@ export function PromotionTemplatePreviewPage() {
           <strong>{template?.name || "模板模拟预览"}</strong>
           <span>手动检查设备适配及账号绑定的每个中间状态</span>
         </div>
-        {template ? <Badge tone="primary">{template.version.split(" · ")[0]}</Badge> : null}
+        {template ? <Badge tone="neutral">{template.version.split(" · ")[0]}</Badge> : null}
       </header>
       {loading ? (
         <div className="loading-state min-h-64"><Spinner />正在读取模板…</div>
@@ -1028,20 +1131,25 @@ export function PromotionTemplatesPage() {
   const { can } = useAuth();
   const canManage = can("promotion.templates.manage");
   const [rows, setRows] = useState<PromotionTemplate[]>([]);
+  const [view, setView] = useState<RepositoryView>("local");
+  const [repositoryRows, setRepositoryRows] = useState<RemotePromotionArtifact[]>([]);
+  const [repositoryLoading, setRepositoryLoading] = useState(false);
+  const [repositoryRefreshing, setRepositoryRefreshing] = useState(false);
+  const repositoryRefreshActive = useRef(false);
+  const [repositoryError, setRepositoryError] = useState("");
+  const [repositoryPending, setRepositoryPending] = useState("");
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
   const [drawer, setDrawer] = useState(false);
-  const [replacing, setReplacing] = useState<PromotionTemplate | null>(null);
+  const [editing, setEditing] = useState<PromotionTemplate | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [packageInspecting, setPackageInspecting] = useState(false);
   const packageInspectionRequest = useRef(0);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [templateStatus, setTemplateStatus] = useState("active");
   const [integrations, setIntegrations] = useState<RuntimeIntegrationOption[]>([]);
   const [selectedIntegrationIds, setSelectedIntegrationIds] = useState<string[]>([]);
-  const [integrationEditing, setIntegrationEditing] = useState<PromotionTemplate | null>(null);
-  const [bindingIntegrationIds, setBindingIntegrationIds] = useState<string[]>([]);
-  const [bindingSaving, setBindingSaving] = useState(false);
   const [pending, setPending] = useState(false);
   const [previewing, setPreviewing] = useState<PromotionTemplate | null>(null);
   const [qualityReviewing, setQualityReviewing] = useState<PromotionTemplate | null>(null);
@@ -1086,6 +1194,59 @@ export function PromotionTemplatesPage() {
   useEffect(() => {
     void load();
   }, [load]);
+  const loadRepository = useCallback(async ({
+    refresh = false,
+    preserve = false,
+  }: {
+    refresh?: boolean;
+    preserve?: boolean;
+  } = {}) => {
+    if (refresh && repositoryRefreshActive.current) {
+      return { ok: false, cacheHit: true };
+    }
+    if (refresh) repositoryRefreshActive.current = true;
+    if (preserve) setRepositoryRefreshing(true);
+    else {
+      setRepositoryLoading(true);
+      setRepositoryError("");
+    }
+    try {
+      const payload = await apiRequest(
+        `/api/promotion/templates/repository${refresh ? "/refresh" : ""}`,
+        {
+          method: refresh ? "POST" : "GET",
+        },
+      );
+      const data = object(object(payload).data ?? payload);
+      setRepositoryRows(
+        unwrapList<unknown>(payload).rows.map(remotePromotionArtifactRow),
+      );
+      setRepositoryError("");
+      return { ok: true, cacheHit: data.cacheHit === true };
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "远程仓库读取失败";
+      if (preserve) toast.error(`仓库刷新失败，当前显示上次缓存：${message}`);
+      else {
+        setRepositoryRows([]);
+        setRepositoryError(message);
+      }
+      return { ok: false, cacheHit: false };
+    } finally {
+      if (refresh) repositoryRefreshActive.current = false;
+      if (preserve) setRepositoryRefreshing(false);
+      else setRepositoryLoading(false);
+    }
+  }, []);
+  function changeView(next: RepositoryView) {
+    setView(next);
+    if (next !== "repository") return;
+    void (async () => {
+      const cached = await loadRepository({ preserve: repositoryRows.length > 0 });
+      if (!cached.ok || !cached.cacheHit) return;
+      const refreshed = await loadRepository({ refresh: true, preserve: true });
+      if (refreshed.ok) await load();
+    })();
+  }
   const visible = useMemo(() => {
     const search = keyword.trim().toLowerCase();
     return search
@@ -1097,10 +1258,40 @@ export function PromotionTemplatesPage() {
       : rows;
   }, [keyword, rows]);
   const templatePagination = useClientPagination(visible, { resetKey: keyword });
+  const repositoryVisible = useMemo(() => {
+    const search = keyword.trim().toLowerCase();
+    if (!search) return repositoryRows;
+    return repositoryRows.filter((row) =>
+      `${row.sequence} ${row.name} ${row.description} ${row.slug} ${row.version}`
+        .toLowerCase()
+        .includes(search),
+    );
+  }, [keyword, repositoryRows]);
+  const repositoryPagination = useClientPagination(repositoryVisible, {
+    resetKey: keyword,
+  });
+  async function importRepositoryTemplate(row: Pick<RemotePromotionArtifact, "sequence">) {
+    if (!canManage || repositoryPending) return;
+    setRepositoryPending(row.sequence);
+    try {
+      const payload = await apiRequest(
+        `/api/promotion/templates/repository/${row.sequence}/import`,
+        { method: "POST" },
+      );
+      const data = object(object(payload).data ?? payload);
+      const action = field(data, "action");
+      toast.success(action === "updated" ? "远程模板已更新" : "远程模板已添加到本地");
+      await Promise.all([load(), loadRepository()]);
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "远程模板导入失败");
+    } finally {
+      setRepositoryPending("");
+    }
+  }
   async function chooseTemplatePackage(next: File | null) {
     const requestId = ++packageInspectionRequest.current;
     setFile(next);
-    if (!next || replacing) {
+    if (!next || editing) {
       setPackageInspecting(false);
       return;
     }
@@ -1132,36 +1323,39 @@ export function PromotionTemplatesPage() {
   }
   async function upload(event?: FormEvent) {
     event?.preventDefault();
-    if (!file || !name.trim() || (replacing && !replacing.id)) return;
+    if (!name.trim() || (!editing && !file) || (editing && !editing.id)) return;
     setPending(true);
     try {
       const body = new FormData();
-      body.set("file", file);
+      if (file) body.set("file", file);
       body.set("integrationIds", JSON.stringify(selectedIntegrationIds));
-      if (!replacing) {
-        body.set("name", name.trim());
-        if (description.trim()) body.set("description", description.trim());
-      }
+      body.set("name", name.trim());
+      body.set("description", description.trim());
+      if (editing) body.set("status", templateStatus);
       const payload = await apiRequest(
-        replacing
-          ? `/api/promotion/templates/${replacing.id}/versions`
+        editing
+          ? `/api/promotion/templates/${editing.id}/edit`
           : "/api/promotion/templates",
         { method: "POST", body },
       );
       const data = object(object(payload).data ?? payload);
       const imported = templateRow(data.template ?? data);
       setDrawer(false);
-      setReplacing(null);
+      setEditing(null);
       setFile(null);
       setName("");
       setDescription("");
       setSelectedIntegrationIds([]);
-      setQualityReviewing(imported);
-      toast.success(
-        imported.qualityReport.status === "warnings"
-          ? `模板已导入，发现 ${imported.qualityReport.warnings.length} 项优化建议`
-          : "模板已导入，质量检查通过",
-      );
+      if (editing) {
+        toast.success(file ? "模板及资源包已更新" : "模板已保存");
+      } else {
+        setQualityReviewing(imported);
+        toast.success(
+          imported.qualityReport.status === "warnings"
+            ? `模板已导入，发现 ${imported.qualityReport.warnings.length} 项优化建议`
+            : "模板已导入，质量检查通过",
+        );
+      }
       await load();
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "导入失败");
@@ -1169,15 +1363,27 @@ export function PromotionTemplatesPage() {
       setPending(false);
     }
   }
-  function openImport(row?: PromotionTemplate) {
-    if (row && !row.id) return;
+  function openImport() {
     packageInspectionRequest.current += 1;
     setPackageInspecting(false);
-    setReplacing(row || null);
+    setEditing(null);
     setFile(null);
-    setName(row?.name || "");
+    setName("");
     setDescription("");
-    setSelectedIntegrationIds(row?.integrationIds || []);
+    setTemplateStatus("active");
+    setSelectedIntegrationIds([]);
+    setDrawer(true);
+  }
+  function openEditor(row: PromotionTemplate) {
+    if (!row.id) return;
+    packageInspectionRequest.current += 1;
+    setPackageInspecting(false);
+    setEditing(row);
+    setFile(null);
+    setName(row.name);
+    setDescription(row.description);
+    setTemplateStatus(row.status === "disabled" ? "disabled" : "active");
+    setSelectedIntegrationIds(row.integrationIds);
     setDrawer(true);
   }
   function toggleIntegration(
@@ -1190,30 +1396,6 @@ export function PromotionTemplatesPage() {
         ? values.filter((value) => value !== integrationId)
         : [...values, integrationId],
     );
-  }
-  function openIntegrationEditor(row: PromotionTemplate) {
-    setIntegrationEditing(row);
-    setBindingIntegrationIds(row.integrationIds);
-  }
-  async function saveIntegrationBindings() {
-    if (!integrationEditing?.id || !canManage) return;
-    setBindingSaving(true);
-    try {
-      await apiRequest(
-        `/api/promotion/templates/${integrationEditing.id}/integrations`,
-        {
-          method: "PUT",
-          body: JSON.stringify({ integrationIds: bindingIntegrationIds }),
-        },
-      );
-      setIntegrationEditing(null);
-      toast.success("模板集成已保存");
-      await load();
-    } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "模板集成保存失败");
-    } finally {
-      setBindingSaving(false);
-    }
   }
   function openPreview(row: PromotionTemplate) {
     if (!row.previewUrl) return;
@@ -1231,6 +1413,22 @@ export function PromotionTemplatesPage() {
       await load();
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "操作失败");
+    }
+  }
+  async function removeTemplate(row: PromotionTemplate) {
+    if (!canManage || !row.id) return;
+    if (!(await confirmAction({
+      title: `删除模板“${row.name}”？`,
+      description: "这是永久删除操作；如果模板仍被推广渠道使用，系统会拒绝删除。",
+      confirmText: "确认删除",
+      destructive: true,
+    }))) return;
+    try {
+      await apiRequest(`/api/promotion/templates/${row.id}`, { method: "DELETE" });
+      toast.success("模板已删除");
+      await load();
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "模板删除失败");
     }
   }
   const loadPolicy = useCallback(async () => {
@@ -1311,24 +1509,44 @@ export function PromotionTemplatesPage() {
         search={{
           value: keyword,
           onChange: setKeyword,
-          placeholder: "搜索模板名称、版本或状态",
+          placeholder:
+            view === "local"
+              ? "搜索模板名称、版本或状态"
+              : "搜索远程模板名称、编号或版本",
         }}
-        meta={`${visible.length} 个模板`}
+        filters={
+          <RepositorySourceTabs
+            value={view}
+            localLabel="本地模板"
+            onChange={changeView}
+          />
+        }
+        meta={`${view === "local" ? visible.length : repositoryVisible.length} 个模板`}
         actions={
           <>
-            <Button variant="outline" onClick={() => void load()}>
-              <RefreshCwIcon size={16} />
-              刷新
+            <Button
+              variant={view === "repository" ? "default" : "outline"}
+              disabled={view === "repository" && (repositoryLoading || repositoryRefreshing)}
+              onClick={() => {
+                if (view === "local") void load();
+                else void (async () => {
+                  const refreshed = await loadRepository({ refresh: true, preserve: true });
+                  if (refreshed.ok) await load();
+                })();
+              }}
+            >
+              {repositoryRefreshing ? <Spinner /> : <RefreshCwIcon size={16} />}
+              {view === "local" ? "刷新" : "刷新仓库"}
             </Button>
-            <Button variant="outline" onClick={() => setDesignSpecDrawer(true)}>
+            {view === "local" ? <Button variant="outline" onClick={() => setDesignSpecDrawer(true)}>
               <BookOpenIcon size={16} />
               设计规范
-            </Button>
-            <Button variant="outline" onClick={openPolicy}>
+            </Button> : null}
+            {view === "local" ? <Button variant="outline" onClick={openPolicy}>
               <Settings2Icon size={16} />
               模板策略
-            </Button>
-            {canManage ? (
+            </Button> : null}
+            {canManage && view === "local" ? (
               <Button onClick={() => openImport()}>
                 <PlusIcon size={17} />
                 导入模板
@@ -1338,20 +1556,137 @@ export function PromotionTemplatesPage() {
         }
       />
       <ListPagination
-        page={templatePagination.page}
-        pageSize={templatePagination.pageSize}
-        total={templatePagination.total}
-        disabled={loading}
-        onPageChange={templatePagination.setPage}
-        onPageSizeChange={templatePagination.setPageSize}
+        page={view === "local" ? templatePagination.page : repositoryPagination.page}
+        pageSize={view === "local" ? templatePagination.pageSize : repositoryPagination.pageSize}
+        total={view === "local" ? templatePagination.total : repositoryPagination.total}
+        disabled={view === "local" ? loading : repositoryLoading}
+        onPageChange={view === "local" ? templatePagination.setPage : repositoryPagination.setPage}
+        onPageSizeChange={view === "local" ? templatePagination.setPageSize : repositoryPagination.setPageSize}
       />
       <ListTableCard>
-        {loading ? (
+        {view === "repository" ? (
+          repositoryLoading ? (
+            <div className="loading-state">
+              <Spinner />
+            </div>
+          ) : repositoryError ? (
+            <EmptyState
+              title="远程仓库暂不可用"
+              description={repositoryError}
+            />
+          ) : repositoryVisible.length ? (
+            <Table layout="list">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>远程模板</TableHead>
+                  <TableHead>版本</TableHead>
+                  <TableHead>源码目录</TableHead>
+                  <TableHead>资源</TableHead>
+                  <TableHead>本地状态</TableHead>
+                  <TableHead adaptive>备注</TableHead>
+                  <TableHead>操作</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {repositoryPagination.rows.map((row) => (
+                  <TableRow key={row.id}>
+                    <TableCell>
+                      <EntityPrimaryCell
+                        title={`${row.sequence} · ${row.name}`}
+                        id={row.slug}
+                        status={{
+                          label: "远程仓库",
+                          description: "此模板来自已配置的 GitHub 私人仓库。",
+                          tone: "neutral",
+                          details: [
+                            { label: "版本", value: row.version },
+                            { label: "文件", value: row.fileCount },
+                            { label: "分支", value: row.ref },
+                          ],
+                        }}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Badge tone="neutral">{row.version}</Badge>
+                    </TableCell>
+                    <TableCell>
+                      <div className="cell-main max-w-72">
+                        <strong>{row.repository}</strong>
+                        <span className="truncate" title={row.source}>{row.source}</span>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="cell-main">
+                        <strong>{row.fileCount} 个文件</strong>
+                        <span>{formatRepositorySize(row.totalSize)}</span>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <Badge
+                        tone={
+                          row.localStatus === "current"
+                            ? "success"
+                            : row.localStatus === "conflict"
+                              ? "danger"
+                              : row.localStatus === "update"
+                                ? "warning"
+                                : "neutral"
+                        }
+                      >
+                        {row.localStatus === "current"
+                          ? "已添加"
+                          : row.localStatus === "conflict"
+                            ? "版本冲突"
+                            : row.localStatus === "update"
+                              ? `可更新 · ${row.localVersion}`
+                              : "未添加"}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="whitespace-normal px-4 text-muted-foreground">
+                      <span className="line-clamp-2 break-words" title={row.description || undefined}>
+                        {row.description || "暂无备注"}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center justify-center gap-2">
+                        <Button variant="outline" size="sm" asChild>
+                          <a href={row.sourceUrl} target="_blank" rel="noreferrer">
+                            源码
+                          </a>
+                        </Button>
+                        {canManage ? (
+                          <Button
+                            size="sm"
+                            variant={row.localStatus === "current" ? "outline" : "default"}
+                            disabled={
+                              row.localStatus === "current" ||
+                              row.localStatus === "conflict" ||
+                              Boolean(repositoryPending)
+                            }
+                            onClick={() => void importRepositoryTemplate(row)}
+                          >
+                            {repositoryPending === row.sequence ? <Spinner /> : null}
+                            {row.localStatus === "update" ? "更新" : row.localStatus === "current" ? "已添加" : "添加到本地"}
+                          </Button>
+                        ) : null}
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          ) : (
+            <EmptyState
+              title="远程仓库没有模板"
+              description="当前目录清单中没有可用的远程模板。"
+            />
+          )
+        ) : loading ? (
           <div className="loading-state">
             <Spinner />
           </div>
         ) : visible.length ? (
-          <Table>
+          <Table layout="list">
             <TableHeader>
               <TableRow>
                 <TableHead>模板</TableHead>
@@ -1360,8 +1695,10 @@ export function PromotionTemplatesPage() {
                 <TableHead>资源</TableHead>
                 <TableHead>集成</TableHead>
                 <TableHead>使用渠道</TableHead>
+                <TableHead adaptive>备注</TableHead>
+                <TableHead>创建时间</TableHead>
                 <TableHead>更新时间</TableHead>
-                <TableHead className="text-right">操作</TableHead>
+                <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -1396,16 +1733,18 @@ export function PromotionTemplatesPage() {
                     />
                   </TableCell>
                   <TableCell>
-                    <Badge tone="primary">{row.version.split(" · ")[0]}</Badge>
+                    <Badge tone="neutral">{row.version.split(" · ")[0]}</Badge>
                   </TableCell>
                   <TableCell>
-                    <div className="cell-main">
+                    <div className="grid min-w-0 justify-items-center gap-1">
                       <strong>{row.defaultLocale}</strong>
-                      <span>{row.supportedLocales.length} 种语言</span>
+                      <span className="text-xs text-muted-foreground">
+                        {row.supportedLocales.length} 种语言
+                      </span>
                     </div>
                   </TableCell>
                   <TableCell>
-                    <div className="cell-main">
+                    <div className="grid min-w-0 justify-items-center gap-1">
                       <strong>{row.assetCount} 个文件</strong>
                       <Badge
                         tone={
@@ -1426,47 +1765,74 @@ export function PromotionTemplatesPage() {
                   </TableCell>
                   <TableCell>{row.integrationIds.length} 个</TableCell>
                   <TableCell>{row.channelCount} 个渠道</TableCell>
+                  <TableCell className="whitespace-normal px-4 text-muted-foreground">
+                    <span className="line-clamp-2 break-words" title={row.description || undefined}>
+                      {row.description || "暂无备注"}
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {formatDateTime(row.createdAt)}
+                  </TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatDateTime(row.updatedAt)}
                   </TableCell>
                   <TableCell>
-                    <div className="flex items-center justify-end gap-1">
-                      <IconButton
-                        label="模拟预览：不创建账号、不占用 IP"
+                    <div className="flex min-w-max items-center justify-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
                         disabled={!row.previewUrl}
                         onClick={() => openPreview(row)}
                       >
-                        <EyeIcon size={16} />
-                      </IconButton>
-                      <IconButton
-                        label="查看质量报告"
+                        预览
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
                         onClick={() => setQualityReviewing(row)}
                       >
-                        <ActivityIcon size={16} />
-                      </IconButton>
+                        质量报告
+                      </Button>
                       {canManage ? (
                         <>
-                          <IconButton
-                            label="配置集成"
+                          {row.repositorySource?.localStatus === "update" ? (
+                            <Button
+                              size="sm"
+                              disabled={Boolean(repositoryPending)}
+                              onClick={() => void importRepositoryTemplate(row.repositorySource!)}
+                            >
+                              {repositoryPending === row.repositorySource.sequence ? <Spinner /> : null}
+                              更新
+                            </Button>
+                          ) : row.repositorySource?.localStatus === "conflict" ? (
+                            <Button size="sm" variant="outline" disabled>
+                              版本冲突
+                            </Button>
+                          ) : null}
+                          <Button
+                            variant="outline"
+                            size="sm"
                             disabled={!row.id}
-                            onClick={() => openIntegrationEditor(row)}
+                            onClick={() => openEditor(row)}
                           >
-                            <PlugZapIcon size={16} />
-                          </IconButton>
-                          <IconButton
-                            label="替换版本"
-                            disabled={!row.id}
-                            onClick={() => openImport(row)}
-                          >
-                            <UploadCloudIcon size={16} />
-                          </IconButton>
-                          <IconButton
-                            label={row.status === "disabled" ? "启用" : "停用"}
+                            编辑
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
                             disabled={!row.id}
                             onClick={() => void toggle(row)}
                           >
-                            <ArchiveIcon size={16} />
-                          </IconButton>
+                            {row.status === "disabled" ? "启用" : "停用"}
+                          </Button>
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            disabled={!row.id}
+                            onClick={() => void removeTemplate(row)}
+                          >
+                            删除
+                          </Button>
                         </>
                       ) : null}
                     </div>
@@ -1822,60 +2188,21 @@ export function PromotionTemplatesPage() {
         ) : null}
       </Drawer>
       <Drawer
-        open={Boolean(integrationEditing)}
-        onClose={() => !bindingSaving && setIntegrationEditing(null)}
-        title={
-          integrationEditing
-            ? `配置集成 · ${integrationEditing.name}`
-            : "配置集成"
-        }
-        description="选择这个模板发布时需要统一加载的运行时集成。"
-        footer={
-          <>
-            <Button
-              variant="outline"
-              disabled={bindingSaving}
-              onClick={() => setIntegrationEditing(null)}
-            >
-              取消
-            </Button>
-            <Button
-              disabled={bindingSaving}
-              onClick={() => void saveIntegrationBindings()}
-            >
-              {bindingSaving ? <Spinner /> : <PlugZapIcon size={16} />}
-              保存集成
-            </Button>
-          </>
-        }
-      >
-        <div className="drawer-form">
-          <RuntimeIntegrationSwitches
-            integrations={integrations}
-            selectedIds={bindingIntegrationIds}
-            disabled={bindingSaving}
-            onToggle={(integrationId) =>
-              toggleIntegration(
-                integrationId,
-                bindingIntegrationIds,
-                setBindingIntegrationIds,
-              )
-            }
-          />
-        </div>
-      </Drawer>
-      <Drawer
         open={drawer}
         onClose={() => !pending && setDrawer(false)}
-        title={replacing ? `替换版本 · ${replacing.name}` : "导入推广模板"}
-        description="上传 ZIP 模板文件并创建新的可用版本；导入完成后会生成轻量质量报告。"
+        title={editing ? `编辑模板 · ${editing.name}` : "导入推广模板"}
+        description={
+          editing
+            ? "统一修改名称、内部说明、启用状态和集成；如需更新资源，可同时选择新的 ZIP。"
+            : "上传 ZIP 模板文件并创建新的可用版本；导入完成后会生成轻量质量报告。"
+        }
         footer={
           <>
             <Button variant="outline" onClick={() => setDrawer(false)}>
               取消
             </Button>
             <Button
-              disabled={pending || packageInspecting || !file || !name.trim()}
+              disabled={pending || packageInspecting || !name.trim() || (!editing && !file)}
               onClick={() => void upload()}
             >
               {pending ? (
@@ -1883,7 +2210,7 @@ export function PromotionTemplatesPage() {
               ) : (
                 <UploadCloudIcon size={16} />
               )}
-              {replacing ? "导入新版本" : "开始导入"}
+              {editing ? "保存模板" : "开始导入"}
             </Button>
           </>
         }
@@ -1898,34 +2225,51 @@ export function PromotionTemplatesPage() {
               }
             />
             <UploadCloudIcon size={27} />
-            <strong><DrawerFieldLabel required>{file?.name || "选择模板 ZIP 文件"}</DrawerFieldLabel></strong>
+            <strong>
+              <DrawerFieldLabel required={!editing}>
+                {file?.name || (editing ? "可选：选择新的模板 ZIP" : "选择模板 ZIP 文件")}
+              </DrawerFieldLabel>
+            </strong>
             <span>
               {packageInspecting
                 ? "正在读取包内名称和说明…"
-                : "仅支持 .zip，最大 20 MB；包内元数据会自动填写且可修改"}
+                : editing
+                  ? "不选择则只保存管理信息和集成配置；选择后同时替换模板资源"
+                  : "仅支持 .zip，最大 20 MB；包内元数据会自动填写且可修改"}
             </span>
           </label>
-          {!replacing ? (
-            <>
-              <label className="field">
-                <DrawerFieldLabel required>模板名称</DrawerFieldLabel>
-                <Input
-                  value={name}
-                  maxLength={120}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="例如：FB 美区夏季促销"
-                />
-              </label>
-              <label className="field">
-                <DrawerFieldLabel>内部说明</DrawerFieldLabel>
-                <Input
-                  value={description}
-                  maxLength={2000}
-                  onChange={(e) => setDescription(e.target.value)}
-                  placeholder="说明模板适用场景"
-                />
-              </label>
-            </>
+          <label className="field">
+            <DrawerFieldLabel required>模板名称</DrawerFieldLabel>
+            <Input
+              value={name}
+              maxLength={120}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="例如：FB 美区夏季促销"
+            />
+          </label>
+          <label className="field">
+            <DrawerFieldLabel>内部说明</DrawerFieldLabel>
+            <Input
+              value={description}
+              maxLength={2000}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="说明模板适用场景"
+            />
+          </label>
+          {editing ? (
+            <label className="switch-row">
+              <span>
+                <strong>启用模板</strong>
+                <small>停用后模板不可用于新的推广渠道。</small>
+              </span>
+              <Switch
+                checked={templateStatus !== "disabled"}
+                onCheckedChange={(checked) =>
+                  setTemplateStatus(checked ? "active" : "disabled")
+                }
+                aria-label="启用模板"
+              />
+            </label>
           ) : null}
           <RuntimeIntegrationSwitches
             integrations={integrations}
@@ -2110,7 +2454,7 @@ export function PromotionChannelsPage() {
     const search = keyword.trim().toLowerCase();
     return search
       ? rows.filter((row) =>
-          `${row.name} ${row.countryCode} ${row.hostname} ${row.slug} ${row.accountGroupName}`
+          `${row.name} ${row.countryCode} ${countryDisplayName(row.countryCode)} ${row.platform} ${platformDisplayName(row.platform)} ${row.hostname} ${row.slug} ${row.accountGroupName}`
             .toLowerCase()
             .includes(search),
         )
@@ -2576,19 +2920,21 @@ export function PromotionChannelsPage() {
             <Spinner />
           </div>
         ) : visible.length ? (
-          <Table>
+          <Table layout="list">
             <TableHeader>
               <TableRow>
                 <TableHead>渠道</TableHead>
-                <TableHead>国家 / 平台</TableHead>
+                <TableHead>国家</TableHead>
+                <TableHead>平台</TableHead>
                 <TableHead>模板</TableHead>
                 <TableHead>账号入库分组</TableHead>
-                <TableHead>访问地址</TableHead>
+                <TableHead adaptive>访问地址</TableHead>
                 <TableHead>Pixel</TableHead>
                 <TableHead>FB 域名状态</TableHead>
                 <TableHead>语言</TableHead>
-                <TableHead>上线时间</TableHead>
-                <TableHead className="text-right">操作</TableHead>
+                <TableHead>创建时间</TableHead>
+                <TableHead>更新时间</TableHead>
+                <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -2615,21 +2961,27 @@ export function PromotionChannelsPage() {
                     />
                   </TableCell>
                   <TableCell>
-                    <div className="cell-main">
-                      <strong>{row.countryCode || "-"}</strong>
-                      <span>Facebook</span>
+                    <div className="flex min-w-max items-center justify-center gap-2">
+                      <CountryFlag code={row.countryCode} />
+                      <span>{countryDisplayName(row.countryCode)}</span>
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex min-w-max items-center justify-center gap-2">
+                      <PlatformLogo platform={row.platform} />
+                      <span>{platformDisplayName(row.platform)}</span>
                     </div>
                   </TableCell>
                   <TableCell>{row.templateName || row.templateId}</TableCell>
                   <TableCell>
-                    <div className="cell-main">
+                    <div className="cell-main mx-auto">
                       <strong>{row.accountGroupName || "未配置"}</strong>
                       <span>{row.accountGroupId || "-"}</span>
                     </div>
                   </TableCell>
                   <TableCell>
-                    <div className="cell-main">
-                      <strong>{row.hostname || "-"}</strong>
+                    <div className="cell-main mx-auto">
+                      <strong title={row.hostname || undefined}>{row.hostname || "-"}</strong>
                       <span className="inline-link">
                         /{row.slug}
                         {row.publicUrl ? (
@@ -2656,13 +3008,23 @@ export function PromotionChannelsPage() {
                     </div>
                   </TableCell>
                   <TableCell>
-                    <div className="cell-main">
-                      <strong>{row.pixelName || "未绑定"}</strong>
-                      <span className="flex flex-wrap gap-1">
-                        {row.metaBrowserPixelEnabled ? <Badge tone="success">Browser</Badge> : null}
-                        {row.metaCapiEnabled ? <Badge tone="success">CAPI</Badge> : null}
-                        {!row.metaBrowserPixelEnabled && !row.metaCapiEnabled ? "未上报" : null}
-                      </span>
+                    <div className="flex min-w-max flex-col items-center gap-1.5">
+                      {row.pixelId ? (
+                        <>
+                          <span className="text-foreground">{row.pixelName || "已绑定 Pixel"}</span>
+                          <span className="flex flex-wrap justify-center gap-1">
+                            {row.metaBrowserPixelEnabled ? (
+                              <Badge tone="success">浏览器</Badge>
+                            ) : null}
+                            {row.metaCapiEnabled ? <Badge tone="success">CAPI</Badge> : null}
+                            {!row.metaBrowserPixelEnabled && !row.metaCapiEnabled ? (
+                              <Badge tone="neutral">未上报</Badge>
+                            ) : null}
+                          </span>
+                        </>
+                      ) : (
+                        <Badge tone="neutral">未绑定</Badge>
+                      )}
                     </div>
                   </TableCell>
                   <TableCell>
@@ -2687,22 +3049,30 @@ export function PromotionChannelsPage() {
                     {row.localeMode === "fixed" ? row.locale || "固定" : "自动"}
                   </TableCell>
                   <TableCell className="text-muted-foreground">
-                    {formatDateTime(row.goLiveAt)}
+                    {formatDateTime(row.createdAt)}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {formatDateTime(row.updatedAt)}
                   </TableCell>
                   <TableCell>
-                    <div className="flex items-center justify-end gap-1">
-                      <IconButton
-                        label="打开真实渠道页：提交号码会创建账号并占用 IP"
+                    <div className="flex min-w-max items-center justify-end gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={!row.publicUrl}
+                        title="打开真实渠道页；提交号码会创建账号并占用 IP"
                         onClick={() =>
                           window.open(row.publicUrl, "_blank", "noopener,noreferrer")
                         }
                       >
-                        <EyeIcon size={16} />
-                      </IconButton>
+                        访问页面
+                      </Button>
                       {canManage ? (
                         <>
-                          <IconButton
-                            label={
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            title={
                               row.metaCapiProbeReady
                                 ? "探测 Facebook CAPI 连通性"
                                 : "需先配置可用的 CAPI Token"
@@ -2710,22 +3080,24 @@ export function PromotionChannelsPage() {
                             disabled={!row.metaCapiProbeReady}
                             onClick={() => void probeCapi(row)}
                           >
-                            <ActivityIcon size={16} />
-                          </IconButton>
-                          <IconButton label="编辑" disabled={!row.id} onClick={() => open(row)}>
-                            <PencilIcon size={16} />
-                          </IconButton>
-                          <IconButton
-                            label={row.enabled ? "停用" : "启用"}
+                            探测 CAPI
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={!row.id}
+                            onClick={() => open(row)}
+                          >
+                            编辑
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
                             disabled={!row.id}
                             onClick={() => void toggle(row)}
                           >
-                            {row.enabled ? (
-                              <ArchiveIcon size={16} />
-                            ) : (
-                              <RocketIcon size={16} />
-                            )}
-                          </IconButton>
+                            {row.enabled ? "停用" : "启用"}
+                          </Button>
                         </>
                       ) : null}
                     </div>

@@ -75,7 +75,7 @@ const taskStatus: Record<
   string,
   { label: string; tone: BadgeTone; color: string }
 > = {
-  running: { label: "运行中", tone: "info", color: "#1d4ed8" },
+  running: { label: "运行中", tone: "success", color: "#047857" },
   paused: { label: "已暂停", tone: "warning", color: "#b45309" },
   completed: { label: "已完成", tone: "success", color: "#047857" },
   cancelled: { label: "已取消", tone: "neutral", color: "#94a3b8" },

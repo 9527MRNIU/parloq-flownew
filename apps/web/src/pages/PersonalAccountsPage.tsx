@@ -3,11 +3,8 @@ import {
   CheckCheckIcon,
   FolderInputIcon,
   LoaderCircleIcon,
-  LogOutIcon,
   MessageSquareTextIcon,
-  PowerIcon,
   RefreshCwIcon,
-  UnplugIcon,
   UploadCloudIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -33,7 +30,6 @@ import {
   confirmAction,
   Drawer,
   EmptyState,
-  IconButton,
   Input,
   Modal,
   SelectField,
@@ -188,7 +184,7 @@ function proxyRow(input: unknown): ProxyRow {
 }
 function sourceBadge(row: Account) {
   if (["landing_page", "landing", "pairing"].includes(row.source))
-    return <Badge tone="info">落地页链接</Badge>;
+    return <Badge tone="neutral">落地页链接</Badge>;
   if (["json", "json_import", "import"].includes(row.source))
     return <Badge tone="neutral">JSON 导入</Badge>;
   return <Badge tone="neutral">待识别</Badge>;
@@ -649,10 +645,10 @@ export function PersonalAccountsPage() {
             正在加载统一账号池…
           </div>
         ) : visible.length ? (
-          <Table>
+          <Table layout="list">
             <TableHeader>
               <TableRow>
-                <TableHead className="w-10">
+                <TableHead>
                   <Checkbox
                     aria-label="选择全部可见账号"
                     checked={allVisibleSelected}
@@ -666,12 +662,12 @@ export function PersonalAccountsPage() {
                     }
                   />
                 </TableHead>
-                <TableHead>账号</TableHead>
+                <TableHead adaptive>账号</TableHead>
                 <TableHead>来源</TableHead>
                 <TableHead>分组</TableHead>
                 <TableHead>代理</TableHead>
                 <TableHead>账号数据</TableHead>
-                <TableHead className="sticky right-0 bg-background text-right">操作</TableHead>
+                <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -692,7 +688,7 @@ export function PersonalAccountsPage() {
                       }
                     />
                   </TableCell>
-                  <TableCell>
+                  <TableCell primary>
                     <div className="flex min-w-[190px] items-start gap-3">
                       <AccountStatusIndicator
                         status={row.status}
@@ -808,9 +804,10 @@ export function PersonalAccountsPage() {
                     </div>
                   </TableCell>
                   <TableCell className="sticky right-0 bg-background">
-                    {canManage ? <div className="flex items-center justify-end gap-1">
-                      <IconButton
-                        label="重新同步资料"
+                    {canManage ? <div className="flex min-w-max items-center justify-end gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
                         disabled={
                           !row.id ||
                           row.validationStatus !== "ready" ||
@@ -819,30 +816,31 @@ export function PersonalAccountsPage() {
                         }
                         onClick={() => void action(row, "sync")}
                       >
-                        <RefreshCwIcon
-                          className={operation === `${row.id}:sync` ? "spin" : ""}
-                          size={16}
-                        />
-                      </IconButton>
+                        {operation === `${row.id}:sync` ? <LoaderCircleIcon className="spin" size={16} /> : null}
+                        同步资料
+                      </Button>
                       {row.connected ? (
-                        <IconButton
-                          label="断开"
+                        <Button
+                          variant="outline"
+                          size="sm"
                           disabled={!row.id || Boolean(operation)}
                           onClick={() => void action(row, "disconnect")}
                         >
-                          <UnplugIcon size={16} />
-                        </IconButton>
+                          断开
+                        </Button>
                       ) : (
-                        <IconButton
-                          label="连接"
+                        <Button
+                          variant="outline"
+                          size="sm"
                           disabled={!row.id || Boolean(operation)}
                           onClick={() => void action(row, "connect")}
                         >
-                          <PowerIcon size={16} />
-                        </IconButton>
+                          连接
+                        </Button>
                       )}
-                      <IconButton
-                        label="发测试消息"
+                      <Button
+                        variant="outline"
+                        size="sm"
                         disabled={!row.id || !row.connected}
                         onClick={() => {
                           setTestAccount(row);
@@ -850,20 +848,17 @@ export function PersonalAccountsPage() {
                           setTestResult("");
                         }}
                       >
-                        <MessageSquareTextIcon size={16} />
-                      </IconButton>
-                      <IconButton
-                        label="登出并解绑设备"
-                        className="text-destructive"
+                        发测试消息
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
                         disabled={!row.id || Boolean(operation)}
                         onClick={() => void action(row, "logout")}
                       >
-                        {operation === `${row.id}:logout` ? (
-                          <LoaderCircleIcon className="spin" size={16} />
-                        ) : (
-                          <LogOutIcon size={16} />
-                        )}
-                      </IconButton>
+                        {operation === `${row.id}:logout` ? <LoaderCircleIcon className="spin" size={16} /> : null}
+                        登出解绑
+                      </Button>
                     </div> : null}
                   </TableCell>
                 </TableRow>

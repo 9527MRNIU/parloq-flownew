@@ -1,6 +1,5 @@
 import {
   LoaderCircleIcon,
-  PencilIcon,
   RefreshCwIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -14,7 +13,6 @@ import {
   Badge,
   Button,
   Drawer,
-  IconButton,
   Input,
   Switch,
   Table,
@@ -211,16 +209,16 @@ export function SystemMenusPage() {
       <ListTableCard>
         {loading ? <div className="loading-state"><LoaderCircleIcon className="spin" size={18} />正在加载菜单…</div> : (
         <div className="table-scroll">
-          <Table>
+          <Table layout="list">
             <TableHeader>
               <TableRow>
                 <TableHead>菜单名称</TableHead>
                 <TableHead>上级菜单</TableHead>
                 <TableHead>类型</TableHead>
-                <TableHead>路由路径</TableHead>
+                <TableHead adaptive>路由路径</TableHead>
                 <TableHead>权限标识</TableHead>
                 <TableHead>显示</TableHead>
-                <TableHead className="text-right">操作</TableHead>
+                <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -246,15 +244,15 @@ export function SystemMenusPage() {
                     />
                   </TableCell>
                   <TableCell>{rows.find((item) => item.readKey === row.parentReadKey)?.name || "根目录"}</TableCell>
-                  <TableCell><Badge tone={row.type === "目录" ? "primary" : "neutral"}>{row.type}</Badge></TableCell>
+                  <TableCell><Badge tone="neutral">{row.type}</Badge></TableCell>
                   <TableCell className="text-muted-foreground">{row.path || "-"}</TableCell>
                   <TableCell className="permission-key">{row.permission}</TableCell>
                   <TableCell>{row.visible ? "显示" : "隐藏"}</TableCell>
                   <TableCell>
-                    <div className="flex items-center justify-end gap-1">
-                      <IconButton label="编辑菜单" disabled={!row.id} onClick={() => startEdit(row)}>
-                        <PencilIcon size={16} />
-                      </IconButton>
+                    <div className="flex min-w-max items-center justify-end gap-2">
+                      <Button variant="outline" size="sm" disabled={!row.id} onClick={() => startEdit(row)}>
+                        编辑
+                      </Button>
                     </div>
                   </TableCell>
                 </TableRow>

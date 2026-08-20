@@ -95,6 +95,7 @@ class Settings:
     task_worker_max_concurrency: int
     domain_verify_mock: bool
     domain_registrar_mock: bool
+    dev_provider_domain_fixtures: bool
     promotion_ingress_host: str
     promotion_integration_public_scheme: str
     promotion_integration_public_port: int | None
@@ -182,6 +183,10 @@ def get_settings() -> Settings:
         domain_registrar_mock=_bool_env(
             "DOMAIN_REGISTRAR_MOCK", os.getenv("APP_ENV", "development") == "development"
         ),
+        dev_provider_domain_fixtures=_bool_env(
+            "DEV_PROVIDER_DOMAIN_FIXTURES",
+            os.getenv("APP_ENV", "development").lower() == "development",
+        ),
         promotion_ingress_host=os.getenv(
             "PROMOTION_INGRESS_HOST", "promotion.localhost"
         ).strip().lower().rstrip("."),
@@ -263,6 +268,7 @@ def get_settings() -> Settings:
                 settings.promotion_event_rate_limit_mock,
                 settings.domain_verify_mock,
                 settings.domain_registrar_mock,
+                settings.dev_provider_domain_fixtures,
                 settings.meta_capi_mock,
             )
         ):

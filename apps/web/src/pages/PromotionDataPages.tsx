@@ -565,11 +565,11 @@ export function PromotionChannelStatisticsPage() {
           <div className="loading-state"><Spinner />正在加载渠道统计…</div>
         ) : rows.length ? (
           <div className="table-scroll">
-            <Table>
+            <Table layout="list">
               <TableHeader>
                 <TableRow>
                   <TableHead className="expand-column" />
-                  <TableHead>渠道 / 国家</TableHead>
+                  <TableHead adaptive>渠道 / 国家</TableHead>
                   <TableHead>登录请求（次数 / 人数）</TableHead>
                   <TableHead>登录成功（次数 / 人数）</TableHead>
                   <TableHead>请求登录率</TableHead>
@@ -600,7 +600,7 @@ export function PromotionChannelStatisticsPage() {
                           {open ? <ChevronDownIcon size={16} /> : <ChevronRightIcon size={16} />}
                         </IconButton>
                       </TableCell>
-                      <TableCell>
+                      <TableCell primary>
                         <div className="cell-main">
                           <strong>{row.name}</strong>
                           <span>{row.id || "等待 ID 迁移"}</span>
@@ -776,10 +776,10 @@ export function PromotionTrendPage() {
           />
           <ListTableCard>
             {daily.length ? (
-              <Table>
+              <Table layout="list">
                 <TableHeader>
                   <TableRow>
-                    <TableHead>日期</TableHead>
+                    <TableHead adaptive>日期</TableHead>
                     <TableHead>独立访客</TableHead>
                     <TableHead>号码提交</TableHead>
                     <TableHead>登录 / 配对成功</TableHead>

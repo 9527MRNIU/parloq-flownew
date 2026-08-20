@@ -201,6 +201,21 @@ class SystemPlatformConfiguration(Base, TimestampMixin):
     )
 
 
+class SystemRepositorySnapshot(Base, TimestampMixin):
+    __tablename__ = "system_repository_snapshots"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
+    platform_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    repository: Mapped[str] = mapped_column(String(255), nullable=False)
+    repository_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    catalog_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    commit_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    refreshed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
+
 class BitlyProviderAccount(Base, TimestampMixin):
     __tablename__ = "bitly_provider_accounts"
 

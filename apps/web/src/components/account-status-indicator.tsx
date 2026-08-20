@@ -143,7 +143,7 @@ function unifiedStatusMeta(
       key: "syncing" as const,
       label: "同步中",
       description: "账号连接可用，系统正在同步头像、群组与联系人资料。",
-      tone: "info" as const,
+      tone: "warning" as const,
       Icon: Clock3Icon,
     };
   }

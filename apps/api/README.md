@@ -59,6 +59,10 @@ checks pause/cancel between batches, and renders message text only in memory.
 - Promotion templates and channels are `/api/promotion/templates` and
   `/api/promotion/channels`; ZIP imports require `index.html`, while manifest,
   assets, and bundled locale JSON are optional.
+- GitHub-backed templates and integrations are listed from the configured
+  private repository's `artifacts/catalog.json`; source directories are read
+  directly and imported through the same validators without requiring release
+  ZIP artifacts.
 - Channel statistics and daily trends are
   `/api/promotion/data-center/channels` and
   `/api/promotion/data-center/trends`. Facebook daily spend, other cost,

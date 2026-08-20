@@ -1,7 +1,5 @@
 import {
-  BanIcon,
   LoaderCircleIcon,
-  PencilIcon,
   PlusIcon,
   RefreshCwIcon,
 } from "lucide-react";
@@ -14,7 +12,6 @@ import {
   confirmAction,
   Drawer,
   EmptyState,
-  IconButton,
   Input,
   SelectField,
   Spinner,
@@ -246,15 +243,15 @@ export function UsersPage() {
           </div>
         ) : rows.length ? (
           <div className="table-scroll">
-            <Table>
+            <Table layout="list">
               <TableHeader>
                 <TableRow>
-                  <TableHead>用户</TableHead>
+                  <TableHead adaptive>用户</TableHead>
                   <TableHead>角色</TableHead>
                   <TableHead>账号类型</TableHead>
                   <TableHead>最近登录</TableHead>
                   <TableHead>创建时间</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
+                  <TableHead>操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -279,7 +276,7 @@ export function UsersPage() {
                     </TableCell>
                     <TableCell>{row.groupName || "-"}</TableCell>
                     <TableCell>
-                      <Badge tone={row.isAdmin ? "primary" : "neutral"}>
+                      <Badge tone="neutral">
                         {row.isAdmin ? "管理员" : "普通用户"}
                       </Badge>
                     </TableCell>
@@ -290,23 +287,24 @@ export function UsersPage() {
                       {formatDateTime(row.createdAt)}
                     </TableCell>
                     <TableCell>
-                      <div className="flex items-center justify-end gap-1">
-                        <IconButton
-                          label="编辑（可恢复登录）"
+                      <div className="flex min-w-max items-center justify-end gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          title="编辑用户；已停用用户可在编辑中恢复登录"
                           disabled={!row.id}
                           onClick={() => edit(row)}
                         >
-                          <PencilIcon size={16} />
-                        </IconButton>
-                        <IconButton
-                          label="删除用户"
-                          variant="ghost"
-                          className="danger"
+                          编辑
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
                           disabled={!row.id || row.username === "admin"}
                           onClick={() => void remove(row)}
                         >
-                          <BanIcon size={16} />
-                        </IconButton>
+                          删除
+                        </Button>
                       </div>
                     </TableCell>
                   </TableRow>

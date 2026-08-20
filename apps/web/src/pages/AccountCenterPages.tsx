@@ -1,9 +1,7 @@
 import {
   DownloadIcon,
-  PencilIcon,
   PlusIcon,
   RefreshCwIcon,
-  Trash2Icon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -29,7 +27,6 @@ import {
   confirmAction,
   Drawer,
   EmptyState,
-  IconButton,
   Input,
   SelectField,
   Spinner,
@@ -131,7 +128,7 @@ const exportable = (row: ExportAccount) =>
 
 function sourceBadge(source: string) {
   if (["landing_page", "landing", "pairing"].includes(source))
-    return <Badge tone="info">落地页链接</Badge>;
+    return <Badge tone="neutral">落地页链接</Badge>;
   if (["json", "json_import", "import"].includes(source))
     return <Badge tone="neutral">JSON 导入</Badge>;
   return <Badge tone="neutral">待识别</Badge>;
@@ -378,9 +375,9 @@ export function AccountExportPage() {
       />
       <ListTableCard>
         {loading ? <div className="loading-state"><Spinner />正在加载账号…</div> : visible.length ? (
-          <Table>
+          <Table layout="list">
             <TableHeader><TableRow>
-              <TableHead className="w-10">
+              <TableHead>
                 <Checkbox
                   aria-label="选择全部可导出账号"
                   checked={allVisibleSelected}
@@ -394,7 +391,7 @@ export function AccountExportPage() {
                   }
                 />
               </TableHead>
-              <TableHead>账号</TableHead><TableHead>来源</TableHead><TableHead>分组</TableHead><TableHead>导出条件</TableHead><TableHead>入库时间</TableHead><TableHead className="text-right">操作</TableHead>
+              <TableHead adaptive>账号</TableHead><TableHead>来源</TableHead><TableHead>分组</TableHead><TableHead>导出条件</TableHead><TableHead>入库时间</TableHead><TableHead>操作</TableHead>
             </TableRow></TableHeader>
             <TableBody>{exportPagination.rows.map((row) => (
               <TableRow key={row.readKey}>
@@ -412,7 +409,7 @@ export function AccountExportPage() {
                     }
                   />
                 </TableCell>
-                <TableCell>
+                <TableCell primary>
                   <div className="flex min-w-[220px] items-start gap-3">
                     <AccountStatusIndicator
                       status={row.status}
@@ -460,7 +457,7 @@ export function AccountExportPage() {
                   )}
                 </TableCell>
                 <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
-                <TableCell><div className="flex justify-end gap-2"><Button variant="outline" size="sm" disabled={!canManage || !exportable(row) || Boolean(exporting)} onClick={() => void download(row, "baileys_creds")}>{exporting === `${row.id}:baileys_creds` ? <Spinner /> : <DownloadIcon size={15} />}兼容 JSON</Button><Button variant="outline" size="sm" disabled={!canManage || !exportable(row) || Boolean(exporting)} onClick={() => void download(row, "native")}>{exporting === `${row.id}:native` ? <Spinner /> : <DownloadIcon size={15} />}完整备份</Button></div></TableCell>
+                <TableCell><div className="flex min-w-max justify-end gap-2"><Button variant="outline" size="sm" disabled={!canManage || !exportable(row) || Boolean(exporting)} onClick={() => void download(row, "baileys_creds")}>{exporting === `${row.id}:baileys_creds` ? <Spinner /> : null}兼容 JSON</Button><Button variant="outline" size="sm" disabled={!canManage || !exportable(row) || Boolean(exporting)} onClick={() => void download(row, "native")}>{exporting === `${row.id}:native` ? <Spinner /> : null}完整备份</Button></div></TableCell>
               </TableRow>
             ))}</TableBody>
           </Table>
@@ -574,7 +571,7 @@ export function AccountGroupsPage() {
       />
       <ListTableCard>
         {loading ? <div className="loading-state"><Spinner />正在加载账号分组…</div> : visible.length ? (
-          <Table><TableHeader><TableRow><TableHead>分组</TableHead><TableHead>说明</TableHead><TableHead>账号数</TableHead><TableHead>创建时间</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader>
+          <Table layout="list"><TableHeader><TableRow><TableHead>分组</TableHead><TableHead adaptive>说明</TableHead><TableHead>账号数</TableHead><TableHead>创建时间</TableHead><TableHead>操作</TableHead></TableRow></TableHeader>
             <TableBody>{groupPagination.rows.map((row) => <TableRow key={row.readKey}>
               <TableCell>
                 <EntityPrimaryCell
@@ -594,7 +591,7 @@ export function AccountGroupsPage() {
               <TableCell className="max-w-[360px] text-muted-foreground">{row.description || "暂无说明"}</TableCell>
               <TableCell>{row.accountCount == null ? <span className="text-muted-foreground">待同步</span> : row.accountCount}</TableCell>
               <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
-              <TableCell><div className="flex justify-end gap-1">{canManage ? <><IconButton label="编辑分组" disabled={!row.id} onClick={() => edit(row)}><PencilIcon size={15} /></IconButton><IconButton label="删除分组" className="text-destructive" disabled={!row.id} onClick={() => void remove(row)}><Trash2Icon size={15} /></IconButton></> : null}</div></TableCell>
+              <TableCell><div className="flex min-w-max justify-end gap-2">{canManage ? <><Button variant="outline" size="sm" disabled={!row.id} onClick={() => edit(row)}>编辑</Button><Button variant="destructive" size="sm" disabled={!row.id} onClick={() => void remove(row)}>删除</Button></> : null}</div></TableCell>
             </TableRow>)}</TableBody>
           </Table>
         ) : <EmptyState title="还没有账号分组" description="创建分组后可按用途、国家或客户业务组织统一账号池。" />}
@@ -785,9 +782,9 @@ export function AccountIntakePage() {
         {loading ? (
           <div className="loading-state"><Spinner />正在加载接入记录…</div>
         ) : rows.length ? (
-          <Table>
+          <Table layout="list">
             <TableHeader><TableRow>
-              <TableHead>号码 / 账号</TableHead>
+              <TableHead adaptive>号码 / 账号</TableHead>
               <TableHead>接入类型</TableHead>
               <TableHead>接入状态</TableHead>
               <TableHead>入池结果</TableHead>
@@ -807,7 +804,7 @@ export function AccountIntakePage() {
                   </div>
                 </TableCell>
                 <TableCell>
-                  <Badge tone={row.attemptType === "reauthentication" ? "info" : "neutral"}>
+                  <Badge tone="neutral">
                     {row.attemptType === "reauthentication" ? "重新认证" : "首次绑定"}
                   </Badge>
                 </TableCell>

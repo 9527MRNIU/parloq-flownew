@@ -1,17 +1,12 @@
 import {
-  BanIcon,
-  CheckCircle2Icon,
   CircleGaugeIcon,
   LinkIcon,
   LoaderCircleIcon,
-  PencilIcon,
-  PlayIcon,
   PlusIcon,
   RefreshCwIcon,
   SaveIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
-  Trash2Icon,
   UnlinkIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -813,15 +808,15 @@ export function IpManagementPage() {
             </div>
           ) : visibleRows.length ? (
             <div className="table-scroll">
-              <Table>
+              <Table layout="list">
                 <TableHeader>
                   <TableRow>
-                    <TableHead>代理</TableHead>
+                    <TableHead adaptive>代理</TableHead>
                     <TableHead>国家 / 地区</TableHead>
                     <TableHead>凭证</TableHead>
                     <TableHead>健康</TableHead>
                     <TableHead>绑定</TableHead>
-                    <TableHead className="text-right">操作</TableHead>
+                    <TableHead>操作</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -880,46 +875,42 @@ export function IpManagementPage() {
                         {row.bindingCount}
                       </TableCell>
                       <TableCell onClick={(event) => event.stopPropagation()}>
-                        {canManage ? <div className="flex items-center justify-end gap-1">
-                          <IconButton
-                            label="健康检测"
+                        {canManage ? <div className="flex min-w-max items-center justify-end gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
                             disabled={
                               !row.id || !row.enabled || testingIds.includes(row.id)
                             }
                             onClick={() => void healthTest(row)}
                           >
-                            {testingIds.includes(row.id) ? (
-                              <LoaderCircleIcon className="spin" size={16} />
-                            ) : (
-                              <PlayIcon size={16} />
-                            )}
-                          </IconButton>
-                          <IconButton
-                            label="编辑"
+                            {testingIds.includes(row.id) ? <LoaderCircleIcon className="spin" size={16} /> : null}
+                            健康检测
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
                             disabled={!row.id}
                             onClick={() => openEdit(row)}
                           >
-                            <PencilIcon size={16} />
-                          </IconButton>
-                          <IconButton
-                            label={row.enabled ? "停用" : "启用"}
+                            编辑
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
                             disabled={!row.id}
                             onClick={() => void toggle(row)}
                           >
-                            {row.enabled ? (
-                              <BanIcon size={16} />
-                            ) : (
-                              <CheckCircle2Icon size={16} />
-                            )}
-                          </IconButton>
-                          <IconButton
+                            {row.enabled ? "停用" : "启用"}
+                          </Button>
+                          <Button
                             variant="destructive"
-                            label="删除"
+                            size="sm"
                             disabled={!row.id}
                             onClick={() => void remove(row)}
                           >
-                            <Trash2Icon size={16} />
-                          </IconButton>
+                            删除
+                          </Button>
                         </div> : null}
                       </TableCell>
                     </TableRow>

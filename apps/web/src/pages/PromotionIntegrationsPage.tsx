@@ -1,12 +1,8 @@
 import {
-  ActivityIcon,
+  DownloadIcon,
   PackageIcon,
-  PauseIcon,
-  PencilIcon,
-  PlayIcon,
   PlusIcon,
   RefreshCwIcon,
-  Trash2Icon,
   UploadCloudIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -14,6 +10,7 @@ import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
 import { DrawerFieldLabel } from "../components/drawer-form";
+import { RepositorySourceTabs } from "../components/repository-source-tabs";
 import {
   ListPagination,
   ListTableCard,
@@ -26,7 +23,6 @@ import {
   Button,
   Drawer,
   EmptyState,
-  IconButton,
   Input,
   SearchableSelect,
   Spinner,
@@ -41,6 +37,14 @@ import {
   toast,
 } from "../components/ui";
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
+import {
+  formatRepositorySize,
+  localRepositorySourceRow,
+  remotePromotionArtifactRow,
+  type LocalRepositorySource,
+  type RemotePromotionArtifact,
+  type RepositoryView,
+} from "../lib/promotion-repository";
 
 type IntegrationType = "script" | "iframe";
 
@@ -66,6 +70,8 @@ type PromotionIntegration = {
   feedbackEvents: string[];
   eventCount: number;
   lastEventAt?: string;
+  repositorySource: LocalRepositorySource | null;
+  createdAt?: string;
   updatedAt?: string;
 };
 
@@ -150,6 +156,10 @@ function integrationRow(input: unknown): PromotionIntegration {
     feedbackEvents: stringList(row.feedbackEvents ?? row.feedback_events),
     eventCount: Number(row.eventCount ?? row.event_count ?? 0),
     lastEventAt: field(row, "lastEventAt", "last_event_at"),
+    repositorySource: localRepositorySourceRow(
+      row.repositorySource ?? row.repository_source,
+    ),
+    createdAt: field(row, "createdAt", "created_at"),
     updatedAt: field(row, "updatedAt", "updated_at"),
   };
 }
@@ -181,12 +191,22 @@ export default function PromotionIntegrationsPage() {
   const { can } = useAuth();
   const canManage = can("promotion.integrations.manage");
   const [rows, setRows] = useState<PromotionIntegration[]>([]);
+  const [view, setView] = useState<RepositoryView>("local");
+  const [repositoryRows, setRepositoryRows] = useState<RemotePromotionArtifact[]>([]);
+  const [repositoryLoading, setRepositoryLoading] = useState(false);
+  const [repositoryRefreshing, setRepositoryRefreshing] = useState(false);
+  const repositoryRefreshActive = useRef(false);
+  const [repositoryError, setRepositoryError] = useState("");
+  const [repositoryPending, setRepositoryPending] = useState("");
+  const [repositoryImporting, setRepositoryImporting] =
+    useState<RemotePromotionArtifact | null>(null);
+  const [repositoryDomainId, setRepositoryDomainId] = useState("");
+  const [repositoryEnabled, setRepositoryEnabled] = useState(true);
   const [domains, setDomains] = useState<DomainOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
   const [drawer, setDrawer] = useState(false);
   const [editing, setEditing] = useState<PromotionIntegration | null>(null);
-  const [replacing, setReplacing] = useState<PromotionIntegration | null>(null);
   const [pending, setPending] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [packageInspecting, setPackageInspecting] = useState(false);
@@ -233,6 +253,60 @@ export default function PromotionIntegrationsPage() {
     void load();
   }, [load]);
 
+  const loadRepository = useCallback(async ({
+    refresh = false,
+    preserve = false,
+  }: {
+    refresh?: boolean;
+    preserve?: boolean;
+  } = {}) => {
+    if (refresh && repositoryRefreshActive.current) {
+      return { ok: false, cacheHit: true };
+    }
+    if (refresh) repositoryRefreshActive.current = true;
+    if (preserve) setRepositoryRefreshing(true);
+    else {
+      setRepositoryLoading(true);
+      setRepositoryError("");
+    }
+    try {
+      const payload = await apiRequest(
+        `/api/promotion/integrations/repository${refresh ? "/refresh" : ""}`,
+        {
+          method: refresh ? "POST" : "GET",
+        },
+      );
+      const data = object(object(payload).data ?? payload);
+      const nextRows = unwrapList<unknown>(payload).rows.map(remotePromotionArtifactRow);
+      setRepositoryRows(nextRows);
+      setRepositoryError("");
+      return { ok: true, cacheHit: data.cacheHit === true };
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "远程仓库读取失败";
+      if (preserve) toast.error(`仓库刷新失败，当前显示上次缓存：${message}`);
+      else {
+        setRepositoryRows([]);
+        setRepositoryError(message);
+      }
+      return { ok: false, cacheHit: false };
+    } finally {
+      if (refresh) repositoryRefreshActive.current = false;
+      if (preserve) setRepositoryRefreshing(false);
+      else setRepositoryLoading(false);
+    }
+  }, []);
+
+  function changeView(next: RepositoryView) {
+    setView(next);
+    if (next !== "repository") return;
+    void (async () => {
+      const cached = await loadRepository({ preserve: repositoryRows.length > 0 });
+      if (!cached.ok || !cached.cacheHit) return;
+      const refreshed = await loadRepository({ refresh: true, preserve: true });
+      if (refreshed.ok) await load();
+    })();
+  }
+
   const loadEvents = useCallback(
     async (row: PromotionIntegration, page: number, pageSize: number) => {
       setEventsLoading(true);
@@ -276,11 +350,62 @@ export default function PromotionIntegrationsPage() {
     );
   }, [keyword, rows]);
   const pagination = useClientPagination(visible, { resetKey: keyword });
+  const repositoryVisible = useMemo(() => {
+    const search = keyword.trim().toLowerCase();
+    if (!search) return repositoryRows;
+    return repositoryRows.filter((row) =>
+      `${row.sequence} ${row.name} ${row.description} ${row.slug} ${row.integrationKey} ${row.version}`
+        .toLowerCase()
+        .includes(search),
+    );
+  }, [keyword, repositoryRows]);
+  const repositoryPagination = useClientPagination(repositoryVisible, {
+    resetKey: keyword,
+  });
+
+  async function importRepositoryIntegration(
+    row: Pick<RemotePromotionArtifact, "sequence">,
+    domainId?: string,
+  ) {
+    if (!canManage || repositoryPending) return;
+    setRepositoryPending(row.sequence);
+    try {
+      const payload = await apiRequest(
+        `/api/promotion/integrations/repository/${row.sequence}/import`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            ...(domainId ? { domainId } : {}),
+            enabled: repositoryEnabled,
+          }),
+        },
+      );
+      const data = object(object(payload).data ?? payload);
+      const action = field(data, "action");
+      setRepositoryImporting(null);
+      toast.success(action === "updated" ? "远程集成已更新" : "远程集成已添加到本地");
+      await Promise.all([load(), loadRepository()]);
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "远程集成导入失败");
+    } finally {
+      setRepositoryPending("");
+    }
+  }
+
+  function beginRepositoryImport(row: RemotePromotionArtifact) {
+    if (row.localStatus === "update") {
+      void importRepositoryIntegration(row);
+      return;
+    }
+    setRepositoryDomainId(domains[0]?.id || "");
+    setRepositoryEnabled(true);
+    setRepositoryImporting(row);
+  }
 
   async function chooseIntegrationPackage(next: File | null) {
     const requestId = ++packageInspectionRequest.current;
     setFile(next);
-    if (!next || replacing) {
+    if (!next || editing) {
       setPackageInspecting(false);
       return;
     }
@@ -323,7 +448,6 @@ export default function PromotionIntegrationsPage() {
     packageInspectionRequest.current += 1;
     setPackageInspecting(false);
     setEditing(null);
-    setReplacing(null);
     setFile(null);
     setForm({ ...emptyForm, domainId: domains[0]?.id || "" });
     setDrawer(true);
@@ -333,7 +457,6 @@ export default function PromotionIntegrationsPage() {
     packageInspectionRequest.current += 1;
     setPackageInspecting(false);
     setEditing(row);
-    setReplacing(null);
     setFile(null);
     setForm({
       integrationKey: row.integrationKey,
@@ -345,15 +468,6 @@ export default function PromotionIntegrationsPage() {
     setDrawer(true);
   }
 
-  function openVersion(row: PromotionIntegration) {
-    packageInspectionRequest.current += 1;
-    setPackageInspecting(false);
-    setEditing(null);
-    setReplacing(row);
-    setFile(null);
-    setDrawer(true);
-  }
-
   function openEvents(row: PromotionIntegration) {
     setEventIntegration(row);
     setEventPage(1);
@@ -362,26 +476,6 @@ export default function PromotionIntegrationsPage() {
 
   async function save() {
     if (!canManage) return;
-    if (replacing) {
-      if (!file) return;
-      setPending(true);
-      try {
-        const body = new FormData();
-        body.set("file", file);
-        await apiRequest(`/api/promotion/integrations/${replacing.id}/versions`, {
-          method: "POST",
-          body,
-        });
-        setDrawer(false);
-        toast.success("集成版本已更新");
-        await load();
-      } catch (caught) {
-        toast.error(caught instanceof Error ? caught.message : "集成版本更新失败");
-      } finally {
-        setPending(false);
-      }
-      return;
-    }
     if (
       !form.integrationKey.trim() ||
       !form.name.trim() ||
@@ -392,34 +486,30 @@ export default function PromotionIntegrationsPage() {
     }
     setPending(true);
     try {
-      if (editing) {
-        await apiRequest(`/api/promotion/integrations/${editing.id}`, {
-          method: "PATCH",
-          body: JSON.stringify({
-            integrationKey: form.integrationKey.trim(),
-            name: form.name.trim(),
-            description: form.description.trim() || null,
-            domainId: form.domainId,
-            enabled: form.enabled,
-          }),
-        });
-      } else {
-        const body = new FormData();
-        body.set("file", file as File);
-        body.set("integrationKey", form.integrationKey.trim());
-        body.set("name", form.name.trim());
-        body.set("domainId", form.domainId);
-        body.set("enabled", String(form.enabled));
-        if (form.description.trim()) {
-          body.set("description", form.description.trim());
-        }
-        await apiRequest("/api/promotion/integrations", {
+      const body = new FormData();
+      if (file) body.set("file", file);
+      body.set("integrationKey", form.integrationKey.trim());
+      body.set("name", form.name.trim());
+      body.set("domainId", form.domainId);
+      body.set("enabled", String(form.enabled));
+      body.set("description", form.description.trim());
+      await apiRequest(
+        editing
+          ? `/api/promotion/integrations/${editing.id}/edit`
+          : "/api/promotion/integrations",
+        {
           method: "POST",
           body,
-        });
-      }
+        },
+      );
       setDrawer(false);
-      toast.success(editing ? "集成已更新" : "集成已导入");
+      toast.success(
+        editing
+          ? file
+            ? "集成及资源包已更新"
+            : "集成已保存"
+          : "集成已导入",
+      );
       await load();
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "集成保存失败");
@@ -461,12 +551,10 @@ export default function PromotionIntegrationsPage() {
   const createDisabled =
     pending ||
     packageInspecting ||
-    (!replacing &&
-      (!form.integrationKey.trim() ||
-        !form.name.trim() ||
-        !form.domainId ||
-        (!editing && !file))) ||
-    (Boolean(replacing) && !file);
+    !form.integrationKey.trim() ||
+    !form.name.trim() ||
+    !form.domainId ||
+    (!editing && !file);
 
   return (
     <StandardListPage viewport>
@@ -474,16 +562,36 @@ export default function PromotionIntegrationsPage() {
         search={{
           value: keyword,
           onChange: setKeyword,
-          placeholder: "搜索集成、标识、入口或源域名",
+          placeholder:
+            view === "local"
+              ? "搜索集成、标识、入口或源域名"
+              : "搜索远程集成名称、编号或标识",
         }}
-        meta={`${visible.length} 个集成`}
+        filters={
+          <RepositorySourceTabs
+            value={view}
+            localLabel="本地集成"
+            onChange={changeView}
+          />
+        }
+        meta={`${view === "local" ? visible.length : repositoryVisible.length} 个集成`}
         actions={
           <>
-            <Button variant="outline" onClick={() => void load()}>
-              <RefreshCwIcon size={16} />
-              刷新
+            <Button
+              variant={view === "repository" ? "default" : "outline"}
+              disabled={view === "repository" && (repositoryLoading || repositoryRefreshing)}
+              onClick={() => {
+                if (view === "local") void load();
+                else void (async () => {
+                  const refreshed = await loadRepository({ refresh: true, preserve: true });
+                  if (refreshed.ok) await load();
+                })();
+              }}
+            >
+              {repositoryRefreshing ? <Spinner /> : <RefreshCwIcon size={16} />}
+              {view === "local" ? "刷新" : "刷新仓库"}
             </Button>
-            {canManage ? (
+            {canManage && view === "local" ? (
               <Button onClick={openCreate}>
                 <PlusIcon size={17} />
                 导入集成
@@ -493,30 +601,157 @@ export default function PromotionIntegrationsPage() {
         }
       />
       <ListPagination
-        page={pagination.page}
-        pageSize={pagination.pageSize}
-        total={pagination.total}
-        disabled={loading}
-        onPageChange={pagination.setPage}
-        onPageSizeChange={pagination.setPageSize}
+        page={view === "local" ? pagination.page : repositoryPagination.page}
+        pageSize={view === "local" ? pagination.pageSize : repositoryPagination.pageSize}
+        total={view === "local" ? pagination.total : repositoryPagination.total}
+        disabled={view === "local" ? loading : repositoryLoading}
+        onPageChange={view === "local" ? pagination.setPage : repositoryPagination.setPage}
+        onPageSizeChange={view === "local" ? pagination.setPageSize : repositoryPagination.setPageSize}
       />
       <ListTableCard>
-        {loading ? (
+        {view === "repository" ? (
+          repositoryLoading ? (
+            <div className="loading-state">
+              <Spinner />
+            </div>
+          ) : repositoryError ? (
+            <EmptyState
+              title="远程仓库暂不可用"
+              description={repositoryError}
+            />
+          ) : repositoryVisible.length ? (
+            <Table layout="list">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>远程集成</TableHead>
+                  <TableHead adaptive>备注</TableHead>
+                  <TableHead>类型</TableHead>
+                  <TableHead>版本</TableHead>
+                  <TableHead>源码目录</TableHead>
+                  <TableHead>资源</TableHead>
+                  <TableHead>本地状态</TableHead>
+                  <TableHead>操作</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {repositoryPagination.rows.map((row) => (
+                  <TableRow key={row.id}>
+                    <TableCell>
+                      <EntityPrimaryCell
+                        title={`${row.sequence} · ${row.name}`}
+                        showId={false}
+                        description={row.integrationKey}
+                        status={{
+                          label: "远程仓库",
+                          description: "此集成来自已配置的 GitHub 私人仓库。",
+                          tone: "neutral",
+                          details: [
+                            { label: "版本", value: row.version },
+                            { label: "文件", value: row.fileCount },
+                            { label: "分支", value: row.ref },
+                          ],
+                        }}
+                      />
+                    </TableCell>
+                    <TableCell className="whitespace-normal text-muted-foreground">
+                      <span className="line-clamp-2 break-words" title={row.description || undefined}>
+                        {row.description || "暂无备注"}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <Badge tone="neutral">
+                        {row.type === "iframe" ? "iframe" : "JavaScript"}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <Badge tone="neutral">{row.version}</Badge>
+                    </TableCell>
+                    <TableCell>
+                      <div className="cell-main max-w-72">
+                        <strong>{row.repository}</strong>
+                        <span className="truncate" title={row.source}>{row.source}</span>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="cell-main">
+                        <strong>{row.fileCount} 个文件</strong>
+                        <span>{formatRepositorySize(row.totalSize)}</span>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <Badge
+                        tone={
+                          row.localStatus === "current"
+                            ? "success"
+                            : row.localStatus === "conflict"
+                              ? "danger"
+                              : row.localStatus === "update"
+                                ? "warning"
+                                : "neutral"
+                        }
+                      >
+                        {row.localStatus === "current"
+                          ? "已添加"
+                          : row.localStatus === "conflict"
+                            ? "版本冲突"
+                            : row.localStatus === "update"
+                              ? `可更新 · ${row.localVersion}`
+                              : "未添加"}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center justify-end gap-2">
+                        <Button variant="outline" size="sm" asChild>
+                          <a href={row.sourceUrl} target="_blank" rel="noreferrer">
+                            源码
+                          </a>
+                        </Button>
+                        {canManage ? (
+                          <Button
+                            size="sm"
+                            variant={row.localStatus === "current" ? "outline" : "default"}
+                            disabled={
+                              row.localStatus === "current" ||
+                              row.localStatus === "conflict" ||
+                              Boolean(repositoryPending)
+                            }
+                            onClick={() => beginRepositoryImport(row)}
+                          >
+                            {repositoryPending === row.sequence ? <Spinner /> : null}
+                            {row.localStatus === "update" ? "更新" : row.localStatus === "current" ? "已添加" : "添加到本地"}
+                          </Button>
+                        ) : null}
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          ) : (
+            <EmptyState
+              title="远程仓库没有集成"
+              description="当前目录清单中没有可用的远程集成。"
+            />
+          )
+        ) : loading ? (
           <div className="loading-state">
             <Spinner />
           </div>
         ) : visible.length ? (
-          <Table>
+          <Table layout="list">
             <TableHeader>
               <TableRow>
                 <TableHead>集成</TableHead>
+                <TableHead>集成标识</TableHead>
                 <TableHead>类型</TableHead>
                 <TableHead>源域名</TableHead>
                 <TableHead>资源包</TableHead>
                 <TableHead>模板</TableHead>
                 <TableHead>回传</TableHead>
+                <TableHead adaptive>备注</TableHead>
+                <TableHead>创建时间</TableHead>
                 <TableHead>更新时间</TableHead>
-                <TableHead className="text-right">操作</TableHead>
+                <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -526,7 +761,6 @@ export default function PromotionIntegrationsPage() {
                     <EntityPrimaryCell
                       title={row.name}
                       id={row.id}
-                      description={row.integrationKey}
                       status={{
                         label: row.enabled && row.domainReady ? "已启用" : "已停用",
                         description:
@@ -544,8 +778,13 @@ export default function PromotionIntegrationsPage() {
                       }}
                     />
                   </TableCell>
+                  <TableCell className="permission-key">
+                    <span title={row.integrationKey}>
+                      {row.integrationKey}
+                    </span>
+                  </TableCell>
                   <TableCell>
-                    <Badge tone={row.type === "iframe" ? "primary" : "info"}>
+                    <Badge tone="neutral">
                       {row.type === "iframe" ? "iframe" : "JavaScript"}
                     </Badge>
                   </TableCell>
@@ -580,41 +819,57 @@ export default function PromotionIntegrationsPage() {
                       </span>
                     </div>
                   </TableCell>
+                  <TableCell className="whitespace-normal text-muted-foreground">
+                    <span className="line-clamp-2 break-words" title={row.description || undefined}>
+                      {row.description || "暂无备注"}
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {formatDateTime(row.createdAt)}
+                  </TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatDateTime(row.updatedAt)}
                   </TableCell>
                   <TableCell>
-                    <div className="flex items-center justify-end gap-1">
+                    <div className="flex min-w-max items-center justify-end gap-2">
                       {row.feedbackEnabled ? (
-                        <IconButton label="查看回传记录" onClick={() => openEvents(row)}>
-                          <ActivityIcon size={16} />
-                        </IconButton>
+                        <Button variant="outline" size="sm" onClick={() => openEvents(row)}>
+                          回传记录
+                        </Button>
                       ) : null}
                       {canManage ? (
                         <>
-                          <IconButton label="上传新版本" onClick={() => openVersion(row)}>
-                            <UploadCloudIcon size={16} />
-                          </IconButton>
-                          <IconButton label="编辑集成" onClick={() => openEditor(row)}>
-                            <PencilIcon size={16} />
-                          </IconButton>
-                          <IconButton
-                            label={row.enabled ? "停用集成" : "启用集成"}
+                          {row.repositorySource?.localStatus === "update" ? (
+                            <Button
+                              size="sm"
+                              disabled={Boolean(repositoryPending)}
+                              onClick={() => void importRepositoryIntegration(row.repositorySource!)}
+                            >
+                              {repositoryPending === row.repositorySource.sequence ? <Spinner /> : null}
+                              更新
+                            </Button>
+                          ) : row.repositorySource?.localStatus === "conflict" ? (
+                            <Button size="sm" variant="outline" disabled>
+                              版本冲突
+                            </Button>
+                          ) : null}
+                          <Button variant="outline" size="sm" onClick={() => openEditor(row)}>
+                            编辑
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
                             onClick={() => void toggle(row)}
                           >
-                            {row.enabled ? (
-                              <PauseIcon size={16} />
-                            ) : (
-                              <PlayIcon size={16} />
-                            )}
-                          </IconButton>
-                          <IconButton
-                            label="删除集成"
-                            className="text-destructive"
+                            {row.enabled ? "停用" : "启用"}
+                          </Button>
+                          <Button
+                            variant="destructive"
+                            size="sm"
                             onClick={() => void remove(row)}
                           >
-                            <Trash2Icon size={16} />
-                          </IconButton>
+                            删除
+                          </Button>
                         </>
                       ) : null}
                     </div>
@@ -632,21 +887,85 @@ export default function PromotionIntegrationsPage() {
       </ListTableCard>
 
       <Drawer
+        open={Boolean(repositoryImporting)}
+        onClose={() => !repositoryPending && setRepositoryImporting(null)}
+        title={repositoryImporting ? `添加远程集成 · ${repositoryImporting.name}` : "添加远程集成"}
+        description="选择资源托管域名后，系统会直接读取仓库源码并保存为本地集成。"
+        footer={
+          <>
+            <Button
+              variant="outline"
+              disabled={Boolean(repositoryPending)}
+              onClick={() => setRepositoryImporting(null)}
+            >
+              取消
+            </Button>
+            <Button
+              disabled={!repositoryImporting || !repositoryDomainId || Boolean(repositoryPending)}
+              onClick={() => {
+                if (repositoryImporting) {
+                  void importRepositoryIntegration(repositoryImporting, repositoryDomainId);
+                }
+              }}
+            >
+              {repositoryPending ? <Spinner /> : <DownloadIcon />}
+              添加到本地
+            </Button>
+          </>
+        }
+      >
+        {repositoryImporting ? (
+          <div className="drawer-form">
+            <div className="rounded-lg border bg-muted/30 p-3">
+              <div className="flex items-center gap-2">
+                <Badge tone="neutral">{repositoryImporting.sequence}</Badge>
+                <strong>{repositoryImporting.name}</strong>
+                <Badge tone="neutral">{repositoryImporting.version}</Badge>
+              </div>
+              <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                {repositoryImporting.description || repositoryImporting.integrationKey}
+              </p>
+            </div>
+            <label className="field">
+              <DrawerFieldLabel required>源域名</DrawerFieldLabel>
+              <SearchableSelect
+                value={repositoryDomainId}
+                onValueChange={setRepositoryDomainId}
+                options={domains.map((domain) => ({
+                  value: domain.id,
+                  label: domain.hostname,
+                  description: domain.id,
+                }))}
+                placeholder="选择已验证域名"
+                searchPlaceholder="搜索域名"
+                emptyText="没有可用域名，请先完成域名接入"
+                ariaLabel="远程集成源域名"
+              />
+              <small>后续从仓库更新时会保留这个源域名。</small>
+            </label>
+            <label className="switch-row">
+              <span>
+                <strong>添加后立即启用</strong>
+                <small>关闭后可以先检查资源，再手动启用。</small>
+              </span>
+              <Switch
+                checked={repositoryEnabled}
+                onCheckedChange={setRepositoryEnabled}
+                aria-label="添加后立即启用远程集成"
+              />
+            </label>
+          </div>
+        ) : null}
+      </Drawer>
+
+      <Drawer
         open={drawer}
         onClose={() => !pending && setDrawer(false)}
-        title={
-          replacing
-            ? `上传新版本 · ${replacing.name}`
-            : editing
-              ? `编辑集成 · ${editing.name}`
-              : "导入集成"
-        }
+        title={editing ? `编辑集成 · ${editing.name}` : "导入集成"}
         description={
-          replacing
-            ? "完整校验新 ZIP 后原子替换资源包，失败不会影响当前版本。"
-            : editing
-              ? "修改管理信息不会改变已经托管的资源包。"
-              : "上传 ZIP 后自动识别 iframe 或一个或多个 JavaScript 入口。"
+          editing
+            ? "统一修改管理信息和状态；如需更新资源，可同时选择新的 ZIP。"
+            : "上传 ZIP 后自动识别 iframe 或一个或多个 JavaScript 入口。"
         }
         footer={
           <>
@@ -654,37 +973,36 @@ export default function PromotionIntegrationsPage() {
               取消
             </Button>
             <Button disabled={createDisabled} onClick={() => void save()}>
-              {pending ? <Spinner /> : replacing || !editing ? <UploadCloudIcon size={16} /> : <PackageIcon size={16} />}
-              {replacing ? "导入新版本" : editing ? "保存集成" : "开始导入"}
+              {pending ? <Spinner /> : editing ? <PackageIcon size={16} /> : <UploadCloudIcon size={16} />}
+              {editing ? "保存集成" : "开始导入"}
             </Button>
           </>
         }
       >
         <div className="drawer-form">
-          {!editing ? (
-            <label className="upload-zone">
-              <Input
-                type="file"
-                accept=".zip,application/zip"
-                onChange={(event) =>
-                  void chooseIntegrationPackage(event.target.files?.[0] || null)
-                }
-              />
-              <UploadCloudIcon size={27} />
-              <strong>
-                <DrawerFieldLabel required>
-                  {file?.name || "选择集成 ZIP 文件"}
-                </DrawerFieldLabel>
-              </strong>
-              <span>
-                {packageInspecting
-                  ? "正在读取包内名称、标识和说明…"
+          <label className="upload-zone">
+            <Input
+              type="file"
+              accept=".zip,application/zip"
+              onChange={(event) =>
+                void chooseIntegrationPackage(event.target.files?.[0] || null)
+              }
+            />
+            <UploadCloudIcon size={27} />
+            <strong>
+              <DrawerFieldLabel required={!editing}>
+                {file?.name || (editing ? "可选：选择新的集成 ZIP" : "选择集成 ZIP 文件")}
+              </DrawerFieldLabel>
+            </strong>
+            <span>
+              {packageInspecting
+                ? "正在读取包内名称、标识和说明…"
+                : editing
+                  ? "不选择则只保存管理信息；选择后同时原子替换资源包"
                   : "目录不限；包内元数据会自动填写且可修改，最大 20 MB"}
-              </span>
-            </label>
-          ) : null}
-          {!replacing ? (
-            <>
+            </span>
+          </label>
+          <>
               <label className="field">
                 <DrawerFieldLabel required>集成名称</DrawerFieldLabel>
                 <Input
@@ -731,7 +1049,7 @@ export default function PromotionIntegrationsPage() {
                 <small>系统会在这个域名下自动生成资源地址，不需要填写路径。</small>
               </label>
               <label className="field">
-                <DrawerFieldLabel>内部说明</DrawerFieldLabel>
+                <DrawerFieldLabel>备注</DrawerFieldLabel>
                 <Input
                   value={form.description}
                   maxLength={2000}
@@ -757,8 +1075,7 @@ export default function PromotionIntegrationsPage() {
                   aria-label="启用集成"
                 />
               </label>
-            </>
-          ) : null}
+          </>
           {!editing ? (
             <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
               ZIP 有唯一 HTML 入口时自动识别为 iframe；没有 HTML 时，所有 JS/MJS
@@ -810,7 +1127,7 @@ export default function PromotionIntegrationsPage() {
                 <Spinner />
               </div>
             ) : eventRows.length ? (
-              <Table>
+              <Table layout="list">
                 <TableHeader>
                   <TableRow>
                     <TableHead>事件</TableHead>
@@ -818,7 +1135,7 @@ export default function PromotionIntegrationsPage() {
                     <TableHead>访客</TableHead>
                     <TableHead>来源</TableHead>
                     <TableHead>时间</TableHead>
-                    <TableHead>数据</TableHead>
+                    <TableHead adaptive>数据</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>

@@ -88,6 +88,20 @@ from app.services.promotion_event_rate_limits import (
     consume_promotion_event_rate_limits,
 )
 from app.services.public_rate_limits import public_request_ip
+from app.services.github_repository import (
+    GitHubRemoteArtifact,
+    GitHubRepositoryConfigurationError,
+    GitHubRepositorySnapshot,
+    cached_github_repository_snapshot,
+    configured_github_repository_client,
+    github_repository_snapshot,
+    refresh_github_repository_snapshot,
+    repository_local_status,
+    remote_artifact_row,
+    stored_repository_source,
+    with_repository_source,
+)
+from app.services.platform_clients import PlatformClientError
 from app.services.template_quality import (
     inspect_template_quality,
     unchecked_template_quality_report,
@@ -406,10 +420,51 @@ def _template_integration_ids(db: DbSession, template_id: int) -> list[str]:
     return [str(value) for value in ids]
 
 
-def template_row(db: DbSession, item: PromotionTemplate) -> dict:
+def _template_repository_source(
+    item: PromotionTemplate,
+    snapshot: GitHubRepositorySnapshot | None,
+) -> dict | None:
+    source = stored_repository_source(item.manifest_json)
+    if (
+        snapshot is None
+        or source.get("provider") != "github"
+        or source.get("kind") != "template"
+    ):
+        return None
+    artifact = next(
+        (
+            value
+            for value in snapshot.artifacts
+            if value.kind == "template"
+            and value.sequence == source.get("sequence")
+            and snapshot.repository == source.get("repository")
+        ),
+        None,
+    )
+    if artifact is None:
+        return None
+    return {
+        "sequence": artifact.sequence,
+        "repository": snapshot.repository,
+        "ref": snapshot.ref,
+        "localStatus": repository_local_status(
+            item.manifest_json,
+            item.version,
+            snapshot,
+            artifact,
+        ),
+        "remoteVersion": artifact.version,
+    }
+
+
+def template_row(
+    db: DbSession,
+    item: PromotionTemplate,
+    repository_snapshot: GitHubRepositorySnapshot | None = None,
+) -> dict:
     manifest = item.manifest_json or {}
     quality_report = item.quality_report_json or unchecked_template_quality_report()
-    return {"id": entity_id(item), "name": item.name, "description": item.description, "version": item.version, "status": item.status, "manifest": manifest, "defaultLocale": manifest.get("defaultLocale"), "supportedLocales": manifest.get("supportedLocales", []), "i18n": manifest.get("i18n"), "assetCount": item.asset_count, "totalSize": item.total_size, "qualityReport": quality_report, "integrationIds": _template_integration_ids(db, item.id), "createdAt": iso(item.created_at), "updatedAt": iso(item.updated_at)}
+    return {"id": entity_id(item), "name": item.name, "description": item.description, "version": item.version, "status": item.status, "manifest": manifest, "defaultLocale": manifest.get("defaultLocale"), "supportedLocales": manifest.get("supportedLocales", []), "i18n": manifest.get("i18n"), "assetCount": item.asset_count, "totalSize": item.total_size, "qualityReport": quality_report, "integrationIds": _template_integration_ids(db, item.id), "repositorySource": _template_repository_source(item, repository_snapshot), "createdAt": iso(item.created_at), "updatedAt": iso(item.updated_at)}
 
 
 def _channel_hostname(item: PromotionChannel, domain: DomainRecord | None) -> str:
@@ -707,6 +762,61 @@ def _replace_bundle(db: DbSession, item: PromotionTemplate, raw: bytes) -> None:
     for path, content_type, content in assets: db.add(PromotionAsset(template_id=item.id, path=path, content_type=content_type, size=len(content), content=content))
 
 
+def _repository_template(
+    db: DbSession,
+    user,
+    snapshot: GitHubRepositorySnapshot,
+    artifact: GitHubRemoteArtifact,
+) -> PromotionTemplate | None:
+    statement = select(PromotionTemplate)
+    if user.role != "admin":
+        statement = statement.where(PromotionTemplate.created_by == user.id)
+    items = list(db.scalars(statement).all())
+    for item in items:
+        source = stored_repository_source(item.manifest_json)
+        if (
+            source.get("provider") == "github"
+            and source.get("repository") == snapshot.repository
+            and source.get("kind") == artifact.kind
+            and source.get("sequence") == artifact.sequence
+        ):
+            return item
+    for item in items:
+        manifest = item.manifest_json or {}
+        if (
+            str(manifest.get("projectId") or "") == artifact.sequence
+            or str(manifest.get("name") or "").strip() == artifact.name
+        ):
+            return item
+    return None
+
+
+def _repository_item_status(
+    item: PromotionTemplate | None,
+    snapshot: GitHubRepositorySnapshot,
+    artifact: GitHubRemoteArtifact,
+) -> str:
+    if item is None:
+        return "new"
+    return repository_local_status(
+        item.manifest_json,
+        item.version,
+        snapshot,
+        artifact,
+    )
+
+
+def _repository_http_error(error: PlatformClientError) -> HTTPException:
+    return HTTPException(
+        status_code=(
+            status.HTTP_409_CONFLICT
+            if isinstance(error, GitHubRepositoryConfigurationError)
+            else status.HTTP_502_BAD_GATEWAY
+        ),
+        detail=str(error),
+    )
+
+
 def _form_integration_ids(value: str | None) -> list[str] | None:
     if value is None:
         return None
@@ -948,7 +1058,13 @@ def download_account_link_starter(_current_user: CurrentUser) -> Response:
 def list_templates(db: DbSession, current_user: CurrentUser) -> dict:
     statement = select(PromotionTemplate)
     if current_user.role != "admin": statement = statement.where(PromotionTemplate.created_by == current_user.id)
-    items = db.scalars(statement.order_by(PromotionTemplate.created_at.desc())).all(); return {"data": {"rows": [template_row(db, x) for x in items], "total": len(items)}}
+    items = db.scalars(statement.order_by(PromotionTemplate.created_at.desc())).all()
+    try:
+        cached = cached_github_repository_snapshot(db, kind="template")
+    except PlatformClientError:
+        cached = None
+    snapshot = cached[0] if cached is not None else None
+    return {"data": {"rows": [template_row(db, x, snapshot) for x in items], "total": len(items)}}
 
 
 @router.post("/api/promotion/templates/package-metadata")
@@ -972,6 +1088,172 @@ def inspect_template_package(
     }
 
 
+def _repository_templates_response(
+    db: DbSession,
+    current_user: CurrentUser,
+    snapshot: GitHubRepositorySnapshot,
+    refreshed_at: datetime,
+    *,
+    cache_hit: bool,
+) -> dict:
+    rows = []
+    for artifact in snapshot.artifacts:
+        item = _repository_template(db, current_user, snapshot, artifact)
+        rows.append(
+            {
+                **remote_artifact_row(snapshot, artifact),
+                "localStatus": _repository_item_status(
+                    item,
+                    snapshot,
+                    artifact,
+                ),
+                "localId": entity_id(item) if item is not None else None,
+                "localName": item.name if item is not None else None,
+                "localVersion": item.version if item is not None else None,
+            }
+        )
+    return {
+        "data": {
+            "rows": rows,
+            "total": len(rows),
+            "repository": snapshot.repository,
+            "ref": snapshot.ref,
+            "commitSha": snapshot.commit_sha,
+            "refreshedAt": iso(refreshed_at),
+            "cacheHit": cache_hit,
+        }
+    }
+
+
+@router.get("/api/promotion/templates/repository")
+def list_repository_templates(
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    try:
+        cached = cached_github_repository_snapshot(db, kind="template")
+        if cached is None:
+            snapshot, refreshed_at = refresh_github_repository_snapshot(
+                db,
+                kind="template",
+            )
+            cache_hit = False
+        else:
+            snapshot, refreshed_at = cached
+            cache_hit = True
+    except PlatformClientError as error:
+        raise _repository_http_error(error) from error
+    return _repository_templates_response(
+        db,
+        current_user,
+        snapshot,
+        refreshed_at,
+        cache_hit=cache_hit,
+    )
+
+
+@router.post("/api/promotion/templates/repository/refresh")
+def refresh_repository_templates(
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    try:
+        snapshot, refreshed_at = refresh_github_repository_snapshot(
+            db,
+            kind="template",
+        )
+    except PlatformClientError as error:
+        raise _repository_http_error(error) from error
+    return _repository_templates_response(
+        db,
+        current_user,
+        snapshot,
+        refreshed_at,
+        cache_hit=False,
+    )
+
+
+@router.post("/api/promotion/templates/repository/{sequence}/import")
+def import_repository_template(
+    sequence: str,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    try:
+        snapshot, _refreshed_at = github_repository_snapshot(db, kind="template")
+        artifact = next(
+            (value for value in snapshot.artifacts if value.sequence == sequence),
+            None,
+        )
+        if artifact is None:
+            raise HTTPException(status_code=404, detail="远程模板不存在")
+        item = _repository_template(db, current_user, snapshot, artifact)
+        item_status = _repository_item_status(item, snapshot, artifact)
+        if item_status == "conflict":
+            raise HTTPException(
+                status_code=409,
+                detail="仓库模板内容已变化，请先修改 manifest.json 的 version",
+            )
+        if item_status == "current" and item is not None:
+            return {
+                "data": {
+                    "action": "unchanged",
+                    "template": template_row(db, item, snapshot),
+                }
+            }
+        client = configured_github_repository_client(db)
+        try:
+            raw = client.archive_artifact(artifact)
+        finally:
+            client.close()
+    except PlatformClientError as error:
+        raise _repository_http_error(error) from error
+    if item is None:
+        manifest, html, assets, total, quality_report = _safe_bundle(raw)
+        item = PromotionTemplate(
+            public_id=new_public_id("ptpl"),
+            name=artifact.name,
+            description=artifact.description,
+            version=str(manifest.get("version") or "1")[:40],
+            status="active",
+            manifest_json=with_repository_source(manifest, snapshot, artifact),
+            index_html=html,
+            asset_count=len(assets),
+            total_size=total,
+            quality_report_json=quality_report,
+            created_by=current_user.id,
+        )
+        db.add(item)
+        db.flush()
+        for path, content_type, content in assets:
+            db.add(
+                PromotionAsset(
+                    template_id=item.id,
+                    path=path,
+                    content_type=content_type,
+                    size=len(content),
+                    content=content,
+                )
+            )
+        action = "added"
+    else:
+        _replace_bundle(db, item, raw)
+        item.manifest_json = with_repository_source(
+            item.manifest_json or {},
+            snapshot,
+            artifact,
+        )
+        action = "updated"
+    db.commit()
+    db.refresh(item)
+    return {
+        "data": {
+            "action": action,
+            "template": template_row(db, item, snapshot),
+        }
+    }
+
+
 @router.post("/api/promotion/templates", status_code=status.HTTP_201_CREATED)
 def import_template(db: DbSession, current_user: CurrentUser, file: UploadFile = File(...), name: str = Form(..., min_length=1, max_length=120), description: str | None = Form(default=None, max_length=2000), integration_ids: str | None = Form(default=None, alias="integrationIds")) -> dict:
     if not file.filename or not file.filename.lower().endswith(".zip"): raise HTTPException(status_code=422, detail="请选择 ZIP 模板包")
@@ -982,6 +1264,47 @@ def import_template(db: DbSession, current_user: CurrentUser, file: UploadFile =
     selected_integrations = _form_integration_ids(integration_ids)
     if selected_integrations is not None: _set_template_integrations(db, item, selected_integrations, current_user)
     db.commit(); db.refresh(item); return {"data": {"template": template_row(db, item)}}
+
+
+@router.post("/api/promotion/templates/{template_id}/edit")
+def edit_template(
+    template_id: str,
+    db: DbSession,
+    current_user: CurrentUser,
+    name: str = Form(...),
+    description: str | None = Form(default=None),
+    template_status: str = Form(default="active", alias="status"),
+    integration_ids: str = Form(default="[]", alias="integrationIds"),
+    file: UploadFile | None = File(default=None),
+) -> dict:
+    item = _template(db, template_id, current_user)
+    try:
+        payload = PromotionTemplateUpdate(
+            name=name,
+            description=description,
+            status=template_status,
+        )
+    except ValidationError as error:
+        raise HTTPException(
+            status_code=422,
+            detail=error.errors(include_url=False),
+        ) from None
+    selected_integrations = _form_integration_ids(integration_ids) or []
+    raw: bytes | None = None
+    if file is not None and file.filename:
+        if not file.filename.lower().endswith(".zip"):
+            raise HTTPException(status_code=422, detail="请选择 ZIP 模板包")
+        raw = file.file.read(MAX_ZIP + 1)
+        _safe_bundle(raw)
+    if raw is not None:
+        _replace_bundle(db, item, raw)
+    item.name = payload.name or item.name
+    item.description = payload.description
+    item.status = payload.status or item.status
+    _set_template_integrations(db, item, selected_integrations, current_user)
+    db.commit()
+    db.refresh(item)
+    return {"data": {"template": template_row(db, item)}}
 
 
 @router.post("/api/promotion/templates/{template_id}/versions")

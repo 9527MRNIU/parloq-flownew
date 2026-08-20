@@ -1,9 +1,7 @@
 import {
-  ExternalLinkIcon,
   KeyRoundIcon,
   Link2Icon,
   LoaderCircleIcon,
-  PencilIcon,
   PlusIcon,
   RefreshCwIcon,
   Trash2Icon,
@@ -473,15 +471,15 @@ export function DirectShortLinksPage() {
           </div>
         ) : rows.length ? (
           <div className="table-scroll">
-            <Table>
+            <Table layout="list">
               <TableHeader>
                 <TableRow>
                   <TableHead>Bitly 短链接</TableHead>
-                  <TableHead>目标地址</TableHead>
+                  <TableHead adaptive>目标地址</TableHead>
                   <TableHead>账号</TableHead>
                   <TableHead>点击数</TableHead>
                   <TableHead>创建时间</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
+                  <TableHead>操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -521,27 +519,27 @@ export function DirectShortLinksPage() {
                       {formatDateTime(row.createdAt)}
                     </TableCell>
                     <TableCell>
-                      <div className="flex items-center justify-end gap-1">
-                        <IconButton
-                          label="打开"
+                      <div className="flex min-w-max items-center justify-end gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
                           onClick={() => window.open(row.shortUrl, "_blank")}
                         >
-                          <ExternalLinkIcon size={16} />
-                        </IconButton>
+                          打开
+                        </Button>
                         {canManage ? (
                           <>
-                            <IconButton label="编辑" disabled={!row.id} onClick={() => openEdit(row)}>
-                              <PencilIcon size={16} />
-                            </IconButton>
-                            <IconButton
-                              label="删除"
-                              variant="ghost"
-                              className="danger"
+                            <Button variant="outline" size="sm" disabled={!row.id} onClick={() => openEdit(row)}>
+                              编辑
+                            </Button>
+                            <Button
+                              variant="destructive"
+                              size="sm"
                               disabled={!row.id}
                               onClick={() => void remove(row)}
                             >
-                              <Trash2Icon size={16} />
-                            </IconButton>
+                              删除
+                            </Button>
                           </>
                         ) : null}
                       </div>

@@ -340,7 +340,7 @@ export function HyperlinkMarketInsightsPage() {
                   <strong>国家交叉矩阵</strong>
                   <span>单元格显示封号率与发送量</span>
                 </div>
-                <Badge tone="primary">来源国家 × 目标国家</Badge>
+                <Badge tone="neutral">来源国家 × 目标国家</Badge>
               </header>
               <div className="table-scroll">
                 <Table className="risk-matrix">
@@ -434,10 +434,10 @@ export function HyperlinkMarketInsightsPage() {
           />
           <section className="card table-card">
             <div className="table-scroll">
-              <Table>
+              <Table layout="list">
                 <TableHeader>
                   <TableRow>
-                    <TableHead>账号来源国家</TableHead>
+                    <TableHead adaptive>账号来源国家</TableHead>
                     <TableHead>发送目标国家</TableHead>
                     <TableHead>发送（单勾）</TableHead>
                     <TableHead>双勾送达</TableHead>

@@ -2,16 +2,10 @@ import {
   BoxesIcon,
   FileStackIcon,
   GaugeIcon,
-  ListChecksIcon,
   LoaderCircleIcon,
-  PauseIcon,
-  PencilIcon,
-  PlayIcon,
   PlusIcon,
   RefreshCwIcon,
-  Trash2Icon,
   WorkflowIcon,
-  XCircleIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -45,7 +39,6 @@ import {
   Button,
   Drawer,
   EmptyState,
-  IconButton,
   Input,
   SelectField,
   Spinner,
@@ -188,7 +181,7 @@ function resourceStatus(row: AnyRow): EntityStatusMeta {
       tone: "success",
     };
   }
-  return { label: "已创建", description: "资源已创建，当前没有额外的运行状态。", tone: "info" };
+  return { label: "已创建", description: "资源已创建，当前没有额外的运行状态。", tone: "neutral" };
 }
 function statusBadge(value: unknown) {
   const status = String(value || "ready");
@@ -225,12 +218,12 @@ function taskRecipientStatus(value: unknown) {
     string,
     {
       label: string;
-      tone: "neutral" | "success" | "warning" | "danger" | "info";
+      tone: "neutral" | "success" | "warning" | "danger";
     }
   > = {
     pending: { label: "等待发送", tone: "warning" },
-    leased: { label: "已进入缓冲", tone: "info" },
-    submitting: { label: "提交中", tone: "info" },
+    leased: { label: "已进入缓冲", tone: "warning" },
+    submitting: { label: "提交中", tone: "warning" },
     accepted: { label: "已受理", tone: "success" },
     retry: { label: "等待重试", tone: "warning" },
     reconciling: { label: "状态核对中", tone: "warning" },
@@ -252,10 +245,10 @@ function taskMessageStatus(value: unknown) {
     string,
     {
       label: string;
-      tone: "neutral" | "success" | "warning" | "danger" | "info";
+      tone: "neutral" | "success" | "warning" | "danger";
     }
   > = {
-    queued: { label: "已提交", tone: "info" },
+    queued: { label: "已提交", tone: "warning" },
     sent: { label: "已发送", tone: "success" },
     delivered: { label: "已送达", tone: "success" },
     read: { label: "已读", tone: "success" },
@@ -401,7 +394,7 @@ function TaskStatLine({
   label: string;
   value: number;
   total?: number;
-  tone?: "neutral" | "success" | "warning" | "danger" | "info";
+  tone?: "neutral" | "success" | "warning" | "danger";
 }) {
   return (
     <div className="flex min-w-40 items-center gap-2 text-xs tabular-nums">
@@ -423,7 +416,7 @@ function TaskSubmissionStats({ row }: { row: AnyRow }) {
     <div className="grid gap-1.5">
       <TaskStatLine label="总数" value={total} />
       <TaskStatLine label="等待" value={Number(stats.waiting || 0)} total={total} tone="warning" />
-      <TaskStatLine label="提交中" value={Number(stats.submitting || 0)} total={total} tone="info" />
+      <TaskStatLine label="提交中" value={Number(stats.submitting || 0)} total={total} tone="warning" />
       <TaskStatLine label="成功" value={Number(stats.accepted || 0)} total={total} tone="success" />
       <TaskStatLine label="失败" value={Number(stats.failed || 0)} total={total} tone="danger" />
     </div>
@@ -481,7 +474,7 @@ function TaskAccountGroupCell({ row }: { row: AnyRow }) {
   return (
     <div className="cell-main min-w-[200px]">
       <strong>{groupName || "账号分组待同步"}</strong>
-      <Badge tone="info">自动调度</Badge>
+      <Badge tone="neutral">自动调度</Badge>
       {groupId ? <span>{groupId}</span> : null}
       <span>
         {totalSlots
@@ -730,62 +723,63 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
       config.taskActions &&
       ["draft", "paused", "running", "waiting_accounts"].includes(taskStatus);
     return (
-      <div className="flex items-center justify-end gap-1">
+      <div className="flex min-w-max items-center justify-end gap-2">
         {config.taskActions ? (
-          <IconButton
-            label="任务明细"
+          <Button
+            variant="outline"
+            size="sm"
             disabled={!row.id}
             onClick={() => void loadTaskDetails(row)}
           >
-            <ListChecksIcon size={16} />
-          </IconButton>
+            任务明细
+          </Button>
         ) : null}
         {canManage ? (
           <>
         {canStart ? (
-          <IconButton
-            label="开始"
+          <Button
+            variant="outline"
+            size="sm"
             disabled={!row.id || Boolean(operation)}
             onClick={() => void taskAction(row, "start")}
           >
-            <PlayIcon size={16} />
-          </IconButton>
+            开始
+          </Button>
         ) : null}
         {canPause ? (
-          <IconButton
-            label="暂停"
+          <Button
+            variant="outline"
+            size="sm"
             disabled={!row.id || Boolean(operation)}
             onClick={() => void taskAction(row, "pause")}
           >
-            <PauseIcon size={16} />
-          </IconButton>
+            暂停
+          </Button>
         ) : null}
         {canCancel ? (
-          <IconButton
-            label="取消"
+          <Button
+            variant="outline"
+            size="sm"
             disabled={!row.id || Boolean(operation)}
             onClick={() => void taskAction(row, "cancel")}
           >
-            {operation.startsWith(row.id) ? (
-              <LoaderCircleIcon className="spin" size={16} />
-            ) : (
-              <XCircleIcon size={16} />
-            )}
-          </IconButton>
+            {operation.startsWith(row.id) ? <LoaderCircleIcon className="spin" size={16} /> : null}
+            取消
+          </Button>
         ) : null}
         {canEdit ? (
-          <IconButton label="编辑" disabled={!row.id} onClick={() => open(row)}>
-            <PencilIcon size={16} />
-          </IconButton>
+          <Button variant="outline" size="sm" disabled={!row.id} onClick={() => open(row)}>
+            编辑
+          </Button>
         ) : null}
-        <IconButton
-          className="text-destructive"
-          label="删除"
+        <Button
+          variant="destructive"
+          size="sm"
           disabled={!row.id}
           onClick={() => void remove(row)}
         >
-          <Trash2Icon size={16} />
-        </IconButton>
+          删除
+        </Button>
           </>
         ) : null}
       </div>
@@ -848,16 +842,20 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
             <Spinner />
           </div>
         ) : visible.length ? (
-          <Table>
+          <Table layout="list">
             <TableHeader>
               <TableRow>
-                {displayColumns.map((column) => (
-                  <TableHead className={column.className} key={column.key}>
+                {displayColumns.map((column, columnIndex) => (
+                  <TableHead
+                    adaptive={columnIndex === 0}
+                    className={column.className}
+                    key={column.key}
+                  >
                     {column.label}
                   </TableHead>
                 ))}
                 {config.showUpdatedAt !== false ? <TableHead>更新时间</TableHead> : null}
-                <TableHead className="text-right">操作</TableHead>
+                <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -1048,7 +1046,7 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
           </div>
         ) : detailRows.length ? (
           <div className="overflow-auto rounded-lg border">
-            <Table>
+            <Table layout="list">
               <TableHeader>
                 <TableRow>
                   <TableHead>目标号码</TableHead>
@@ -1057,7 +1055,7 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
                   <TableHead>发送账号</TableHead>
                   <TableHead>尝试次数</TableHead>
                   <TableHead>最近更新</TableHead>
-                  <TableHead>异常信息</TableHead>
+                  <TableHead adaptive>异常信息</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>

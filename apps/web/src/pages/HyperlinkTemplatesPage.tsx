@@ -807,9 +807,9 @@ export function HyperlinkTemplatesPage() {
                       <span className="shrink-0">{formatDateTime(row.updatedAt || row.createdAt).split(" ")[0]}</span>
                     </div>
                     </button>
-                    <div className="flex items-center justify-end gap-1 border-t border-border/70 px-3 py-2">
-                      <IconButton label="预览" onClick={() => setPreviewing(row)}><EyeIcon size={16} /></IconButton>
-                      {canManage ? <><IconButton label="编辑" onClick={() => open(row)}><PencilIcon size={16} /></IconButton><IconButton label="删除" className="text-destructive" onClick={() => void remove(row)}><Trash2Icon size={16} /></IconButton></> : null}
+                    <div className="flex min-w-max items-center justify-end gap-2 border-t border-border/70 px-3 py-2">
+                      <Button variant="outline" size="sm" onClick={() => setPreviewing(row)}>预览</Button>
+                      {canManage ? <><Button variant="outline" size="sm" onClick={() => open(row)}>编辑</Button><Button variant="destructive" size="sm" onClick={() => void remove(row)}>删除</Button></> : null}
                     </div>
                   </div>
                 </article>

@@ -1,13 +1,10 @@
 import {
   ArrowDownToLineIcon,
   ArrowUpFromLineIcon,
-  BracesIcon,
   LoaderCircleIcon,
   NetworkIcon,
-  PencilIcon,
   PlusIcon,
   RefreshCwIcon,
-  Trash2Icon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
@@ -34,7 +31,6 @@ import {
   confirmAction,
   Drawer,
   EmptyState,
-  IconButton,
   Input,
   SelectField,
   Spinner,
@@ -593,14 +589,14 @@ export function ProtocolManagementPage() {
         {loading ? <div className="loading-state"><Spinner />正在加载协议节点…</div> : error ? (
           <div className="error-state"><strong>协议加载失败</strong><span>{error}</span><Button variant="outline" onClick={() => void load()}>重试</Button></div>
         ) : visible.length ? (
-          <Table>
+          <Table layout="list">
             <TableHeader><TableRow>
-              <TableHead className="w-10"><Checkbox aria-label="选择全部协议" checked={allVisibleSelected} onCheckedChange={(checked) => setSelected(checked ? Array.from(new Set([...selected, ...visibleIds])) : selected.filter((id) => !visibleIds.includes(id)))} /></TableHead>
-              <TableHead>协议名称</TableHead><TableHead>进号开关</TableHead><TableHead>营销开关</TableHead><TableHead>账号总量</TableHead><TableHead>有效数 / 率</TableHead><TableHead>在线数 / 率</TableHead><TableHead>备注</TableHead><TableHead>创建时间</TableHead><TableHead className="text-right">操作</TableHead>
+              <TableHead><Checkbox aria-label="选择全部协议" checked={allVisibleSelected} onCheckedChange={(checked) => setSelected(checked ? Array.from(new Set([...selected, ...visibleIds])) : selected.filter((id) => !visibleIds.includes(id)))} /></TableHead>
+              <TableHead>协议名称</TableHead><TableHead>进号开关</TableHead><TableHead>营销开关</TableHead><TableHead>账号总量</TableHead><TableHead>有效数 / 率</TableHead><TableHead>在线数 / 率</TableHead><TableHead adaptive>备注</TableHead><TableHead>创建时间</TableHead><TableHead>操作</TableHead>
             </TableRow></TableHeader>
             <TableBody>{nodePagination.rows.map((row) => <TableRow key={row.readKey}>
               <TableCell><Checkbox aria-label={`选择协议 ${row.name || "待迁移协议"}`} disabled={!row.id} checked={Boolean(row.id) && selected.includes(row.id)} onCheckedChange={(checked) => row.id && setSelected((current) => checked ? [...current, row.id] : current.filter((id) => id !== row.id))} /></TableCell>
-              <TableCell>
+              <TableCell primary>
                 <EntityPrimaryCell
                   title={row.name || "待迁移协议"}
                   id={row.id}
@@ -624,10 +620,10 @@ export function ProtocolManagementPage() {
               <TableCell><div className="flex items-center gap-2"><span>{row.onlineCount == null ? "-" : row.onlineCount.toLocaleString()}</span>{rateBadge(row.onlineRate, "online")}</div></TableCell>
               <TableCell><span className="block max-w-52 truncate text-muted-foreground" title={row.remark}>{row.remark || "-"}</span></TableCell>
               <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
-              <TableCell><div className="flex justify-end gap-1">
-                <Button variant="ghost" size="sm" disabled={!row.id || specLoading} onClick={() => void openSpec(row)}><BracesIcon size={14} />接口规范</Button>
-                {canManage ? <IconButton label="编辑协议" disabled={!row.id} onClick={() => openEdit(row)}><PencilIcon size={15} /></IconButton> : null}
-                {canManage ? <IconButton label="删除协议" disabled={!row.id} onClick={() => void removeNode(row)}><Trash2Icon size={15} /></IconButton> : null}
+              <TableCell><div className="flex min-w-max justify-end gap-2">
+                <Button variant="outline" size="sm" disabled={!row.id || specLoading} onClick={() => void openSpec(row)}>接口规范</Button>
+                {canManage ? <Button variant="outline" size="sm" disabled={!row.id} onClick={() => openEdit(row)}>编辑</Button> : null}
+                {canManage ? <Button variant="destructive" size="sm" disabled={!row.id} onClick={() => void removeNode(row)}>删除</Button> : null}
               </div></TableCell>
             </TableRow>)}</TableBody>
           </Table>
@@ -647,13 +643,13 @@ export function ProtocolManagementPage() {
         onPageSizeChange={poolPagination.setPageSize}
       />
       <ListTableCard>
-        {pools.length ? <Table>
-          <TableHeader><TableRow><TableHead>协议池</TableHead><TableHead>回退顺序</TableHead><TableHead>备注</TableHead><TableHead className="text-right">操作</TableHead></TableRow></TableHeader>
+        {pools.length ? <Table layout="list">
+          <TableHeader><TableRow><TableHead>协议池</TableHead><TableHead adaptive>回退顺序</TableHead><TableHead>备注</TableHead><TableHead>操作</TableHead></TableRow></TableHeader>
           <TableBody>{poolPagination.rows.map((pool) => <TableRow key={pool.id}>
             <TableCell><EntityPrimaryCell title={pool.name} id={pool.id} status={{ label: pool.members.some((member) => member.available) ? "可回退" : "无可用成员", description: pool.members.some((member) => member.available) ? "池中至少有一个成员可接入。" : "当前所有成员不可接入，渠道请求会明确失败。", tone: pool.members.some((member) => member.available) ? "success" : "warning" }} /></TableCell>
             <TableCell><div className="flex flex-wrap gap-1">{pool.members.map((member, index) => <Badge key={member.protocolNodeId} tone={member.available ? "success" : "neutral"}>{index + 1}. {member.protocolNodeName}</Badge>)}</div></TableCell>
             <TableCell><span className="block max-w-64 truncate text-muted-foreground">{pool.remark || "-"}</span></TableCell>
-            <TableCell><div className="flex justify-end">{canManage ? <><IconButton label="编辑协议池" onClick={() => openPool(pool)}><PencilIcon size={15} /></IconButton><IconButton label="删除协议池" onClick={() => void removePool(pool)}><Trash2Icon size={15} /></IconButton></> : null}</div></TableCell>
+            <TableCell><div className="flex min-w-max justify-end gap-2">{canManage ? <><Button variant="outline" size="sm" onClick={() => openPool(pool)}>编辑</Button><Button variant="destructive" size="sm" onClick={() => void removePool(pool)}>删除</Button></> : null}</div></TableCell>
           </TableRow>)}</TableBody>
         </Table> : <EmptyState title="暂无协议池" description="默认拒绝不可用节点；需要回退时再显式创建协议池并绑定渠道。" />}
       </ListTableCard>

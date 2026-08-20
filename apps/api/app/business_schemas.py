@@ -362,6 +362,15 @@ class PromotionIntegrationUpdate(Model):
     )
 
 
+class PromotionRepositoryIntegrationImport(Model):
+    domain_id: str | None = Field(default=None, alias="domainId", max_length=20)
+    enabled: bool = True
+
+    _domain_id = field_validator("domain_id")(
+        lambda value: str(parse_snowflake_id(value)) if value is not None else None
+    )
+
+
 class PromotionTemplateIntegrationsUpdate(Model):
     integration_ids: list[str] = Field(
         default_factory=list, alias="integrationIds", max_length=50

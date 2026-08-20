@@ -384,11 +384,11 @@ export function AccountStatisticsPage() {
         {loading ? (
           <div className="loading-state min-h-64"><Spinner />正在汇总日统计…</div>
         ) : daily.length ? (
-          <Table>
+          <Table layout="list">
             <TableHeader>
               <TableRow>
                 <TableHead>日期</TableHead>
-                <TableHead>账号池</TableHead>
+                <TableHead adaptive>账号池</TableHead>
                 <TableHead>在线</TableHead>
                 <TableHead>新增账号</TableHead>
                 <TableHead>解绑阶段</TableHead>
@@ -402,7 +402,7 @@ export function AccountStatisticsPage() {
                     <div className="cell-main min-w-[130px]">
                       <strong>{row.date}</strong>
                       <span>
-                        <Badge tone={row.source === "realtime" || row.source === "实时" ? "success" : "primary"}>
+                        <Badge tone={row.source === "realtime" || row.source === "实时" ? "success" : "neutral"}>
                           {row.source === "realtime" ? "实时" : row.source || "历史"}
                         </Badge>
                       </span>
@@ -467,8 +467,8 @@ export function AccountStatisticsPage() {
           {loading ? (
             <div className="loading-state"><Spinner />正在汇总国家分布…</div>
           ) : countries.length ? (
-            <Table>
-              <TableHeader><TableRow><TableHead>国家</TableHead><TableHead>账号</TableHead><TableHead>在线</TableHead><TableHead>有效率</TableHead></TableRow></TableHeader>
+            <Table layout="list">
+              <TableHeader><TableRow><TableHead adaptive>国家</TableHead><TableHead>账号</TableHead><TableHead>在线</TableHead><TableHead>有效率</TableHead></TableRow></TableHeader>
               <TableBody>
                 {countryPagination.rows.map((row) => (
                   <TableRow key={row.code || row.name}>
@@ -503,8 +503,8 @@ export function AccountStatisticsPage() {
             className="mx-3 mt-3"
           />
           {qualityRows.length ? (
-            <Table>
-              <TableHeader><TableRow><TableHead>账号</TableHead><TableHead>来源</TableHead><TableHead>头像</TableHead><TableHead>群组</TableHead><TableHead>好友</TableHead><TableHead>双向</TableHead><TableHead>评分</TableHead></TableRow></TableHeader>
+            <Table layout="list">
+              <TableHeader><TableRow><TableHead adaptive>账号</TableHead><TableHead>来源</TableHead><TableHead>头像</TableHead><TableHead>群组</TableHead><TableHead>好友</TableHead><TableHead>双向</TableHead><TableHead>评分</TableHead></TableRow></TableHeader>
               <TableBody>
                 {qualityPagination.rows.map((row) => (
                   <TableRow key={row.readKey}>
@@ -525,7 +525,7 @@ export function AccountStatisticsPage() {
                         }}
                       />
                     </TableCell>
-                    <TableCell>{row.source === "json_import" ? <Badge tone="neutral">JSON 导入</Badge> : row.source === "landing_page" ? <Badge tone="info">落地页链接</Badge> : "-"}</TableCell>
+                    <TableCell>{row.source === "json_import" ? <Badge tone="neutral">JSON 导入</Badge> : row.source === "landing_page" ? <Badge tone="neutral">落地页链接</Badge> : "-"}</TableCell>
                     <TableCell>{row.avatar == null ? "-" : row.avatar ? "有" : "无"}</TableCell>
                     <TableCell>{metric(row.groups)}</TableCell>
                     <TableCell>{metric(row.friends)}</TableCell>

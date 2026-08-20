@@ -1,7 +1,16 @@
 import * as React from "react";
 import { cn } from "../../lib/utils";
 
-export function Table({ className, ...props }: React.ComponentProps<"table">) {
+type TableProps = React.ComponentProps<"table"> & {
+  layout?: "default" | "list";
+};
+
+export function Table({
+  className,
+  layout = "default",
+  style,
+  ...props
+}: TableProps) {
   return (
     <div
       data-slot="table-container"
@@ -9,7 +18,13 @@ export function Table({ className, ...props }: React.ComponentProps<"table">) {
     >
       <table
         data-slot="table"
-        className={cn("w-full caption-bottom text-sm", className)}
+        data-table-layout={layout === "list" ? "list" : undefined}
+        className={cn(
+          "w-full caption-bottom text-sm",
+          layout === "list" && "standard-list-table table-auto",
+          className,
+        )}
+        style={style}
         {...props}
       />
     </div>
@@ -66,23 +81,50 @@ export function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
     />
   );
 }
-export function TableHead({ className, ...props }: React.ComponentProps<"th">) {
+type TableHeadProps = React.ComponentProps<"th"> & {
+  adaptive?: boolean;
+};
+
+export function TableHead({
+  className,
+  children,
+  adaptive = false,
+  style,
+  ...props
+}: TableHeadProps) {
+  const isActionColumn =
+    typeof children === "string" && children.trim() === "操作";
+
   return (
     <th
       data-slot="table-head"
+      data-table-action-column={isActionColumn ? "" : undefined}
+      data-table-adaptive-column={adaptive ? "" : undefined}
       scope="col"
       className={cn(
         "h-10 px-2 text-left align-middle font-medium whitespace-nowrap text-foreground [&:has([role=checkbox])]:pr-0",
         className,
       )}
+      style={style}
       {...props}
-    />
+    >
+      {children}
+    </th>
   );
 }
-export function TableCell({ className, ...props }: React.ComponentProps<"td">) {
+type TableCellProps = React.ComponentProps<"td"> & {
+  primary?: boolean;
+};
+
+export function TableCell({
+  className,
+  primary = false,
+  ...props
+}: TableCellProps) {
   return (
     <td
       data-slot="table-cell"
+      data-table-primary-cell={primary ? "" : undefined}
       className={cn(
         "p-2 align-middle whitespace-nowrap [&:has([role=checkbox])]:pr-0",
         className,

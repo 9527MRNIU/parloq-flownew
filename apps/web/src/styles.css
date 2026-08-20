@@ -691,6 +691,127 @@ body {
 }
 
 /*
+ * Shared operational-list geometry. Each page declares exactly one adaptive
+ * column. Other columns size themselves from their content; the adaptive
+ * column keeps a usable minimum and absorbs whatever horizontal room remains.
+ */
+.standard-list-table {
+  --list-adaptive-min-width: 360px;
+  min-width: 100%;
+  table-layout: auto;
+}
+.standard-list-table [data-slot="table-head"]:not([data-table-adaptive-column]) {
+  width: 1%;
+}
+.standard-list-table [data-table-adaptive-column] {
+  width: 100%;
+  min-width: var(--list-adaptive-min-width);
+}
+.standard-list-table [data-slot="table-head"],
+.standard-list-table [data-slot="table-cell"] {
+  padding-inline: 24px;
+  text-align: center;
+}
+.standard-list-table [data-slot="table-head"]:has([role="checkbox"]),
+.standard-list-table [data-slot="table-cell"]:has([role="checkbox"]) {
+  padding-inline: 8px;
+}
+.standard-list-table [data-slot="table-row"]
+  > :not(:last-child) {
+  border-right: 1px solid var(--border);
+}
+.standard-list-table .cell-main {
+  width: max-content;
+  min-width: max-content;
+  max-width: none;
+  justify-items: center;
+  text-align: center;
+}
+.standard-list-table .cell-main > * {
+  min-width: 0;
+  max-width: 100%;
+}
+.standard-list-table [data-entity-primary-cell],
+.standard-list-table [data-table-primary-cell] > .flex {
+  width: 100%;
+  align-items: start;
+  justify-content: flex-start;
+  text-align: left;
+}
+.standard-list-table [data-table-primary-cell] {
+  text-align: left;
+}
+.standard-list-table [data-entity-primary-cell] .cell-main,
+.standard-list-table [data-table-primary-cell] .cell-main {
+  justify-items: start;
+  text-align: left;
+}
+.standard-list-table:has([data-table-action-column]) [data-table-action-column],
+.standard-list-table:has([data-table-action-column])
+  [data-slot="table-body"]
+  > [data-slot="table-row"]
+  > [data-slot="table-cell"]:last-child:not([colspan]) {
+  text-align: right;
+}
+.standard-list-table:has([data-table-action-column])
+  [data-slot="table-body"]
+  > [data-slot="table-row"]
+  > [data-slot="table-cell"]:last-child:not([colspan])
+  > .flex {
+  justify-content: flex-end;
+}
+.standard-list-table [data-slot="table-cell"] strong,
+.standard-list-table [data-slot="table-cell"] b,
+.standard-list-table [data-slot="table-cell"] .font-medium,
+.standard-list-table [data-slot="table-cell"] .font-semibold,
+.standard-list-table [data-slot="table-cell"] .font-bold {
+  font-weight: 400;
+}
+.standard-list-table [data-entity-primary-cell] strong,
+.standard-list-table [data-table-primary-cell] strong {
+  font-weight: 600;
+}
+
+/*
+ * Tables whose final header is named “操作” keep that whole column pinned to
+ * the right. The header marker is added by the shared TableHead component, so
+ * every operational list gets the same behavior without page-specific styles.
+ */
+[data-slot="table"]:has([data-table-action-column]) [data-table-action-column],
+[data-slot="table"]:has([data-table-action-column])
+  [data-slot="table-body"]
+  > [data-slot="table-row"]
+  > [data-slot="table-cell"]:last-child:not([colspan]) {
+  position: sticky;
+  right: 0;
+  background: var(--background);
+  box-shadow:
+    -1px 0 0 var(--border),
+    -12px 0 18px -20px color-mix(in oklab, var(--foreground) 45%, transparent);
+}
+[data-slot="table"]:has([data-table-action-column]) [data-table-action-column] {
+  z-index: 12;
+}
+[data-slot="table"]:has([data-table-action-column])
+  [data-slot="table-body"]
+  > [data-slot="table-row"]
+  > [data-slot="table-cell"]:last-child:not([colspan]) {
+  z-index: 10;
+}
+[data-slot="table"]:has([data-table-action-column])
+  [data-slot="table-body"]
+  > [data-slot="table-row"]:hover
+  > [data-slot="table-cell"]:last-child:not([colspan]) {
+  background: var(--table-hover);
+}
+[data-slot="table"]:has([data-table-action-column])
+  [data-slot="table-body"]
+  > [data-slot="table-row"][data-state="selected"]
+  > [data-slot="table-cell"]:last-child:not([colspan]) {
+  background: var(--muted);
+}
+
+/*
  * Operational list pages keep a stable viewport-height workspace. Toolbars and
  * pagination remain visible while the table card owns both scroll axes.
  */
@@ -804,7 +925,9 @@ body {
   font-weight: 600;
 }
 .badge-neutral {
+  border-color: transparent;
   background: var(--muted);
+  color: var(--muted-foreground);
 }
 .badge-success {
   border-color: var(--status-success-border);
@@ -826,16 +949,6 @@ body {
   border-color: var(--status-danger-border);
   background: var(--status-danger-bg);
   color: var(--danger);
-}
-.badge-info {
-  border-color: var(--status-info-border);
-  background: var(--status-info-bg);
-  color: var(--info);
-}
-.badge-primary {
-  border-color: color-mix(in srgb, var(--primary) 30%, transparent);
-  background: var(--primary-soft);
-  color: var(--primary);
 }
 .user-cell {
   display: flex;

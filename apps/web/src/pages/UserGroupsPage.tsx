@@ -1,9 +1,7 @@
 import {
   LoaderCircleIcon,
-  PencilIcon,
   PlusIcon,
   RefreshCwIcon,
-  Trash2Icon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
@@ -14,7 +12,6 @@ import {
   confirmAction,
   Drawer,
   EmptyState,
-  IconButton,
   Input,
   MultiSelect,
   Spinner,
@@ -262,15 +259,15 @@ export function UserGroupsPage() {
           </div>
         ) : visibleRows.length ? (
           <div className="table-scroll">
-            <Table>
+            <Table layout="list">
               <TableHeader>
                 <TableRow>
                   <TableHead>角色</TableHead>
                   <TableHead>类型</TableHead>
                   <TableHead>成员数</TableHead>
-                  <TableHead>菜单 / 操作权限</TableHead>
+                  <TableHead adaptive>菜单 / 操作权限</TableHead>
                   <TableHead>更新时间</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
+                  <TableHead>操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -295,7 +292,7 @@ export function UserGroupsPage() {
                       />
                     </TableCell>
                     <TableCell>
-                      <Badge tone={row.builtin ? "primary" : "neutral"}>
+                      <Badge tone="neutral">
                         {row.builtin ? "系统内置" : "自定义"}
                       </Badge>
                     </TableCell>
@@ -307,19 +304,18 @@ export function UserGroupsPage() {
                       {formatDateTime(row.updatedAt || row.createdAt)}
                     </TableCell>
                     <TableCell>
-                      <div className="flex items-center justify-end gap-1">
-                        <IconButton label="编辑" disabled={!row.id} onClick={() => edit(row)}>
-                          <PencilIcon size={16} />
-                        </IconButton>
-                        <IconButton
-                          label="删除"
-                          variant="ghost"
-                          className="danger"
+                      <div className="flex min-w-max items-center justify-end gap-2">
+                        <Button variant="outline" size="sm" disabled={!row.id} onClick={() => edit(row)}>
+                          编辑
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
                           disabled={!row.id || row.builtin}
                           onClick={() => void remove(row)}
                         >
-                          <Trash2Icon size={16} />
-                        </IconButton>
+                          删除
+                        </Button>
                       </div>
                     </TableCell>
                   </TableRow>

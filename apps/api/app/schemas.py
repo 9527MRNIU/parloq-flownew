@@ -108,6 +108,13 @@ class SystemPlatformConfigurationUpdate(ApiModel):
     payment_id: str | None = Field(default=None, alias="paymentId", max_length=64)
     account_id: str | None = Field(default=None, alias="accountId", max_length=64)
     base_url: str | None = Field(default=None, alias="baseUrl", max_length=2048)
+    repository: str | None = Field(default=None, max_length=255)
+    repository_ref: str | None = Field(default=None, alias="ref", max_length=255)
+    catalog_path: str | None = Field(
+        default=None,
+        alias="catalogPath",
+        max_length=512,
+    )
 
 
 class BitlyAccountCreate(ApiModel):

@@ -18,6 +18,15 @@ from app.services.platform_clients import (
     NameSiloClient,
     PlatformClientError,
 )
+from app.services.github_repository import (
+    DEFAULT_CATALOG_PATH,
+    DEFAULT_GITHUB_REF,
+    GitHubRepositoryClient,
+    clear_github_repository_snapshot,
+    normalize_github_ref,
+    normalize_github_repository,
+    normalize_repository_path,
+)
 
 
 router = APIRouter(prefix="/api/system/configuration", tags=["system-configuration"])
@@ -49,6 +58,12 @@ PLATFORMS: dict[str, PlatformDefinition] = {
         credential_key="api_key",
         credential_label="API Key",
         description="用于通过宝塔开放 API 管理站点与反向代理。",
+    ),
+    "github": PlatformDefinition(
+        name="GitHub 仓库",
+        credential_key="access_token",
+        credential_label="Fine-grained Token",
+        description="只读访问私人模板与集成仓库；Token 仅需 Contents: Read 权限。",
     ),
 }
 
@@ -148,6 +163,21 @@ def _normalized_settings(
         ):
             raise HTTPException(status_code=422, detail="宝塔面板地址格式不正确")
         settings["baseUrl"] = base_url
+    elif platform_key == "github":
+        try:
+            if payload.repository is not None:
+                settings["repository"] = normalize_github_repository(
+                    payload.repository
+                )
+            if payload.repository_ref is not None:
+                settings["ref"] = normalize_github_ref(payload.repository_ref)
+            if payload.catalog_path is not None:
+                settings["catalogPath"] = normalize_repository_path(
+                    payload.catalog_path,
+                    default=DEFAULT_CATALOG_PATH,
+                )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
     return settings
 
 
@@ -196,19 +226,31 @@ def set_system_configuration(
     settings = _normalized_settings(platform_key, payload, current_settings)
     configured = credential is not None or payload.value is not None
     enabled = payload.enabled if payload.enabled is not None else config.enabled
+    configuration_changed = (
+        changed_secret
+        or settings != current_settings
+        or bool(enabled) != bool(config.enabled)
+    )
     if enabled and not configured:
         raise HTTPException(status_code=422, detail="请先配置平台凭据")
     if platform_key == "namesilo" and enabled and not settings.get("paymentId"):
         raise HTTPException(status_code=422, detail="启用 NameSilo 前请填写信用卡 Payment ID")
     if platform_key == "baota" and enabled and not settings.get("baseUrl"):
         raise HTTPException(status_code=422, detail="启用宝塔面板前请填写面板地址")
+    if platform_key == "github" and enabled and not settings.get("repository"):
+        raise HTTPException(status_code=422, detail="启用 GitHub 前请填写私人仓库")
+    if platform_key == "github":
+        settings.setdefault("ref", DEFAULT_GITHUB_REF)
+        settings.setdefault("catalogPath", DEFAULT_CATALOG_PATH)
     config.enabled = bool(enabled)
     config.settings_json = settings
     config.updated_by = admin.id
-    if changed_secret or settings != current_settings:
+    if configuration_changed:
         config.last_test_status = "untested"
         config.last_test_message = None
         config.last_test_at = None
+        if platform_key == "github":
+            clear_github_repository_snapshot(db)
     db.commit()
     _no_store(response)
     return {"data": {"platform": _platform_row(db, platform_key, definition)}}
@@ -229,7 +271,7 @@ def test_system_configuration(
     assert config is not None
     settings = dict(config.settings_json or {})
     accounts: list[dict[str, str]] = []
-    client: NameSiloClient | CloudflareClient | BaoTaClient | None = None
+    client: NameSiloClient | CloudflareClient | BaoTaClient | GitHubRepositoryClient | None = None
     try:
         secret = decrypt_secret(credential.value_ciphertext)
         if platform_key == "namesilo":
@@ -249,13 +291,27 @@ def test_system_configuration(
             if not selected and len(accounts) == 1:
                 settings["accountId"] = accounts[0]["id"]
             message = f"Cloudflare 连接成功，发现 {len(accounts)} 个账户"
-        else:
+        elif platform_key == "baota":
             base_url = str(settings.get("baseUrl") or "")
             if not base_url:
                 raise PlatformClientError("请先填写宝塔面板地址")
             client = BaoTaClient(base_url, secret)
             client.verify_connection()
             message = "宝塔面板连接成功"
+        else:
+            repository = str(settings.get("repository") or "")
+            if not repository:
+                raise PlatformClientError("请先填写 GitHub 私人仓库")
+            client = GitHubRepositoryClient(
+                secret,
+                repository=repository,
+                ref=str(settings.get("ref") or DEFAULT_GITHUB_REF),
+                catalog_path=str(
+                    settings.get("catalogPath") or DEFAULT_CATALOG_PATH
+                ),
+            )
+            result = client.verify_connection()
+            message = f"GitHub 连接成功：{result['repository']}"
         config.last_test_status = "success"
         config.last_test_message = message
         ok = True
@@ -294,6 +350,8 @@ def clear_system_configuration(
     config = _configuration(db, platform_key)
     if config is not None:
         db.delete(config)
+    if platform_key == "github":
+        clear_github_repository_snapshot(db)
     db.commit()
     _no_store(response)
     return {"data": {"cleared": True, "platformKey": platform_key}}

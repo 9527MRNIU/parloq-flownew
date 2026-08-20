@@ -34,10 +34,13 @@ type PlatformSettings = {
   paymentId?: string;
   accountId?: string;
   baseUrl?: string;
+  repository?: string;
+  ref?: string;
+  catalogPath?: string;
 };
 
 type PlatformConfiguration = {
-  key: "namesilo" | "cloudflare" | "baota";
+  key: "namesilo" | "cloudflare" | "baota" | "github";
   name: string;
   credentialLabel: string;
   description: string;
@@ -83,6 +86,9 @@ function platformRows(payload: unknown): PlatformConfiguration[] {
         paymentId: String(settings.paymentId || ""),
         accountId: String(settings.accountId || ""),
         baseUrl: String(settings.baseUrl || ""),
+        repository: String(settings.repository || ""),
+        ref: String(settings.ref || ""),
+        catalogPath: String(settings.catalogPath || ""),
       },
       lastTestStatus: String(row.lastTestStatus || "untested") as PlatformConfiguration["lastTestStatus"],
       lastTestMessage: String(row.lastTestMessage || ""),
@@ -103,6 +109,9 @@ function draftsFromRows(rows: PlatformConfiguration[]): Record<string, PlatformD
         paymentId: row.settings.paymentId || "",
         accountId: row.settings.accountId || "",
         baseUrl: row.settings.baseUrl || "",
+        repository: row.settings.repository || "",
+        ref: row.settings.ref || "main",
+        catalogPath: row.settings.catalogPath || "artifacts/catalog.json",
       },
     ]),
   );
@@ -168,6 +177,10 @@ export function SystemConfigurationPage() {
       toast.error("启用宝塔面板前请填写面板地址");
       return;
     }
+    if (row.key === "github" && draft.enabled && !draft.repository?.trim()) {
+      toast.error("启用 GitHub 前请填写私人仓库");
+      return;
+    }
     setPendingKey(`${row.key}:save`);
     try {
       await apiRequest(`/api/system/configuration/${row.key}`, {
@@ -178,6 +191,13 @@ export function SystemConfigurationPage() {
           ...(row.key === "namesilo" ? { paymentId: draft.paymentId?.trim() || "" } : {}),
           ...(row.key === "cloudflare" ? { accountId: draft.accountId?.trim() || "" } : {}),
           ...(row.key === "baota" ? { baseUrl: draft.baseUrl?.trim() || "" } : {}),
+          ...(row.key === "github"
+            ? {
+                repository: draft.repository?.trim() || "",
+                ref: draft.ref?.trim() || "main",
+                catalogPath: draft.catalogPath?.trim() || "artifacts/catalog.json",
+              }
+            : {}),
         }),
       });
       if (row.key === "cloudflare") setCloudflareAccounts([]);
@@ -303,6 +323,59 @@ export function SystemConfigurationPage() {
                         className="max-w-2xl"
                       />
                     </DrawerFormField>
+                  ) : null}
+
+                  {row.key === "github" ? (
+                    <>
+                      <DrawerFormField
+                        label="私人仓库"
+                        htmlFor="system-github-repository"
+                        hint="填写 owner/repository 或完整的 GitHub HTTPS 地址。"
+                      >
+                        <Input
+                          id="system-github-repository"
+                          value={draft.repository || ""}
+                          disabled={busy}
+                          onChange={(event) => updateDraft(row.key, { repository: event.target.value })}
+                          placeholder="zaptel099/parloq-flow-template-kit"
+                          autoComplete="off"
+                          spellCheck={false}
+                          className="max-w-2xl"
+                        />
+                      </DrawerFormField>
+                      <DrawerFormField
+                        label="分支或标签"
+                        htmlFor="system-github-ref"
+                        hint="系统读取这个版本的远程模板和集成源码。"
+                      >
+                        <Input
+                          id="system-github-ref"
+                          value={draft.ref || "main"}
+                          disabled={busy}
+                          onChange={(event) => updateDraft(row.key, { ref: event.target.value })}
+                          placeholder="main"
+                          autoComplete="off"
+                          spellCheck={false}
+                          className="max-w-2xl"
+                        />
+                      </DrawerFormField>
+                      <DrawerFormField
+                        label="目录清单"
+                        htmlFor="system-github-catalog"
+                        hint="清单记录项目编号、模板或集成类型以及对应源码目录。"
+                      >
+                        <Input
+                          id="system-github-catalog"
+                          value={draft.catalogPath || "artifacts/catalog.json"}
+                          disabled={busy}
+                          onChange={(event) => updateDraft(row.key, { catalogPath: event.target.value })}
+                          placeholder="artifacts/catalog.json"
+                          autoComplete="off"
+                          spellCheck={false}
+                          className="max-w-2xl"
+                        />
+                      </DrawerFormField>
+                    </>
                   ) : null}
 
                   <DrawerFormField

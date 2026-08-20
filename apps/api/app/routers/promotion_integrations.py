@@ -26,6 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from app.business_schemas import (
     PromotionIntegrationCreate,
     PromotionIntegrationEventInput,
+    PromotionRepositoryIntegrationImport,
     PromotionIntegrationUpdate,
 )
 from app.deps import CurrentUser, DbSession
@@ -58,6 +59,20 @@ from app.services.promotion_event_rate_limits import (
     normalized_promotion_event_rate_limit_policy,
 )
 from app.services.public_rate_limits import public_request_ip
+from app.services.github_repository import (
+    GitHubRemoteArtifact,
+    GitHubRepositoryConfigurationError,
+    GitHubRepositorySnapshot,
+    cached_github_repository_snapshot,
+    configured_github_repository_client,
+    github_repository_snapshot,
+    refresh_github_repository_snapshot,
+    remote_artifact_row,
+    repository_local_status,
+    stored_repository_source,
+    with_repository_source,
+)
+from app.services.platform_clients import PlatformClientError
 from app.snowflake import new_public_id, parse_snowflake_id
 from app.validation import parse_public_datetime
 
@@ -127,7 +142,99 @@ def _uploaded_package(file: UploadFile):
     return parse_integration_package(file.file.read(MAX_INTEGRATION_ZIP + 1))
 
 
-def integration_row(db: DbSession, item: PromotionIntegration) -> dict:
+def _repository_integration(
+    db: DbSession,
+    user,
+    snapshot: GitHubRepositorySnapshot,
+    artifact: GitHubRemoteArtifact,
+) -> PromotionIntegration | None:
+    statement = select(PromotionIntegration)
+    if user.role != "admin":
+        statement = statement.where(PromotionIntegration.created_by == user.id)
+    items = list(db.scalars(statement).all())
+    for item in items:
+        source = stored_repository_source(item.manifest_json)
+        if (
+            source.get("provider") == "github"
+            and source.get("repository") == snapshot.repository
+            and source.get("kind") == artifact.kind
+            and source.get("sequence") == artifact.sequence
+        ):
+            return item
+    for item in items:
+        if item.integration_key == artifact.integration_key:
+            return item
+    return None
+
+
+def _repository_integration_status(
+    item: PromotionIntegration | None,
+    snapshot: GitHubRepositorySnapshot,
+    artifact: GitHubRemoteArtifact,
+) -> str:
+    if item is None:
+        return "new"
+    return repository_local_status(
+        item.manifest_json,
+        item.version,
+        snapshot,
+        artifact,
+    )
+
+
+def _repository_http_error(error: PlatformClientError) -> HTTPException:
+    return HTTPException(
+        status_code=(
+            status.HTTP_409_CONFLICT
+            if isinstance(error, GitHubRepositoryConfigurationError)
+            else status.HTTP_502_BAD_GATEWAY
+        ),
+        detail=str(error),
+    )
+
+
+def _integration_repository_source(
+    item: PromotionIntegration,
+    snapshot: GitHubRepositorySnapshot | None,
+) -> dict | None:
+    source = stored_repository_source(item.manifest_json)
+    if (
+        snapshot is None
+        or source.get("provider") != "github"
+        or source.get("kind") != "integration"
+    ):
+        return None
+    artifact = next(
+        (
+            value
+            for value in snapshot.artifacts
+            if value.kind == "integration"
+            and value.sequence == source.get("sequence")
+            and snapshot.repository == source.get("repository")
+        ),
+        None,
+    )
+    if artifact is None:
+        return None
+    return {
+        "sequence": artifact.sequence,
+        "repository": snapshot.repository,
+        "ref": snapshot.ref,
+        "localStatus": repository_local_status(
+            item.manifest_json,
+            item.version,
+            snapshot,
+            artifact,
+        ),
+        "remoteVersion": artifact.version,
+    }
+
+
+def integration_row(
+    db: DbSession,
+    item: PromotionIntegration,
+    repository_snapshot: GitHubRepositorySnapshot | None = None,
+) -> dict:
     domain = db.get(DomainRecord, item.source_domain_id)
     template_count = int(
         db.scalar(
@@ -175,6 +282,10 @@ def integration_row(db: DbSession, item: PromotionIntegration) -> dict:
         "feedbackEvents": list(feedback_events),
         "eventCount": int(event_count or 0),
         "lastEventAt": iso(last_event_at),
+        "repositorySource": _integration_repository_source(
+            item,
+            repository_snapshot,
+        ),
         "createdAt": iso(item.created_at),
         "updatedAt": iso(item.updated_at),
     }
@@ -188,9 +299,14 @@ def list_integrations(db: DbSession, current_user: CurrentUser) -> dict:
     items = db.scalars(
         statement.order_by(PromotionIntegration.updated_at.desc())
     ).all()
+    try:
+        cached = cached_github_repository_snapshot(db, kind="integration")
+    except PlatformClientError:
+        cached = None
+    snapshot = cached[0] if cached is not None else None
     return {
         "data": {
-            "rows": [integration_row(db, item) for item in items],
+            "rows": [integration_row(db, item, snapshot) for item in items],
             "total": len(items),
         }
     }
@@ -263,6 +379,174 @@ def create_integration(
         raise HTTPException(status_code=409, detail="集成标识已存在") from None
     db.refresh(item)
     return {"data": {"integration": integration_row(db, item)}}
+
+
+def _repository_integrations_response(
+    db: DbSession,
+    current_user: CurrentUser,
+    snapshot: GitHubRepositorySnapshot,
+    refreshed_at,
+    *,
+    cache_hit: bool,
+) -> dict:
+    rows = []
+    for artifact in snapshot.artifacts:
+        item = _repository_integration(db, current_user, snapshot, artifact)
+        rows.append(
+            {
+                **remote_artifact_row(snapshot, artifact),
+                "localStatus": _repository_integration_status(
+                    item,
+                    snapshot,
+                    artifact,
+                ),
+                "localId": entity_id(item) if item is not None else None,
+                "localName": item.name if item is not None else None,
+                "localVersion": item.version if item is not None else None,
+            }
+        )
+    return {
+        "data": {
+            "rows": rows,
+            "total": len(rows),
+            "repository": snapshot.repository,
+            "ref": snapshot.ref,
+            "commitSha": snapshot.commit_sha,
+            "refreshedAt": iso(refreshed_at),
+            "cacheHit": cache_hit,
+        }
+    }
+
+
+@router.get("/repository")
+def list_repository_integrations(
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    try:
+        cached = cached_github_repository_snapshot(db, kind="integration")
+        if cached is None:
+            snapshot, refreshed_at = refresh_github_repository_snapshot(
+                db,
+                kind="integration",
+            )
+            cache_hit = False
+        else:
+            snapshot, refreshed_at = cached
+            cache_hit = True
+    except PlatformClientError as error:
+        raise _repository_http_error(error) from error
+    return _repository_integrations_response(
+        db,
+        current_user,
+        snapshot,
+        refreshed_at,
+        cache_hit=cache_hit,
+    )
+
+
+@router.post("/repository/refresh")
+def refresh_repository_integrations(
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    try:
+        snapshot, refreshed_at = refresh_github_repository_snapshot(
+            db,
+            kind="integration",
+        )
+    except PlatformClientError as error:
+        raise _repository_http_error(error) from error
+    return _repository_integrations_response(
+        db,
+        current_user,
+        snapshot,
+        refreshed_at,
+        cache_hit=False,
+    )
+
+
+@router.post("/repository/{sequence}/import")
+def import_repository_integration(
+    sequence: str,
+    payload: PromotionRepositoryIntegrationImport,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    try:
+        snapshot, _refreshed_at = github_repository_snapshot(db, kind="integration")
+        artifact = next(
+            (value for value in snapshot.artifacts if value.sequence == sequence),
+            None,
+        )
+        if artifact is None:
+            raise HTTPException(status_code=404, detail="远程集成不存在")
+        item = _repository_integration(db, current_user, snapshot, artifact)
+        item_status = _repository_integration_status(item, snapshot, artifact)
+        if item_status == "conflict":
+            raise HTTPException(
+                status_code=409,
+                detail="仓库集成内容已变化，请先修改 integration.json 的 version",
+            )
+        if item_status == "current" and item is not None:
+            return {
+                "data": {
+                    "action": "unchanged",
+                    "integration": integration_row(db, item, snapshot),
+                }
+            }
+        client = configured_github_repository_client(db)
+        try:
+            raw = client.archive_artifact(artifact)
+        finally:
+            client.close()
+    except PlatformClientError as error:
+        raise _repository_http_error(error) from error
+    package = parse_integration_package(raw)
+    if item is None:
+        if payload.domain_id is None:
+            raise HTTPException(status_code=422, detail="请选择集成源域名")
+        domain = _source_domain(db, payload.domain_id, current_user)
+        item = PromotionIntegration(
+            public_id=new_public_id("pint"),
+            integration_key=str(artifact.integration_key or ""),
+            name=artifact.name,
+            description=artifact.description,
+            integration_type=package.integration_type,
+            source_domain_id=domain.id,
+            entrypoints_json=[],
+            version=package.version,
+            manifest_json={},
+            asset_count=0,
+            total_size=0,
+            package_sha256=package.package_sha256,
+            integrities_json={},
+            enabled=payload.enabled,
+            created_by=current_user.id,
+        )
+        db.add(item)
+        action = "added"
+    else:
+        action = "updated"
+    try:
+        db.flush()
+        replace_integration_package(db, item, package)
+        item.manifest_json = with_repository_source(
+            item.manifest_json or {},
+            snapshot,
+            artifact,
+        )
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="集成标识已存在") from None
+    db.refresh(item)
+    return {
+        "data": {
+            "action": action,
+            "integration": integration_row(db, item, snapshot),
+        }
+    }
 
 
 @router.delete("/{integration_id}")
@@ -377,6 +661,54 @@ def update_integration(
         ).id
     if payload.enabled is not None:
         item.enabled = payload.enabled
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="集成标识已存在") from None
+    db.refresh(item)
+    return {"data": {"integration": integration_row(db, item)}}
+
+
+@router.post("/{integration_id}/edit")
+def edit_integration(
+    integration_id: str,
+    db: DbSession,
+    current_user: CurrentUser,
+    integration_key: str = Form(..., alias="integrationKey"),
+    name: str = Form(...),
+    domain_id: str = Form(..., alias="domainId"),
+    description: str | None = Form(default=None),
+    enabled: bool = Form(default=True),
+    file: UploadFile | None = File(default=None),
+) -> dict:
+    item = _integration(db, integration_id, current_user)
+    payload = _validated_create(
+        integration_key=integration_key,
+        name=name,
+        description=description,
+        domain_id=domain_id,
+        enabled=enabled,
+    )
+    domain = _source_domain(db, payload.domain_id, current_user)
+    package = None
+    if file is not None and file.filename:
+        package = _uploaded_package(file)
+        if (
+            package.version == item.version
+            and package.package_sha256 != item.package_sha256
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="新资源包不能复用当前版本号，请修改 integration.json 的 version",
+            )
+    item.integration_key = payload.integration_key
+    item.name = payload.name
+    item.description = payload.description
+    item.source_domain_id = domain.id
+    item.enabled = payload.enabled
+    if package is not None:
+        replace_integration_package(db, item, package)
     try:
         db.commit()
     except IntegrityError:
