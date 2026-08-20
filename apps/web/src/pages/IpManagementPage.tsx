@@ -659,19 +659,23 @@ export function IpManagementPage() {
     }
   }
   async function unbind(binding: ProxyBinding) {
-    if (!binding.accountId) return;
+    if (!binding.id) return;
+    const orphaned = !binding.accountId;
     if (
       !(await confirmAction({
-        title: `解绑账号 ${binding.accountName || binding.accountPhone || "当前账号"}？`,
-        description: "在线账号需先断开连接后才能解绑代理。",
-        confirmText: "确认解绑",
+        title: orphaned
+          ? "清理账号已不存在的残留绑定？"
+          : `解绑账号 ${binding.accountName || binding.accountPhone || "当前账号"}？`,
+        description: orphaned
+          ? "只会删除当前 IP 绑定记录，不会影响其他账号或代理。"
+          : "在线账号需先断开连接后才能解绑代理。",
+        confirmText: orphaned ? "确认清理" : "确认解绑",
       }))
     )
       return;
     try {
-      await apiRequest(`/api/personal-accounts/${binding.accountId}`, {
-        method: "PATCH",
-        body: JSON.stringify({ proxyId: null }),
+      await apiRequest(`/api/ip-proxy-bindings/${binding.id}`, {
+        method: "DELETE",
       });
       await Promise.all([loadBindings(selectedId), load()]);
     } catch (caught) {
@@ -1006,18 +1010,18 @@ export function IpManagementPage() {
                         <strong>
                           {binding.accountName ||
                             binding.accountPhone ||
-                            "账号待迁移"}
+                            "账号已不存在"}
                         </strong>
                         {binding.accountId ? (
                           <small>{binding.accountId}</small>
                         ) : (
-                          <small>等待 ID 迁移</small>
+                          <small>残留 IP 绑定</small>
                         )}
                       </div>
                       {canManage ? (
                         <IconButton
                           label="解绑"
-                          disabled={!binding.accountId}
+                          disabled={!binding.id}
                           onClick={() => void unbind(binding)}
                         >
                           <UnlinkIcon size={15} />

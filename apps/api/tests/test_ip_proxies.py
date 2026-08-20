@@ -4,9 +4,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.database import SessionLocal
-from app.models import PersonalAccount, ProxyEndpoint
+from app.models import AccountProxyBinding, PersonalAccount, ProxyEndpoint
 from app.routers.ip_proxies import _reconcile_account_proxy_best_effort
 from app.services.wa_gateway import WaGatewayClient
+from app.snowflake import new_public_id
 
 
 def test_ip_proxy_and_binding_lifecycle(admin_client: TestClient) -> None:
@@ -103,6 +104,48 @@ def test_ip_proxy_and_binding_lifecycle(admin_client: TestClient) -> None:
 
     assert admin_client.delete(f"/api/ip-proxy-bindings/{binding_one['id']}").status_code == 200
     assert admin_client.delete(f"/api/ip-proxy-bindings/{binding_two['id']}").status_code == 200
+    assert admin_client.delete(f"/api/ip-proxies/{proxy['id']}").status_code == 200
+
+
+def test_orphaned_proxy_binding_can_be_deleted_by_binding_id(
+    admin_client: TestClient,
+) -> None:
+    created = admin_client.post(
+        "/api/ip-proxies",
+        json={
+            "name": "Orphan binding cleanup proxy",
+            "protocol": "http",
+            "host": "orphan-binding.example.test",
+            "port": 8080,
+        },
+    )
+    assert created.status_code == 201, created.text
+    proxy = created.json()["data"]["proxy"]
+
+    with SessionLocal() as db:
+        binding = AccountProxyBinding(
+            public_id=new_public_id("ipb"),
+            account_public_id=f"missing-{new_public_id('acct')}",
+            proxy_id=int(proxy["id"]),
+        )
+        db.add(binding)
+        db.flush()
+        binding_id = str(binding.id)
+        db.commit()
+
+    listed = admin_client.get(
+        "/api/ip-proxy-bindings",
+        params={"proxyId": proxy["id"]},
+    )
+    assert listed.status_code == 200, listed.text
+    row = listed.json()["data"]["rows"][0]
+    assert row["id"] == binding_id
+    assert "accountId" not in row
+
+    deleted = admin_client.delete(f"/api/ip-proxy-bindings/{binding_id}")
+    assert deleted.status_code == 200, deleted.text
+    detail = admin_client.get(f"/api/ip-proxies/{proxy['id']}")
+    assert detail.json()["data"]["proxy"]["assignedAccountCount"] == 0
     assert admin_client.delete(f"/api/ip-proxies/{proxy['id']}").status_code == 200
 
 
