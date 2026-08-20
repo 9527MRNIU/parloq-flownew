@@ -59,6 +59,9 @@ ALLOWED_INTEGRATION_EXTENSIONS = {
     ".wasm",
 }
 VERSION_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,39})$")
+INTEGRATION_KEY_RE = re.compile(
+    r"^[a-z0-9](?:[a-z0-9._-]{0,78}[a-z0-9])?$"
+)
 FEEDBACK_EVENT_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 BUILTIN_FEEDBACK_EVENTS = ("page_view", "visit_end")
 
@@ -358,6 +361,30 @@ def _manifest_entrypoints(
     return tuple(entrypoints)
 
 
+def _optional_manifest_text(
+    manifest: dict,
+    key: str,
+    max_length: int,
+    label: str,
+    *,
+    allow_empty: bool = False,
+) -> str | None:
+    if key not in manifest:
+        return None
+    value = manifest[key]
+    if not isinstance(value, str):
+        raise HTTPException(status_code=422, detail=f"integration.json {label}必须是字符串")
+    normalized = value.strip()
+    if not normalized and not allow_empty:
+        raise HTTPException(status_code=422, detail=f"integration.json {label}不能为空")
+    if len(normalized) > max_length:
+        raise HTTPException(
+            status_code=422,
+            detail=f"integration.json {label}不能超过 {max_length} 个字符",
+        )
+    return normalized
+
+
 def _package_contract(
     values: dict[str, bytes],
     package_sha256: str,
@@ -379,6 +406,27 @@ def _package_contract(
         schema_version = str(manifest.get("schemaVersion") or "1")
         if schema_version != "1":
             raise HTTPException(status_code=422, detail="仅支持集成清单 schemaVersion 1")
+    integration_key = _optional_manifest_text(
+        manifest,
+        "integrationKey",
+        80,
+        "集成标识",
+    )
+    if integration_key is not None and not INTEGRATION_KEY_RE.fullmatch(
+        integration_key
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="integration.json 集成标识只能包含小写字母、数字、点、下划线和连字符",
+        )
+    name = _optional_manifest_text(manifest, "name", 120, "集成名称")
+    description = _optional_manifest_text(
+        manifest,
+        "description",
+        2000,
+        "集成说明",
+        allow_empty=True,
+    )
     configured_type = str(manifest.get("type") or "").strip().lower() or None
     if configured_type not in {None, "script", "iframe"}:
         raise HTTPException(status_code=422, detail="集成类型必须是 script 或 iframe")
@@ -420,6 +468,13 @@ def _package_contract(
         )
     normalized_manifest = {
         **manifest,
+        **(
+            {"integrationKey": integration_key}
+            if integration_key is not None
+            else {}
+        ),
+        **({"name": name} if name is not None else {}),
+        **({"description": description} if description is not None else {}),
         "schemaVersion": "1",
         "type": integration_type,
         "version": version,

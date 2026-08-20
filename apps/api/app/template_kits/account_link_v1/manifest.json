@@ -1,6 +1,8 @@
 {
   "schema": "promotion-template/v2",
   "version": "1.4.0",
+  "name": "白标账号链接模板",
+  "description": "使用平台标准组件完成手机号输入、配对码展示和账号初始化状态反馈。",
   "entry": "index.html",
   "format": "static-bundle",
   "capabilities": ["phone-pairing"],

@@ -200,6 +200,26 @@ def list_integrations(db: DbSession, current_user: CurrentUser) -> dict:
     }
 
 
+@router.post("/package-metadata")
+def inspect_integration_package(
+    _current_user: CurrentUser,
+    file: UploadFile = File(...),
+) -> dict:
+    package = _uploaded_package(file)
+    manifest = package.manifest
+    return {
+        "data": {
+            "metadata": {
+                "integrationKey": manifest.get("integrationKey"),
+                "name": manifest.get("name"),
+                "description": manifest.get("description"),
+                "version": package.version,
+                "type": package.integration_type,
+            }
+        }
+    }
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_integration(
     db: DbSession,

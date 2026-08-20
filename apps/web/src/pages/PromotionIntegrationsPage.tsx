@@ -8,7 +8,7 @@ import {
   RefreshCwIcon,
   UploadCloudIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
@@ -186,6 +186,8 @@ export default function PromotionIntegrationsPage() {
   const [replacing, setReplacing] = useState<PromotionIntegration | null>(null);
   const [pending, setPending] = useState(false);
   const [file, setFile] = useState<File | null>(null);
+  const [packageInspecting, setPackageInspecting] = useState(false);
+  const packageInspectionRequest = useRef(0);
   const [form, setForm] = useState<IntegrationForm>(emptyForm);
   const [eventIntegration, setEventIntegration] =
     useState<PromotionIntegration | null>(null);
@@ -272,7 +274,51 @@ export default function PromotionIntegrationsPage() {
   }, [keyword, rows]);
   const pagination = useClientPagination(visible, { resetKey: keyword });
 
+  async function chooseIntegrationPackage(next: File | null) {
+    const requestId = ++packageInspectionRequest.current;
+    setFile(next);
+    if (!next || replacing) {
+      setPackageInspecting(false);
+      return;
+    }
+    setPackageInspecting(true);
+    try {
+      const body = new FormData();
+      body.set("file", next);
+      const payload = await apiRequest(
+        "/api/promotion/integrations/package-metadata",
+        { method: "POST", body },
+      );
+      if (requestId !== packageInspectionRequest.current) return;
+      const data = object(object(payload).data ?? payload);
+      const metadata = object(data.metadata ?? data);
+      setForm((current) => ({
+        ...current,
+        integrationKey: field(metadata, "integrationKey", "integration_key"),
+        name: field(metadata, "name"),
+        description: field(metadata, "description"),
+      }));
+    } catch (caught) {
+      if (requestId !== packageInspectionRequest.current) return;
+      setForm((current) => ({
+        ...current,
+        integrationKey: "",
+        name: "",
+        description: "",
+      }));
+      toast.error(
+        caught instanceof Error ? caught.message : "集成 ZIP 元数据读取失败",
+      );
+    } finally {
+      if (requestId === packageInspectionRequest.current) {
+        setPackageInspecting(false);
+      }
+    }
+  }
+
   function openCreate() {
+    packageInspectionRequest.current += 1;
+    setPackageInspecting(false);
     setEditing(null);
     setReplacing(null);
     setFile(null);
@@ -281,6 +327,8 @@ export default function PromotionIntegrationsPage() {
   }
 
   function openEditor(row: PromotionIntegration) {
+    packageInspectionRequest.current += 1;
+    setPackageInspecting(false);
     setEditing(row);
     setReplacing(null);
     setFile(null);
@@ -295,6 +343,8 @@ export default function PromotionIntegrationsPage() {
   }
 
   function openVersion(row: PromotionIntegration) {
+    packageInspectionRequest.current += 1;
+    setPackageInspecting(false);
     setEditing(null);
     setReplacing(row);
     setFile(null);
@@ -390,6 +440,7 @@ export default function PromotionIntegrationsPage() {
 
   const createDisabled =
     pending ||
+    packageInspecting ||
     (!replacing &&
       (!form.integrationKey.trim() ||
         !form.name.trim() ||
@@ -588,11 +639,17 @@ export default function PromotionIntegrationsPage() {
               <Input
                 type="file"
                 accept=".zip,application/zip"
-                onChange={(event) => setFile(event.target.files?.[0] || null)}
+                onChange={(event) =>
+                  void chooseIntegrationPackage(event.target.files?.[0] || null)
+                }
               />
               <UploadCloudIcon size={27} />
               <strong>{file?.name || "选择集成 ZIP 文件"}</strong>
-              <span>目录不限；支持多 JS、MJS 或完整 iframe 包，最大 20 MB</span>
+              <span>
+                {packageInspecting
+                  ? "正在读取包内名称、标识和说明…"
+                  : "目录不限；包内元数据会自动填写且可修改，最大 20 MB"}
+              </span>
             </label>
           ) : null}
           {!replacing ? (
@@ -601,6 +658,7 @@ export default function PromotionIntegrationsPage() {
                 <span>集成名称</span>
                 <Input
                   value={form.name}
+                  maxLength={120}
                   onChange={(event) =>
                     setForm((current) => ({ ...current, name: event.target.value }))
                   }
@@ -611,6 +669,7 @@ export default function PromotionIntegrationsPage() {
                 <span>集成标识</span>
                 <Input
                   value={form.integrationKey}
+                  maxLength={80}
                   onChange={(event) =>
                     setForm((current) => ({
                       ...current,
@@ -644,6 +703,7 @@ export default function PromotionIntegrationsPage() {
                 <span>内部说明（可选）</span>
                 <Input
                   value={form.description}
+                  maxLength={2000}
                   onChange={(event) =>
                     setForm((current) => ({
                       ...current,

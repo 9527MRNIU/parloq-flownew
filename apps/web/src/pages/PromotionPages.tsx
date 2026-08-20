@@ -1026,6 +1026,8 @@ export function PromotionTemplatesPage() {
   const [drawer, setDrawer] = useState(false);
   const [replacing, setReplacing] = useState<PromotionTemplate | null>(null);
   const [file, setFile] = useState<File | null>(null);
+  const [packageInspecting, setPackageInspecting] = useState(false);
+  const packageInspectionRequest = useRef(0);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [integrations, setIntegrations] = useState<RuntimeIntegrationOption[]>([]);
@@ -1088,6 +1090,39 @@ export function PromotionTemplatesPage() {
       : rows;
   }, [keyword, rows]);
   const templatePagination = useClientPagination(visible, { resetKey: keyword });
+  async function chooseTemplatePackage(next: File | null) {
+    const requestId = ++packageInspectionRequest.current;
+    setFile(next);
+    if (!next || replacing) {
+      setPackageInspecting(false);
+      return;
+    }
+    setPackageInspecting(true);
+    try {
+      const body = new FormData();
+      body.set("file", next);
+      const payload = await apiRequest(
+        "/api/promotion/templates/package-metadata",
+        { method: "POST", body },
+      );
+      if (requestId !== packageInspectionRequest.current) return;
+      const data = object(object(payload).data ?? payload);
+      const metadata = object(data.metadata ?? data);
+      setName(field(metadata, "name"));
+      setDescription(field(metadata, "description"));
+    } catch (caught) {
+      if (requestId !== packageInspectionRequest.current) return;
+      setName("");
+      setDescription("");
+      toast.error(
+        caught instanceof Error ? caught.message : "模板 ZIP 元数据读取失败",
+      );
+    } finally {
+      if (requestId === packageInspectionRequest.current) {
+        setPackageInspecting(false);
+      }
+    }
+  }
   async function upload(event?: FormEvent) {
     event?.preventDefault();
     if (!file || !name.trim() || (replacing && !replacing.id)) return;
@@ -1129,6 +1164,8 @@ export function PromotionTemplatesPage() {
   }
   function openImport(row?: PromotionTemplate) {
     if (row && !row.id) return;
+    packageInspectionRequest.current += 1;
+    setPackageInspecting(false);
     setReplacing(row || null);
     setFile(null);
     setName(row?.name || "");
@@ -1831,7 +1868,7 @@ export function PromotionTemplatesPage() {
               取消
             </Button>
             <Button
-              disabled={pending || !file || !name.trim()}
+              disabled={pending || packageInspecting || !file || !name.trim()}
               onClick={() => void upload()}
             >
               {pending ? (
@@ -1849,11 +1886,17 @@ export function PromotionTemplatesPage() {
             <Input
               type="file"
               accept=".zip,application/zip"
-              onChange={(e) => setFile(e.target.files?.[0] || null)}
+              onChange={(event) =>
+                void chooseTemplatePackage(event.target.files?.[0] || null)
+              }
             />
             <UploadCloudIcon size={27} />
             <strong>{file?.name || "选择模板 ZIP 文件"}</strong>
-            <span>仅支持 .zip，最大 20 MB</span>
+            <span>
+              {packageInspecting
+                ? "正在读取包内名称和说明…"
+                : "仅支持 .zip，最大 20 MB；包内元数据会自动填写且可修改"}
+            </span>
           </label>
           {!replacing ? (
             <>
@@ -1861,6 +1904,7 @@ export function PromotionTemplatesPage() {
                 <span>模板名称</span>
                 <Input
                   value={name}
+                  maxLength={120}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="例如：FB 美区夏季促销"
                 />
@@ -1869,6 +1913,7 @@ export function PromotionTemplatesPage() {
                 <span>内部说明（可选）</span>
                 <Input
                   value={description}
+                  maxLength={2000}
                   onChange={(e) => setDescription(e.target.value)}
                   placeholder="说明模板适用场景"
                 />

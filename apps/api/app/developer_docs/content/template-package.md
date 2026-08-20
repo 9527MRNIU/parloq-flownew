@@ -31,6 +31,8 @@ template.zip
 {
   "schema": "promotion-template/v2",
   "version": "2.0.0",
+  "name": "中文活动落地页",
+  "description": "用于中文市场的账号链接活动。",
   "entry": "index.html",
   "format": "static-bundle",
   "capabilities": ["phone-pairing"],
@@ -56,6 +58,7 @@ template.zip
 - `requirements.pairingContract` 固定为 `promotion-public-pairing/v1`，`requirements.componentKit` 固定为 `account-link-elements/v1`；
 - `format` 可使用 `static-bundle` 或 `vite-dist`；
 - `version` 为 1–40 字符的模板业务版本；
+- `name` 和 `description` 是可选的管理端预填信息；名称最多 120 字符，说明最多 2000 字符。官方产物使用中文填写，导入后仍可手动修改；
 - `supportedLocales` 至少一个、最多 128 个，且必须包含可用的默认语言；
 - locale 使用 `en`、`zh-CN`、`pt-BR` 这类语言标签；
 - `i18n.path` 必须是安全相对路径，不能以 `/` 开头或包含上级目录跳转；
@@ -69,3 +72,6 @@ template.zip
 估算、图片体积以及外部资源、iframe、图片属性、懒加载和 viewport 等建议。
 这些性能与标记建议不会阻止模板使用；不安全路径、非法 manifest、source map
 文件和超出硬限制的包仍会直接拒绝导入。
+
+首次导入时，系统会读取 `manifest.json` 的 `name` 和 `description` 自动填写
+管理字段。它们只是建议值，用户确认导入前可以直接修改，最终以表单内容为准。

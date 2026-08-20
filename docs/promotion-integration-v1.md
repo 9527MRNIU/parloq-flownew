@@ -31,6 +31,9 @@
   "schemaVersion": 1,
   "type": "script",
   "version": "2.0.0",
+  "integrationKey": "visitor-link-v1",
+  "name": "统一访客关联",
+  "description": "为推广模板提供统一的访客关联能力。",
   "entries": [
     "scripts/bootstrap.js",
     { "path": "scripts/runtime.mjs", "scriptType": "module" }
@@ -39,6 +42,8 @@
 ```
 
 - `type` 支持 `script` 和 `iframe`；
+- `integrationKey`、`name` 和 `description` 可用于自动填写导入表单，导入前仍可手动修改；机器标识使用小写字母、数字、点、下划线和连字符，名称与说明使用中文；
+- `integrationKey` 最多 80 字符，`name` 最多 120 字符，`description` 最多 2000 字符；
 - script 支持多个 `.js` / `.mjs` 入口，数组顺序就是注入顺序；
 - `scriptType` 支持 `classic` 和 `module`，省略时 `.mjs` 自动识别为 module；
 - iframe 只能指定一个 `.html` / `.htm` 入口，包内其他脚本由 HTML 自行引用；

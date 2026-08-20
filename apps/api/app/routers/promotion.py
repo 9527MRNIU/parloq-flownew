@@ -518,7 +518,39 @@ def channel_row(db: DbSession, item: PromotionChannel) -> dict:
     }
 
 
+def _optional_manifest_text(
+    manifest: dict,
+    key: str,
+    max_length: int,
+    label: str,
+    *,
+    allow_empty: bool = False,
+) -> str | None:
+    if key not in manifest:
+        return None
+    value = manifest[key]
+    if not isinstance(value, str):
+        raise HTTPException(status_code=422, detail=f"manifest {label}必须是字符串")
+    normalized = value.strip()
+    if not normalized and not allow_empty:
+        raise HTTPException(status_code=422, detail=f"manifest {label}不能为空")
+    if len(normalized) > max_length:
+        raise HTTPException(
+            status_code=422,
+            detail=f"manifest {label}不能超过 {max_length} 个字符",
+        )
+    return normalized
+
+
 def _manifest_protocol(manifest: dict) -> dict:
+    name = _optional_manifest_text(manifest, "name", 120, "模板名称")
+    description = _optional_manifest_text(
+        manifest,
+        "description",
+        2000,
+        "模板说明",
+        allow_empty=True,
+    )
     schema = str(manifest.get("schema") or "promotion-template/v1")
     if schema not in {
         "promotion-template/v1",
@@ -599,6 +631,8 @@ def _manifest_protocol(manifest: dict) -> dict:
         )
     return {
         **manifest,
+        **({"name": name} if name is not None else {}),
+        **({"description": description} if description is not None else {}),
         "schema": normalized_schema,
         "entry": entry,
         "format": bundle_format,
@@ -916,6 +950,27 @@ def list_templates(db: DbSession, current_user: CurrentUser) -> dict:
     statement = select(PromotionTemplate).where(PromotionTemplate.archived_at.is_(None))
     if current_user.role != "admin": statement = statement.where(PromotionTemplate.created_by == current_user.id)
     items = db.scalars(statement.order_by(PromotionTemplate.created_at.desc())).all(); return {"data": {"rows": [template_row(db, x) for x in items], "total": len(items)}}
+
+
+@router.post("/api/promotion/templates/package-metadata")
+def inspect_template_package(
+    _current_user: CurrentUser,
+    file: UploadFile = File(...),
+) -> dict:
+    if not file.filename or not file.filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=422, detail="请选择 ZIP 模板包")
+    manifest, _html, _assets, _total, _quality_report = _safe_bundle(
+        file.file.read(MAX_ZIP + 1)
+    )
+    return {
+        "data": {
+            "metadata": {
+                "name": manifest.get("name"),
+                "description": manifest.get("description"),
+                "version": manifest.get("version"),
+            }
+        }
+    }
 
 
 @router.post("/api/promotion/templates", status_code=status.HTTP_201_CREATED)

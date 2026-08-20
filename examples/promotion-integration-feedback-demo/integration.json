@@ -2,6 +2,9 @@
   "schemaVersion": 1,
   "type": "iframe",
   "version": "1.0.0",
+  "integrationKey": "promotion-feedback-demo",
+  "name": "推广回传演示集成",
+  "description": "演示 iframe 集成独立初始化并向平台回传访问与业务事件。",
   "entry": "index.html",
   "feedback": {
     "enabled": true,
