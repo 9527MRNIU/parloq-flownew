@@ -150,13 +150,13 @@ const RATE_LIMIT_FIELDS: Array<[
   string,
   string,
 ]> = [
-  ["visitorCheck", "同一设备请求开始配对", "同一渠道、同一设备每次调用开始配对接口都会计数，无论是否创建新任务；优先使用复合设备指纹，指纹不可用时回退浏览器访客标识。"],
-  ["ipStart", "同一 IP 请求开始配对", "同一渠道、同一来源 IP 每次调用开始配对接口都会计数，无论是否创建新任务。"],
-  ["visitorAttempt", "同一设备新建任务", "只有准备创建新配对任务时才计数；继续已有任务不计数。优先使用复合设备指纹，指纹不可用时回退浏览器访客标识。"],
-  ["phoneAttempt", "同一号码新建任务", "同一租户、同一号码创建新的配对任务时计数；继续已有任务不计数。"],
-  ["channelAttempt", "单个渠道新建总量", "单个渠道在统计窗口内累计创建的新配对任务数；继续已有任务不计数，也不同于协议节点同时进行的配对任务上限。"],
-  ["status", "单个任务状态查询", "按同一个配对任务限制状态查询频率。"],
-  ["cancel", "单个任务取消请求", "按同一个配对任务限制取消请求频率。"],
+  ["visitorCheck", "同设备请求配对", "同一渠道、同一设备每次调用开始配对接口都会计数，无论是否创建新任务；优先使用复合设备指纹，指纹不可用时回退浏览器访客标识。"],
+  ["ipStart", "同IP请求配对", "同一渠道、同一来源 IP 每次调用开始配对接口都会计数，无论是否创建新任务。"],
+  ["visitorAttempt", "同设备新建任务", "只有准备创建新配对任务时才计数；继续已有任务不计数。优先使用复合设备指纹，指纹不可用时回退浏览器访客标识。"],
+  ["phoneAttempt", "同号码新建任务", "同一租户、同一号码创建新的配对任务时计数；继续已有任务不计数。"],
+  ["channelAttempt", "单渠道新建总量", "单个渠道在统计窗口内累计创建的新配对任务数；继续已有任务不计数，也不同于协议节点同时进行的配对任务上限。"],
+  ["status", "单任务状态查询", "按同一个配对任务限制状态查询频率。"],
+  ["cancel", "单任务取消请求", "按同一个配对任务限制取消请求频率。"],
 ];
 
 function toRateLimitForm(policy: RateLimitPolicy): RateLimitPolicyForm {
@@ -680,21 +680,21 @@ export function ProtocolManagementPage() {
           </DrawerFormSection>
 
           <DrawerFormSection title="连接策略" description="按需在线会在配对同步、发送和人工操作时持有连接租约；空闲后仅断开 Socket，不退出 WhatsApp 登录。">
-            <DrawerFormField label="账号连接模式" required><SelectField className="w-full" value={form.connectionPolicy} onValueChange={(next) => setForm((current) => ({ ...current, connectionPolicy: next as "on_demand" | "always_on" }))} options={[{ value: "on_demand", label: "按需在线（推荐）" }, { value: "always_on", label: "持续连接" }]} /></DrawerFormField>
-            <DrawerFormField label="空闲断开（秒）" required><Input type="number" min={60} max={86400} value={form.idleDisconnectSeconds} onChange={(event) => setForm((current) => ({ ...current, idleDisconnectSeconds: event.target.value }))} /></DrawerFormField>
-            <DrawerFormField label="验证后保活（秒）" required><Input type="number" min={0} max={3600} value={form.postVerifyGraceSeconds} onChange={(event) => setForm((current) => ({ ...current, postVerifyGraceSeconds: event.target.value }))} /></DrawerFormField>
+            <DrawerFormField label="账号连接模式" required><SelectField className="w-full" value={form.connectionPolicy} onValueChange={(next) => setForm((current) => ({ ...current, connectionPolicy: next as "on_demand" | "always_on" }))} options={[{ value: "on_demand", label: "按需在线 (推荐)" }, { value: "always_on", label: "持续连接" }]} /></DrawerFormField>
+            <DrawerFormField label="空闲断开 (秒)" required><Input type="number" min={60} max={86400} value={form.idleDisconnectSeconds} onChange={(event) => setForm((current) => ({ ...current, idleDisconnectSeconds: event.target.value }))} /></DrawerFormField>
+            <DrawerFormField label="验证后保活 (秒)" required><Input type="number" min={0} max={3600} value={form.postVerifyGraceSeconds} onChange={(event) => setForm((current) => ({ ...current, postVerifyGraceSeconds: event.target.value }))} /></DrawerFormField>
           </DrawerFormSection>
 
           <DrawerFormSection title="公共配对风控与限速" description="设备和 IP 规则限制每次开始配对请求；设备、号码和渠道的新建规则只限制新配对任务；状态查询和取消请求按单个配对任务限制。">
             {RATE_LIMIT_FIELDS.map(([key, label, description]) => (
-              <DrawerFormField key={key} label={label} hint={description} align="start">
+              <DrawerFormField key={key} label={label} hint={description} align="compound">
                 <div className="grid min-w-0 grid-cols-2 gap-2">
                   <label className="grid min-w-0 gap-1 text-xs text-muted-foreground">
-                    <DrawerFieldLabel required={key !== "channelAttempt"}>{key === "channelAttempt" ? "最多请求（留空不限）" : "最多请求"}</DrawerFieldLabel>
+                    <DrawerFieldLabel required={key !== "channelAttempt"}>{key === "channelAttempt" ? "最多请求 (留空不限)" : "最多请求"}</DrawerFieldLabel>
                     <Input type="number" min={1} max={100000} placeholder={key === "channelAttempt" ? "不限制" : undefined} value={form.rateLimitPolicy[key].maxRequests} onChange={(event) => setForm((current) => ({ ...current, rateLimitPolicy: { ...current.rateLimitPolicy, [key]: { ...current.rateLimitPolicy[key], maxRequests: event.target.value } } }))} />
                   </label>
                   <label className="grid min-w-0 gap-1 text-xs text-muted-foreground">
-                    <DrawerFieldLabel required={key !== "channelAttempt" || Boolean(form.rateLimitPolicy[key].maxRequests.trim())}>统计窗口（秒）</DrawerFieldLabel>
+                    <DrawerFieldLabel required={key !== "channelAttempt" || Boolean(form.rateLimitPolicy[key].maxRequests.trim())}>统计窗口 (秒)</DrawerFieldLabel>
                     <Input type="number" min={1} max={86400} disabled={key === "channelAttempt" && form.rateLimitPolicy[key].maxRequests.trim() === ""} value={form.rateLimitPolicy[key].windowSeconds} onChange={(event) => setForm((current) => ({ ...current, rateLimitPolicy: { ...current.rateLimitPolicy, [key]: { ...current.rateLimitPolicy[key], windowSeconds: event.target.value } } }))} />
                   </label>
                 </div>

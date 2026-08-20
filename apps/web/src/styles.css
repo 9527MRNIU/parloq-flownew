@@ -1337,6 +1337,9 @@ tr.selected-row {
   font-weight: 500;
   line-height: 20px;
 }
+.drawer-standard-body {
+  --drawer-form-label-gap: 8px;
+}
 @media (min-width: 561px) {
   .drawer-standard-body .drawer-form .field,
   .drawer-standard-body .drawer-form .switch-row,
@@ -1354,6 +1357,18 @@ tr.selected-row {
   .drawer-standard-body .drawer-form .switch-row strong {
     text-align: right;
   }
+}
+.drawer-standard-body .drawer-form-section-header {
+  display: none;
+}
+.drawer-standard-body .drawer-form-section-content {
+  margin-top: 0;
+}
+.drawer-standard-body
+  .drawer-form-sections
+  > :not([hidden])
+  ~ :not([hidden]) {
+  margin-top: var(--drawer-form-field-gap);
 }
 .drawer-form .field > :not(span):not(small) {
   min-width: 0;

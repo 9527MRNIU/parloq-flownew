@@ -1015,10 +1015,10 @@ export function DomainsPage() {
                       </Badge>
                     </TableCell>
                     <TableCell>
-                      <div className="flex items-center gap-1 whitespace-nowrap">
-                        {statusBadge(row.dnsStatus)}
+                      <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1 whitespace-nowrap">
+                        <span className="justify-self-end">{statusBadge(row.dnsStatus)}</span>
                         <span className="text-muted-foreground">/</span>
-                        {statusBadge(row.sslStatus)}
+                        <span className="justify-self-start">{statusBadge(row.sslStatus)}</span>
                       </div>
                     </TableCell>
                     <TableCell>

@@ -19,7 +19,7 @@ function DrawerHelpTip({
       <TooltipTrigger asChild>
         <button
           type="button"
-          className="inline-flex size-5 shrink-0 items-center justify-center rounded-full text-muted-foreground/70 transition-colors hover:bg-muted hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          className="mr-0.5 inline-flex size-4 shrink-0 align-[-3px] items-center justify-center rounded-full text-muted-foreground/70 transition-colors hover:bg-muted hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
           aria-label={`${label}说明`}
         >
           <InfoIcon className="size-4" />
@@ -43,7 +43,7 @@ export function DrawerRequiredMark() {
       <span aria-hidden="true" className="ml-1 text-destructive">
         *
       </span>
-      <span className="sr-only">（必填）</span>
+      <span className="sr-only">(必填)</span>
     </>
   );
 }
@@ -82,7 +82,7 @@ export function DrawerFormLayout({
         className,
       )}
     >
-      <div className="min-w-0 space-y-[var(--drawer-form-section-gap)]">
+      <div className="drawer-form-sections min-w-0 space-y-[var(--drawer-form-section-gap)]">
         {children}
       </div>
       {aside ? (
@@ -112,7 +112,7 @@ export function DrawerFormSection({
   return (
     <section className={cn("min-w-0", className)}>
       {!hideHeader ? (
-        <header className="flex min-h-8 min-w-0 items-center gap-2.5">
+        <header className="drawer-form-section-header flex min-h-8 min-w-0 items-center gap-2.5">
           <div className="flex shrink-0 items-center gap-1">
             <h3 className="drawer-form-section-title">{title}</h3>
             {description ? (
@@ -125,7 +125,7 @@ export function DrawerFormSection({
       ) : null}
       <div
         className={cn(
-          "grid min-w-0 gap-[var(--drawer-form-field-gap)]",
+          "drawer-form-section-content grid min-w-0 gap-[var(--drawer-form-field-gap)]",
           !hideHeader && "mt-4",
         )}
       >
@@ -151,35 +151,39 @@ export function DrawerFormField({
   hint?: ReactNode;
   meta?: ReactNode;
   required?: boolean;
-  align?: "center" | "start";
+  align?: "center" | "start" | "compound";
   className?: string;
 }) {
   const labelClassName = cn(
-    "text-sm font-medium leading-5 text-foreground",
+    "inline text-sm font-medium leading-5 text-foreground",
   );
   const labelNode = (
     <div
       className={cn(
-        "drawer-form-field-label flex min-w-0 gap-1 md:self-start",
-        align === "start"
-          ? "items-start md:min-h-8 md:pt-1.5"
-          : "items-center md:h-8",
+        "drawer-form-field-label flex min-w-0 md:self-start",
+        align === "compound"
+          ? "md:self-end md:pb-1.5"
+          : align === "start"
+            ? "items-start md:min-h-8 md:pt-1.5"
+            : "items-center md:h-8",
       )}
     >
-      {hint ? (
-        <DrawerHelpTip label={String(label)}>{hint}</DrawerHelpTip>
-      ) : null}
-      {htmlFor ? (
-        <label htmlFor={htmlFor} className={labelClassName}>
-          {label}
-          {required ? <DrawerRequiredMark /> : null}
-        </label>
-      ) : (
-        <div className={labelClassName}>
-          {label}
-          {required ? <DrawerRequiredMark /> : null}
-        </div>
-      )}
+      <span className="min-w-0 max-w-full">
+        {hint ? (
+          <DrawerHelpTip label={String(label)}>{hint}</DrawerHelpTip>
+        ) : null}
+        {htmlFor ? (
+          <label htmlFor={htmlFor} className={labelClassName}>
+            {label}
+            {required ? <DrawerRequiredMark /> : null}
+          </label>
+        ) : (
+          <span className={labelClassName}>
+            {label}
+            {required ? <DrawerRequiredMark /> : null}
+          </span>
+        )}
+      </span>
     </div>
   );
 
@@ -191,7 +195,7 @@ export function DrawerFormField({
       )}
     >
       {labelNode}
-      <div className="min-w-0">
+      <div className="grid min-h-8 min-w-0 items-center">
         {children}
         {meta ? (
           <div className="mt-1.5 flex min-h-4 items-start justify-between gap-3 text-xs leading-4 text-muted-foreground">
