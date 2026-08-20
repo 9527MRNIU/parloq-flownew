@@ -62,6 +62,9 @@ def bitly_account_row(account: BitlyProviderAccount) -> dict[str, Any]:
         "enabled": account.enabled,
         "status": account.status,
         "isMock": account.is_mock,
+        "lastError": account.last_error,
+        "cooldownUntil": iso(account.cooldown_until),
+        "lastUsedAt": iso(account.last_used_at),
         "createdAt": iso(account.created_at),
         "updatedAt": iso(account.updated_at),
     }
@@ -79,6 +82,8 @@ def direct_short_link_row(link: DirectShortLink) -> dict[str, Any]:
         "enabled": link.enabled,
         "status": link.status,
         "lastError": link.last_error,
+        "clickCount": link.click_count,
+        "clicksSyncedAt": iso(link.clicks_synced_at),
         "createdAt": iso(link.created_at),
         "updatedAt": iso(link.updated_at),
     }

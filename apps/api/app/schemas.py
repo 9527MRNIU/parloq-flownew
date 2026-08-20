@@ -118,18 +118,17 @@ class SystemPlatformConfigurationUpdate(ApiModel):
 
 
 class BitlyAccountCreate(ApiModel):
-    name: str = Field(min_length=1, max_length=120)
-    access_token: str | None = Field(default=None, alias="accessToken", max_length=2048)
-    group_guid: str | None = Field(default=None, alias="groupGuid", max_length=80)
-    short_domain: str = Field(default="bit.ly", alias="shortDomain", max_length=255)
-    enabled: bool = True
+    access_token: str = Field(alias="accessToken", min_length=1, max_length=2048)
 
 
 class BitlyAccountUpdate(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
-    access_token: str | None = Field(default=None, alias="accessToken", max_length=2048)
-    group_guid: str | None = Field(default=None, alias="groupGuid", max_length=80)
-    short_domain: str | None = Field(default=None, alias="shortDomain", max_length=255)
+    access_token: str | None = Field(
+        default=None,
+        alias="accessToken",
+        min_length=1,
+        max_length=2048,
+    )
     enabled: bool | None = None
 
 
@@ -157,6 +156,10 @@ class DirectShortLinkUpdate(ApiModel):
         if value is not None and value.scheme not in {"http", "https"}:
             raise ValueError("only http and https target URLs are supported")
         return value
+
+
+class DirectShortLinkClickSync(ApiModel):
+    link_ids: list[str] = Field(alias="linkIds", min_length=1, max_length=100)
 
 
 class MetaPixelCreate(ApiModel):

@@ -52,6 +52,8 @@ type BitlyAccount = {
   linkCount?: number;
   groupGuid?: string;
   tokenMasked?: string;
+  lastError?: string;
+  cooldownUntil?: string;
 };
 
 type DirectShortLink = {
@@ -65,6 +67,7 @@ type DirectShortLink = {
   providerAccountId: string;
   providerAccountName?: string;
   clickCount?: number;
+  clicksSyncedAt?: string;
   createdAt?: string;
 };
 
@@ -87,7 +90,25 @@ function normalizeAccount(input: unknown): BitlyAccount {
         row.access_token_masked ||
         "",
     ),
+    lastError: String(row.lastError || row.last_error || ""),
+    cooldownUntil: String(
+      row.cooldownUntil || row.cooldown_until || "",
+    ),
   };
+}
+
+function accountStatus(row: BitlyAccount): {
+  label: string;
+  tone: "success" | "warning" | "danger" | "neutral";
+} {
+  if (!row.enabled || row.status === "disabled")
+    return { label: "停用", tone: "neutral" };
+  if (["invalid", "error"].includes(row.status || ""))
+    return { label: "异常", tone: "danger" };
+  if (row.status === "exhausted")
+    return { label: "额度耗尽", tone: "warning" };
+  if (row.cooldownUntil) return { label: "冷却中", tone: "warning" };
+  return { label: "可用", tone: "success" };
 }
 
 function normalizeLink(input: unknown): DirectShortLink {
@@ -108,6 +129,9 @@ function normalizeLink(input: unknown): DirectShortLink {
       row.providerAccountName || row.provider_account_name || "",
     ),
     clickCount: Number(row.clickCount ?? row.click_count ?? 0),
+    clicksSyncedAt: String(
+      row.clicksSyncedAt || row.clicks_synced_at || "",
+    ),
     createdAt: String(row.createdAt || row.created_at || ""),
   };
 }
@@ -151,6 +175,7 @@ export function DirectShortLinksPage() {
   const [targetUrl, setTargetUrl] = useState("");
   const [providerAccountId, setProviderAccountId] = useState("");
   const [pending, setPending] = useState(false);
+  const [syncingClicks, setSyncingClicks] = useState(false);
   const [accountDrawer, setAccountDrawer] = useState(false);
   const [editingAccount, setEditingAccount] = useState<BitlyAccount | null>(
     null,
@@ -159,8 +184,6 @@ export function DirectShortLinksPage() {
   const [accountForm, setAccountForm] = useState({
     name: "",
     accessToken: "",
-    groupGuid: "",
-    shortDomain: "bit.ly",
     enabled: true,
   });
 
@@ -293,15 +316,11 @@ export function DirectShortLinksPage() {
         ? {
             name: row.name,
             accessToken: "",
-            groupGuid: row.groupGuid || "",
-            shortDomain: row.shortDomain || "bit.ly",
             enabled: row.enabled ?? true,
           }
         : {
             name: "",
             accessToken: "",
-            groupGuid: "",
-            shortDomain: "bit.ly",
             enabled: true,
           },
     );
@@ -309,16 +328,20 @@ export function DirectShortLinksPage() {
   }
 
   async function saveAccount() {
-    if (!accountForm.name.trim() || !accountForm.shortDomain.trim() || (editingAccount && !editingAccount.id)) return;
+    if (
+      (editingAccount && (!editingAccount.id || !accountForm.name.trim())) ||
+      (!editingAccount && !accountForm.accessToken.trim())
+    )
+      return;
     setAccountPending(true);
     try {
-      const body = {
-        name: accountForm.name.trim(),
-        shortDomain: accountForm.shortDomain.trim(),
-        groupGuid: accountForm.groupGuid.trim() || undefined,
-        accessToken: accountForm.accessToken.trim() || undefined,
-        enabled: accountForm.enabled,
-      };
+      const body = editingAccount
+        ? {
+            name: accountForm.name.trim(),
+            accessToken: accountForm.accessToken.trim() || undefined,
+            enabled: accountForm.enabled,
+          }
+        : { accessToken: accountForm.accessToken.trim() };
       await apiRequest(
         editingAccount
           ? `/api/bitly-accounts/${editingAccount.id}`
@@ -332,8 +355,6 @@ export function DirectShortLinksPage() {
       setAccountForm({
         name: "",
         accessToken: "",
-        groupGuid: "",
-        shortDomain: "bit.ly",
         enabled: true,
       });
       await loadAccounts();
@@ -347,12 +368,36 @@ export function DirectShortLinksPage() {
     }
   }
 
+  async function syncClicks() {
+    const linkIds = rows.map((row) => row.id).filter(Boolean);
+    if (!linkIds.length) return;
+    setSyncingClicks(true);
+    try {
+      const response = (await apiRequest("/api/direct-short-links/sync-clicks", {
+        method: "POST",
+        body: JSON.stringify({ linkIds }),
+      })) as { data?: { updated?: number; failed?: number } };
+      await loadLinks();
+      const updated = Number(response.data?.updated || 0);
+      const failed = Number(response.data?.failed || 0);
+      if (failed) {
+        toast.error(`已同步 ${updated} 条，${failed} 条读取失败`);
+      } else {
+        toast.success(`已同步 ${updated} 条短链的点击数据`);
+      }
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "同步点击数失败");
+    } finally {
+      setSyncingClicks(false);
+    }
+  }
+
   async function removeAccount(row: BitlyAccount) {
     if (!row.id) return;
     if (
       !(await confirmAction({
         title: `删除 Bitly 账号“${row.name}”？`,
-        description: "该账号及其本地短链记录会一并删除；Bitly 上的账号和短链不受影响。",
+        description: "仅未关联短链的账号可以删除；已有短链的账号请改为停用。Bitly 上的账号不受影响。",
         confirmText: "确认删除",
         destructive: true,
       }))
@@ -414,11 +459,14 @@ export function DirectShortLinksPage() {
           <>
             <Button
               variant="outline"
-              onClick={() => void Promise.all([loadLinks(), loadAccounts()])}
-              disabled={loading}
+              onClick={() => void syncClicks()}
+              disabled={loading || syncingClicks || rows.length === 0}
             >
-              <RefreshCwIcon size={16} className={loading ? "spin" : ""} />
-              刷新
+              <RefreshCwIcon
+                size={16}
+                className={syncingClicks ? "spin" : ""}
+              />
+              同步点击数
             </Button>
             {user?.isAdmin ? (
               <Button variant="outline" onClick={() => openAccount()}>
@@ -475,9 +523,9 @@ export function DirectShortLinksPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Bitly 短链接</TableHead>
+                  <TableHead>点击数</TableHead>
                   <TableHead adaptive>目标地址</TableHead>
                   <TableHead>账号</TableHead>
-                  <TableHead>点击数</TableHead>
                   <TableHead>创建时间</TableHead>
                   <TableHead>操作</TableHead>
                 </TableRow>
@@ -494,10 +542,29 @@ export function DirectShortLinksPage() {
                           ...linkStatus(row),
                           details: [
                             { label: "服务账号", value: row.providerAccountName || "-" },
-                            { label: "点击数", value: (row.clickCount || 0).toLocaleString() },
+                            {
+                              label: "点击数",
+                              value: row.clicksSyncedAt
+                                ? (row.clickCount || 0).toLocaleString()
+                                : "未同步",
+                            },
                           ],
                         }}
                       />
+                    </TableCell>
+                    <TableCell className="tabular-nums">
+                      <div className="flex min-w-max flex-col gap-0.5">
+                        <span>
+                          {row.clicksSyncedAt
+                            ? (row.clickCount || 0).toLocaleString()
+                            : "未同步"}
+                        </span>
+                        {row.clicksSyncedAt ? (
+                          <small className="text-muted-foreground">
+                            {formatDateTime(row.clicksSyncedAt)}
+                          </small>
+                        ) : null}
+                      </div>
                     </TableCell>
                     <TableCell>
                       <div className="truncate-cell" title={row.targetUrl}>
@@ -511,9 +578,6 @@ export function DirectShortLinksPage() {
                             String(item.id) === String(row.providerAccountId),
                         )?.name ||
                         "-"}
-                    </TableCell>
-                    <TableCell className="tabular-nums">
-                      {(row.clickCount || 0).toLocaleString()}
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatDateTime(row.createdAt)}
@@ -649,7 +713,7 @@ export function DirectShortLinksPage() {
         open={accountDrawer}
         onClose={() => !accountPending && setAccountDrawer(false)}
         title="Bitly 账号管理"
-        description="Access Token 只加密保存，后续不会回显原文。"
+        description="新增时只需填写 Access Token，系统会自动识别账号、Group 和短域名。Token 加密保存，后续不会回显原文。"
         footer={<Button onClick={() => setAccountDrawer(false)}>完成</Button>}
       >
         <div className="drawer-form">
@@ -659,43 +723,20 @@ export function DirectShortLinksPage() {
                 ? `编辑 · ${editingAccount.name}`
                 : "添加 Bitly 账号"}
             </strong>
-            <label className="field">
-              <DrawerFieldLabel required>账号名称</DrawerFieldLabel>
-              <Input
-                value={accountForm.name}
-                onChange={(event) =>
-                  setAccountForm({ ...accountForm, name: event.target.value })
-                }
-              />
-            </label>
-            <div className="form-grid">
+            {editingAccount ? (
               <label className="field">
-                <DrawerFieldLabel required>短域名</DrawerFieldLabel>
+                <DrawerFieldLabel required>账号名称</DrawerFieldLabel>
                 <Input
-                  value={accountForm.shortDomain}
+                  value={accountForm.name}
                   onChange={(event) =>
                     setAccountForm({
                       ...accountForm,
-                      shortDomain: event.target.value,
+                      name: event.target.value,
                     })
                   }
-                  placeholder="bit.ly"
                 />
               </label>
-              <label className="field">
-                <DrawerFieldLabel>Group GUID</DrawerFieldLabel>
-                <Input
-                  value={accountForm.groupGuid}
-                  onChange={(event) =>
-                    setAccountForm({
-                      ...accountForm,
-                      groupGuid: event.target.value,
-                    })
-                  }
-                  placeholder="留空自动发现"
-                />
-              </label>
-            </div>
+            ) : null}
             <label className="field">
               <DrawerFieldLabel required={!editingAccount}>
                 Access Token{editingAccount ? "（留空不修改）" : ""}
@@ -715,18 +756,28 @@ export function DirectShortLinksPage() {
                 }
               />
             </label>
-            <label className="switch-row">
-              <span>
-                <strong>启用账号</strong>
-                <small>停用后不会再用于创建直接短链。</small>
-              </span>
-              <Switch
-                checked={accountForm.enabled}
-                onCheckedChange={(enabled) =>
-                  setAccountForm({ ...accountForm, enabled })
-                }
-              />
-            </label>
+            {editingAccount ? (
+              <label className="switch-row">
+                <span>
+                  <strong>启用账号</strong>
+                  <small>停用后不会再用于创建直接短链。</small>
+                </span>
+                <Switch
+                  checked={accountForm.enabled}
+                  onCheckedChange={(enabled) =>
+                    setAccountForm({ ...accountForm, enabled })
+                  }
+                />
+              </label>
+            ) : (
+              <div className="system-note">
+                <KeyRoundIcon size={18} />
+                <div>
+                  <strong>账号资料自动识别</strong>
+                  <span>保存前会验证 Token，并读取默认 Group 与短域名。</span>
+                </div>
+              </div>
+            )}
             <div className="flex flex-wrap justify-end gap-2">
               {editingAccount ? (
                 <Button variant="ghost" onClick={() => openAccount()}>
@@ -736,8 +787,9 @@ export function DirectShortLinksPage() {
               <Button
                 disabled={
                   accountPending ||
-                  !accountForm.name.trim() ||
-                  !accountForm.shortDomain.trim()
+                  (editingAccount
+                    ? !accountForm.name.trim()
+                    : !accountForm.accessToken.trim())
                 }
                 onClick={() => void saveAccount()}
               >
@@ -769,9 +821,13 @@ export function DirectShortLinksPage() {
                       {row.shortDomain || "bit.ly"} ·{" "}
                       {row.tokenMasked || row.status || "已配置"}
                     </span>
+                    {row.groupGuid ? <span>Group · {row.groupGuid}</span> : null}
+                    {row.lastError ? (
+                      <span className="text-destructive">{row.lastError}</span>
+                    ) : null}
                   </div>
-                  <Badge tone={row.enabled ? "success" : "neutral"}>
-                    {row.enabled ? "可用" : "停用"}
+                  <Badge tone={accountStatus(row).tone}>
+                    {accountStatus(row).label}
                   </Badge>
                   <Button
                     variant="ghost"

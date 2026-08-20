@@ -1200,3 +1200,42 @@ def test_system_configuration_migration_adds_admin_only_menu_and_storage(
         ("menu_system_menus", 903),
         ("menu_system_developer_docs", 904),
     ]
+
+
+def test_bitly_pool_analytics_columns_are_reversible(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'bitly-pool-analytics.db'}"
+    _alembic(database_url, "0051_repository_cache")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    assert "last_error" not in {
+        column["name"]
+        for column in inspector.get_columns("bitly_provider_accounts")
+    }
+    assert "click_count" not in {
+        column["name"] for column in inspector.get_columns("direct_short_links")
+    }
+    engine.dispose()
+
+    _alembic(database_url, "0052_bitly_pool_analytics")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    assert {"last_error", "cooldown_until", "last_used_at"} <= {
+        column["name"]
+        for column in inspector.get_columns("bitly_provider_accounts")
+    }
+    assert {"click_count", "clicks_synced_at"} <= {
+        column["name"] for column in inspector.get_columns("direct_short_links")
+    }
+    engine.dispose()
+
+    _alembic_downgrade(database_url, "0051_repository_cache")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    assert "last_error" not in {
+        column["name"]
+        for column in inspector.get_columns("bitly_provider_accounts")
+    }
+    assert "click_count" not in {
+        column["name"] for column in inspector.get_columns("direct_short_links")
+    }
+    engine.dispose()

@@ -35,12 +35,69 @@ COMPOSE_FILE = f"{REMOTE_DIR}/docker-compose.yaml"
 ENV_FILE = f"{REMOTE_DIR}/.env"
 RELEASE_DIR = f"{REMOTE_DIR}/releases"
 SITE_NAME = "center.parloq.com"
+WABA_REMOTE_DIR = "/www/server/panel/data/compose/waba"
+WABA_COMPOSE_FILE = f"{WABA_REMOTE_DIR}/docker-compose.yaml"
+WABA_ENV_FILE = f"{WABA_REMOTE_DIR}/.env"
 SECURITY_ENV_KEYS = (
     "TURNSTILE_SITE_KEY",
     "TURNSTILE_SECRET_KEY",
     "DATA_ENCRYPTION_ACTIVE_KEY_ID",
     "DATA_ENCRYPTION_KEYS",
 )
+
+WABA_BITLY_EXPORTER_SOURCE = """from __future__ import annotations
+
+import json
+
+from sqlalchemy import select
+
+from app.core.config import get_settings
+from app.db.models import ShortLinkProviderAccount
+from app.db.session import SessionLocal
+from app.services.domain_integrations.crypto import decrypt_provider_secrets
+
+
+with SessionLocal() as db:
+    accounts = list(
+        db.scalars(
+            select(ShortLinkProviderAccount)
+            .where(
+                ShortLinkProviderAccount.provider == "bitly",
+                ShortLinkProviderAccount.enabled.is_(True),
+                ShortLinkProviderAccount.archived_at.is_(None),
+            )
+            .order_by(ShortLinkProviderAccount.id)
+        ).all()
+    )
+    master_key = get_settings().credential_encryption_key
+    exported = []
+    for account in accounts:
+        values = decrypt_provider_secrets(
+            "bitly", account.token_secret_payload, master_key
+        )
+        token = values.get("access_token", "").strip()
+        if not token:
+            raise RuntimeError("an enabled Bitly account has no access token")
+        exported.append({"accessToken": token})
+print(json.dumps({"accounts": exported}, separators=(",", ":")))
+"""
+
+BITLY_RESULT_WRITER_SOURCE = """from __future__ import annotations
+
+import json
+import sys
+
+
+result_path, status_path = sys.argv[1:3]
+with open(result_path, encoding="utf-8") as source:
+    result = json.load(source)
+for key in ("source", "imported", "skipped"):
+    if not isinstance(result.get(key), int) or result[key] < 0:
+        raise RuntimeError("invalid Bitly import result")
+payload = {"status": "success", **result}
+with open(status_path, "w", encoding="utf-8") as target:
+    json.dump(payload, target, separators=(",", ":"))
+"""
 
 
 class BaoTaError(RuntimeError):
@@ -418,6 +475,45 @@ write_status '{{"status":"success","commit":"'"${{commit}}"'","backup":"'"${{bac
 """
 
 
+def bitly_migration_script(*, status_file: str, migration_id: str) -> str:
+    if not re.fullmatch(r"[0-9]{10,20}", migration_id):
+        raise BaoTaError("invalid Bitly migration id")
+    exporter_b64 = base64.b64encode(WABA_BITLY_EXPORTER_SOURCE.encode()).decode()
+    writer_b64 = base64.b64encode(BITLY_RESULT_WRITER_SOURCE.encode()).decode()
+    q = shlex.quote
+    return f"""#!/usr/bin/env bash
+set -Eeuo pipefail
+parloq_compose={q(COMPOSE_FILE)}
+parloq_env={q(ENV_FILE)}
+waba_compose={q(WABA_COMPOSE_FILE)}
+waba_env={q(WABA_ENV_FILE)}
+status_file={q(status_file)}
+result_file="${{status_file}}.result"
+exporter_b64={q(exporter_b64)}
+writer_b64={q(writer_b64)}
+write_status() {{
+  mkdir -p "$(dirname "${{status_file}}")"
+  printf '%s\n' "$1" >"${{status_file}}"
+}}
+failed() {{
+  code=$?
+  rm -f "${{result_file}}"
+  write_status '{{"status":"failed","exitCode":'"${{code}}"'}}'
+  exit "${{code}}"
+}}
+trap failed ERR
+docker compose -p waba --env-file "${{waba_env}}" -f "${{waba_compose}}" \
+  exec -T rocket-worker python -c "$(printf '%s' "${{exporter_b64}}" | base64 -d)" \
+  | docker compose -p parloq-flow --env-file "${{parloq_env}}" -f "${{parloq_compose}}" \
+    exec -T api python -m app.maintenance.import_waba_bitly \
+    >"${{result_file}}"
+python3 -c "$(printf '%s' "${{writer_b64}}" | base64 -d)" \
+  "${{result_file}}" "${{status_file}}"
+rm -f "${{result_file}}"
+trap - ERR
+"""
+
+
 def security_configuration_script(
     *, security_file: str, checksum: str, status_file: str, configuration_id: str,
 ) -> str:
@@ -615,6 +711,42 @@ def command_configure_security(client: BaoTaClient, args: argparse.Namespace) ->
                 pass
 
 
+def command_migrate_bitly(client: BaoTaClient) -> None:
+    migration_id = str(int(time.time()))
+    status_file = f"{RELEASE_DIR}/status-bitly-{migration_id}.json"
+    task_id: int | None = None
+    try:
+        task_id = client.add_shell_task(
+            f"parloq-bitly-migration-{migration_id}",
+            bitly_migration_script(
+                status_file=status_file,
+                migration_id=migration_id,
+            ),
+        )
+        result = client.wait_status(status_file, timeout_seconds=600)
+        if result.get("status") != "success":
+            raise BaoTaError(
+                "production Bitly credential migration failed "
+                f"(exit={result.get('exitCode')})"
+            )
+        print(json.dumps({
+            "status": "success",
+            "source": result.get("source"),
+            "imported": result.get("imported"),
+            "skipped": result.get("skipped"),
+        }))
+    finally:
+        if task_id is not None:
+            try:
+                client.delete_task(task_id)
+            except BaoTaError:
+                pass
+        try:
+            client.delete_file(status_file)
+        except BaoTaError:
+            pass
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     result.add_argument(
@@ -624,6 +756,7 @@ def parser() -> argparse.ArgumentParser:
     )
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("status")
+    commands.add_parser("migrate-bitly")
     configure_security = commands.add_parser("configure-security")
     configure_security.add_argument("--secrets-file", required=True, type=Path)
     release = commands.add_parser("release")
@@ -649,6 +782,8 @@ def main() -> int:
                 command_status(client)
             elif args.command == "configure-security":
                 command_configure_security(client, args)
+            elif args.command == "migrate-bitly":
+                command_migrate_bitly(client)
             else:
                 command_release(client, args)
         return 0

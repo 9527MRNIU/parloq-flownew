@@ -66,6 +66,21 @@ class BaoTaDeploymentTests(unittest.TestCase):
                 compose_content="services:\n  api:\n    image: parloq-api:a\n",
             )
 
+    def test_bitly_migration_is_a_read_only_waba_to_parloq_pipe(self) -> None:
+        script = BAOTA.bitly_migration_script(
+            status_file="/tmp/bitly-status.json",
+            migration_id="1786900000",
+        )
+        self.assertIn("exec -T rocket-worker python -c", script)
+        self.assertIn("python -m app.maintenance.import_waba_bitly", script)
+        self.assertIn("/www/server/panel/data/compose/waba", script)
+        self.assertIn("write_status '{\"status\":\"failed\"", script)
+        self.assertNotIn("docker compose up", script)
+        self.assertNotIn("docker compose down", script)
+        self.assertNotIn("token_secret_payload =", script)
+        compile(BAOTA.WABA_BITLY_EXPORTER_SOURCE, "<waba-bitly-exporter>", "exec")
+        compile(BAOTA.BITLY_RESULT_WRITER_SOURCE, "<bitly-result-writer>", "exec")
+
     def test_security_configuration_script_updates_only_security_keys(self) -> None:
         script = BAOTA.security_configuration_script(
             security_file="/tmp/security.env",

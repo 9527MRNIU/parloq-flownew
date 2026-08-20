@@ -1,34 +1,52 @@
 from __future__ import annotations
 
+from datetime import timedelta
 
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 
 from app.deps import CurrentUser, DbSession
 from app.entity_ids import identifier_filter
-from app.snowflake import new_public_id
-
 from app.models import BitlyProviderAccount, DirectShortLink
-from app.schemas import DirectShortLinkCreate, DirectShortLinkUpdate
-from app.security import decrypt_secret
+from app.schemas import (
+    DirectShortLinkClickSync,
+    DirectShortLinkCreate,
+    DirectShortLinkUpdate,
+)
+from app.security import decrypt_secret, utcnow
 from app.serializers import direct_short_link_row
 from app.services.bitly import BitlyClient, BitlyServiceError
+from app.snowflake import new_public_id
 
 
 router = APIRouter(prefix="/api/direct-short-links", tags=["direct-short-links"])
 
 
-def _account_for_create(db: DbSession, identifier: str | None) -> BitlyProviderAccount:
+def _accounts_for_create(
+    db: DbSession,
+    identifier: str | None,
+) -> list[BitlyProviderAccount]:
+    now = utcnow()
     statement = select(BitlyProviderAccount).where(
         BitlyProviderAccount.enabled.is_(True),
         BitlyProviderAccount.status == "active",
+        or_(
+            BitlyProviderAccount.cooldown_until.is_(None),
+            BitlyProviderAccount.cooldown_until <= now,
+        ),
     )
     if identifier:
-        statement = statement.where(identifier_filter(BitlyProviderAccount, identifier))
-    account = db.scalar(statement.order_by(BitlyProviderAccount.id).limit(1))
-    if account is None:
-        raise HTTPException(status_code=409, detail="没有可用的 Bitly 账号")
-    return account
+        statement = statement.where(
+            identifier_filter(BitlyProviderAccount, identifier)
+        )
+    return list(
+        db.scalars(
+            statement.order_by(
+                BitlyProviderAccount.last_used_at.asc().nullsfirst(),
+                BitlyProviderAccount.id,
+            )
+        ).all()
+    )
 
 
 def _link_or_404(db: DbSession, identifier: str, user) -> DirectShortLink:
@@ -47,8 +65,43 @@ def _client(account: BitlyProviderAccount) -> BitlyClient:
     try:
         token = decrypt_secret(account.token_ciphertext)
     except ValueError:
-        raise HTTPException(status_code=500, detail="Bitly Token 无法解密，请重新保存") from None
+        raise BitlyServiceError(
+            "Bitly Token 无法解密，请重新保存",
+            category="invalid",
+        ) from None
     return BitlyClient(token, is_mock=account.is_mock)
+
+
+def _record_account_failure(
+    db: DbSession,
+    account: BitlyProviderAccount,
+    error: BitlyServiceError,
+) -> None:
+    account.last_error = str(error)[:2000]
+    if error.category == "invalid":
+        account.status = "invalid"
+        account.cooldown_until = None
+    elif error.category == "quota_exhausted":
+        account.status = "exhausted"
+        account.cooldown_until = None
+    elif error.category == "configuration":
+        account.status = "error"
+        account.cooldown_until = None
+    elif error.category in {"temporary", "rate_limited"}:
+        cooldown = min(max(int(error.retry_after or 60), 60), 3600)
+        account.cooldown_until = utcnow() + timedelta(seconds=cooldown)
+    db.commit()
+
+
+def _record_account_success(
+    db: DbSession,
+    account: BitlyProviderAccount,
+) -> None:
+    account.last_error = None
+    account.cooldown_until = None
+    account.last_used_at = utcnow()
+    account.status = "active" if account.enabled else "disabled"
+    db.commit()
 
 
 @router.get("")
@@ -101,36 +154,92 @@ def create_link(
     db: DbSession,
     current_user: CurrentUser,
 ) -> dict:
-    account = _account_for_create(db, payload.provider_account_id)
+    accounts = _accounts_for_create(db, payload.provider_account_id)
+    if not accounts:
+        raise HTTPException(status_code=409, detail="没有可用的 Bitly 账号")
     target_url = str(payload.target_url)
-    try:
-        result = _client(account).create_bitlink(
-            target_url=target_url,
+    errors: list[str] = []
+    for account in accounts:
+        try:
+            result = _client(account).create_bitlink(
+                target_url=target_url,
+                title=payload.title,
+                group_guid=account.group_guid,
+                domain=account.short_domain,
+            )
+            bitlink_id = str(result.get("id") or "").strip()
+            short_url = str(result.get("link") or "").strip()
+            if not bitlink_id or not short_url:
+                raise BitlyServiceError(
+                    "Bitly 未返回有效短链",
+                    category="temporary",
+                )
+        except BitlyServiceError as exc:
+            errors.append(str(exc))
+            _record_account_failure(db, account, exc)
+            continue
+
+        _record_account_success(db, account)
+        link = DirectShortLink(
+            public_id=new_public_id("dsl"),
             title=payload.title,
-            group_guid=account.group_guid,
-            domain=account.short_domain,
+            target_url=target_url,
+            bitlink_id=bitlink_id,
+            short_url=short_url,
+            provider_account_id=account.id,
+            enabled=True,
+            status="active",
+            click_count=0,
+            created_by=current_user.id,
         )
-    except BitlyServiceError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from None
-    bitlink_id = str(result.get("id") or "").strip()
-    short_url = str(result.get("link") or "").strip()
-    if not bitlink_id or not short_url:
-        raise HTTPException(status_code=502, detail="Bitly 未返回有效短链")
-    link = DirectShortLink(
-        public_id=new_public_id("dsl"),
-        title=payload.title,
-        target_url=target_url,
-        bitlink_id=bitlink_id,
-        short_url=short_url,
-        provider_account_id=account.id,
-        enabled=True,
-        status="active",
-        created_by=current_user.id,
+        db.add(link)
+        db.commit()
+        db.refresh(link)
+        return {"data": {"link": direct_short_link_row(link)}}
+
+    detail = errors[-1] if errors else "Bitly 账号池没有返回可用账号"
+    raise HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail=f"所有可用 Bitly 账号均创建失败：{detail}",
     )
-    db.add(link)
-    db.commit()
-    db.refresh(link)
-    return {"data": {"link": direct_short_link_row(link)}}
+
+
+@router.post("/sync-clicks")
+def sync_clicks(
+    payload: DirectShortLinkClickSync,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    updated = 0
+    failures: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for identifier in payload.link_ids:
+        if identifier in seen:
+            continue
+        seen.add(identifier)
+        try:
+            link = _link_or_404(db, identifier, current_user)
+            summary = _client(link.provider_account).click_summary(link.bitlink_id)
+            click_count = max(int(summary.get("total_clicks") or 0), 0)
+        except (TypeError, ValueError):
+            failures.append({"id": identifier, "message": "Bitly 点击统计格式不正确"})
+            continue
+        except (HTTPException, BitlyServiceError) as exc:
+            message = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+            failures.append({"id": identifier, "message": message[:300]})
+            continue
+        link.click_count = click_count
+        link.clicks_synced_at = utcnow()
+        link.last_error = None
+        db.commit()
+        updated += 1
+    return {
+        "data": {
+            "updated": updated,
+            "failed": len(failures),
+            "failures": failures,
+        }
+    }
 
 
 @router.patch("/{link_id}")
@@ -152,8 +261,9 @@ def update_link(
         )
     except BitlyServiceError as exc:
         link.last_error = str(exc)[:2000]
-        db.commit()
+        _record_account_failure(db, link.provider_account, exc)
         raise HTTPException(status_code=502, detail=str(exc)) from None
+    _record_account_success(db, link.provider_account)
     if target_url is not None:
         link.target_url = target_url
     if "title" in payload.model_fields_set:
