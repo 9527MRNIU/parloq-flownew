@@ -632,34 +632,51 @@ def command_release(client: BaoTaClient, args: argparse.Namespace) -> None:
     compose_file = Path(args.compose_file).resolve()
     if not compose_file.is_file():
         raise BaoTaError("managed Compose file does not exist")
-    remote_archive = client.upload(archive, RELEASE_DIR)
+    remote_archive: str | None = None
     status_file = f"{RELEASE_DIR}/status-{args.short_sha}.json"
-    script = release_script(
-        commit=args.commit,
-        short_sha=args.short_sha,
-        archive=remote_archive,
-        checksum=args.checksum,
-        api_image=args.api_image,
-        web_image=args.web_image,
-        gateway_image=args.gateway_image,
-        status_file=status_file,
-        compose_content=compose_file.read_text(encoding="utf-8"),
-    )
-    task_id = client.add_shell_task(f"parloq-release-{args.short_sha}", script)
-    result = client.wait_status(status_file)
-    if result.get("status") != "success":
-        raise BaoTaError(
-            f"production release failed (exit={result.get('exitCode')}, rollback={result.get('rollbackAttempted')})"
+    task_id: int | None = None
+    try:
+        remote_archive = client.upload(archive, RELEASE_DIR)
+        script = release_script(
+            commit=args.commit,
+            short_sha=args.short_sha,
+            archive=remote_archive,
+            checksum=args.checksum,
+            api_image=args.api_image,
+            web_image=args.web_image,
+            gateway_image=args.gateway_image,
+            status_file=status_file,
+            compose_content=compose_file.read_text(encoding="utf-8"),
         )
-    client.delete_task(task_id)
-    client.delete_file(remote_archive)
-    client.delete_file(status_file)
-    print(json.dumps({
-        "status": "success",
-        "commit": args.commit,
-        "backup": result.get("backup"),
-        "composeBackup": result.get("composeBackup"),
-    }))
+        task_id = client.add_shell_task(f"parloq-release-{args.short_sha}", script)
+        result = client.wait_status(status_file)
+        if result.get("status") != "success":
+            raise BaoTaError(
+                "production release failed "
+                f"(exit={result.get('exitCode')}, "
+                f"rollback={result.get('rollbackAttempted')})"
+            )
+        print(json.dumps({
+            "status": "success",
+            "commit": args.commit,
+            "backup": result.get("backup"),
+            "composeBackup": result.get("composeBackup"),
+        }))
+    finally:
+        if task_id is not None:
+            try:
+                client.delete_task(task_id)
+            except BaoTaError:
+                pass
+        if remote_archive is not None:
+            try:
+                client.delete_file(remote_archive)
+            except BaoTaError:
+                pass
+        try:
+            client.delete_file(status_file)
+        except BaoTaError:
+            pass
 
 
 def command_configure_security(client: BaoTaClient, args: argparse.Namespace) -> None:

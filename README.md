@@ -292,59 +292,35 @@ docker compose --env-file .env.example config --quiet
 | 项目 | 本地开发 | 生产环境 |
 | --- | --- | --- |
 | Compose 文件 | `docker-compose.yml` | `deploy/docker-compose.production.yml` |
-| 镜像 | Compose 现场构建 | 生产服务器从本机仓库源码现场构建 |
+| 镜像 | Compose 现场构建 | 本地 Mac 构建 `linux/amd64` 后通过宝塔 API 上传 |
 | WhatsApp 引擎 | `mock` | `baileys` |
 | 数据库 | Docker 命名卷 | 独立宿主持久化目录 |
 | Redis | 临时数据 | AOF 持久化 |
 | 对外端口 | 多个开发端口 | 仅 Web 绑定 `127.0.0.1:18100` |
 | 数据迁移 | 开发自动建表 | API 启动时先运行 Alembic |
-| 写入控制面 | 本地 Docker | 服务器本机 Docker Compose（沿用宝塔编排目录） |
+| 写入控制面 | 本地 Docker | 宝塔 API（SSH 仅用于只读检查和回环隧道） |
 
 管理入口为 <https://center.parloq.com>。固定服务器、宝塔记录、目录、站点、反代、证书和客户域名接入方式统一维护在 [生产部署与交接文档](docs/production-deployment.md)，不要在多个文档中维护易过期的副本。
 
-### 首次配置私有仓库
+### 发布凭据
 
-生产脚本使用 GitHub Token 在服务器仓库执行 `git fetch`。Compose 随后直接使用
-同一台服务器上的仓库目录作为 build context，不会再次从 GitHub 下载源码。Token
-必须具有该私人仓库的 `Contents: Read-only` 权限，不得写进 `.env`、Git URL、
-Compose 文件或仓库。
-
-不需要单独运行配置命令。第一次在生产服务器执行一键更新时，如果服务器还没有
-Token，脚本会在终端提示输入（输入内容不回显），并直接保存到：
-
-```text
-/www/server/panel/data/compose/parloq-flow/github-token
-```
-
-文件权限自动设为 `600`，后续更新不会再次询问。Token 只用于服务器 Git 更新，
-不会写进 `.env`、镜像或 Git URL。
-
-同一次首次更新还会在缺少 `MANAGEMENT_ORIGIN` 时提示输入当前服务器的管理后台
-域名，并以 `https://域名` 的形式保存到同一 Compose 目录的 `.env`。Web 运行时
-配置、API Origin 校验和发布后首页验证都使用该值；后续更新不会再次询问，也不
-需要为不同部署修改镜像中的 Nginx 配置。宝塔反代可以保留真实 Host，也可以使用
-其默认的回环 Host；`18100` 仅监听 `127.0.0.1`，Web 会用已保存的管理域名完成
-内部路由。客户推广域名仍需保留真实 Host，以维持管理后台与公开落地页的隔离。
-
-生产 `.env` 的管理域名、源码路径、Git revision、构建策略和镜像标签由发布命令
-维护。
+本地使用未提交的 `.env.baota.local` 连接宝塔 API。SSH 只建立到宝塔回环监听的
+加密隧道并执行只读诊断；镜像上传、Compose 更新、迁移和应用服务更新全部由宝塔
+API 临时任务完成。生产 `.env` 不会被整份覆盖，发布只更新三个应用镜像变量。
 
 ### 一键更新
 
-代码推送到 `main` 后，在生产服务器的仓库根目录执行：
+代码推送到 `main` 后，在已配置发布凭据的本地 Mac 仓库根目录执行：
 
 ```bash
 bash deploy/release-production.sh
 ```
 
-脚本直接在服务器本机使用 Token 更新 `origin/main`，然后把生产 Compose 配置
-同步到宝塔已经登记的 `parloq-flow` 目录，使用 Compose/BuildKit 缓存构建 API、
-Web 和 Baileys 网关，并执行 `docker compose up`。API 在对外启动前自动执行
-Alembic，Worker 等 API 健康后再完成更新。整个过程不调用宝塔 API、不创建计划
-任务、不导出 tar，也不上传镜像。发布完全成功后，每个应用组件保留最近 3 个
-镜像版本，运行中的镜像始终保留，同时清理超过 7 天的 BuildKit 构建缓存。脚本
-还会验证已保存管理域名的首页和登录安全接口，避免仅健康检查通过但后台仍返回
-404。
+脚本会确认 `main` 工作区干净且 `HEAD` 等于 `origin/main`，先执行宝塔只读状态
+检查，再在本地构建三个 `linux/amd64` 不可变镜像。镜像归档经 SHA-256 校验后由
+宝塔 File API 上传；临时任务加载镜像、备份生产配置、运行 Alembic，仅更新 API、
+Worker、Web 和 Baileys 网关，并核对健康状态及镜像 revision。成功后本地与远程
+传输归档都会自动清理。
 
 ### 发布后验证
 
