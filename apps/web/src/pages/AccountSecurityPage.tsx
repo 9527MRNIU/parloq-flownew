@@ -8,7 +8,7 @@ import {
   TriangleAlertIcon,
 } from "lucide-react";
 import { REGEXP_ONLY_DIGITS } from "input-otp";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { apiRequest, type ApiEnvelope } from "../api/client";
 import {
@@ -48,6 +48,120 @@ type MfaSetup = {
   secret: string;
   otpauthUri: string;
 };
+
+function PasswordChangeCard() {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmedPassword, setConfirmedPassword] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const passwordsMatch = newPassword === confirmedPassword;
+  const canSubmit = Boolean(
+    currentPassword && newPassword.length >= 8 && confirmedPassword && passwordsMatch,
+  );
+
+  async function changePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canSubmit) return;
+    if (currentPassword === newPassword) {
+      setError("新密码不能与当前密码相同");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await apiRequest("/api/auth/password/change", {
+        method: "POST",
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmedPassword("");
+      toast.success("密码已修改，其他登录会话已退出");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "密码修改失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <KeyRoundIcon />
+          修改密码
+        </CardTitle>
+        <CardDescription>修改成功后，当前设备保持登录，其他设备上的登录会话会退出。</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={(event) => void changePassword(event)}>
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="password-current">当前密码</FieldLabel>
+              <Input
+                id="password-current"
+                type="password"
+                autoComplete="current-password"
+                value={currentPassword}
+                onChange={(event) => {
+                  setCurrentPassword(event.target.value);
+                  setError("");
+                }}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="password-new">新密码</FieldLabel>
+              <Input
+                id="password-new"
+                type="password"
+                autoComplete="new-password"
+                minLength={8}
+                value={newPassword}
+                onChange={(event) => {
+                  setNewPassword(event.target.value);
+                  setError("");
+                }}
+              />
+              <FieldDescription>至少 8 位字符。</FieldDescription>
+            </Field>
+            <Field data-invalid={Boolean(confirmedPassword && !passwordsMatch)}>
+              <FieldLabel htmlFor="password-confirm">确认新密码</FieldLabel>
+              <Input
+                id="password-confirm"
+                type="password"
+                autoComplete="new-password"
+                minLength={8}
+                value={confirmedPassword}
+                onChange={(event) => {
+                  setConfirmedPassword(event.target.value);
+                  setError("");
+                }}
+              />
+              <FieldError>
+                {confirmedPassword && !passwordsMatch ? "两次输入的新密码不一致" : ""}
+              </FieldError>
+            </Field>
+            {error ? (
+              <Alert variant="destructive">
+                <TriangleAlertIcon />
+                <AlertTitle>密码修改失败</AlertTitle>
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            ) : null}
+            <div>
+              <Button type="submit" disabled={!canSubmit || saving}>
+                {saving ? <Spinner /> : <KeyRoundIcon />}
+                保存新密码
+              </Button>
+            </div>
+          </FieldGroup>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
 
 function TotpInput({
   value,
@@ -269,6 +383,7 @@ export function AccountSecurityPage() {
 
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
+      <PasswordChangeCard />
       {loading ? (
         <div className="flex min-h-40 items-center justify-center gap-2 text-sm text-muted-foreground">
           <Spinner /> 正在加载安全设置…

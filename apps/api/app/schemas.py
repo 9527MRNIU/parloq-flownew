@@ -34,6 +34,10 @@ class MfaProtectedActionRequest(MfaPasswordRequest):
     code: str = Field(min_length=6, max_length=16)
 
 
+class PasswordChangeRequest(MfaPasswordRequest):
+    new_password: str = Field(alias="newPassword", min_length=8, max_length=512)
+
+
 class UserCreate(ApiModel):
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=8, max_length=512)

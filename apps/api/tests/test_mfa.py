@@ -42,7 +42,8 @@ def test_optional_mfa_login_recovery_and_admin_reset(admin_client: TestClient) -
             wrong_password = operator.post(
                 "/api/auth/mfa/setup", json={"currentPassword": "wrong-password"}
             )
-            assert wrong_password.status_code == 401
+            assert wrong_password.status_code == 400
+            assert operator.get("/api/auth/me").status_code == 200
 
             setup = operator.post(
                 "/api/auth/mfa/setup",

@@ -21,11 +21,13 @@ from app.schemas import (
     MfaLoginVerifyRequest,
     MfaPasswordRequest,
     MfaProtectedActionRequest,
+    PasswordChangeRequest,
 )
 from app.security import (
     create_session_token,
     decrypt_secret,
     encrypt_secret,
+    hash_password,
     secret_fingerprint,
     utcnow,
     verify_password,
@@ -120,7 +122,9 @@ def _enabled_mfa(user: UserAccount) -> UserMfaCredential | None:
 
 def _require_current_password(user: UserAccount, password: str) -> None:
     if not verify_password(password, user.password_hash):
-        raise HTTPException(status_code=401, detail="当前密码错误")
+        # The caller is already authenticated. A wrong re-authentication
+        # password is a validation failure, not an expired login session.
+        raise HTTPException(status_code=400, detail="当前密码错误")
 
 
 def _recent_mfa_failure_count(db: DbSession, user_id: int) -> int:
@@ -343,6 +347,22 @@ def verify_mfa_login(
     data = _complete_login(response, db, user)
     db.commit()
     return {"data": data}
+
+
+@router.post("/password/change")
+def change_password(
+    payload: PasswordChangeRequest,
+    request: Request,
+    db: DbSession,
+    user: CurrentUser,
+) -> dict:
+    _require_current_password(user, payload.current_password)
+    if verify_password(payload.new_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="新密码不能与当前密码相同")
+    user.password_hash = hash_password(payload.new_password)
+    _revoke_other_sessions(db, user.id, request.state.auth_session.id)
+    db.commit()
+    return {"data": {"ok": True}}
 
 
 @router.get("/mfa/status")
