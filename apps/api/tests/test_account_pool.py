@@ -255,7 +255,50 @@ def test_import_group_statistics_and_export(
         )
         assert stored is not None
         stored.validation_status = "ready"
+        stored.metadata_sync_status = "ready"
+        stored.status = "linked_offline"
+        stored.has_avatar = True
+        stored.group_count = 3
+        stored.friend_count = 12
+        stored.mutual_contact_count = 4
         db.commit()
+
+    filtered = admin_client.get(
+        "/api/personal-accounts",
+        params={
+            "source": "json_import",
+            "groupId": group_id,
+            "protocolId": protocol_id,
+            "qualityKnown": "true",
+            "status": "offline",
+            "pageSize": 1,
+        },
+    )
+    assert filtered.status_code == 200, filtered.text
+    filtered_data = filtered.json()["data"]
+    assert filtered_data["total"] == 1
+    assert filtered_data["rows"][0]["id"] == account["id"]
+    assert filtered_data["rows"][0]["quality"]["groupCount"] == 3
+
+    invalid_filter = admin_client.get(
+        "/api/personal-accounts", params={"status": "not-a-status"}
+    )
+    assert invalid_filter.status_code == 422
+
+    filter_options = admin_client.get("/api/personal-accounts/filter-options")
+    assert filter_options.status_code == 200, filter_options.text
+    assert any(
+        row["id"] == protocol_id
+        for row in filter_options.json()["data"]["protocols"]
+    )
+
+    lifecycle = admin_client.get(
+        f"/api/personal-accounts/{account['id']}/lifecycle"
+    )
+    assert lifecycle.status_code == 200, lifecycle.text
+    lifecycle_data = lifecycle.json()["data"]
+    assert lifecycle_data["total"] >= 1
+    assert lifecycle_data["rows"][0]["toState"]
 
     monkeypatch.setattr(
         WaGatewayClient,
@@ -284,6 +327,19 @@ def test_import_group_statistics_and_export(
     groups = admin_client.get("/api/account-groups").json()["data"]
     matched = next(row for row in groups["rows"] if row["id"] == group_id)
     assert matched["accountCount"] == 1
+    assert matched["validAccountCount"] == 1
+    assert matched["validRate"] == 1.0
+    assert matched["onlineAccountCount"] == 0
+    assert matched["abnormalAccountCount"] == 0
+    assert matched["pendingValidationCount"] == 0
+    assert matched["profileKnownCount"] == 1
+    assert matched["profileCompleteCount"] == 1
+    assert matched["profileCompleteRate"] == 1.0
+    assert matched["profileUnknownCount"] == 0
+    assert matched["noAvatarCount"] == 0
+    assert matched["noGroupCount"] == 0
+    assert matched["zeroFriendCount"] == 0
+    assert matched["zeroMutualCount"] == 0
 
     with SessionLocal() as db:
         stored = db.scalar(select(PersonalAccount).where(PersonalAccount.id == int(account["id"])))

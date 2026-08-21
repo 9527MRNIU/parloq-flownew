@@ -1,10 +1,12 @@
 import {
   AlertTriangleIcon,
   CheckCheckIcon,
+  EyeIcon,
   FolderInputIcon,
   LoaderCircleIcon,
   MessageSquareTextIcon,
   RefreshCwIcon,
+  SlidersHorizontalIcon,
   UploadCloudIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -13,7 +15,6 @@ import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import {
   AccountStatusIndicator,
-  accountUnifiedStatusKey,
 } from "../components/account-status-indicator";
 import { DrawerFieldLabel } from "../components/drawer-form";
 import {
@@ -21,7 +22,6 @@ import {
   ListTableCard,
   ListToolbar,
   StandardListPage,
-  useClientPagination,
 } from "../components/list-page";
 import {
   Badge,
@@ -32,6 +32,9 @@ import {
   EmptyState,
   Input,
   Modal,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
   SelectField,
   Spinner,
   Table,
@@ -69,10 +72,22 @@ type Account = {
   lastError: string;
   groupId: string;
   groupName: string;
+  protocolId: string;
+  protocolName: string;
+  protocolType: string;
   accepted: number | null;
   delivered: number | null;
+  hasAvatar: boolean | null;
+  groupCount: number | null;
+  friendCount: number | null;
+  mutualContactCount: number | null;
+  qualityScore: number | null;
+  qualitySyncedAt: string;
+  enabled: boolean;
+  marketingEligible: boolean;
   lastConnectedAt?: string;
   createdAt?: string;
+  updatedAt?: string;
 };
 type ProxyRow = {
   id: string;
@@ -88,6 +103,15 @@ type ImportProtocol = {
   available: boolean;
   unavailableReason: string;
   supportedFormats: string[];
+};
+type FilterProtocol = { id: string; name: string; type: string };
+type LifecycleEvent = {
+  id: string;
+  fromState: string;
+  toState: string;
+  reason: string;
+  providerCode: string;
+  occurredAt: string;
 };
 const val = (row: Record<string, unknown>, ...keys: string[]) => {
   for (const key of keys) if (row[key] != null) return String(row[key]);
@@ -112,6 +136,9 @@ function accountRow(input: unknown): Account {
     unknown
   >;
   const group = (row.group || {}) as Record<string, unknown>;
+  const protocol = (row.protocol || {}) as Record<string, unknown>;
+  const quality = (row.quality || {}) as Record<string, unknown>;
+  const rawAvatar = quality.hasAvatar ?? quality.has_avatar;
   const id = snowflakeId(
     row,
     "id",
@@ -163,6 +190,14 @@ function accountRow(input: unknown): Account {
       snowflakeId(group, "id", "groupId", "group_id") ||
       snowflakeId(row, "groupId", "group_id"),
     groupName: val(group, "name") || val(row, "groupName", "group_name"),
+    protocolId:
+      snowflakeId(protocol, "id", "protocolId", "protocol_id") ||
+      snowflakeId(row, "protocolId", "protocol_id"),
+    protocolName:
+      val(protocol, "name") || val(row, "protocolName", "protocol_name"),
+    protocolType:
+      val(protocol, "type", "protocolType", "protocol_type") ||
+      val(row, "protocolType", "protocol_type"),
     accepted: optionalNumber(
       row,
       "acceptedCount",
@@ -177,8 +212,35 @@ function accountRow(input: unknown): Account {
       "delivered_count",
       "doubleTickCount",
     ),
+    hasAvatar: rawAvatar == null ? null : Boolean(rawAvatar),
+    groupCount: optionalNumber(quality, "groupCount", "group_count"),
+    friendCount: optionalNumber(quality, "friendCount", "friend_count"),
+    mutualContactCount: optionalNumber(
+      quality,
+      "mutualContactCount",
+      "mutual_contact_count",
+    ),
+    qualityScore: optionalNumber(quality, "score"),
+    qualitySyncedAt: val(quality, "syncedAt", "synced_at"),
+    enabled: Boolean(row.enabled ?? true),
+    marketingEligible: Boolean(
+      row.marketingEligible ?? row.marketing_eligible ?? true,
+    ),
     lastConnectedAt: val(row, "lastConnectedAt", "last_connected_at"),
     createdAt: val(row, "createdAt", "created_at"),
+    updatedAt: val(row, "updatedAt", "updated_at"),
+  };
+}
+
+function lifecycleEvent(input: unknown): LifecycleEvent {
+  const row = input as Record<string, unknown>;
+  return {
+    id: snowflakeId(row, "id", "eventId", "event_id"),
+    fromState: val(row, "fromState", "from_state"),
+    toState: val(row, "toState", "to_state"),
+    reason: val(row, "reason", "reasonCategory", "reason_category"),
+    providerCode: val(row, "providerCode", "provider_code"),
+    occurredAt: val(row, "occurredAt", "occurred_at"),
   };
 }
 function proxyRow(input: unknown): ProxyRow {
@@ -207,7 +269,7 @@ function sourceBadge(row: Account) {
   if (["landing_page", "landing", "pairing"].includes(row.source))
     return <Badge tone="neutral">落地页链接</Badge>;
   if (["json", "json_import", "import"].includes(row.source))
-    return <Badge tone="neutral">JSON 导入</Badge>;
+    return <Badge tone="neutral">会话包导入</Badge>;
   return <Badge tone="neutral">待识别</Badge>;
 }
 const canSwitchProxy = (row: Account) =>
@@ -226,9 +288,21 @@ export function PersonalAccountsPage() {
   const [importProtocols, setImportProtocols] = useState<ImportProtocol[]>([]);
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
-  const [groupFilter, setGroupFilter] = useState("all");
+  const [groupFilter, setGroupFilter] = useState(
+    searchParams.get("groupId") || "all",
+  );
   const [sourceFilter, setSourceFilter] = useState("all");
+  const [countryFilter, setCountryFilter] = useState("");
+  const [protocolFilter, setProtocolFilter] = useState("");
+  const [metadataFilter, setMetadataFilter] = useState("");
+  const [qualityFilter, setQualityFilter] = useState("all");
+  const [filterCountries, setFilterCountries] = useState<string[]>([]);
+  const [filterProtocols, setFilterProtocols] = useState<FilterProtocol[]>([]);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [batchGroupId, setBatchGroupId] = useState("");
   const [groupingIds, setGroupingIds] = useState<string[]>([]);
@@ -251,27 +325,68 @@ export function PersonalAccountsPage() {
   const [importGroupId, setImportGroupId] = useState("");
   const [importProtocolId, setImportProtocolId] = useState("");
   const [importProxyId, setImportProxyId] = useState("");
-  const load = useCallback(async () => {
+  const [detailAccount, setDetailAccount] = useState<Account | null>(null);
+  const [detailEvents, setDetailEvents] = useState<LifecycleEvent[]>([]);
+  const [detailLoading, setDetailLoading] = useState(false);
+
+  const loadAccounts = useCallback(async () => {
     setLoading(true);
     try {
-      const [
-        accountsPayload,
-        groupsPayload,
-        proxiesPayload,
-        importOptionsPayload,
-      ] = await Promise.all([
-        apiRequest("/api/personal-accounts?pageSize=100"),
+      const query = new URLSearchParams({
+        page: String(page),
+        pageSize: String(pageSize),
+      });
+      if (debouncedKeyword) query.set("keyword", debouncedKeyword);
+      if (statusFilter !== "all") query.set("status", statusFilter);
+      if (sourceFilter !== "all") query.set("source", sourceFilter);
+      if (groupFilter !== "all") query.set("groupId", groupFilter);
+      if (countryFilter) query.set("countryCode", countryFilter);
+      if (protocolFilter) query.set("protocolId", protocolFilter);
+      if (metadataFilter) query.set("metadataStatus", metadataFilter);
+      if (qualityFilter !== "all") {
+        query.set("qualityKnown", qualityFilter === "known" ? "true" : "false");
+      }
+      const accountsPayload = await apiRequest(
+        `/api/personal-accounts?${query.toString()}`,
+      );
+      const next = unwrapList<unknown>(accountsPayload);
+      const nextRows = next.rows.map(accountRow);
+      setRows(nextRows);
+      setTotal(next.total);
+      setSelectedIds((current) =>
+        current.filter((id) => nextRows.some((row) => row.id === id)),
+      );
+    } catch (caught) {
+      setRows([]);
+      setTotal(0);
+      toast.error(caught instanceof Error ? caught.message : "账号加载失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [
+    countryFilter,
+    debouncedKeyword,
+    groupFilter,
+    metadataFilter,
+    page,
+    pageSize,
+    protocolFilter,
+    qualityFilter,
+    sourceFilter,
+    statusFilter,
+  ]);
+
+  const loadReferences = useCallback(async () => {
+    try {
+      const [groupsPayload, proxiesPayload, importOptionsPayload, filterPayload] =
+        await Promise.all([
         apiRequest("/api/account-groups?pageSize=100"),
         user?.isAdmin
           ? apiRequest("/api/ip-proxies?pageSize=100").catch(() => null)
           : Promise.resolve(null),
         apiRequest("/api/personal-accounts/import-options"),
+        apiRequest("/api/personal-accounts/filter-options"),
       ]);
-      const nextRows = unwrapList<unknown>(accountsPayload).rows.map(accountRow);
-      setRows(nextRows);
-      setSelectedIds((current) =>
-        current.filter((id) => nextRows.some((row) => row.id === id)),
-      );
       setGroups(
         unwrapList<Record<string, unknown>>(groupsPayload)
           .rows.map((row) => {
@@ -309,49 +424,52 @@ export function PersonalAccountsPage() {
         const available = nextImportProtocols.filter((row) => row.available);
         return available.length === 1 ? available[0].id : "";
       });
+      const filterData = ((filterPayload as { data?: unknown }).data ||
+        filterPayload) as Record<string, unknown>;
+      setFilterCountries(
+        Array.isArray(filterData.countries)
+          ? filterData.countries.map(String).filter(Boolean)
+          : [],
+      );
+      setFilterProtocols(
+        Array.isArray(filterData.protocols)
+          ? filterData.protocols
+              .map((input) => {
+                const row = input as Record<string, unknown>;
+                return {
+                  id: snowflakeId(row, "id", "protocolId", "protocol_id"),
+                  name: val(row, "name"),
+                  type: val(row, "type", "protocolType", "protocol_type"),
+                };
+              })
+              .filter((row) => row.id)
+          : [],
+      );
     } catch (caught) {
-      setRows([]);
       setGroups([]);
       setImportProtocols([]);
-      toast.error(caught instanceof Error ? caught.message : "账号加载失败");
-    } finally {
-      setLoading(false);
+      setFilterCountries([]);
+      setFilterProtocols([]);
+      toast.error(caught instanceof Error ? caught.message : "账号筛选项加载失败");
     }
   }, [user?.isAdmin]);
+
   useEffect(() => {
-    void load();
-  }, [load]);
+    const timer = window.setTimeout(
+      () => setDebouncedKeyword(keyword.trim()),
+      250,
+    );
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+  useEffect(() => {
+    void loadAccounts();
+  }, [loadAccounts]);
+  useEffect(() => {
+    void loadReferences();
+  }, [loadReferences]);
   useEffect(() => {
     if (searchParams.get("import") === "1") setImportOpen(true);
   }, [searchParams]);
-  const visible = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    return rows.filter(
-      (row) =>
-        (!search ||
-          `${row.phone} ${row.name} ${row.id} ${row.countryCode} ${row.groupName} ${row.sourceRefType} ${row.importFormat} ${row.lastError}`
-            .toLowerCase()
-            .includes(search)) &&
-        (statusFilter === "all" ||
-          accountUnifiedStatusKey({
-            status: row.status,
-            connected: row.connected,
-            validationStatus: row.validationStatus,
-            metadataSyncStatus: row.metadataSyncStatus,
-          }) === statusFilter) &&
-        (sourceFilter === "all" || row.source === sourceFilter) &&
-        (groupFilter === "all" ||
-          (groupFilter === "__ungrouped__"
-            ? !row.groupId
-            : row.groupId === groupFilter)),
-    );
-  }, [
-    groupFilter,
-    keyword,
-    rows,
-    sourceFilter,
-    statusFilter,
-  ]);
   const importGroups = useMemo(() => {
     const currentUserId = String(user?.id || "");
     return groups.filter(
@@ -361,10 +479,7 @@ export function PersonalAccountsPage() {
         group.ownerId === currentUserId,
     );
   }, [groups, user?.id, user?.isAdmin]);
-  const pagination = useClientPagination(visible, {
-    resetKey: `${keyword}|${statusFilter}|${sourceFilter}|${groupFilter}`,
-  });
-  const visibleIds = visible.map((row) => row.id).filter(Boolean);
+  const visibleIds = rows.map((row) => row.id).filter(Boolean);
   const allVisibleSelected =
     Boolean(visibleIds.length) &&
     visibleIds.every((id) => selectedIds.includes(id));
@@ -399,7 +514,7 @@ export function PersonalAccountsPage() {
       await apiRequest(`/api/personal-accounts/${row.id}/${name}`, {
         method: "POST",
       });
-      await load();
+      await loadAccounts();
       if (name === "sync") toast.success("资料同步任务已提交到后台");
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "操作失败");
@@ -414,7 +529,7 @@ export function PersonalAccountsPage() {
         method: "PATCH",
         body: JSON.stringify({ proxyId: proxyId || null }),
       });
-      await load();
+      await loadAccounts();
       toast.success("隔离代理已更新");
     } catch (caught) {
       toast.error(
@@ -432,7 +547,7 @@ export function PersonalAccountsPage() {
         method: "PATCH",
         body: JSON.stringify({ groupId: groupId || null }),
       });
-      await load();
+      await loadAccounts();
       toast.success(groupId ? "账号分组已更新" : "账号已移出分组");
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "账号改组失败");
@@ -457,7 +572,7 @@ export function PersonalAccountsPage() {
     setGroupingIds((current) =>
       current.filter((id) => !targetIds.includes(id)),
     );
-    await load();
+    await loadAccounts();
     if (failed.length) {
       toast.warning(
         `批量改组完成：成功 ${targetIds.length - failed.length} 个，失败 ${failed.length} 个`,
@@ -495,6 +610,22 @@ export function PersonalAccountsPage() {
       setTestResult(caught instanceof Error ? caught.message : "发送失败");
     } finally {
       setTestPending(false);
+    }
+  }
+  async function openDetails(row: Account) {
+    if (!row.id) return;
+    setDetailAccount(row);
+    setDetailEvents([]);
+    setDetailLoading(true);
+    try {
+      const payload = await apiRequest(
+        `/api/personal-accounts/${row.id}/lifecycle?pageSize=100`,
+      );
+      setDetailEvents(unwrapList<unknown>(payload).rows.map(lifecycleEvent));
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "生命周期加载失败");
+    } finally {
+      setDetailLoading(false);
     }
   }
   function openImport() {
@@ -570,7 +701,7 @@ export function PersonalAccountsPage() {
         method: "POST",
         body,
       });
-      await load();
+      await Promise.all([loadAccounts(), loadReferences()]);
       toast.success("账号 JSON 已导入统一账号池");
       setImportOpen(false);
       setImportFile(null);
@@ -589,12 +720,21 @@ export function PersonalAccountsPage() {
       setImportPending(false);
     }
   }
+  const advancedFilterCount = [
+    countryFilter,
+    protocolFilter,
+    metadataFilter,
+    qualityFilter === "all" ? "" : qualityFilter,
+  ].filter(Boolean).length;
   return (
     <StandardListPage viewport>
       <ListToolbar
         search={{
           value: keyword,
-          onChange: setKeyword,
+          onChange: (value) => {
+            setKeyword(value);
+            setPage(1);
+          },
           placeholder: "搜索号码、名称或国家",
         }}
         filters={
@@ -603,7 +743,10 @@ export function PersonalAccountsPage() {
               ariaLabel="账号状态"
               className="w-[150px]"
               value={statusFilter}
-              onValueChange={setStatusFilter}
+              onValueChange={(value) => {
+                setStatusFilter(value);
+                setPage(1);
+              }}
               options={[
                 { value: "all", label: "全部账号状态" },
                 { value: "online", label: "在线" },
@@ -622,18 +765,24 @@ export function PersonalAccountsPage() {
               ariaLabel="账号来源"
               className="w-[145px]"
               value={sourceFilter}
-              onValueChange={setSourceFilter}
+              onValueChange={(value) => {
+                setSourceFilter(value);
+                setPage(1);
+              }}
               options={[
                 { value: "all", label: "全部来源" },
                 { value: "landing_page", label: "落地页链接" },
-                { value: "json_import", label: "JSON 导入" },
+                { value: "json_import", label: "会话包导入" },
               ]}
             />
             <SelectField
               ariaLabel="账号分组筛选"
               className="w-[155px]"
               value={groupFilter}
-              onValueChange={setGroupFilter}
+              onValueChange={(value) => {
+                setGroupFilter(value);
+                setPage(1);
+              }}
               options={[
                 { value: "all", label: "全部分组" },
                 { value: "__ungrouped__", label: "未分组" },
@@ -645,12 +794,107 @@ export function PersonalAccountsPage() {
                 })),
               ]}
             />
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button variant="outline">
+                  <SlidersHorizontalIcon size={16} />
+                  更多筛选
+                  {advancedFilterCount ? (
+                    <Badge tone="neutral">{advancedFilterCount}</Badge>
+                  ) : null}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-80 space-y-4">
+                <div>
+                  <strong className="text-sm">精细筛选</strong>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    按接入资源和资料完整度缩小账号范围。
+                  </p>
+                </div>
+                <SelectField
+                  ariaLabel="国家筛选"
+                  className="w-full"
+                  value={countryFilter}
+                  onValueChange={(value) => {
+                    setCountryFilter(value);
+                    setPage(1);
+                  }}
+                  placeholder="全部国家"
+                  clearable
+                  options={filterCountries.map((country) => ({
+                    value: country,
+                    label: country,
+                  }))}
+                />
+                <SelectField
+                  ariaLabel="协议节点筛选"
+                  className="w-full"
+                  value={protocolFilter}
+                  onValueChange={(value) => {
+                    setProtocolFilter(value);
+                    setPage(1);
+                  }}
+                  placeholder="全部协议"
+                  clearable
+                  options={filterProtocols.map((protocol) => ({
+                    value: protocol.id,
+                    label: `${protocol.name} · ${protocol.type || "未知类型"}`,
+                  }))}
+                />
+                <SelectField
+                  ariaLabel="资料同步状态筛选"
+                  className="w-full"
+                  value={metadataFilter}
+                  onValueChange={(value) => {
+                    setMetadataFilter(value);
+                    setPage(1);
+                  }}
+                  placeholder="全部资料同步状态"
+                  clearable
+                  options={[
+                    { value: "pending", label: "待同步" },
+                    { value: "syncing", label: "同步中" },
+                    { value: "ready", label: "已同步" },
+                    { value: "failed", label: "同步失败" },
+                    { value: "unsupported", label: "不支持同步" },
+                  ]}
+                />
+                <SelectField
+                  ariaLabel="基础资料完整度筛选"
+                  className="w-full"
+                  value={qualityFilter}
+                  onValueChange={(value) => {
+                    setQualityFilter(value);
+                    setPage(1);
+                  }}
+                  options={[
+                    { value: "all", label: "全部资料情况" },
+                    { value: "known", label: "基础资料已知" },
+                    { value: "unknown", label: "基础资料未知" },
+                  ]}
+                />
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  disabled={!advancedFilterCount}
+                  onClick={() => {
+                    setCountryFilter("");
+                    setProtocolFilter("");
+                    setMetadataFilter("");
+                    setQualityFilter("all");
+                    setPage(1);
+                  }}
+                >
+                  清除精细筛选
+                </Button>
+              </PopoverContent>
+            </Popover>
           </>
         }
         meta={
           selectedIds.length
-            ? `已选择 ${selectedIds.length} / ${visible.length} 个账号`
-            : `${visible.length} 个账号`
+            ? `已选择 ${selectedIds.length} / ${total} 个账号`
+            : `${total} 个账号`
         }
         actions={
           <>
@@ -688,7 +932,9 @@ export function PersonalAccountsPage() {
             ) : null}
             <Button
               variant="outline"
-              onClick={() => void load()}
+              onClick={() =>
+                void Promise.all([loadAccounts(), loadReferences()])
+              }
               disabled={loading}
             >
               <RefreshCwIcon size={16} className={loading ? "spin" : ""} />
@@ -704,12 +950,15 @@ export function PersonalAccountsPage() {
         }
       />
       <ListPagination
-        page={pagination.page}
-        pageSize={pagination.pageSize}
-        total={pagination.total}
+        page={page}
+        pageSize={pageSize}
+        total={total}
         disabled={loading}
-        onPageChange={pagination.setPage}
-        onPageSizeChange={pagination.setPageSize}
+        onPageChange={setPage}
+        onPageSizeChange={(value) => {
+          setPageSize(value);
+          setPage(1);
+        }}
       />
       <ListTableCard>
         {loading ? (
@@ -717,7 +966,7 @@ export function PersonalAccountsPage() {
             <Spinner />
             正在加载统一账号池…
           </div>
-        ) : visible.length ? (
+        ) : rows.length ? (
           <Table layout="list">
             <TableHeader>
               <TableRow>
@@ -744,7 +993,7 @@ export function PersonalAccountsPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {pagination.rows.map((row) => (
+              {rows.map((row) => (
                 <TableRow key={row.readKey}>
                   <TableCell>
                     <Checkbox
@@ -857,11 +1106,19 @@ export function PersonalAccountsPage() {
                     )}
                   </TableCell>
                   <TableCell>
-                    <div className="cell-main min-w-[160px] max-w-[180px]">
+                    <div className="cell-main min-w-[210px] max-w-[240px]">
                       <div className="tick-stats">
                         <span><CheckCheckIcon size={14} />单勾 {row.accepted == null ? "-" : row.accepted}</span>
                         <span><CheckCheckIcon size={14} />双勾 {row.delivered == null ? "-" : row.delivered}</span>
                       </div>
+                      <span>
+                        头像 {row.hasAvatar == null ? "未知" : row.hasAvatar ? "有" : "无"}
+                        {" · "}群组 {row.groupCount == null ? "未知" : row.groupCount}
+                      </span>
+                      <span>
+                        好友 {row.friendCount == null ? "未知" : row.friendCount}
+                        {" · "}双向 {row.mutualContactCount == null ? "未知" : row.mutualContactCount}
+                      </span>
                       {row.lastError ? (
                         <span
                           className="flex items-center gap-1 truncate text-destructive"
@@ -870,14 +1127,22 @@ export function PersonalAccountsPage() {
                           <AlertTriangleIcon size={13} />
                           {row.lastError}
                         </span>
-                      ) : (
-                        <span className="text-muted-foreground">无异常</span>
-                      )}
+                      ) : null}
                       <span>最近连接 {formatDateTime(row.lastConnectedAt)}</span>
                     </div>
                   </TableCell>
                   <TableCell className="sticky right-0 bg-background">
-                    {canManage ? <div className="flex min-w-max items-center justify-end gap-2">
+                    <div className="flex min-w-max items-center justify-end gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={!row.id}
+                        onClick={() => void openDetails(row)}
+                      >
+                        <EyeIcon size={16} />
+                        详情
+                      </Button>
+                      {canManage ? <>
                       <Button
                         variant="outline"
                         size="sm"
@@ -932,7 +1197,8 @@ export function PersonalAccountsPage() {
                         {operation === `${row.id}:logout` ? <LoaderCircleIcon className="spin" size={16} /> : null}
                         登出解绑
                       </Button>
-                    </div> : null}
+                      </> : null}
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -945,6 +1211,105 @@ export function PersonalAccountsPage() {
           />
         )}
       </ListTableCard>
+      <Drawer
+        wide
+        open={Boolean(detailAccount)}
+        onClose={() => setDetailAccount(null)}
+        title="账号详情"
+        description="集中查看接入资源、资料完整度、当前状态和生命周期。"
+      >
+        {detailAccount ? (
+          <div className="grid gap-6 pb-6">
+            <section className="grid gap-3">
+              <div>
+                <h3 className="text-sm font-semibold">基本信息</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  账号身份、归属和进入账号池的来源。
+                </p>
+              </div>
+              <div className="grid gap-3 rounded-xl border p-4 sm:grid-cols-2">
+                <div className="cell-main"><span>账号</span><strong>{detailAccount.phone || detailAccount.name || "账号待迁移"}</strong></div>
+                <div className="cell-main"><span>ID</span><strong>{detailAccount.id}</strong></div>
+                <div className="cell-main"><span>来源</span><strong>{detailAccount.source === "json_import" ? "会话包导入" : detailAccount.source === "landing_page" ? "落地页链接" : detailAccount.source || "待识别"}</strong></div>
+                <div className="cell-main"><span>导入格式</span><strong>{detailAccount.importFormat || detailAccount.sourceRefType || "-"}</strong></div>
+                <div className="cell-main"><span>账号分组</span><strong>{detailAccount.groupName || "未分组"}</strong></div>
+                <div className="cell-main"><span>创建时间</span><strong>{formatDateTime(detailAccount.createdAt)}</strong></div>
+              </div>
+            </section>
+
+            <section className="grid gap-3">
+              <h3 className="text-sm font-semibold">接入资源</h3>
+              <div className="grid gap-3 rounded-xl border p-4 sm:grid-cols-2">
+                <div className="cell-main"><span>协议节点</span><strong>{detailAccount.protocolName || "未识别"}</strong><span>{detailAccount.protocolType || "协议类型未知"}</span></div>
+                <div className="cell-main"><span>隔离代理</span><strong>{detailAccount.proxyName || "系统自动分配"}</strong></div>
+              </div>
+            </section>
+
+            <section className="grid gap-3">
+              <h3 className="text-sm font-semibold">当前状态</h3>
+              <div className="flex items-start gap-3 rounded-xl border p-4">
+                <AccountStatusIndicator
+                  status={detailAccount.status}
+                  connected={detailAccount.connected}
+                  validationStatus={detailAccount.validationStatus}
+                  metadataSyncStatus={detailAccount.metadataSyncStatus}
+                  lastError={detailAccount.lastError}
+                />
+                <div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-2">
+                  <div className="cell-main"><span>验证状态</span><strong>{detailAccount.validationStatus || "-"}</strong></div>
+                  <div className="cell-main"><span>资料同步</span><strong>{detailAccount.metadataSyncStatus || "-"}</strong></div>
+                  <div className="cell-main"><span>最近连接</span><strong>{formatDateTime(detailAccount.lastConnectedAt)}</strong></div>
+                  <div className="cell-main"><span>最新异常</span><strong className={detailAccount.lastError ? "text-destructive" : ""}>{detailAccount.lastError || "无异常"}</strong></div>
+                </div>
+              </div>
+            </section>
+
+            <section className="grid gap-3">
+              <div>
+                <h3 className="text-sm font-semibold">基础资料</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  未同步的数据保持“未知”，不会当作 0 处理。
+                </p>
+              </div>
+              <div className="grid gap-3 rounded-xl border p-4 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="cell-main"><span>头像</span><strong>{detailAccount.hasAvatar == null ? "未知" : detailAccount.hasAvatar ? "有" : "无"}</strong></div>
+                <div className="cell-main"><span>群组</span><strong>{detailAccount.groupCount == null ? "未知" : detailAccount.groupCount}</strong></div>
+                <div className="cell-main"><span>好友</span><strong>{detailAccount.friendCount == null ? "未知" : detailAccount.friendCount}</strong></div>
+                <div className="cell-main"><span>双向联系人</span><strong>{detailAccount.mutualContactCount == null ? "未知" : detailAccount.mutualContactCount}</strong></div>
+              </div>
+              <span className="text-xs text-muted-foreground">资料更新时间 {formatDateTime(detailAccount.qualitySyncedAt)}</span>
+            </section>
+
+            <section className="grid gap-3">
+              <div>
+                <h3 className="text-sm font-semibold">生命周期</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  按发生时间倒序记录账号状态变更及原因。
+                </p>
+              </div>
+              {detailLoading ? (
+                <div className="loading-state"><Spinner />正在加载生命周期…</div>
+              ) : detailEvents.length ? (
+                <div className="overflow-hidden rounded-xl border">
+                  <Table>
+                    <TableHeader><TableRow><TableHead>发生时间</TableHead><TableHead>状态变化</TableHead><TableHead adaptive>原因</TableHead><TableHead>服务码</TableHead></TableRow></TableHeader>
+                    <TableBody>{detailEvents.map((event) => (
+                      <TableRow key={event.id}>
+                        <TableCell className="text-muted-foreground">{formatDateTime(event.occurredAt)}</TableCell>
+                        <TableCell><Badge tone="neutral">{event.fromState || "初始"} → {event.toState || "未知"}</Badge></TableCell>
+                        <TableCell>{event.reason || "未记录"}</TableCell>
+                        <TableCell className="text-muted-foreground">{event.providerCode || "-"}</TableCell>
+                      </TableRow>
+                    ))}</TableBody>
+                  </Table>
+                </div>
+              ) : (
+                <EmptyState title="暂无生命周期记录" description="发生状态变化后会在这里形成可追溯记录。" />
+              )}
+            </section>
+          </div>
+        ) : null}
+      </Drawer>
       <Drawer
         open={importOpen}
         onClose={closeImport}

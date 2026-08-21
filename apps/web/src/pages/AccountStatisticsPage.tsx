@@ -3,20 +3,26 @@ import {
   CheckCircle2Icon,
   Globe2Icon,
   RefreshCwIcon,
-  UserPlusIcon,
   UsersIcon,
   WifiIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  CartesianGrid,
+  Cell,
+  Line,
+  LineChart,
+  Pie,
+  PieChart,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { apiRequest, formatLocalDateInput } from "../api/client";
 import { DatePickerField } from "../components/date-picker-field";
-import { EntityPrimaryCell } from "../components/entity-primary-cell";
 import {
-  ListPagination,
   ListTableCard,
   ListToolbar,
   StandardListPage,
-  useClientPagination,
 } from "../components/list-page";
 import {
   Badge,
@@ -31,8 +37,11 @@ import {
   TableHeader,
   TableRow,
 } from "../components/ui";
-import { accountRowKey, snowflakeId } from "../lib/account-identifiers";
-import { formatPhoneDisplay } from "../lib/utils";
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+} from "../components/ui/chart";
 
 const pick = (row: Record<string, unknown>, ...keys: string[]) => {
   for (const key of keys) if (row[key] != null) return row[key];
@@ -48,13 +57,23 @@ const numberValue = (row: Record<string, unknown>, ...keys: string[]) => {
   const parsed = Number(found);
   return Number.isFinite(parsed) ? parsed : null;
 };
-function normalizeRate(value: number | null, count?: number | null, total?: number | null) {
+function normalizeRate(
+  value: number | null,
+  count?: number | null,
+  total?: number | null,
+) {
   if (value != null) return value <= 1 ? value * 100 : value;
   if (count == null || total == null || total <= 0) return null;
   return (count / total) * 100;
 }
-const metric = (value: number | null) => value == null ? <span className="text-muted-foreground">-</span> : value.toLocaleString();
-const percent = (value: number | null) => value == null ? "-" : `${value.toFixed(1)}%`;
+const metric = (value: number | null) =>
+  value == null ? (
+    <span className="text-muted-foreground">-</span>
+  ) : (
+    value.toLocaleString()
+  );
+const percent = (value: number | null) =>
+  value == null ? "-" : `${value.toFixed(1)}%`;
 
 type Overview = {
   total: number | null;
@@ -69,18 +88,48 @@ type Overview = {
 function overviewRow(input: unknown): Overview {
   const row = (input || {}) as Record<string, unknown>;
   const total = numberValue(row, "totalAccounts", "total_accounts", "total");
-  const invalid = numberValue(row, "invalidAccounts", "invalid_accounts", "invalid");
-  const valid = numberValue(row, "validAccounts", "valid_accounts", "valid") ?? (total != null && invalid != null ? total - invalid : null);
-  const online = numberValue(row, "onlineAccounts", "online_accounts", "online");
+  const invalid = numberValue(
+    row,
+    "invalidAccounts",
+    "invalid_accounts",
+    "invalid",
+  );
+  const valid =
+    numberValue(row, "validAccounts", "valid_accounts", "valid") ??
+    (total != null && invalid != null ? total - invalid : null);
+  const online = numberValue(
+    row,
+    "onlineAccounts",
+    "online_accounts",
+    "online",
+  );
   return {
     total,
     valid,
-    validRate: normalizeRate(numberValue(row, "validRate", "valid_rate"), valid, total),
+    validRate: normalizeRate(
+      numberValue(row, "validRate", "valid_rate"),
+      valid,
+      total,
+    ),
     online,
-    onlineRate: normalizeRate(numberValue(row, "onlineRate", "online_rate"), online, valid),
+    onlineRate: normalizeRate(
+      numberValue(row, "onlineRate", "online_rate"),
+      online,
+      valid,
+    ),
     invalid,
-    invalidRate: normalizeRate(numberValue(row, "invalidRate", "invalid_rate"), invalid, total),
-    countries: numberValue(row, "countryCount", "country_count", "coveredCountries", "covered_countries"),
+    invalidRate: normalizeRate(
+      numberValue(row, "invalidRate", "invalid_rate"),
+      invalid,
+      total,
+    ),
+    countries: numberValue(
+      row,
+      "countryCount",
+      "country_count",
+      "coveredCountries",
+      "covered_countries",
+    ),
   };
 }
 
@@ -97,9 +146,7 @@ type DailyRow = {
   newInvalidRate: number | null;
   invalid: number | null;
   preMarketingInvalid: number | null;
-  preMarketingRate: number | null;
   postMarketingInvalid: number | null;
-  postMarketingRate: number | null;
   netGrowth: number | null;
   overallInvalidRate: number | null;
 };
@@ -112,86 +159,100 @@ function dailyRow(input: unknown): DailyRow {
     valid: numberValue(row, "validAccounts", "valid_accounts", "valid"),
     online: numberValue(row, "onlineAccounts", "online_accounts", "online"),
     onlineRate: normalizeRate(numberValue(row, "onlineRate", "online_rate")),
-    retained: numberValue(row, "retainedAccounts", "retained_accounts", "retained"),
+    retained: numberValue(
+      row,
+      "retainedAccounts",
+      "retained_accounts",
+      "retained",
+    ),
     added: numberValue(row, "newAccounts", "new_accounts", "added"),
-    newInvalid: numberValue(row, "newInvalidAccounts", "new_invalid_accounts", "sameDayInvalid", "same_day_invalid"),
-    newInvalidRate: normalizeRate(numberValue(row, "newInvalidRate", "new_invalid_rate", "sameDayInvalidRate", "same_day_invalid_rate")),
-    invalid: numberValue(row, "invalidatedAccounts", "invalidated_accounts", "invalidAccounts", "invalid_accounts", "invalid"),
-    preMarketingInvalid: numberValue(row, "preMarketingInvalid", "pre_marketing_invalid"),
-    preMarketingRate: normalizeRate(numberValue(row, "preMarketingInvalidRate", "pre_marketing_invalid_rate")),
-    postMarketingInvalid: numberValue(row, "postMarketingInvalid", "post_marketing_invalid"),
-    postMarketingRate: normalizeRate(numberValue(row, "postMarketingInvalidRate", "post_marketing_invalid_rate")),
+    newInvalid: numberValue(
+      row,
+      "newInvalidAccounts",
+      "new_invalid_accounts",
+      "sameDayInvalid",
+      "same_day_invalid",
+    ),
+    newInvalidRate: normalizeRate(
+      numberValue(
+        row,
+        "newInvalidRate",
+        "new_invalid_rate",
+        "sameDayInvalidRate",
+        "same_day_invalid_rate",
+      ),
+    ),
+    invalid: numberValue(
+      row,
+      "invalidatedAccounts",
+      "invalidated_accounts",
+      "invalidAccounts",
+      "invalid_accounts",
+      "invalid",
+    ),
+    preMarketingInvalid: numberValue(
+      row,
+      "preMarketingInvalid",
+      "pre_marketing_invalid",
+    ),
+    postMarketingInvalid: numberValue(
+      row,
+      "postMarketingInvalid",
+      "post_marketing_invalid",
+    ),
     netGrowth: numberValue(row, "netGrowth", "net_growth"),
-    overallInvalidRate: normalizeRate(numberValue(row, "overallInvalidRate", "overall_invalid_rate")),
+    overallInvalidRate: normalizeRate(
+      numberValue(row, "overallInvalidRate", "overall_invalid_rate"),
+    ),
   };
 }
 
-type CountryRow = { code: string; name: string; total: number | null; online: number | null; invalid: number | null; validRate: number | null };
+type CountryRow = { code: string; name: string; total: number | null };
 function countryRow(input: unknown): CountryRow {
   const row = input as Record<string, unknown>;
-  const total = numberValue(row, "totalAccounts", "total_accounts", "total");
-  const invalid = numberValue(row, "invalidAccounts", "invalid_accounts", "invalid");
   return {
     code: stringValue(row, "countryCode", "country_code", "iso2").toUpperCase(),
     name: stringValue(row, "countryName", "country_name", "name"),
-    total,
-    online: numberValue(row, "onlineAccounts", "online_accounts", "online"),
-    invalid,
-    validRate: normalizeRate(numberValue(row, "validRate", "valid_rate"), total != null && invalid != null ? total - invalid : null, total),
-  };
-}
-
-type QualityMetric = { count: number | null; rate: number | null; known: number | null; unknown: number | null };
-type QualityRow = { id: string; readKey: string; account: string; phone: string; source: string; avatar: boolean | null; groups: number | null; friends: number | null; mutual: number | null; score: number | null; sync: string };
-function qualityMetric(input: unknown, average = false): QualityMetric {
-  const row = (input || {}) as Record<string, unknown>;
-  return {
-    count: numberValue(row, average ? "average" : "count"),
-    rate: average ? numberValue(row, "average") : normalizeRate(numberValue(row, "rate")),
-    known: numberValue(row, "knownCount", "known_count"),
-    unknown: numberValue(row, "unknownCount", "unknown_count"),
-  };
-}
-function qualityRow(input: unknown): QualityRow {
-  const row = input as Record<string, unknown>;
-  const avatar = pick(row, "hasAvatar", "has_avatar");
-  const id = snowflakeId(row, "id", "accountId", "account_id");
-  const phone = formatPhoneDisplay(
-    stringValue(row, "phone", "phoneNumber", "phone_number"),
-  );
-  const displayName = stringValue(row, "displayName", "display_name");
-  return {
-    id,
-    readKey: accountRowKey(row, id),
-    account: /^\+\d+$/.test(displayName)
-      ? formatPhoneDisplay(displayName)
-      : displayName || phone,
-    phone,
-    source: stringValue(row, "source"),
-    avatar: avatar == null ? null : Boolean(avatar),
-    groups: numberValue(row, "groupCount", "group_count"),
-    friends: numberValue(row, "friendCount", "friend_count"),
-    mutual: numberValue(row, "mutualCount", "mutual_count"),
-    score: numberValue(row, "score", "qualityScore", "quality_score"),
-    sync: stringValue(row, "syncStatus", "sync_status"),
+    total: numberValue(row, "totalAccounts", "total_accounts", "total"),
   };
 }
 function listBody(payload: unknown) {
-  const data = ((payload as { data?: unknown })?.data ?? payload) as Record<string, unknown>;
-  return Array.isArray(data) ? data : Array.isArray(data.rows) ? data.rows : Array.isArray(data.items) ? data.items : [];
+  const data = ((payload as { data?: unknown })?.data ?? payload) as Record<
+    string,
+    unknown
+  >;
+  return Array.isArray(data)
+    ? data
+    : Array.isArray(data.rows)
+      ? data.rows
+      : Array.isArray(data.items)
+        ? data.items
+        : [];
 }
+
+const countryColors = [
+  "#6d87cd",
+  "#10b981",
+  "#f59e0b",
+  "#8b5cf6",
+  "#0ea5e9",
+  "#f97316",
+  "#14b8a6",
+  "#a855f7",
+  "#94a3b8",
+];
 
 export function AccountStatisticsPage() {
   const today = formatLocalDateInput();
-  const initialFrom = formatLocalDateInput(new Date(Date.now() - 29 * 86400000));
+  const initialFrom = formatLocalDateInput(
+    new Date(Date.now() - 29 * 86400000),
+  );
   const [dateFrom, setDateFrom] = useState(initialFrom);
   const [dateTo, setDateTo] = useState(today);
   const [countryCode, setCountryCode] = useState("");
   const [overview, setOverview] = useState<Overview>(overviewRow({}));
   const [daily, setDaily] = useState<DailyRow[]>([]);
   const [countries, setCountries] = useState<CountryRow[]>([]);
-  const [quality, setQuality] = useState<Record<string, QualityMetric>>({});
-  const [qualityRows, setQualityRows] = useState<QualityRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -201,26 +262,21 @@ export function AccountStatisticsPage() {
     try {
       const query = new URLSearchParams({ dateFrom, dateTo });
       if (countryCode) query.set("countryCode", countryCode);
-      const [overviewPayload, dailyPayload, countriesPayload, qualityPayload] = await Promise.all([
-        apiRequest("/api/account-statistics/overview"),
-        apiRequest(`/api/account-statistics/daily?${query}`),
-        apiRequest("/api/account-statistics/countries"),
-        apiRequest("/api/personal-accounts/statistics"),
-      ]);
-      const overviewData = ((overviewPayload as { data?: unknown }).data ?? overviewPayload) as Record<string, unknown>;
-      setOverview(overviewRow(overviewData.overview || overviewData.summary || overviewData));
+      const [overviewPayload, dailyPayload, countriesPayload] =
+        await Promise.all([
+          apiRequest("/api/account-statistics/overview"),
+          apiRequest(`/api/account-statistics/daily?${query}`),
+          apiRequest("/api/account-statistics/countries"),
+        ]);
+      const overviewData = ((overviewPayload as { data?: unknown }).data ??
+        overviewPayload) as Record<string, unknown>;
+      setOverview(
+        overviewRow(
+          overviewData.overview || overviewData.summary || overviewData,
+        ),
+      );
       setDaily(listBody(dailyPayload).map(dailyRow));
       setCountries(listBody(countriesPayload).map(countryRow));
-      const qualityData = ((qualityPayload as { data?: unknown }).data ?? qualityPayload) as Record<string, unknown>;
-      const qualitySummary = (qualityData.quality || {}) as Record<string, unknown>;
-      setQuality({
-        noAvatar: qualityMetric(qualitySummary.noAvatar || qualitySummary.no_avatar),
-        noGroup: qualityMetric(qualitySummary.noGroup || qualitySummary.no_group),
-        zeroFriends: qualityMetric(qualitySummary.zeroFriends || qualitySummary.zero_friends),
-        zeroMutual: qualityMetric(qualitySummary.zeroMutualContacts || qualitySummary.zero_mutual_contacts),
-        score: qualityMetric(qualitySummary.score, true),
-      });
-      setQualityRows((Array.isArray(qualityData.rows) ? qualityData.rows : []).map(qualityRow));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "账号统计加载失败");
     } finally {
@@ -231,21 +287,17 @@ export function AccountStatisticsPage() {
 
   function preset(days: number) {
     setDateTo(today);
-    setDateFrom(formatLocalDateInput(new Date(Date.now() - (days - 1) * 86400000)));
+    setDateFrom(
+      formatLocalDateInput(new Date(Date.now() - (days - 1) * 86400000)),
+    );
   }
+
   const overviewCards = [
-    { label: "账号总数", value: overview.total, detail: "全部账号", icon: UsersIcon },
-    { label: "有效数", value: overview.valid, detail: `有效率 ${percent(overview.validRate)}`, icon: CheckCircle2Icon },
-    { label: "在线数", value: overview.online, detail: `在线率 ${percent(overview.onlineRate)}`, icon: WifiIcon },
-    { label: "无效数", value: overview.invalid, detail: `无效率 ${percent(overview.invalidRate)}`, icon: BanIcon },
+    { label: "账号总数", value: overview.total, detail: "全部在池账号", icon: UsersIcon },
+    { label: "有效账号", value: overview.valid, detail: `有效率 ${percent(overview.validRate)}`, icon: CheckCircle2Icon },
+    { label: "在线账号", value: overview.online, detail: `在线率 ${percent(overview.onlineRate)}`, icon: WifiIcon },
+    { label: "无效账号", value: overview.invalid, detail: `无效率 ${percent(overview.invalidRate)}`, icon: BanIcon },
     { label: "覆盖国家", value: overview.countries, detail: "不含混合（Any）", icon: Globe2Icon },
-  ];
-  const qualityCards = [
-    { label: "无头像 / 率", data: quality.noAvatar },
-    { label: "无群组 / 率", data: quality.noGroup },
-    { label: "0 好友 / 率", data: quality.zeroFriends },
-    { label: "0 双向 / 率", data: quality.zeroMutual },
-    { label: "平均评分", data: quality.score, score: true },
   ];
   const countryOptions = useMemo(
     () =>
@@ -258,46 +310,48 @@ export function AccountStatisticsPage() {
       })),
     [countries],
   );
-  const dailyPagination = useClientPagination(daily, {
-    resetKey: `${dateFrom}|${dateTo}|${countryCode}`,
-  });
-  const countryPagination = useClientPagination(countries);
-  const qualityPagination = useClientPagination(qualityRows);
+  const countrySlices = useMemo(() => {
+    const sorted = countries
+      .filter((row) => (row.total ?? 0) > 0)
+      .sort((left, right) => (right.total ?? 0) - (left.total ?? 0));
+    const visible = sorted.slice(0, 8).map((row, index) => ({
+      key: row.code || row.name || `country-${index}`,
+      name: row.name || row.code || "未知国家",
+      code: row.code,
+      total: row.total ?? 0,
+      color: countryColors[index],
+    }));
+    const otherTotal = sorted
+      .slice(8)
+      .reduce((sum, row) => sum + (row.total ?? 0), 0);
+    if (otherTotal > 0) {
+      visible.push({
+        key: "other",
+        name: "其他",
+        code: "",
+        total: otherTotal,
+        color: countryColors[8],
+      });
+    }
+    return visible;
+  }, [countries]);
+  const countryTotal = countrySlices.reduce((sum, row) => sum + row.total, 0);
+  const chartConfig = {
+    total: { label: "账号总数", color: "#6d87cd" },
+    online: { label: "在线账号", color: "#10b981" },
+    added: { label: "新增账号", color: "#8b5cf6" },
+    netGrowth: { label: "净变化", color: "#f59e0b" },
+  };
+  const trendLegend = [
+    { label: "账号总数", color: "#6d87cd" },
+    { label: "在线账号", color: "#10b981" },
+    { label: "新增账号", color: "#8b5cf6" },
+    { label: "净变化", color: "#f59e0b" },
+  ];
 
   return (
     <StandardListPage>
       <ListToolbar
-        filters={
-          <>
-            <DatePickerField
-              value={dateFrom}
-              onValueChange={setDateFrom}
-              ariaLabel="开始日期"
-              className="w-36"
-            />
-            <span className="hidden text-sm text-muted-foreground xl:inline">至</span>
-            <DatePickerField
-              value={dateTo}
-              onValueChange={setDateTo}
-              ariaLabel="结束日期"
-              className="w-36"
-            />
-            <SelectField
-              value={countryCode}
-              onValueChange={setCountryCode}
-              options={countryOptions}
-              placeholder="全部国家"
-              clearable
-              className="w-40"
-            />
-            {[7, 30, 90].map((days) => (
-              <Button key={days} variant="outline" onClick={() => preset(days)}>
-                近 {days} 天
-              </Button>
-            ))}
-          </>
-        }
-        meta={`${dateFrom} 至 ${dateTo}`}
         actions={
           <Button variant="outline" onClick={() => void load()} disabled={loading}>
             <RefreshCwIcon size={16} className={loading ? "spin" : ""} />
@@ -311,235 +365,149 @@ export function AccountStatisticsPage() {
         </div>
       ) : null}
 
-      <section className="grid gap-3">
-        <div>
-          <h2 className="text-base font-semibold">账号池概览</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            账号总量、可用性与在线状态的实时快照。
-          </p>
-        </div>
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-          {overviewCards.map(({ label, value, detail, icon: Icon }) => (
-            <div className="summary-card" key={label}>
-              <span className="summary-icon"><Icon size={18} /></span>
-              <div>
-                <small>{label}</small>
-                <strong>{value == null ? "-" : value.toLocaleString()}</strong>
-                <small>{value == null ? "待同步" : detail}</small>
-              </div>
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        {overviewCards.map(({ label, value, detail, icon: Icon }) => (
+          <article
+            className="rounded-xl border bg-card p-4 shadow-sm shadow-black/[0.02]"
+            key={label}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <span className="text-sm text-muted-foreground">{label}</span>
+              <span className="grid size-9 place-items-center rounded-lg bg-primary/10 text-primary">
+                <Icon size={18} />
+              </span>
             </div>
-          ))}
-        </div>
+            <strong className="mt-4 block text-3xl font-semibold tabular-nums tracking-tight">
+              {loading || value == null ? "-" : value.toLocaleString()}
+            </strong>
+            <span className="mt-1 block text-xs text-muted-foreground">
+              {value == null ? "待同步" : detail}
+            </span>
+          </article>
+        ))}
       </section>
 
-      <section className="grid gap-3">
-        <div>
-          <h2 className="text-base font-semibold">账号质量</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            只使用已同步资料计算；未知数据不会被当作 0。
-          </p>
-        </div>
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-          {qualityCards.map(({ label, data, score }) => (
-            <div className="summary-card" key={label}>
-              <span className="summary-icon"><UserPlusIcon size={18} /></span>
-              <div>
-                <small>{label}</small>
-                <strong>
-                  {data?.count == null
-                    ? "-"
-                    : score
-                      ? data.count.toFixed(1)
-                      : data.count.toLocaleString()}
-                </strong>
-                <small>
-                  {data?.count == null
-                    ? "待同步"
-                    : score
-                      ? `已知 ${data.known ?? "-"} · 未知 ${data.unknown ?? "-"}`
-                      : `${percent(data.rate)} · 未知 ${data.unknown ?? "-"}`}
-                </small>
-              </div>
+      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.7fr)_minmax(320px,0.8fr)]">
+        <article className="rounded-xl border bg-card p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <header>
+              <h2 className="font-semibold">账号池变化</h2>
+              <p className="mt-1 text-xs text-muted-foreground">
+                同一时间轴观察账号总量、在线、新增和净变化。
+              </p>
+            </header>
+            <div className="flex flex-wrap items-center gap-2">
+              <DatePickerField value={dateFrom} onValueChange={setDateFrom} ariaLabel="开始日期" className="w-36" />
+              <span className="text-sm text-muted-foreground">至</span>
+              <DatePickerField value={dateTo} onValueChange={setDateTo} ariaLabel="结束日期" className="w-36" />
+              <SelectField value={countryCode} onValueChange={setCountryCode} options={countryOptions} placeholder="全部国家" clearable className="w-40" />
+              {[7, 30, 90].map((days) => (
+                <Button key={days} variant="outline" onClick={() => preset(days)}>
+                  近 {days} 天
+                </Button>
+              ))}
             </div>
-          ))}
-        </div>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-xs text-muted-foreground">
+            {trendLegend.map((item) => (
+              <span className="flex items-center gap-1.5" key={item.label}>
+                <span className="size-2.5 rounded-full" style={{ backgroundColor: item.color }} />
+                {item.label}
+              </span>
+            ))}
+            <span className="ml-auto">{dateFrom} 至 {dateTo}</span>
+          </div>
+          {loading ? (
+            <div className="loading-state h-[300px]"><Spinner />正在汇总趋势…</div>
+          ) : daily.length ? (
+            <ChartContainer config={chartConfig} className="mt-2 h-[300px] w-full">
+              <LineChart accessibilityLayer data={daily} margin={{ top: 12, right: 12, bottom: 0, left: -18 }}>
+                <CartesianGrid vertical={false} strokeDasharray="3 3" />
+                <XAxis dataKey="date" tickFormatter={(value) => String(value).slice(5)} tickLine={false} axisLine={false} />
+                <YAxis allowDecimals={false} tickLine={false} axisLine={false} />
+                <ChartTooltip content={<ChartTooltipContent />} />
+                <Line type="monotone" dataKey="total" stroke="var(--color-total)" strokeWidth={2.4} dot={false} connectNulls />
+                <Line type="monotone" dataKey="online" stroke="var(--color-online)" strokeWidth={2.1} dot={false} connectNulls />
+                <Line type="monotone" dataKey="added" stroke="var(--color-added)" strokeWidth={1.8} dot={false} connectNulls />
+                <Line type="monotone" dataKey="netGrowth" stroke="var(--color-netGrowth)" strokeWidth={1.8} dot={false} connectNulls />
+              </LineChart>
+            </ChartContainer>
+          ) : (
+            <EmptyState title="暂无趋势数据" description="所选时间和国家范围内暂无账号快照。" />
+          )}
+        </article>
+
+        <article className="rounded-xl border bg-card p-4">
+          <header>
+            <h2 className="font-semibold">国家分布</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              按账号总数统计，前 8 个国家之外合并为“其他”。
+            </p>
+          </header>
+          {loading ? (
+            <div className="loading-state h-[300px]"><Spinner />正在汇总国家分布…</div>
+          ) : countrySlices.length ? (
+            <>
+              <div className="relative mx-auto mt-2 w-full max-w-[280px]">
+                <ChartContainer config={{ total: { label: "账号数" } }} className="mx-auto aspect-square h-[250px] w-full">
+                  <PieChart accessibilityLayer>
+                    <Pie data={countrySlices} dataKey="total" nameKey="name" innerRadius={64} outerRadius={96} paddingAngle={2} strokeWidth={2}>
+                      {countrySlices.map((row) => <Cell key={row.key} fill={row.color} />)}
+                    </Pie>
+                  </PieChart>
+                </ChartContainer>
+                <div className="pointer-events-none absolute inset-0 grid place-content-center text-center">
+                  <strong className="text-2xl tabular-nums">{countryTotal.toLocaleString()}</strong>
+                  <span className="text-xs text-muted-foreground">账号</span>
+                </div>
+              </div>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
+                {countrySlices.map((row) => (
+                  <div className="flex items-center gap-2 text-sm" key={row.key}>
+                    <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: row.color }} />
+                    <span className="min-w-0 flex-1 truncate" title={row.name}>
+                      {row.name}
+                      {row.code && row.code !== row.name ? <span className="ml-1 text-muted-foreground">{row.code}</span> : null}
+                    </span>
+                    <strong className="tabular-nums">{row.total.toLocaleString()}</strong>
+                    <span className="w-12 text-right text-xs tabular-nums text-muted-foreground">
+                      {countryTotal > 0 ? `${((row.total / countryTotal) * 100).toFixed(1)}%` : "-"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <EmptyState title="暂无国家统计" description="同步国家信息后会在这里显示分布。" />
+          )}
+        </article>
       </section>
 
       <ListTableCard>
         <div className="border-b px-4 py-3">
-          <h2 className="text-base font-semibold">账号日统计</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            每日账号池变化与解绑阶段，范围最长 90 天。
-          </p>
+          <h2 className="text-base font-semibold">每日明细</h2>
+          <p className="mt-1 text-sm text-muted-foreground">每日账号池变化和解绑阶段，范围最长 90 天。</p>
         </div>
-        <ListPagination
-          page={dailyPagination.page}
-          pageSize={dailyPagination.pageSize}
-          total={dailyPagination.total}
-          onPageChange={dailyPagination.setPage}
-          onPageSizeChange={dailyPagination.setPageSize}
-          ariaLabel="账号日统计分页"
-          className="mx-3 mt-3"
-        />
         {loading ? (
           <div className="loading-state min-h-64"><Spinner />正在汇总日统计…</div>
         ) : daily.length ? (
           <Table layout="list">
-            <TableHeader>
-              <TableRow>
-                <TableHead>日期</TableHead>
-                <TableHead adaptive>账号池</TableHead>
-                <TableHead>在线</TableHead>
-                <TableHead>新增账号</TableHead>
-                <TableHead>解绑阶段</TableHead>
-                <TableHead>净变化</TableHead>
+            <TableHeader><TableRow><TableHead>日期</TableHead><TableHead adaptive>账号池</TableHead><TableHead>在线</TableHead><TableHead>新增账号</TableHead><TableHead>解绑阶段</TableHead><TableHead>净变化</TableHead></TableRow></TableHeader>
+            <TableBody>{daily.map((row) => (
+              <TableRow key={`${row.date}-${row.source}`}>
+                <TableCell><div className="cell-main min-w-[130px]"><strong>{row.date}</strong><span><Badge tone={row.source === "realtime" || row.source === "实时" ? "success" : "neutral"}>{row.source === "realtime" ? "实时" : row.source || "历史"}</Badge></span></div></TableCell>
+                <TableCell><div className="cell-main min-w-[145px]"><strong>总数 {metric(row.total)}</strong><span>有效 {metric(row.valid)} · 留存 {metric(row.retained)}</span></div></TableCell>
+                <TableCell><div className="cell-main min-w-[110px]"><strong>{metric(row.online)}</strong><span>在线率 {percent(row.onlineRate)}</span></div></TableCell>
+                <TableCell><div className="cell-main min-w-[150px]"><strong>{row.added == null ? "-" : `+${row.added}`}</strong><span>当日解绑 {metric(row.newInvalid)} · {percent(row.newInvalidRate)}</span></div></TableCell>
+                <TableCell><div className="cell-main min-w-[185px]"><strong>合计 {metric(row.invalid)}</strong><span>营销前 {metric(row.preMarketingInvalid)} · 营销后 {metric(row.postMarketingInvalid)}</span></div></TableCell>
+                <TableCell><div className="cell-main min-w-[110px]"><strong className={row.netGrowth != null && row.netGrowth < 0 ? "text-destructive" : "text-emerald-600"}>{row.netGrowth == null ? "-" : `${row.netGrowth >= 0 ? "+" : ""}${row.netGrowth}`}</strong><span>解绑率 {percent(row.overallInvalidRate)}</span></div></TableCell>
               </TableRow>
-            </TableHeader>
-            <TableBody>
-              {dailyPagination.rows.map((row) => (
-                <TableRow key={`${row.date}-${row.source}`}>
-                  <TableCell>
-                    <div className="cell-main min-w-[130px]">
-                      <strong>{row.date}</strong>
-                      <span>
-                        <Badge tone={row.source === "realtime" || row.source === "实时" ? "success" : "neutral"}>
-                          {row.source === "realtime" ? "实时" : row.source || "历史"}
-                        </Badge>
-                      </span>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="cell-main min-w-[145px]">
-                      <strong>总数 {metric(row.total)}</strong>
-                      <span>有效 {metric(row.valid)} · 留存 {metric(row.retained)}</span>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="cell-main min-w-[110px]">
-                      <strong>{metric(row.online)}</strong>
-                      <span>在线率 {percent(row.onlineRate)}</span>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="cell-main min-w-[150px]">
-                      <strong>{row.added == null ? "-" : `+${row.added}`}</strong>
-                      <span>当日解绑 {metric(row.newInvalid)} · {percent(row.newInvalidRate)}</span>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="cell-main min-w-[185px]">
-                      <strong>合计 {metric(row.invalid)}</strong>
-                      <span>营销前 {metric(row.preMarketingInvalid)} · 营销后 {metric(row.postMarketingInvalid)}</span>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="cell-main min-w-[110px]">
-                      <strong className={row.netGrowth != null && row.netGrowth < 0 ? "text-destructive" : "text-emerald-600"}>
-                        {row.netGrowth == null ? "-" : `${row.netGrowth >= 0 ? "+" : ""}${row.netGrowth}`}
-                      </strong>
-                      <span>解绑率 {percent(row.overallInvalidRate)}</span>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
+            ))}</TableBody>
           </Table>
         ) : (
           <EmptyState title="暂无日统计" description="所选时间和国家范围内暂无账号快照。" />
         )}
       </ListTableCard>
-
-      <div className="grid gap-4 xl:grid-cols-[0.8fr_1.2fr]">
-        <ListTableCard>
-          <div className="border-b px-4 py-3">
-            <h2 className="text-base font-semibold">国家分布</h2>
-            <p className="mt-1 text-sm text-muted-foreground">账号覆盖与有效占比。</p>
-          </div>
-          <ListPagination
-            page={countryPagination.page}
-            pageSize={countryPagination.pageSize}
-            total={countryPagination.total}
-            onPageChange={countryPagination.setPage}
-            onPageSizeChange={countryPagination.setPageSize}
-            ariaLabel="国家分布分页"
-            className="mx-3 mt-3 !flex-col !items-stretch [&>div:last-child]:justify-between"
-          />
-          {loading ? (
-            <div className="loading-state"><Spinner />正在汇总国家分布…</div>
-          ) : countries.length ? (
-            <Table layout="list">
-              <TableHeader><TableRow><TableHead adaptive>国家</TableHead><TableHead>账号</TableHead><TableHead>在线</TableHead><TableHead>有效率</TableHead></TableRow></TableHeader>
-              <TableBody>
-                {countryPagination.rows.map((row) => (
-                  <TableRow key={row.code || row.name}>
-                    <TableCell>
-                      <strong>{row.name || row.code}</strong>
-                      {row.name && row.code && row.name !== row.code ? <span className="ml-2 text-muted-foreground">{row.code}</span> : null}
-                    </TableCell>
-                    <TableCell>{metric(row.total)}</TableCell>
-                    <TableCell><Badge tone="success">{row.online == null ? "-" : row.online.toLocaleString()}</Badge></TableCell>
-                    <TableCell>{percent(row.validRate)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          ) : (
-            <EmptyState title="暂无国家统计" description="同步国家信息后会在这里显示分布。" />
-          )}
-        </ListTableCard>
-
-        <ListTableCard>
-          <div className="border-b px-4 py-3">
-            <h2 className="text-base font-semibold">账号质量明细</h2>
-            <p className="mt-1 text-sm text-muted-foreground">用于定位尚未完成资料同步的账号。</p>
-          </div>
-          <ListPagination
-            page={qualityPagination.page}
-            pageSize={qualityPagination.pageSize}
-            total={qualityPagination.total}
-            onPageChange={qualityPagination.setPage}
-            onPageSizeChange={qualityPagination.setPageSize}
-            ariaLabel="账号质量明细分页"
-            className="mx-3 mt-3"
-          />
-          {qualityRows.length ? (
-            <Table layout="list">
-              <TableHeader><TableRow><TableHead adaptive>账号</TableHead><TableHead>来源</TableHead><TableHead>头像</TableHead><TableHead>群组</TableHead><TableHead>好友</TableHead><TableHead>双向</TableHead><TableHead>评分</TableHead></TableRow></TableHeader>
-              <TableBody>
-                {qualityPagination.rows.map((row) => (
-                  <TableRow key={row.readKey}>
-                    <TableCell>
-                      <EntityPrimaryCell
-                        title={row.phone || row.account || "账号待迁移"}
-                        id={row.id}
-                        status={{
-                          label: row.sync === "synced" || row.sync === "ready" ? "已同步" : "待同步",
-                          description: row.sync === "synced" || row.sync === "ready"
-                            ? "账号资料已同步，可以参与质量指标统计。"
-                            : "账号资料尚未完成同步，部分质量指标暂不可用。",
-                          tone: row.sync === "synced" || row.sync === "ready" ? "success" : "warning",
-                          details: [
-                            { label: "头像", value: row.avatar == null ? "未知" : row.avatar ? "有" : "无" },
-                            { label: "评分", value: row.score == null ? "-" : row.score },
-                          ],
-                        }}
-                      />
-                    </TableCell>
-                    <TableCell>{row.source === "json_import" ? <Badge tone="neutral">JSON 导入</Badge> : row.source === "landing_page" ? <Badge tone="neutral">落地页链接</Badge> : "-"}</TableCell>
-                    <TableCell>{row.avatar == null ? "-" : row.avatar ? "有" : "无"}</TableCell>
-                    <TableCell>{metric(row.groups)}</TableCell>
-                    <TableCell>{metric(row.friends)}</TableCell>
-                    <TableCell>{metric(row.mutual)}</TableCell>
-                    <TableCell>{metric(row.score)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          ) : (
-            <EmptyState title="暂无账号质量数据" description="账号资料同步后才会参与质量统计。" />
-          )}
-        </ListTableCard>
-      </div>
     </StandardListPage>
   );
 }

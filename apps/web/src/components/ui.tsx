@@ -114,6 +114,7 @@ export * from "./ui/input-otp";
 export * from "./ui/field";
 export * from "./ui/multi-select";
 export * from "./ui/popover";
+export * from "./ui/progress";
 export * from "./ui/select";
 export * from "./ui/searchable-select";
 export * from "./ui/sonner";

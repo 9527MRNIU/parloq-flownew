@@ -6,7 +6,7 @@ from urllib.parse import quote
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile, status
-from sqlalchemy import case, delete, exists, func, or_, select
+from sqlalchemy import and_, case, delete, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.business_schemas import (
@@ -26,6 +26,7 @@ from app.models import (
     AccountMetadataSyncJob,
     AccountPairingAttempt,
     AccountGroup,
+    AccountLifecycleEvent,
     AccountProxyBinding,
     IpAllocationPolicy,
     MessageDelivery,
@@ -81,6 +82,24 @@ GATEWAY_ACCOUNT_STATES = {
     "validating",
 }
 
+VALID_ACCOUNT_STATES = {
+    "linked_offline",
+    "warming",
+    "online_idle",
+    "sending",
+    "draining",
+}
+ONLINE_ACCOUNT_STATES = {"online_idle", "sending"}
+PROCESSING_ACCOUNT_STATES = {"pairing", "connecting", "warming", "draining"}
+ERROR_ACCOUNT_STATES = {
+    "logged_out",
+    "reauth_required",
+    "revoked",
+    "restricted",
+    "disabled",
+    "failed",
+}
+
 
 def _group(db: DbSession, group_id: str, user) -> AccountGroup:
     try:
@@ -117,24 +136,131 @@ def _require_account_export(db: DbSession, user) -> None:
         raise HTTPException(status_code=403, detail="没有账号导出权限")
 
 
-def _group_row(db: DbSession, item: AccountGroup) -> dict:
-    account_count = int(
-        db.scalar(
-            select(func.count())
-            .select_from(PersonalAccount)
-            .where(
-                PersonalAccount.group_id == item.id,
-                PersonalAccount.admission_status == "active",
-            )
-        )
-        or 0
+def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
+    if not group_ids:
+        return {}
+    valid_condition = and_(
+        PersonalAccount.validation_status == "ready",
+        PersonalAccount.status.in_(VALID_ACCOUNT_STATES),
+        PersonalAccount.enabled.is_(True),
     )
+    online_condition = and_(
+        PersonalAccount.validation_status == "ready",
+        PersonalAccount.status.in_(ONLINE_ACCOUNT_STATES),
+        PersonalAccount.enabled.is_(True),
+    )
+    abnormal_condition = or_(
+        PersonalAccount.status.in_(ERROR_ACCOUNT_STATES),
+        PersonalAccount.validation_status == "failed",
+        PersonalAccount.metadata_sync_status == "failed",
+    )
+    pending_condition = PersonalAccount.validation_status.in_(
+        ("pending", "validating")
+    )
+    profile_known_condition = and_(
+        PersonalAccount.has_avatar.is_not(None),
+        PersonalAccount.group_count.is_not(None),
+    )
+    profile_complete_condition = and_(
+        PersonalAccount.has_avatar.is_(True),
+        PersonalAccount.group_count > 0,
+    )
+    profile_unknown_condition = or_(
+        PersonalAccount.has_avatar.is_(None),
+        PersonalAccount.group_count.is_(None),
+    )
+    rows = db.execute(
+        select(
+            PersonalAccount.group_id,
+            func.count(PersonalAccount.id),
+            func.sum(case((valid_condition, 1), else_=0)),
+            func.sum(case((online_condition, 1), else_=0)),
+            func.sum(case((abnormal_condition, 1), else_=0)),
+            func.sum(case((pending_condition, 1), else_=0)),
+            func.sum(case((profile_known_condition, 1), else_=0)),
+            func.sum(case((profile_complete_condition, 1), else_=0)),
+            func.sum(case((profile_unknown_condition, 1), else_=0)),
+            func.sum(case((PersonalAccount.has_avatar.is_(False), 1), else_=0)),
+            func.sum(case((PersonalAccount.group_count == 0, 1), else_=0)),
+            func.sum(case((PersonalAccount.friend_count == 0, 1), else_=0)),
+            func.sum(
+                case((PersonalAccount.mutual_contact_count == 0, 1), else_=0)
+            ),
+        )
+        .where(
+            PersonalAccount.group_id.in_(group_ids),
+            PersonalAccount.admission_status == "active",
+        )
+        .group_by(PersonalAccount.group_id)
+    ).all()
+    return {
+        int(group_id): {
+            "accountCount": int(total or 0),
+            "validAccountCount": int(valid or 0),
+            "onlineAccountCount": int(online or 0),
+            "abnormalAccountCount": int(abnormal or 0),
+            "pendingValidationCount": int(pending or 0),
+            "profileKnownCount": int(profile_known or 0),
+            "profileCompleteCount": int(profile_complete or 0),
+            "profileUnknownCount": int(profile_unknown or 0),
+            "noAvatarCount": int(no_avatar or 0),
+            "noGroupCount": int(no_group or 0),
+            "zeroFriendCount": int(zero_friends or 0),
+            "zeroMutualCount": int(zero_mutual or 0),
+        }
+        for (
+            group_id,
+            total,
+            valid,
+            online,
+            abnormal,
+            pending,
+            profile_known,
+            profile_complete,
+            profile_unknown,
+            no_avatar,
+            no_group,
+            zero_friends,
+            zero_mutual,
+        ) in rows
+        if group_id is not None
+    }
+
+
+def _group_row(
+    db: DbSession,
+    item: AccountGroup,
+    metrics: dict | None = None,
+) -> dict:
+    if metrics is None:
+        metrics = _group_metrics(db, [item.id]).get(item.id, {})
+    account_count = int(metrics.get("accountCount", 0))
+    valid_count = int(metrics.get("validAccountCount", 0))
+    profile_known_count = int(metrics.get("profileKnownCount", 0))
+    profile_complete_count = int(metrics.get("profileCompleteCount", 0))
     return {
         "id": str(item.id),
         "name": item.name,
         "description": item.description,
         "createdBy": str(item.created_by),
         "accountCount": account_count,
+        "validAccountCount": valid_count,
+        "validRate": round(valid_count / account_count, 6) if account_count else None,
+        "onlineAccountCount": int(metrics.get("onlineAccountCount", 0)),
+        "abnormalAccountCount": int(metrics.get("abnormalAccountCount", 0)),
+        "pendingValidationCount": int(metrics.get("pendingValidationCount", 0)),
+        "profileKnownCount": profile_known_count,
+        "profileCompleteCount": profile_complete_count,
+        "profileCompleteRate": (
+            round(profile_complete_count / profile_known_count, 6)
+            if profile_known_count
+            else None
+        ),
+        "profileUnknownCount": int(metrics.get("profileUnknownCount", 0)),
+        "noAvatarCount": int(metrics.get("noAvatarCount", 0)),
+        "noGroupCount": int(metrics.get("noGroupCount", 0)),
+        "zeroFriendCount": int(metrics.get("zeroFriendCount", 0)),
+        "zeroMutualCount": int(metrics.get("zeroMutualCount", 0)),
         "createdAt": iso(item.created_at),
         "updatedAt": iso(item.updated_at),
     }
@@ -146,7 +272,15 @@ def list_account_groups(db: DbSession, current_user: CurrentUser) -> dict:
     if current_user.role != "admin":
         statement = statement.where(AccountGroup.created_by == current_user.id)
     items = db.scalars(statement.order_by(AccountGroup.name, AccountGroup.id)).all()
-    return {"data": {"rows": [_group_row(db, item) for item in items], "total": len(items)}}
+    metrics = _group_metrics(db, [item.id for item in items])
+    return {
+        "data": {
+            "rows": [
+                _group_row(db, item, metrics.get(item.id, {})) for item in items
+            ],
+            "total": len(items),
+        }
+    }
 
 
 @group_router.post("", status_code=status.HTTP_201_CREATED)
@@ -270,13 +404,16 @@ def _proxy_url(db: DbSession, account_id: str) -> str | None:
     return f"{proxy.protocol}://{auth}{proxy.host}:{proxy.port}"
 
 
-def account_row(db: DbSession, item: PersonalAccount) -> dict:
-    bound = _binding(db, item.gateway_account_id)
+def _account_payload(
+    item: PersonalAccount,
+    *,
+    bound: tuple[AccountProxyBinding, ProxyEndpoint] | None,
+    group: AccountGroup | None,
+    protocol: ProtocolNode | None,
+    sent_count: int,
+    delivered_count: int,
+) -> dict:
     proxy = bound[1] if bound else None
-    group = db.get(AccountGroup, item.group_id) if item.group_id else None
-    protocol = db.get(ProtocolNode, item.protocol_id) if item.protocol_id else None
-    sent_count = int(db.scalar(select(func.count()).select_from(MessageDelivery).where(MessageDelivery.account_id == item.id, MessageDelivery.status.in_(("sent", "delivered")))) or 0)
-    delivered_count = int(db.scalar(select(func.count()).select_from(MessageDelivery).where(MessageDelivery.account_id == item.id, MessageDelivery.status == "delivered")) or 0)
     quality_score = None
     if item.has_avatar is not None and item.group_count is not None:
         quality_score = round(
@@ -342,6 +479,101 @@ def account_row(db: DbSession, item: PersonalAccount) -> dict:
         "createdAt": iso(item.created_at),
         "updatedAt": iso(item.updated_at),
     }
+
+
+def account_row(db: DbSession, item: PersonalAccount) -> dict:
+    sent_count = int(
+        db.scalar(
+            select(func.count())
+            .select_from(MessageDelivery)
+            .where(
+                MessageDelivery.account_id == item.id,
+                MessageDelivery.status.in_(("sent", "delivered")),
+            )
+        )
+        or 0
+    )
+    delivered_count = int(
+        db.scalar(
+            select(func.count())
+            .select_from(MessageDelivery)
+            .where(
+                MessageDelivery.account_id == item.id,
+                MessageDelivery.status == "delivered",
+            )
+        )
+        or 0
+    )
+    return _account_payload(
+        item,
+        bound=_binding(db, item.gateway_account_id),
+        group=db.get(AccountGroup, item.group_id) if item.group_id else None,
+        protocol=db.get(ProtocolNode, item.protocol_id) if item.protocol_id else None,
+        sent_count=sent_count,
+        delivered_count=delivered_count,
+    )
+
+
+def account_rows(db: DbSession, items: list[PersonalAccount]) -> list[dict]:
+    if not items:
+        return []
+    group_ids = {item.group_id for item in items if item.group_id is not None}
+    protocol_ids = {item.protocol_id for item in items if item.protocol_id is not None}
+    account_ids = [item.id for item in items]
+    gateway_ids = [item.gateway_account_id for item in items]
+    groups = {
+        item.id: item
+        for item in db.scalars(
+            select(AccountGroup).where(AccountGroup.id.in_(group_ids))
+        ).all()
+    } if group_ids else {}
+    protocols = {
+        item.id: item
+        for item in db.scalars(
+            select(ProtocolNode).where(ProtocolNode.id.in_(protocol_ids))
+        ).all()
+    } if protocol_ids else {}
+    bindings = {
+        binding.account_public_id: (binding, proxy)
+        for binding, proxy in db.execute(
+            select(AccountProxyBinding, ProxyEndpoint)
+            .join(ProxyEndpoint, ProxyEndpoint.id == AccountProxyBinding.proxy_id)
+            .where(AccountProxyBinding.account_public_id.in_(gateway_ids))
+        ).all()
+    }
+    deliveries = {
+        int(account_id): (int(sent or 0), int(delivered or 0))
+        for account_id, sent, delivered in db.execute(
+            select(
+                MessageDelivery.account_id,
+                func.sum(
+                    case(
+                        (MessageDelivery.status.in_(("sent", "delivered")), 1),
+                        else_=0,
+                    )
+                ),
+                func.sum(
+                    case((MessageDelivery.status == "delivered", 1), else_=0)
+                ),
+            )
+            .where(MessageDelivery.account_id.in_(account_ids))
+            .group_by(MessageDelivery.account_id)
+        ).all()
+    }
+    rows = []
+    for item in items:
+        sent_count, delivered_count = deliveries.get(item.id, (0, 0))
+        rows.append(
+            _account_payload(
+                item,
+                bound=bindings.get(item.gateway_account_id),
+                group=groups.get(item.group_id),
+                protocol=protocols.get(item.protocol_id),
+                sent_count=sent_count,
+                delivered_count=delivered_count,
+            )
+        )
+    return rows
 
 
 def delivery_row(item: MessageDelivery) -> dict:
@@ -530,12 +762,84 @@ def _auto_proxy(
     return db.scalar(statement.limit(1))
 
 
+def _unified_status_predicate(status_key: str):
+    connection_online = PersonalAccount.status.in_(ONLINE_ACCOUNT_STATES)
+    connection_error = PersonalAccount.status.in_(ERROR_ACCOUNT_STATES)
+    connection_processing = PersonalAccount.status.in_(PROCESSING_ACCOUNT_STATES)
+    not_online_or_error = and_(~connection_online, ~connection_error)
+    not_terminal_connection = and_(
+        not_online_or_error,
+        ~connection_processing,
+    )
+    validation_ok = PersonalAccount.validation_status != "failed"
+    metadata_ok = PersonalAccount.metadata_sync_status != "failed"
+    predicates = {
+        "online": connection_online,
+        "error": connection_error,
+        "validation_failed": and_(
+            not_online_or_error,
+            PersonalAccount.validation_status == "failed",
+        ),
+        "sync_failed": and_(
+            not_online_or_error,
+            validation_ok,
+            PersonalAccount.metadata_sync_status == "failed",
+        ),
+        "processing": and_(
+            connection_processing,
+            validation_ok,
+            metadata_ok,
+        ),
+        "validating": and_(
+            not_terminal_connection,
+            metadata_ok,
+            PersonalAccount.validation_status == "validating",
+        ),
+        "pending_validation": and_(
+            not_terminal_connection,
+            metadata_ok,
+            PersonalAccount.validation_status == "pending",
+        ),
+        "syncing": and_(
+            not_terminal_connection,
+            PersonalAccount.validation_status == "ready",
+            PersonalAccount.metadata_sync_status == "syncing",
+        ),
+        "pending_sync": and_(
+            not_terminal_connection,
+            PersonalAccount.validation_status == "ready",
+            PersonalAccount.metadata_sync_status == "pending",
+        ),
+        "offline": and_(
+            not_terminal_connection,
+            PersonalAccount.validation_status == "ready",
+            PersonalAccount.metadata_sync_status.in_(("ready", "unsupported")),
+        ),
+    }
+    predicate = predicates.get(status_key)
+    if predicate is None:
+        raise HTTPException(status_code=422, detail="账号状态筛选无效")
+    return predicate
+
+
 @router.get("")
 def list_accounts(
     db: DbSession,
     current_user: CurrentUser,
     keyword: str | None = None,
     account_status: str | None = Query(default=None, alias="status"),
+    source: str | None = None,
+    group_id: str | None = Query(default=None, alias="groupId"),
+    country_code: str | None = Query(
+        default=None,
+        alias="countryCode",
+        min_length=2,
+        max_length=2,
+        pattern=r"^[A-Za-z]{2}$",
+    ),
+    protocol_id: str | None = Query(default=None, alias="protocolId"),
+    metadata_status: str | None = Query(default=None, alias="metadataStatus"),
+    quality_known: bool | None = Query(default=None, alias="qualityKnown"),
     sync: bool = Query(default=False),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
@@ -546,12 +850,67 @@ def list_accounts(
     if current_user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == current_user.id)
     if keyword:
-        pattern = f"%{keyword.strip()}%"
-        statement = statement.where(
-            or_(PersonalAccount.name.ilike(pattern), PersonalAccount.phone_e164.ilike(pattern))
-        )
+        normalized_keyword = keyword.strip()
+        pattern = f"%{normalized_keyword}%"
+        matches = [
+            PersonalAccount.name.ilike(pattern),
+            PersonalAccount.phone_e164.ilike(pattern),
+            PersonalAccount.country_code.ilike(pattern),
+            PersonalAccount.source_ref_type.ilike(pattern),
+            PersonalAccount.import_format.ilike(pattern),
+        ]
+        if normalized_keyword.isdigit():
+            matches.append(PersonalAccount.id == int(normalized_keyword))
+        statement = statement.where(or_(*matches))
     if account_status and account_status != "all":
-        statement = statement.where(PersonalAccount.status == account_status)
+        statement = statement.where(_unified_status_predicate(account_status))
+    if source and source != "all":
+        if source not in {"landing_page", "json_import"}:
+            raise HTTPException(status_code=422, detail="账号来源筛选无效")
+        statement = statement.where(PersonalAccount.source == source)
+    if group_id and group_id != "all":
+        if group_id == "__ungrouped__":
+            statement = statement.where(PersonalAccount.group_id.is_(None))
+        else:
+            try:
+                database_group_id = parse_snowflake_id(group_id)
+            except ValueError:
+                raise HTTPException(status_code=422, detail="账号分组筛选无效") from None
+            statement = statement.where(PersonalAccount.group_id == database_group_id)
+    if country_code:
+        statement = statement.where(
+            PersonalAccount.country_code == country_code.upper()
+        )
+    if protocol_id:
+        try:
+            database_protocol_id = parse_snowflake_id(protocol_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="协议节点筛选无效") from None
+        statement = statement.where(PersonalAccount.protocol_id == database_protocol_id)
+    if metadata_status:
+        if metadata_status not in {
+            "pending",
+            "syncing",
+            "ready",
+            "failed",
+            "unsupported",
+        }:
+            raise HTTPException(status_code=422, detail="资料同步状态筛选无效")
+        statement = statement.where(
+            PersonalAccount.metadata_sync_status == metadata_status
+        )
+    if quality_known is True:
+        statement = statement.where(
+            PersonalAccount.has_avatar.is_not(None),
+            PersonalAccount.group_count.is_not(None),
+        )
+    elif quality_known is False:
+        statement = statement.where(
+            or_(
+                PersonalAccount.has_avatar.is_(None),
+                PersonalAccount.group_count.is_(None),
+            )
+        )
     total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
     items = db.scalars(
         statement.order_by(PersonalAccount.created_at.desc())
@@ -571,7 +930,55 @@ def list_accounts(
             db.commit()
         except GatewayError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
-    return {"data": {"rows": [account_row(db, item) for item in items], "total": total, "page": page, "pageSize": page_size}}
+    return {
+        "data": {
+            "rows": account_rows(db, list(items)),
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+    }
+
+
+@router.get("/filter-options")
+def account_filter_options(db: DbSession, current_user: CurrentUser) -> dict:
+    account_scope = select(PersonalAccount).where(
+        PersonalAccount.admission_status == "active",
+    )
+    if current_user.role != "admin":
+        account_scope = account_scope.where(
+            PersonalAccount.created_by == current_user.id
+        )
+    countries = list(
+        db.scalars(
+            select(PersonalAccount.country_code)
+            .where(
+                PersonalAccount.id.in_(account_scope.with_only_columns(PersonalAccount.id)),
+                PersonalAccount.country_code.is_not(None),
+            )
+            .distinct()
+            .order_by(PersonalAccount.country_code)
+        ).all()
+    )
+    protocol_ids = account_scope.with_only_columns(PersonalAccount.protocol_id)
+    protocols = db.scalars(
+        select(ProtocolNode)
+        .where(ProtocolNode.id.in_(protocol_ids))
+        .order_by(ProtocolNode.name, ProtocolNode.id)
+    ).all()
+    return {
+        "data": {
+            "countries": countries,
+            "protocols": [
+                {
+                    "id": str(item.id),
+                    "name": item.name,
+                    "type": item.protocol_type,
+                }
+                for item in protocols
+            ],
+        }
+    }
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -902,6 +1309,51 @@ def get_account(account_id: str, db: DbSession, current_user: CurrentUser) -> di
     item = _account(db, account_id, current_user)
     _sync_gateway_account(db, item, strict=False)
     return {"data": {"account": account_row(db, item)}}
+
+
+@router.get("/{account_id}/lifecycle")
+def account_lifecycle(
+    account_id: str,
+    db: DbSession,
+    current_user: CurrentUser,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, alias="pageSize", ge=1, le=100),
+) -> dict:
+    item = _account(db, account_id, current_user)
+    statement = select(AccountLifecycleEvent).where(
+        AccountLifecycleEvent.account_id == item.id
+    )
+    total = int(
+        db.scalar(select(func.count()).select_from(statement.subquery())) or 0
+    )
+    events = db.scalars(
+        statement.order_by(
+            AccountLifecycleEvent.occurred_at.desc(),
+            AccountLifecycleEvent.id.desc(),
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "data": {
+            "rows": [
+                {
+                    "id": str(event.id),
+                    "eventId": event.public_id,
+                    "fromState": event.from_state,
+                    "toState": event.to_state,
+                    "reason": event.reason_category,
+                    "providerCode": event.provider_code,
+                    "occurredAt": iso(event.occurred_at),
+                    "recordedAt": iso(event.created_at),
+                }
+                for event in events
+            ],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+    }
 
 
 @router.get("/{account_id}/export")

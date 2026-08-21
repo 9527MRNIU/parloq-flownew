@@ -1,9 +1,11 @@
 import {
   DownloadIcon,
+  EyeIcon,
   PlusIcon,
   RefreshCwIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   apiDownload,
   apiRequest,
@@ -28,6 +30,7 @@ import {
   Drawer,
   EmptyState,
   Input,
+  Progress,
   SelectField,
   Spinner,
   Table,
@@ -473,6 +476,19 @@ type AccountGroup = {
   name: string;
   description: string;
   accountCount: number | null;
+  validAccountCount: number | null;
+  validRate: number | null;
+  onlineAccountCount: number | null;
+  abnormalAccountCount: number | null;
+  pendingValidationCount: number | null;
+  profileKnownCount: number | null;
+  profileCompleteCount: number | null;
+  profileCompleteRate: number | null;
+  profileUnknownCount: number | null;
+  noAvatarCount: number | null;
+  noGroupCount: number | null;
+  zeroFriendCount: number | null;
+  zeroMutualCount: number | null;
   createdAt: string;
 };
 function accountGroup(input: unknown): AccountGroup {
@@ -484,12 +500,66 @@ function accountGroup(input: unknown): AccountGroup {
     name: field(row, "name"),
     description: field(row, "description"),
     accountCount: optionalNumber(row, "accountCount", "account_count"),
+    validAccountCount: optionalNumber(
+      row,
+      "validAccountCount",
+      "valid_account_count",
+    ),
+    validRate: optionalNumber(row, "validRate", "valid_rate"),
+    onlineAccountCount: optionalNumber(
+      row,
+      "onlineAccountCount",
+      "online_account_count",
+    ),
+    abnormalAccountCount: optionalNumber(
+      row,
+      "abnormalAccountCount",
+      "abnormal_account_count",
+    ),
+    pendingValidationCount: optionalNumber(
+      row,
+      "pendingValidationCount",
+      "pending_validation_count",
+    ),
+    profileKnownCount: optionalNumber(
+      row,
+      "profileKnownCount",
+      "profile_known_count",
+    ),
+    profileCompleteCount: optionalNumber(
+      row,
+      "profileCompleteCount",
+      "profile_complete_count",
+    ),
+    profileCompleteRate: optionalNumber(
+      row,
+      "profileCompleteRate",
+      "profile_complete_rate",
+    ),
+    profileUnknownCount: optionalNumber(
+      row,
+      "profileUnknownCount",
+      "profile_unknown_count",
+    ),
+    noAvatarCount: optionalNumber(row, "noAvatarCount", "no_avatar_count"),
+    noGroupCount: optionalNumber(row, "noGroupCount", "no_group_count"),
+    zeroFriendCount: optionalNumber(
+      row,
+      "zeroFriendCount",
+      "zero_friend_count",
+    ),
+    zeroMutualCount: optionalNumber(
+      row,
+      "zeroMutualCount",
+      "zero_mutual_count",
+    ),
     createdAt: field(row, "createdAt", "created_at"),
   };
 }
 
 export function AccountGroupsPage() {
   const { can } = useAuth();
+  const navigate = useNavigate();
   const canManage =
     can("resources.accounts.manage") ||
     can("business.personal_accounts.manage");
@@ -571,7 +641,7 @@ export function AccountGroupsPage() {
       />
       <ListTableCard>
         {loading ? <div className="loading-state"><Spinner />正在加载账号分组…</div> : visible.length ? (
-          <Table layout="list"><TableHeader><TableRow><TableHead>分组</TableHead><TableHead adaptive>说明</TableHead><TableHead>账号数</TableHead><TableHead>创建时间</TableHead><TableHead>操作</TableHead></TableRow></TableHeader>
+          <Table layout="list"><TableHeader><TableRow><TableHead>分组</TableHead><TableHead adaptive>说明</TableHead><TableHead>账号概况</TableHead><TableHead>资料情况</TableHead><TableHead>创建时间</TableHead><TableHead>操作</TableHead></TableRow></TableHeader>
             <TableBody>{groupPagination.rows.map((row) => <TableRow key={row.readKey}>
               <TableCell>
                 <EntityPrimaryCell
@@ -589,9 +659,46 @@ export function AccountGroupsPage() {
                 />
               </TableCell>
               <TableCell className="max-w-[360px] text-muted-foreground">{row.description || "暂无说明"}</TableCell>
-              <TableCell>{row.accountCount == null ? <span className="text-muted-foreground">待同步</span> : row.accountCount}</TableCell>
+              <TableCell>
+                <div className="cell-main min-w-[250px] gap-2">
+                  <strong>
+                    有效 {row.validAccountCount == null ? "-" : row.validAccountCount} / {row.accountCount == null ? "-" : row.accountCount}
+                  </strong>
+                  <Progress
+                    value={row.validRate == null ? 0 : Math.min(100, Math.max(0, row.validRate <= 1 ? row.validRate * 100 : row.validRate))}
+                    aria-label={`${row.name} 有效账号比例`}
+                  />
+                  <span>
+                    有效率 {row.validRate == null ? "-" : `${(row.validRate <= 1 ? row.validRate * 100 : row.validRate).toFixed(1)}%`}
+                    {" · "}在线 {row.onlineAccountCount ?? "-"}
+                    {" · "}异常 {row.abnormalAccountCount ?? "-"}
+                    {" · "}待验证 {row.pendingValidationCount ?? "-"}
+                  </span>
+                </div>
+              </TableCell>
+              <TableCell>
+                <div className="cell-main min-w-[250px] gap-2">
+                  <strong>
+                    基础资料完整 {row.profileCompleteCount ?? "-"} / {row.profileKnownCount ?? "-"}
+                  </strong>
+                  <Progress
+                    value={row.profileCompleteRate == null ? 0 : Math.min(100, Math.max(0, row.profileCompleteRate <= 1 ? row.profileCompleteRate * 100 : row.profileCompleteRate))}
+                    aria-label={`${row.name} 基础资料完整比例`}
+                  />
+                  <span>
+                    完整率 {row.profileCompleteRate == null ? "-" : `${(row.profileCompleteRate <= 1 ? row.profileCompleteRate * 100 : row.profileCompleteRate).toFixed(1)}%`}
+                    {" · "}未知 {row.profileUnknownCount ?? "-"}
+                    {" · "}无头像 {row.noAvatarCount ?? "-"}
+                    {" · "}无群组 {row.noGroupCount ?? "-"}
+                  </span>
+                  <span>
+                    0 好友 {row.zeroFriendCount ?? "-"}
+                    {" · "}0 双向 {row.zeroMutualCount ?? "-"}
+                  </span>
+                </div>
+              </TableCell>
               <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
-              <TableCell><div className="flex min-w-max justify-end gap-2">{canManage ? <><Button variant="outline" size="sm" disabled={!row.id} onClick={() => edit(row)}>编辑</Button><Button variant="destructive" size="sm" disabled={!row.id} onClick={() => void remove(row)}>删除</Button></> : null}</div></TableCell>
+              <TableCell><div className="flex min-w-max justify-end gap-2"><Button variant="outline" size="sm" disabled={!row.id} onClick={() => navigate(`/resources/accounts/manage?groupId=${encodeURIComponent(row.id)}`)}><EyeIcon size={16} />查看账号</Button>{canManage ? <><Button variant="outline" size="sm" disabled={!row.id} onClick={() => edit(row)}>编辑</Button><Button variant="destructive" size="sm" disabled={!row.id} onClick={() => void remove(row)}>删除</Button></> : null}</div></TableCell>
             </TableRow>)}</TableBody>
           </Table>
         ) : <EmptyState title="还没有账号分组" description="创建分组后可按用途、国家或客户业务组织统一账号池。" />}
