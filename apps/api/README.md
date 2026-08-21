@@ -80,8 +80,8 @@ checks pause/cancel between batches, and renders message text only in memory.
   NameSilo → Cloudflare → BaoTa → public-verification workflow. It pauses with
   an operator-facing status when DNS or another external change is still
   pending; it does not schedule background retries.
-- Roles and the complete single-system menu tree are persisted under
-  `/api/system/roles` and `/api/system/menus`; `/api/system/menus/me` returns
+- Roles are managed under `/api/system/roles`. The version-owned menu catalog
+  is exposed read-only at `/api/system/menus`; `/api/system/menus/me` returns
   the current user's permitted tree.
 - `/api/hyperlink/market-insights` is the separate source-account-country ×
   target-country sending/delivery/restriction view.

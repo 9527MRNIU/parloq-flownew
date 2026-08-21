@@ -81,6 +81,14 @@ type ProxyRow = {
   enabled: boolean;
 };
 type AccountGroup = { id: string; readKey: string; name: string; ownerId: string };
+type ImportProtocol = {
+  id: string;
+  name: string;
+  type: string;
+  available: boolean;
+  unavailableReason: string;
+  supportedFormats: string[];
+};
 const val = (row: Record<string, unknown>, ...keys: string[]) => {
   for (const key of keys) if (row[key] != null) return String(row[key]);
   return "";
@@ -182,6 +190,19 @@ function proxyRow(input: unknown): ProxyRow {
     enabled: Boolean(row.enabled ?? true),
   };
 }
+function importProtocol(input: unknown): ImportProtocol {
+  const row = input as Record<string, unknown>;
+  return {
+    id: snowflakeId(row, "id", "protocolId", "protocol_id"),
+    name: val(row, "name"),
+    type: val(row, "type", "protocol", "protocolType", "protocol_type"),
+    available: Boolean(row.available),
+    unavailableReason: val(row, "unavailableReason", "unavailable_reason"),
+    supportedFormats: Array.isArray(row.supportedFormats ?? row.supported_formats)
+      ? ((row.supportedFormats ?? row.supported_formats) as unknown[]).map(String)
+      : [],
+  };
+}
 function sourceBadge(row: Account) {
   if (["landing_page", "landing", "pairing"].includes(row.source))
     return <Badge tone="neutral">落地页链接</Badge>;
@@ -202,6 +223,7 @@ export function PersonalAccountsPage() {
   const [rows, setRows] = useState<Account[]>([]);
   const [proxies, setProxies] = useState<ProxyRow[]>([]);
   const [groups, setGroups] = useState<AccountGroup[]>([]);
+  const [importProtocols, setImportProtocols] = useState<ImportProtocol[]>([]);
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -226,16 +248,24 @@ export function PersonalAccountsPage() {
   } | null>(null);
   const [importValidating, setImportValidating] = useState(false);
   const [importPending, setImportPending] = useState(false);
+  const [importGroupId, setImportGroupId] = useState("");
+  const [importProtocolId, setImportProtocolId] = useState("");
   const [importProxyId, setImportProxyId] = useState("");
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [accountsPayload, groupsPayload, proxiesPayload] = await Promise.all([
+      const [
+        accountsPayload,
+        groupsPayload,
+        proxiesPayload,
+        importOptionsPayload,
+      ] = await Promise.all([
         apiRequest("/api/personal-accounts?pageSize=100"),
         apiRequest("/api/account-groups?pageSize=100"),
         user?.isAdmin
           ? apiRequest("/api/ip-proxies?pageSize=100").catch(() => null)
           : Promise.resolve(null),
+        apiRequest("/api/personal-accounts/import-options"),
       ]);
       const nextRows = unwrapList<unknown>(accountsPayload).rows.map(accountRow);
       setRows(nextRows);
@@ -264,9 +294,25 @@ export function PersonalAccountsPage() {
       if (proxiesPayload) {
         setProxies(unwrapList<unknown>(proxiesPayload).rows.map(proxyRow));
       } else setProxies([]);
+      const nextImportProtocols = unwrapList<unknown>(importOptionsPayload)
+        .rows.map(importProtocol)
+        .filter((row) => row.id);
+      setImportProtocols(nextImportProtocols);
+      setImportProtocolId((current) => {
+        if (
+          nextImportProtocols.some(
+            (row) => row.id === current && row.available,
+          )
+        ) {
+          return current;
+        }
+        const available = nextImportProtocols.filter((row) => row.available);
+        return available.length === 1 ? available[0].id : "";
+      });
     } catch (caught) {
       setRows([]);
       setGroups([]);
+      setImportProtocols([]);
       toast.error(caught instanceof Error ? caught.message : "账号加载失败");
     } finally {
       setLoading(false);
@@ -306,6 +352,15 @@ export function PersonalAccountsPage() {
     sourceFilter,
     statusFilter,
   ]);
+  const importGroups = useMemo(() => {
+    const currentUserId = String(user?.id || "");
+    return groups.filter(
+      (group) =>
+        !user?.isAdmin ||
+        !currentUserId ||
+        group.ownerId === currentUserId,
+    );
+  }, [groups, user?.id, user?.isAdmin]);
   const pagination = useClientPagination(visible, {
     resetKey: `${keyword}|${statusFilter}|${sourceFilter}|${groupFilter}`,
   });
@@ -443,6 +498,11 @@ export function PersonalAccountsPage() {
     }
   }
   function openImport() {
+    setImportProtocolId((current) => {
+      if (current) return current;
+      const available = importProtocols.filter((row) => row.available);
+      return available.length === 1 ? available[0].id : "";
+    });
     setImportOpen(true);
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
@@ -455,6 +515,8 @@ export function PersonalAccountsPage() {
     setImportOpen(false);
     setImportFile(null);
     setImportValidation(null);
+    setImportGroupId("");
+    setImportProtocolId("");
     setImportProxyId("");
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
@@ -489,11 +551,20 @@ export function PersonalAccountsPage() {
     }
   }
   async function submitImport() {
-    if (!importFile || !importValidation?.valid || !canImport) return;
+    if (
+      !importFile ||
+      !importValidation?.valid ||
+      !importGroupId ||
+      !importProtocolId ||
+      !canImport
+    )
+      return;
     setImportPending(true);
     try {
       const body = new FormData();
       body.set("file", importFile);
+      body.set("groupId", importGroupId);
+      body.set("protocolId", importProtocolId);
       if (importProxyId) body.set("proxyId", importProxyId);
       await apiRequest("/api/personal-accounts/import", {
         method: "POST",
@@ -504,6 +575,8 @@ export function PersonalAccountsPage() {
       setImportOpen(false);
       setImportFile(null);
       setImportValidation(null);
+      setImportGroupId("");
+      setImportProtocolId("");
       setImportProxyId("");
       setSearchParams((current) => {
         const next = new URLSearchParams(current);
@@ -875,8 +948,8 @@ export function PersonalAccountsPage() {
       <Drawer
         open={importOpen}
         onClose={closeImport}
-        title="导入账号 JSON"
-        description="导入完成后账号会直接进入当前统一账号池，无需离开账号管理。"
+        title="导入账号会话包"
+        description="选择账号分组和协议节点后，会话包会按对应协议校验并进入统一账号池。"
         footer={
           <>
             <Button variant="outline" disabled={importPending} onClick={closeImport}>
@@ -887,7 +960,9 @@ export function PersonalAccountsPage() {
                 importPending ||
                 importValidating ||
                 !importFile ||
-                !importValidation?.valid
+                !importValidation?.valid ||
+                !importGroupId ||
+                !importProtocolId
               }
               onClick={() => void submitImport()}
             >
@@ -910,7 +985,7 @@ export function PersonalAccountsPage() {
             {importValidating ? <Spinner /> : <UploadCloudIcon size={30} />}
             <strong>
               <DrawerFieldLabel required>
-                {importFile?.name || "选择账号 JSON 文件"}
+                {importFile?.name || "选择账号会话 JSON 文件"}
               </DrawerFieldLabel>
             </strong>
             <span>
@@ -928,6 +1003,49 @@ export function PersonalAccountsPage() {
               {importValidation.message}
             </div>
           ) : null}
+          <label className="field">
+            <DrawerFieldLabel required>账号分组</DrawerFieldLabel>
+            <SelectField
+              className="w-full"
+              value={importGroupId}
+              onValueChange={setImportGroupId}
+              options={importGroups.map((group) => ({
+                value: group.id,
+                label: group.name,
+              }))}
+              placeholder="选择导入账号所属分组"
+              disabled={importPending}
+            />
+            <small className="field-help">
+              {importGroups.length
+                ? "导入成功后，账号会直接进入所选分组。"
+                : "当前没有可用账号分组，请先在账号分组页面创建。"}
+            </small>
+          </label>
+          <label className="field">
+            <DrawerFieldLabel required>导入协议</DrawerFieldLabel>
+            <SelectField
+              className="w-full"
+              value={importProtocolId}
+              onValueChange={setImportProtocolId}
+              options={importProtocols.map((protocol) => ({
+                value: protocol.id,
+                label: `${protocol.name} · ${protocol.type || "未知类型"}${
+                  protocol.unavailableReason
+                    ? ` · ${protocol.unavailableReason}`
+                    : ""
+                }`,
+                disabled: !protocol.available,
+              }))}
+              placeholder="选择用于解析和接入的协议节点"
+              disabled={importPending}
+            />
+            <small className="field-help">
+              {importProtocols.some((protocol) => protocol.available)
+                ? "文件会按所选协议类型校验；不可用或暂不支持导入的协议不能选择。"
+                : "当前没有允许进号且支持会话导入的协议节点。"}
+            </small>
+          </label>
           {user?.isAdmin ? (
             <label className="field">
               <DrawerFieldLabel>固定 IP</DrawerFieldLabel>

@@ -295,12 +295,6 @@ export const navigation: NavSection[] = [
             permissionKey: "system.configuration.manage",
             adminOnly: true,
           },
-          {
-            label: "菜单管理",
-            to: "/system/menus",
-            permissionKey: "system.menus.manage",
-            adminOnly: true,
-          },
         ],
       },
     ],

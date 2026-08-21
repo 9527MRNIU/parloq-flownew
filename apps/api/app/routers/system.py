@@ -12,8 +12,6 @@ from app.entity_ids import (
     identifiers_filter,
     matches_identifier,
 )
-from app.snowflake import new_public_id
-
 from app.models import (
     AuthSession,
     RoleActionPermission,
@@ -23,7 +21,7 @@ from app.models import (
     UserGroup,
 )
 from app.security import utcnow
-from app.schemas import MenuCreate, MenuUpdate, RoleCreate, RoleUpdate
+from app.schemas import RoleCreate, RoleUpdate
 from app.serializers import iso
 from app.services.system_metrics import system_resource_metrics
 
@@ -83,13 +81,6 @@ def _menu_tree(items: list[SystemMenu]) -> list[dict]:
         else:
             roots.append(row)
     return roots
-
-
-def _menu(db: DbSession, identifier: str) -> SystemMenu:
-    item = db.scalar(select(SystemMenu).where(identifier_filter(SystemMenu, identifier)))
-    if item is None:
-        raise HTTPException(status_code=404, detail="菜单不存在")
-    return item
 
 
 def _role(db: DbSession, role_id: str) -> UserGroup:
@@ -308,111 +299,3 @@ def my_menus(db: DbSession, current_user: CurrentUser) -> dict:
     return {"data": {"tree": _menu_tree(visible), "permissions": sorted(
         menu.permission_key for menu in menus if menu.permission_key
     ), "actionPermissions": actions}}
-
-
-def _validate_menu_shape(menu_type: str, route_path: str | None, permission_key: str | None) -> None:
-    if menu_type == "page" and (not route_path or not route_path.startswith("/")):
-        raise HTTPException(status_code=422, detail="页面菜单必须提供以 / 开头的路由")
-    if route_path and not route_path.startswith("/"):
-        raise HTTPException(status_code=422, detail="菜单路由必须以 / 开头")
-    if permission_key and any(character.isspace() for character in permission_key):
-        raise HTTPException(status_code=422, detail="权限标识不能包含空格")
-
-
-@router.post("/menus", status_code=status.HTTP_201_CREATED)
-def create_menu(payload: MenuCreate, db: DbSession, _admin: AdminUser) -> dict:
-    _validate_menu_shape(payload.menu_type, payload.route_path, payload.permission_key)
-    parent = _menu(db, payload.parent_id) if payload.parent_id else None
-    if parent is not None and parent.menu_type != "directory":
-        raise HTTPException(status_code=422, detail="父菜单必须是目录")
-    item = SystemMenu(
-        public_id=new_public_id("menu"),
-        parent_id=parent.id if parent else None,
-        name=payload.name,
-        menu_type=payload.menu_type,
-        route_path=payload.route_path,
-        icon=payload.icon,
-        permission_key=payload.permission_key,
-        sort_order=payload.sort_order,
-        enabled=payload.enabled,
-        visible=payload.visible,
-        is_builtin=False,
-    )
-    db.add(item)
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="菜单路由或权限标识已存在") from None
-    db.refresh(item)
-    return {"data": {"menu": _menu_row(item)}}
-
-
-@router.patch("/menus/{menu_id}")
-def update_menu(
-    menu_id: str, payload: MenuUpdate, db: DbSession, _admin: AdminUser
-) -> dict:
-    item = _menu(db, menu_id)
-    if item.is_builtin and {
-        "parent_id",
-        "route_path",
-        "permission_key",
-    }.intersection(payload.model_fields_set):
-        raise HTTPException(
-            status_code=400, detail="内置菜单只能修改名称、图标、顺序和显示状态"
-        )
-    parent = item.parent
-    if "parent_id" in payload.model_fields_set:
-        parent = _menu(db, payload.parent_id) if payload.parent_id else None
-        if parent and (parent.id == item.id or parent.menu_type != "directory"):
-            raise HTTPException(status_code=422, detail="父菜单无效")
-        ancestor = parent
-        while ancestor is not None:
-            if ancestor.id == item.id:
-                raise HTTPException(status_code=422, detail="菜单层级不能形成循环")
-            ancestor = ancestor.parent
-    route_path = payload.route_path if "route_path" in payload.model_fields_set else item.route_path
-    permission_key = (
-        payload.permission_key
-        if "permission_key" in payload.model_fields_set
-        else item.permission_key
-    )
-    _validate_menu_shape(item.menu_type, route_path, permission_key)
-    if payload.name is not None:
-        item.name = payload.name
-    if "parent_id" in payload.model_fields_set:
-        item.parent_id = parent.id if parent else None
-    if "route_path" in payload.model_fields_set:
-        item.route_path = payload.route_path
-    if "icon" in payload.model_fields_set:
-        item.icon = payload.icon
-    if "permission_key" in payload.model_fields_set:
-        item.permission_key = payload.permission_key
-    if payload.sort_order is not None:
-        item.sort_order = payload.sort_order
-    if payload.enabled is not None:
-        item.enabled = payload.enabled
-    if payload.visible is not None:
-        item.visible = payload.visible
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="菜单路由或权限标识已存在") from None
-    db.refresh(item)
-    return {"data": {"menu": _menu_row(item)}}
-
-
-@router.delete("/menus/{menu_id}")
-def delete_menu(menu_id: str, db: DbSession, _admin: AdminUser) -> dict:
-    item = _menu(db, menu_id)
-    if item.is_builtin:
-        raise HTTPException(status_code=400, detail="内置菜单不能删除")
-    child_count = db.scalar(
-        select(func.count()).select_from(SystemMenu).where(SystemMenu.parent_id == item.id)
-    )
-    if child_count:
-        raise HTTPException(status_code=409, detail="请先删除子菜单")
-    db.delete(item)
-    db.commit()
-    return {"data": {"ok": True}}

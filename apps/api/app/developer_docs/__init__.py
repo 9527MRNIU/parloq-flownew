@@ -229,14 +229,6 @@ DOC_SECTIONS = (
                 "routePath": "/system/roles",
                 "keywords": ("角色", "菜单权限", "操作权限"),
             },
-            {
-                "slug": "menu-system-menus",
-                "title": "菜单管理",
-                "summary": "调整内置菜单名称、排序、启用和显示状态。",
-                "menuPath": "系统 / 系统管理 / 菜单管理",
-                "routePath": "/system/menus",
-                "keywords": ("菜单", "路由", "权限标识", "排序"),
-            },
         ),
     },
     {

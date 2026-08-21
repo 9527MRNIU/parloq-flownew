@@ -82,6 +82,59 @@ def test_channel_launch_at_column_removal_is_reversible(tmp_path: Path) -> None:
     engine.dispose()
 
 
+def test_menu_management_removal_is_reversible(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'menu-management.db'}"
+    _alembic(database_url, "0055_optional_totp_mfa")
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        assert connection.execute(
+            sa.text(
+                "SELECT 1 FROM system_menus "
+                "WHERE public_id = 'menu_system_menus'"
+            )
+        ).scalar_one() == 1
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        assert connection.execute(
+            sa.text(
+                "SELECT 1 FROM system_menus "
+                "WHERE public_id = 'menu_system_menus'"
+            )
+        ).scalar_one_or_none() is None
+        assert connection.execute(
+            sa.text(
+                "SELECT 1 FROM role_menu_permissions AS permission "
+                "JOIN system_menus AS menu ON menu.id = permission.menu_id "
+                "WHERE menu.public_id = 'menu_system_menus'"
+            )
+        ).scalar_one_or_none() is None
+    engine.dispose()
+
+    _alembic_downgrade(database_url, "0055_optional_totp_mfa")
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        restored = connection.execute(
+            sa.text(
+                "SELECT route_path, permission_key, sort_order "
+                "FROM system_menus WHERE public_id = 'menu_system_menus'"
+            )
+        ).one()
+        assert restored == ("/system/menus", "system.menus.manage", 905)
+        assigned_roles = connection.execute(
+            sa.text(
+                "SELECT role.system_key FROM role_menu_permissions AS permission "
+                "JOIN user_groups AS role ON role.id = permission.role_id "
+                "JOIN system_menus AS menu ON menu.id = permission.menu_id "
+                "WHERE menu.public_id = 'menu_system_menus'"
+            )
+        ).scalars().all()
+        assert assigned_roles == ["admin"]
+    engine.dispose()
+
+
 def test_custom_role_is_not_expanded_by_forward_repairs(tmp_path: Path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'custom-role-upgrade.db'}"
     _alembic(database_url, "0005_system_promotion_domains")
@@ -1196,7 +1249,6 @@ def test_system_configuration_migration_adds_admin_only_menu_and_storage(
         assert menu_rows == [
             ("menu_system_developer_docs", 903),
             ("menu_system_configuration", 904),
-            ("menu_system_menus", 905),
         ]
         assigned_roles = connection.execute(
             sa.text(

@@ -193,11 +193,34 @@ def test_import_group_statistics_and_export(
     group_id = created_group.json()["data"]["group"]["id"]
     assert group_id.isdigit()
     assert "publicId" not in created_group.json()["data"]["group"]
+    import_options = admin_client.get("/api/personal-accounts/import-options")
+    assert import_options.status_code == 200, import_options.text
+    available_protocols = [
+        row
+        for row in import_options.json()["data"]["rows"]
+        if row["available"]
+    ]
+    assert available_protocols
+    protocol_id = available_protocols[0]["id"]
+    assert available_protocols[0]["type"] == "baileys"
+    assert available_protocols[0]["supportedFormats"] == [
+        "baileys_creds_json",
+        "parloq_baileys_session_v1",
+    ]
 
     payload = json.dumps(_credentials()).encode()
+    missing_assignments = admin_client.post(
+        "/api/personal-accounts/import",
+        files={"file": ("account.json", io.BytesIO(payload), "application/json")},
+    )
+    assert missing_assignments.status_code == 422
     imported = admin_client.post(
         "/api/personal-accounts/import",
-        data={"groupId": group_id, "name": "Customer JSON"},
+        data={
+            "groupId": group_id,
+            "protocolId": protocol_id,
+            "name": "Customer JSON",
+        },
         files={"file": ("account.json", io.BytesIO(payload), "application/json")},
     )
     assert imported.status_code == 201, imported.text
@@ -210,6 +233,7 @@ def test_import_group_statistics_and_export(
     assert account["validationStatus"] == "validating"
     assert account["metadataSyncStatus"] == "pending"
     assert account["group"]["id"] == group_id
+    assert account["protocol"]["id"] == protocol_id
     assert account["quality"]["score"] is None
 
     statistics = admin_client.get("/api/personal-accounts/statistics")
@@ -274,6 +298,18 @@ def test_native_bundle_import_export_round_trip(
 ) -> None:
     bundle = _session_bundle("12025550995")
     relayed: dict = {}
+    created_group = admin_client.post(
+        "/api/account-groups",
+        json={"name": "Native session imports"},
+    )
+    assert created_group.status_code == 201, created_group.text
+    group_id = created_group.json()["data"]["group"]["id"]
+    import_options = admin_client.get("/api/personal-accounts/import-options")
+    protocol_id = next(
+        row["id"]
+        for row in import_options.json()["data"]["rows"]
+        if row["available"]
+    )
 
     def import_session(self, account_id, session, proxy_url):
         relayed["accountId"] = account_id
@@ -284,6 +320,7 @@ def test_native_bundle_import_export_round_trip(
     monkeypatch.setattr(WaGatewayClient, "import_session", import_session)
     imported = admin_client.post(
         "/api/personal-accounts/import",
+        data={"groupId": group_id, "protocolId": protocol_id},
         files={
             "file": (
                 "native-session.json",
@@ -296,6 +333,8 @@ def test_native_bundle_import_export_round_trip(
     account = imported.json()["data"]["account"]
     assert account["phone"] == "+12025550995"
     assert account["importFormat"] == "parloq_baileys_session_v1"
+    assert account["group"]["id"] == group_id
+    assert account["protocol"]["id"] == protocol_id
     assert relayed["session"] == bundle
     assert relayed["accountId"] != account["id"]
 

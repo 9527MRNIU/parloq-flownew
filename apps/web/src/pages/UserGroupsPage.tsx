@@ -215,7 +215,7 @@ export function UserGroupsPage() {
         search={{
           value: keyword,
           onChange: setKeyword,
-          placeholder: "搜索角色名称或说明",
+          placeholder: "搜索角色名称或备注",
         }}
         meta={`${visibleRows.length} 个角色`}
         actions={
@@ -266,6 +266,8 @@ export function UserGroupsPage() {
                   <TableHead>类型</TableHead>
                   <TableHead>成员数</TableHead>
                   <TableHead adaptive>菜单 / 操作权限</TableHead>
+                  <TableHead>备注</TableHead>
+                  <TableHead>创建时间</TableHead>
                   <TableHead>更新时间</TableHead>
                   <TableHead>操作</TableHead>
                 </TableRow>
@@ -277,7 +279,6 @@ export function UserGroupsPage() {
                       <EntityPrimaryCell
                         title={row.name}
                         id={row.id}
-                        description={row.description || "未填写说明"}
                         status={{
                           label: row.enabled ? "启用" : "停用",
                           description: row.enabled
@@ -299,6 +300,12 @@ export function UserGroupsPage() {
                     <TableCell className="tabular-nums">{row.userCount}</TableCell>
                     <TableCell className="tabular-nums">
                       {row.menuIds.length} / {row.permissionKeys.length}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {row.description || "-"}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {formatDateTime(row.createdAt)}
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatDateTime(row.updatedAt || row.createdAt)}
@@ -365,11 +372,11 @@ export function UserGroupsPage() {
             />
           </label>
           <label className="field">
-            <DrawerFieldLabel>组织归类说明</DrawerFieldLabel>
+            <DrawerFieldLabel>备注</DrawerFieldLabel>
             <Textarea
               value={description}
               onChange={(event) => setDescription(event.target.value)}
-              placeholder="说明该角色对应的团队或用途"
+              placeholder="填写该角色的用途或其他说明"
               rows={4}
             />
           </label>

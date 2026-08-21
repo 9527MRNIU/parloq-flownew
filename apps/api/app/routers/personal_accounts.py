@@ -19,7 +19,7 @@ from app.business_schemas import (
     SendRequest,
 )
 from app.deps import CurrentUser, DbSession
-from app.entity_ids import identifier_filter
+from app.entity_ids import entity_id, identifier_filter
 from app.snowflake import new_public_id, parse_snowflake_id
 
 from app.models import (
@@ -45,9 +45,17 @@ from app.services.baileys_credentials import (
 )
 from app.services.wa_gateway import GatewayError, WaGatewayClient
 from app.services.protocol_nodes import (
+    ingress_unavailable_reason,
     marketing_protocol_available,
     normalized_sync_policy,
+    protocol_capacity,
     select_ingress_protocol,
+)
+from app.services.protocol_session_imports import (
+    ProtocolSessionImportError,
+    import_protocol_session,
+    protocol_session_import_formats,
+    validate_protocol_session,
 )
 from app.services.account_lifecycle import record_initial_account_state
 from app.services.pairing_observability import (
@@ -656,10 +664,10 @@ async def import_account(
     current_user: CurrentUser,
     file: UploadFile = File(...),
     name: str | None = Form(default=None),
-    group_id: str | None = Form(default=None, alias="groupId"),
+    group_id: str = Form(alias="groupId"),
     proxy_id: str | None = Form(default=None, alias="proxyId"),
     legacy_proxy_public_id: str | None = Form(default=None, alias="proxyPublicId"),
-    protocol_id: str | None = Form(default=None, alias="protocolId"),
+    protocol_id: str = Form(alias="protocolId"),
 ) -> dict:
     requested_proxy_id = proxy_id or legacy_proxy_public_id
     if requested_proxy_id and current_user.role != "admin":
@@ -678,10 +686,17 @@ async def import_account(
         )
     except (RecursionError, UnicodeDecodeError, ValueError):
         raise HTTPException(status_code=422, detail="导入文件不是有效 UTF-8 JSON") from None
+    protocol = select_ingress_protocol(db, current_user.id, protocol_id)
     try:
-        session = validate_baileys_session(document)
-    except BaileysCredentialError as exc:
+        session = validate_protocol_session(protocol.protocol_type, document)
+    except ProtocolSessionImportError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
+    selected_group_id = _group_database_id(
+        db,
+        group_id,
+        current_user,
+        account_owner_id=current_user.id,
+    )
 
     normalized_name = (name or session.display_name or session.phone_e164).strip()
     if not normalized_name or len(normalized_name) > 120:
@@ -697,7 +712,6 @@ async def import_account(
                 detail="没有可用固定代理，已阻止账号裸连；手动模式下请在导入时选择 IP",
             )
 
-    protocol = select_ingress_protocol(db, current_user.id, protocol_id)
     item = PersonalAccount(
         public_id=new_public_id("wa"),
         name=normalized_name,
@@ -708,12 +722,7 @@ async def import_account(
         validation_status="validating",
         metadata_sync_status="pending",
         admission_status="active",
-        group_id=_group_database_id(
-            db,
-            group_id,
-            current_user,
-            account_owner_id=current_user.id,
-        ),
+        group_id=selected_group_id,
         protocol_id=protocol.id,
         enabled=True,
         created_by=current_user.id,
@@ -726,7 +735,9 @@ async def import_account(
         _set_binding(db, item.gateway_account_id, selected_proxy_id)
         db.flush()
         gateway_attempted = True
-        client.import_session(
+        import_protocol_session(
+            client,
+            protocol.protocol_type,
             item.gateway_account_id,
             session.value,
             _proxy_url(db, item.gateway_account_id),
@@ -763,6 +774,35 @@ async def import_account(
         raise HTTPException(status_code=502, detail=str(exc)) from None
     db.refresh(item)
     return {"data": {"account": account_row(db, item)}}
+
+
+@router.get("/import-options")
+def account_import_options(db: DbSession, current_user: CurrentUser) -> dict:
+    statement = select(ProtocolNode).where(
+        ProtocolNode.created_by == current_user.id
+    )
+    items = list(db.scalars(statement.order_by(ProtocolNode.id)).all())
+    if not items:
+        select_ingress_protocol(db, current_user.id)
+        db.commit()
+        items = list(db.scalars(statement.order_by(ProtocolNode.id)).all())
+
+    rows = []
+    for item in items:
+        reason = ingress_unavailable_reason(item, protocol_capacity(db, item))
+        formats = protocol_session_import_formats(item.protocol_type)
+        import_reason = None if formats else "当前协议暂不支持会话导入"
+        rows.append(
+            {
+                "id": entity_id(item),
+                "name": item.name,
+                "type": item.protocol_type,
+                "available": reason is None and bool(formats),
+                "unavailableReason": reason or import_reason,
+                "supportedFormats": list(formats),
+            }
+        )
+    return {"data": {"rows": rows, "total": len(rows)}}
 
 
 def _unknown_aware_metric(values: list[object], predicate) -> dict:

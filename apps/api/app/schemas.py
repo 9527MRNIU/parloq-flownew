@@ -96,33 +96,6 @@ class RoleUpdate(ApiModel):
     enabled: bool | None = None
 
 
-class MenuCreate(ApiModel):
-    name: str = Field(min_length=1, max_length=80)
-    menu_type: Literal["directory", "page"] = Field(alias="type")
-    parent_id: str | None = Field(default=None, alias="parentId", max_length=64)
-    route_path: str | None = Field(default=None, alias="routePath", max_length=255)
-    icon: str | None = Field(default=None, max_length=80)
-    permission_key: str | None = Field(
-        default=None, alias="permissionKey", max_length=120
-    )
-    sort_order: int = Field(default=0, alias="sortOrder", ge=0, le=100000)
-    enabled: bool = True
-    visible: bool = True
-
-
-class MenuUpdate(ApiModel):
-    name: str | None = Field(default=None, min_length=1, max_length=80)
-    parent_id: str | None = Field(default=None, alias="parentId", max_length=64)
-    route_path: str | None = Field(default=None, alias="routePath", max_length=255)
-    icon: str | None = Field(default=None, max_length=80)
-    permission_key: str | None = Field(
-        default=None, alias="permissionKey", max_length=120
-    )
-    sort_order: int | None = Field(default=None, alias="sortOrder", ge=0, le=100000)
-    enabled: bool | None = None
-    visible: bool | None = None
-
-
 class SystemPlatformConfigurationUpdate(ApiModel):
     value: str | None = Field(default=None, min_length=8, max_length=8192)
     enabled: bool | None = None

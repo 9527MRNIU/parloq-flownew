@@ -407,28 +407,7 @@ def test_system_roles_menus_and_backend_permission(admin_client: TestClient) -> 
     assert "/resources/operations/protocol" in by_route
     assert "/resources/operations/ip" in by_route
     assert by_route["/promotion/domains"]["permissionKey"] == "promotion.domain.read"
-
-    promotion_management = next(
-        row for row in rows if row["name"] == "推广管理"
-    )
-    assert admin_client.patch(
-        f"/api/system/menus/{promotion_management['id']}", json={"visible": False}
-    ).status_code == 200
-    hidden_tree = admin_client.get("/api/system/menus/me").json()["data"]["tree"]
-    promotion_root = next(
-        row for row in hidden_tree if row["name"] == "推广"
-    )
-    assert all(
-        child["name"] != "推广管理"
-        for child in promotion_root["children"]
-    )
-    assert not any(
-        child["routePath"] == "/promotion/templates"
-        for child in promotion_root["children"]
-    )
-    assert admin_client.patch(
-        f"/api/system/menus/{promotion_management['id']}", json={"visible": True}
-    ).status_code == 200
+    assert "/system/menus" not in by_route
 
     templates_menu = by_route["/promotion/templates"]
     role = admin_client.post(

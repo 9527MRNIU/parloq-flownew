@@ -212,12 +212,13 @@ def select_ingress_protocol(
 ) -> ProtocolNode:
     statement = select(ProtocolNode).where(
         ProtocolNode.created_by == owner_id,
-        ProtocolNode.protocol_type == "baileys",
     )
     if requested_public_id:
         statement = statement.where(
             identifier_filter(ProtocolNode, requested_public_id)
         )
+    else:
+        statement = statement.where(ProtocolNode.protocol_type == "baileys")
     item = db.scalar(
         statement.order_by(ProtocolNode.id).limit(1).with_for_update()
     )
@@ -238,12 +239,12 @@ def select_ingress_protocol(
                     statement.order_by(ProtocolNode.id).limit(1).with_for_update()
                 )
     if item is None:
-        raise HTTPException(status_code=409, detail="没有可用的 Baileys 协议节点")
+        raise HTTPException(status_code=409, detail="没有可用的协议节点")
     reason = ingress_unavailable_reason(item, protocol_capacity(db, item))
     if reason:
         raise HTTPException(
             status_code=409,
-            detail=f"没有允许进号的在线 Baileys 协议：{reason}",
+            detail=f"所选协议节点当前不可用于进号：{reason}",
         )
     return item
 
