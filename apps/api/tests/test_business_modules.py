@@ -402,6 +402,22 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert "window.PromotionBridge" in preview.text
     assert 'addEventListener("contextmenu"' in preview.text
     assert 'e.key==="F12"' in preview.text
+    automatic_preview = admin_client.get(
+        f"/api/promotion/templates/{template['id']}/preview",
+        headers={"Accept-Language": "ar-SA,ar;q=0.9,en;q=0.8"},
+    )
+    assert automatic_preview.status_code == 200
+    assert automatic_preview.headers["content-language"] == "ar"
+    assert '<html lang="ar" dir="rtl">' in automatic_preview.text
+    assert "تابع برقم هاتفك" in automatic_preview.text
+    german_preview = admin_client.get(
+        f"/api/promotion/templates/{template['id']}/preview?lang=de",
+        headers={"Accept-Language": "ar"},
+    )
+    assert german_preview.status_code == 200
+    assert german_preview.headers["content-language"] == "de"
+    assert '<html lang="de" dir="ltr">' in german_preview.text
+    assert "Hallo" in german_preview.text
     assert admin_client.get(
         f"/api/promotion/templates/{template['id']}/preview/assets/assets/app.js"
     ).status_code == 200

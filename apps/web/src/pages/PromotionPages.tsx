@@ -265,6 +265,27 @@ const TEMPLATE_PREVIEW_DEVICES = [
     Icon: SmartphoneIcon,
   },
 ] as const;
+const TEMPLATE_PREVIEW_LOCALE_LABELS: Record<string, string> = {
+  en: "英语",
+  "zh-CN": "简体中文",
+  hi: "印地语",
+  id: "印度尼西亚语",
+  "pt-BR": "巴西葡萄牙语",
+  es: "西班牙语",
+  ru: "俄语",
+  ur: "乌尔都语",
+  de: "德语",
+  tr: "土耳其语",
+  ar: "阿拉伯语",
+  fa: "波斯语",
+  bn: "孟加拉语",
+  it: "意大利语",
+  fr: "法语",
+};
+
+function templatePreviewLocaleLabel(locale: string): string {
+  return TEMPLATE_PREVIEW_LOCALE_LABELS[locale] || locale;
+}
 const TEMPLATE_PREVIEW_STATES: ReadonlyArray<{
   value: TemplatePreviewState;
   label: string;
@@ -849,9 +870,11 @@ function TemplatePreviewWorkspace({
   const [previewState, setPreviewState] =
     useState<TemplatePreviewState>("input");
   const [locale, setLocale] = useState(
-    template.supportedLocales.includes(String(initialLocale))
-      ? String(initialLocale)
-      : template.defaultLocale,
+    initialLocale === "auto"
+      ? "auto"
+      : template.supportedLocales.includes(String(initialLocale))
+        ? String(initialLocale)
+        : "auto",
   );
   const [started, setStarted] = useState(false);
   const [autoplay, setAutoplay] = useState(false);
@@ -885,6 +908,12 @@ function TemplatePreviewWorkspace({
     },
     [postPreviewState, resetPreview, started],
   );
+
+  useEffect(() => {
+    if (locale === "auto" || template.supportedLocales.includes(locale)) return;
+    setLocale("auto");
+    setReloadKey((current) => current + 1);
+  }, [locale, template.supportedLocales]);
 
   useEffect(() => {
     const receivePreviewEvent = (event: MessageEvent) => {
@@ -934,41 +963,66 @@ function TemplatePreviewWorkspace({
     TEMPLATE_PREVIEW_DEVICES[2];
   const previewUrl = new URL(template.previewUrl, window.location.origin);
   previewUrl.searchParams.set("device", device);
-  previewUrl.searchParams.set("lang", locale);
+  if (locale === "auto") previewUrl.searchParams.delete("lang");
+  else previewUrl.searchParams.set("lang", locale);
 
   return (
     <div
       className={`template-device-preview${standalone ? " is-standalone" : ""}`}
     >
       <div className="template-device-preview__toolbar">
-        <div
-          className="template-device-preview__switcher"
-          role="group"
-          aria-label="预览设备"
-        >
-          {TEMPLATE_PREVIEW_DEVICES.map(
-            ({ value, label, dimensions, Icon }) => (
-              <Button
-                key={value}
-                size="sm"
-                variant={device === value ? "default" : "outline"}
-                aria-pressed={device === value}
-                onClick={() => {
-                  setDevice(value);
-                  setAutoplay(false);
-                  setStarted(false);
-                  setPreviewState("input");
-                  setReloadKey((current) => current + 1);
-                }}
-              >
-                <Icon size={15} />
-                {label}
-                <span className="template-device-preview__dimensions">
-                  {dimensions}
-                </span>
-              </Button>
-            ),
-          )}
+        <div className="template-device-preview__toolbar-controls">
+          <label className="template-device-preview__locale-control">
+            <span>预览语言</span>
+            <SelectField
+              value={locale}
+              ariaLabel="预览语言"
+              className="template-device-preview__locale-select"
+              onValueChange={(nextLocale) => {
+                setLocale(nextLocale);
+                setAutoplay(false);
+                setStarted(false);
+                setPreviewState("input");
+                setReloadKey((current) => current + 1);
+              }}
+              options={[
+                { value: "auto", label: "自动识别（跟随浏览器）" },
+                ...template.supportedLocales.map((supportedLocale) => ({
+                  value: supportedLocale,
+                  label: `${templatePreviewLocaleLabel(supportedLocale)}（${supportedLocale}）`,
+                })),
+              ]}
+            />
+          </label>
+          <div
+            className="template-device-preview__switcher"
+            role="group"
+            aria-label="预览设备"
+          >
+            {TEMPLATE_PREVIEW_DEVICES.map(
+              ({ value, label, dimensions, Icon }) => (
+                <Button
+                  key={value}
+                  size="sm"
+                  variant={device === value ? "default" : "outline"}
+                  aria-pressed={device === value}
+                  onClick={() => {
+                    setDevice(value);
+                    setAutoplay(false);
+                    setStarted(false);
+                    setPreviewState("input");
+                    setReloadKey((current) => current + 1);
+                  }}
+                >
+                  <Icon size={15} />
+                  {label}
+                  <span className="template-device-preview__dimensions">
+                    {dimensions}
+                  </span>
+                </Button>
+              ),
+            )}
+          </div>
         </div>
         <div className="template-device-preview__toolbar-actions">
           <Button
@@ -994,7 +1048,7 @@ function TemplatePreviewWorkspace({
                   window.location.origin,
                 );
                 url.searchParams.set("device", device);
-                url.searchParams.set("lang", locale);
+                if (locale !== "auto") url.searchParams.set("lang", locale);
                 window.open(url.toString(), "_blank", "noopener,noreferrer");
               }}
             >
@@ -1054,7 +1108,7 @@ function TemplatePreviewWorkspace({
             title={`${template.name} · ${selectedDevice.label}预览`}
             width={selectedDevice.width}
             height={selectedDevice.height}
-            key={`${template.id}:${device}:${reloadKey}`}
+            key={`${template.id}:${device}:${locale}:${reloadKey}`}
             sandbox="allow-scripts allow-forms allow-top-navigation-by-user-activation"
             referrerPolicy="no-referrer"
             onLoad={() => {

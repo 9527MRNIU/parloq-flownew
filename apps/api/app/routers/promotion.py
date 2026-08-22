@@ -1359,6 +1359,7 @@ def preview_template(
     current_user: CurrentUser,
     lang: str | None = None,
     device: Literal["desktop", "tablet", "mobile"] = "desktop",
+    accept_language: str | None = Header(default=None, alias="Accept-Language"),
 ) -> HTMLResponse:
     item = _template(db, template_id, current_user)
     policy = _runtime_template_policy(db, current_user.id)
@@ -1369,9 +1370,15 @@ def preview_template(
     manifest = item.manifest_json or {}
     default_locale = str(manifest.get("defaultLocale") or "en")
     supported_locales = list(manifest.get("supportedLocales") or [default_locale])
-    requested_locale = lang.replace("_", "-") if lang else default_locale
-    if requested_locale not in supported_locales:
-        requested_locale = default_locale
+    if not lang or lang == "auto":
+        requested_locale = (
+            _accept_language_locale(accept_language, supported_locales)
+            or default_locale
+        )
+    else:
+        requested_locale = (
+            _match_supported_locale(lang, supported_locales) or default_locale
+        )
     resolved_locale, localized_copy = _locale_copy(
         db, item, requested_locale, default_locale
     )
