@@ -569,8 +569,8 @@ def channel_row(db: DbSession, item: PromotionChannel) -> dict:
                 "capiEnabled": capi_enabled,
             },
         },
-        "localeMode": item.locale_mode,
-        "locale": item.locale,
+        "localeMode": "auto",
+        "locale": None,
         "status": item.status,
         "publicUrl": f"https://{hostname}/{item.slug}" if hostname else f"/api/public/promotion/channels/{item.slug}/render",
         "fissionPublicUrl": f"https://{hostname}/{item.slug}/1" if hostname else f"/api/public/promotion/channels/{item.slug}/fission/render",
@@ -1720,8 +1720,7 @@ def create_channel(payload: PromotionChannelCreate, db: DbSession, current_user:
         raise HTTPException(status_code=422, detail="生产环境渠道必须绑定已验证域名")
     if payload.status == "active" and account_group_id is None:
         raise HTTPException(status_code=422, detail="启用渠道前必须选择账号入库分组")
-    template = db.get(PromotionTemplate, tpl); supported = (template.manifest_json or {}).get("supportedLocales", [])
-    if payload.locale_mode == "fixed" and (not payload.locale or payload.locale not in supported): raise HTTPException(status_code=422, detail="固定 locale 必须属于模板 supportedLocales")
+    template = db.get(PromotionTemplate, tpl)
     _validate_channel_contract(
         db,
         template_id=tpl,
@@ -1729,7 +1728,7 @@ def create_channel(payload: PromotionChannelCreate, db: DbSession, current_user:
         protocol_pool_id=protocol_pool_id,
         pixel_id=pix,
     )
-    item = PromotionChannel(public_id=new_public_id("pchn"), channel_type=payload.channel_type, name=payload.name, country_code=payload.country_code, template_id=tpl, domain_id=dom, subdomain_prefix=payload.subdomain_prefix or "", slug=payload.slug or _new_channel_slug(db), pixel_id=pix, account_group_id=account_group_id, protocol_node_id=protocol_node_id, protocol_pool_id=protocol_pool_id, route_version=1, in_app_browser_mode=payload.in_app_browser_mode, new_account_marketing_enabled=payload.new_account_marketing_enabled, locale_mode=payload.locale_mode, locale=payload.locale, status=payload.status, created_by=current_user.id)
+    item = PromotionChannel(public_id=new_public_id("pchn"), channel_type=payload.channel_type, name=payload.name, country_code=payload.country_code, template_id=tpl, domain_id=dom, subdomain_prefix=payload.subdomain_prefix or "", slug=payload.slug or _new_channel_slug(db), pixel_id=pix, account_group_id=account_group_id, protocol_node_id=protocol_node_id, protocol_pool_id=protocol_pool_id, route_version=1, in_app_browser_mode=payload.in_app_browser_mode, new_account_marketing_enabled=payload.new_account_marketing_enabled, locale_mode="auto", locale=None, status=payload.status, created_by=current_user.id)
     db.add(item)
     try: db.commit()
     except IntegrityError: db.rollback(); raise HTTPException(status_code=409, detail="该域名和子域名下的推广渠道 slug 已存在") from None
@@ -1754,11 +1753,11 @@ def update_channel(channel_id: str, payload: PromotionChannelUpdate, db: DbSessi
     if payload.slug is not None: item.slug = payload.slug
     if "subdomain_prefix" in payload.model_fields_set: item.subdomain_prefix = payload.subdomain_prefix or ""
     if payload.status is not None: item.status = payload.status
-    if payload.locale_mode is not None: item.locale_mode = payload.locale_mode
-    if "locale" in payload.model_fields_set: item.locale = payload.locale
+    if payload.locale_mode is not None:
+        item.locale_mode = "auto"
+        item.locale = None
     item.template_id = tpl
-    template = db.get(PromotionTemplate, tpl); supported = (template.manifest_json or {}).get("supportedLocales", [])
-    if item.locale_mode == "fixed" and (not item.locale or item.locale not in supported): raise HTTPException(status_code=422, detail="固定 locale 必须属于模板 supportedLocales")
+    template = db.get(PromotionTemplate, tpl)
     if "domain_id" in payload.model_fields_set: item.domain_id = dom if payload.domain_id else None
     if get_settings().environment != "development" and item.domain_id is None:
         raise HTTPException(status_code=422, detail="生产环境渠道必须绑定已验证域名")
@@ -2055,11 +2054,53 @@ def _public_channel(
     return item
 
 
-def _resolved_locale(channel: PromotionChannel, template: PromotionTemplate, requested: str | None) -> tuple[str, str, list[str]]:
-    manifest = template.manifest_json or {}; default = str(manifest.get("defaultLocale") or "en"); supported = list(manifest.get("supportedLocales") or [default])
-    if channel.locale_mode == "fixed" and channel.locale in supported: return channel.locale, default, supported
-    normalized = requested.replace("_", "-") if requested else None
-    if normalized in supported: return normalized, default, supported
+def _match_supported_locale(value: str | None, supported: list[str]) -> str | None:
+    if not value:
+        return None
+    normalized = value.replace("_", "-").strip().lower()
+    exact = next((locale for locale in supported if locale.lower() == normalized), None)
+    if exact:
+        return exact
+    base = normalized.split("-", 1)[0]
+    return next(
+        (locale for locale in supported if locale.lower().split("-", 1)[0] == base),
+        None,
+    )
+
+
+def _accept_language_locale(value: str | None, supported: list[str]) -> str | None:
+    weighted: list[tuple[float, int, str]] = []
+    for index, part in enumerate((value or "").split(",")):
+        segments = [segment.strip() for segment in part.split(";")]
+        tag = segments[0] if segments else ""
+        quality = 1.0
+        for parameter in segments[1:]:
+            if not parameter.lower().startswith("q="):
+                continue
+            try:
+                quality = float(parameter[2:])
+            except ValueError:
+                quality = 0.0
+        if tag and tag != "*" and quality > 0:
+            weighted.append((quality, index, tag))
+    for _quality, _index, tag in sorted(weighted, key=lambda item: (-item[0], item[1])):
+        matched = _match_supported_locale(tag, supported)
+        if matched:
+            return matched
+    return None
+
+
+def _resolved_locale(
+    channel: PromotionChannel,
+    template: PromotionTemplate,
+    accept_language: str | None,
+) -> tuple[str, str, list[str]]:
+    manifest = template.manifest_json or {}
+    default = str(manifest.get("defaultLocale") or "en")
+    supported = list(manifest.get("supportedLocales") or [default])
+    browser_match = _accept_language_locale(accept_language, supported)
+    if browser_match:
+        return browser_match, default, supported
     country_default = COUNTRY_DEFAULT_LOCALE.get(channel.country_code, default)
     if country_default in supported: return country_default, default, supported
     base = country_default.split("-", 1)[0]
@@ -2200,14 +2241,16 @@ def _localize_template_html(
 
 
 @router.get("/api/public/promotion/channels/{slug}")
-def public_channel(slug: str, request: Request, db: DbSession, lang: str | None = None) -> dict:
+def public_channel(slug: str, request: Request, db: DbSession) -> dict:
     item = _public_channel(db, slug, request); tpl = db.get(PromotionTemplate, item.template_id); pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None; token = _session_token(item)
     if pixel is not None and not pixel.enabled:
         pixel = None
     from app.services.meta_conversions import normalized_meta_event_mapping
     policy = _runtime_template_policy(db, item.created_by)
-    resolved, default, supported = _resolved_locale(item, tpl, lang)
-    return {"data": {"channel": {"id": entity_id(item), "type": item.channel_type, "name": item.name, "countryCode": item.country_code, "slug": item.slug, "localeMode": item.locale_mode}, "template": {"id": entity_id(tpl), "version": tpl.version, "manifest": tpl.manifest_json}, "templatePolicy": policy, "meta": {"datasetId": pixel.dataset_id if pixel else None, "browserEnabled": bool(pixel and pixel.browser_pixel_enabled), "capiEnabled": bool(pixel and pixel.capi_enabled), "eventMapping": normalized_meta_event_mapping(pixel.event_mapping_json if pixel else None)}, "inAppBrowserMode": item.in_app_browser_mode, "countryCode": item.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "renderUrl": f"/api/public/promotion/channels/{slug}/render", "fissionRenderUrl": f"/api/public/promotion/channels/{slug}/fission/render", "assetBaseUrl": f"/api/public/promotion/channels/{slug}/assets/", "eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "metaDomainReportUrl": f"/api/public/promotion/channels/{slug}/meta-domain-unavailable", "sessionToken": token, "sessionExpiresIn": 1800, "rateLimitPolicy": "reserved", "serverTimestamp": utcnow().isoformat()}}
+    resolved, default, supported = _resolved_locale(
+        item, tpl, request.headers.get("accept-language")
+    )
+    return {"data": {"channel": {"id": entity_id(item), "type": item.channel_type, "name": item.name, "countryCode": item.country_code, "slug": item.slug, "localeMode": "auto"}, "template": {"id": entity_id(tpl), "version": tpl.version, "manifest": tpl.manifest_json}, "templatePolicy": policy, "meta": {"datasetId": pixel.dataset_id if pixel else None, "browserEnabled": bool(pixel and pixel.browser_pixel_enabled), "capiEnabled": bool(pixel and pixel.capi_enabled), "eventMapping": normalized_meta_event_mapping(pixel.event_mapping_json if pixel else None)}, "inAppBrowserMode": item.in_app_browser_mode, "countryCode": item.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "renderUrl": f"/api/public/promotion/channels/{slug}/render", "fissionRenderUrl": f"/api/public/promotion/channels/{slug}/fission/render", "assetBaseUrl": f"/api/public/promotion/channels/{slug}/assets/", "eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "metaDomainReportUrl": f"/api/public/promotion/channels/{slug}/meta-domain-unavailable", "sessionToken": token, "sessionExpiresIn": 1800, "rateLimitPolicy": "reserved", "serverTimestamp": utcnow().isoformat()}}
 
 
 def _render_html(
@@ -2215,13 +2258,15 @@ def _render_html(
     channel: PromotionChannel,
     template: PromotionTemplate,
     html: str,
-    lang: str | None,
+    accept_language: str | None,
     pixel_dataset_id: str | None = None,
     traffic_source: str = "direct",
     template_policy: dict | None = None,
 ) -> tuple[str, str, list[ActivePromotionIntegration]]:
     slug = channel.slug
-    requested_locale, default, supported = _resolved_locale(channel, template, lang)
+    requested_locale, default, supported = _resolved_locale(
+        channel, template, accept_language
+    )
     resolved, localized_copy = _locale_copy(
         db, template, requested_locale, default
     )
@@ -2273,7 +2318,7 @@ def _render_html(
 
 
 @router.get("/api/public/promotion/channels/{slug}/render", response_class=HTMLResponse)
-def render_channel(slug: str, request: Request, db: DbSession, lang: str | None = None) -> HTMLResponse:
+def render_channel(slug: str, request: Request, db: DbSession) -> HTMLResponse:
     item = _public_channel(db, slug, request)
     tpl = db.get(PromotionTemplate, item.template_id)
     pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None
@@ -2285,7 +2330,7 @@ def render_channel(slug: str, request: Request, db: DbSession, lang: str | None 
             item,
             tpl,
             tpl.index_html,
-            lang,
+            request.headers.get("accept-language"),
             pixel.dataset_id if pixel else None,
             template_policy=policy,
         )
@@ -2308,7 +2353,7 @@ def render_channel(slug: str, request: Request, db: DbSession, lang: str | None 
     response_class=HTMLResponse,
 )
 def render_fission_channel(
-    slug: str, request: Request, db: DbSession, lang: str | None = None
+    slug: str, request: Request, db: DbSession
 ) -> HTMLResponse:
     item = _public_channel(db, slug, request)
     tpl = db.get(PromotionTemplate, item.template_id)
@@ -2321,7 +2366,7 @@ def render_fission_channel(
             item,
             tpl,
             tpl.index_html,
-            lang,
+            request.headers.get("accept-language"),
             pixel.dataset_id if pixel else None,
             "fission",
             policy,

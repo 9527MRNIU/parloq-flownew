@@ -3011,7 +3011,7 @@ export function PromotionChannelsPage() {
                     </div>
                   </TableCell>
                   <TableCell>
-                    {row.localeMode === "fixed" ? row.locale || "固定" : "自动"}
+                    自动识别
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatDateTime(row.createdAt)}

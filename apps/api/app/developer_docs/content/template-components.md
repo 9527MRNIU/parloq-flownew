@@ -4,7 +4,6 @@
 
 ```html
 <account-link-flow>
-  <account-link-locale-switcher></account-link-locale-switcher>
   <phone-number-field></phone-number-field>
   <account-link-submit></account-link-submit>
   <pairing-code-panel></pairing-code-panel>
@@ -26,14 +25,14 @@
 
 ## 多语言
 
-语言切换器读取 `manifest.supportedLocales`，使用语言原生名称显示，并通过同一页面的 `lang` 查询参数切换。配对码发出后切换器会锁定，避免刷新页面导致正在进行的尝试被放弃。
+生产平台会依次按浏览器 `Accept-Language`、渠道国家和 `defaultLocale` 自动解析语言，并在返回 HTML 前注入 `resolvedLocale` 与首屏文案。白标模板不应重复显示语言切换器。模板仓库预览工具可以手动选择语言，用于检查各语言和 RTL 效果。
 
 标准组件文案内置支持 `en`、`zh-CN`、`hi`、`id`、`pt-BR`、`es`、`ru`、`ur`、`de`、`tr`、`ar`、`fa`、`bn`、`it` 和 `fr`。模板自己的营销文案仍需在每个声明语言中完整提供。
 
 ## RTL 与无障碍
 
 - 阿拉伯语、波斯语和乌尔都语页面应正确使用 RTL 布局；
-- 输入、按钮、语言切换和错误提示必须可用键盘操作；
+- 输入、按钮、可选语言切换和错误提示必须可用键盘操作；
 - 文本与背景保持可读对比度；
 - 状态变化同时提供文字，不只依赖颜色；
 - 手工步骤图标可以换主题，但不能删除必要的替代说明。

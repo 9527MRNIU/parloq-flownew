@@ -43,7 +43,6 @@ export const TEMPLATE_MANIFEST_EXAMPLE = `{
 }`;
 
 export const ACCOUNT_LINK_COMPONENT_EXAMPLE = `<account-link-flow>
-  <account-link-locale-switcher></account-link-locale-switcher>
   <phone-number-field></phone-number-field>
   <account-link-submit></account-link-submit>
   <pairing-code-panel></pairing-code-panel>
@@ -113,7 +112,7 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
     description:
       "新主题组合包内标准组件；组件源码在模板仓库统一维护，构建后随每个 ZIP 一起交付。",
     bullets: [
-      "account-link-locale-switcher 使用语言本地名称快速切换 supportedLocales；生成绑定码后自动锁定，避免中途切换遗留绑定任务。",
+      "生产平台按浏览器 Accept-Language、渠道国家和 defaultLocale 的顺序自动解析语言并注入模板；白标模板不应重复显示语言切换器。模板仓库预览工具可以手动选择语言，用于检查各语言效果。",
       "phone-number-field 以浏览器本地化推断默认国家，用户可以手动切换；渠道国家不作为号码前缀来源。",
       "account-link-submit 在号码有效前保持禁用，并负责防重复提交和加载状态。",
       "pairing-code-panel 负责配对码、倒计时和安全剪贴板复制。",
@@ -146,6 +145,7 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
     description:
       "所有用户可见文案都进入 locales 语言包；平台会在返回 HTML 前按 resolvedLocale 注入首屏文案，并通过 localizedCopy 下发同一份文案供后续交互使用。",
     bullets: [
+      "生产运行时优先匹配浏览器 Accept-Language；模板仓库工具栏的语言选项只控制本地预览。",
       "语言包缺失时依次回退 defaultLocale 和 fallbackLocale。",
       "首屏元素使用 data-copy=\"key\"，可翻译属性使用 data-copy-placeholder、data-copy-aria-label、data-copy-title、data-copy-value 或 data-copy-content；禁止依赖延迟脚本完成首次翻译。",
       "语言就绪时同步设置 html lang、RTL 语言的 dir=rtl 和 document.title。",

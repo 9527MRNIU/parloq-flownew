@@ -545,8 +545,8 @@ class PromotionChannelCreate(Model):
     new_account_marketing_enabled: bool = Field(
         default=True, alias="newAccountMarketingEnabled"
     )
-    locale_mode: Literal["auto", "fixed"] = Field(default="auto", alias="localeMode")
-    locale: str | None = Field(default=None, max_length=16)
+    locale_mode: Literal["auto"] = Field(default="auto", alias="localeMode")
+    locale: None = None
     status: Literal["draft", "active", "paused"] = "draft"
 
     _country = field_validator("country_code")(normalize_country)
@@ -624,8 +624,8 @@ class PromotionChannelUpdate(Model):
     new_account_marketing_enabled: bool | None = Field(
         default=None, alias="newAccountMarketingEnabled"
     )
-    locale_mode: Literal["auto", "fixed"] | None = Field(default=None, alias="localeMode")
-    locale: str | None = Field(default=None, max_length=16)
+    locale_mode: Literal["auto"] | None = Field(default=None, alias="localeMode")
+    locale: None = None
     status: Literal["draft", "active", "paused"] | None = None
 
     _country = field_validator("country_code")(normalize_country)

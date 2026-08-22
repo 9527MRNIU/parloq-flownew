@@ -462,12 +462,26 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert channel_row["accountGroupName"] == "Germany Landing Accounts"
     assert "launchAt" not in channel_row
     assert not any(key.endswith("PublicId") for key in channel_row)
+    fixed_locale = admin_client.patch(
+        f"/api/promotion/channels/{channel_id}",
+        json={"localeMode": "fixed", "locale": "de"},
+    )
+    assert fixed_locale.status_code == 422
 
-    public_config = admin_client.get("/api/public/promotion/channels/de-facebook-demo?lang=de")
+    public_config = admin_client.get(
+        "/api/public/promotion/channels/de-facebook-demo",
+        headers={"Accept-Language": "de-DE,de;q=0.9"},
+    )
     assert public_config.status_code == 200
     config = public_config.json()["data"]
     assert config["resolvedLocale"] == "de"
     assert config["countryCode"] == "DE"
+    automatic_config = admin_client.get(
+        "/api/public/promotion/channels/de-facebook-demo",
+        headers={"Accept-Language": "ja-JP;q=0.9,ar-SA;q=0.8"},
+    )
+    assert automatic_config.status_code == 200
+    assert automatic_config.json()["data"]["resolvedLocale"] == "ar"
     session_token = config["sessionToken"]
     invalid = admin_client.post(
         "/api/public/promotion/channels/de-facebook-demo/events",
@@ -584,7 +598,10 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
         },
     )
     assert policy.status_code == 200, policy.text
-    render = admin_client.get("/api/public/promotion/channels/de-facebook-demo/render?lang=de")
+    render = admin_client.get(
+        "/api/public/promotion/channels/de-facebook-demo/render",
+        headers={"Accept-Language": "de-DE,de;q=0.9"},
+    )
     assert "promotion-runtime-config" in render.text
     assert "parloq" not in render.text.lower()
     assert 'src="/api/public/promotion/guard.js"' in render.text
@@ -607,13 +624,22 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert "/api/public/promotion/channels/de-facebook-demo/assets/assets/logo.png" in render.text
     assert "/assets/assets/assets/" not in render.text
     rtl_render = admin_client.get(
-        "/api/public/promotion/channels/de-facebook-demo/render?lang=ar"
+        "/api/public/promotion/channels/de-facebook-demo/render?lang=de",
+        headers={"Accept-Language": "ar-SA,ar;q=0.9"},
     )
     assert rtl_render.headers["content-language"] == "ar"
     assert '<html lang="ar" dir="rtl">' in rtl_render.text
     assert "<title>تابع برقم هاتفك</title>" in rtl_render.text
+    automatic_render = admin_client.get(
+        "/api/public/promotion/channels/de-facebook-demo/render",
+        headers={"Accept-Language": "ja-JP;q=0.9,ar-SA;q=0.8"},
+    )
+    assert automatic_render.headers["content-language"] == "ar"
+    assert '<html lang="ar" dir="rtl">' in automatic_render.text
+    assert '"resolvedLocale": "ar"' in automatic_render.text
     fallback_render = admin_client.get(
-        "/api/public/promotion/channels/de-facebook-demo/render?lang=fr"
+        "/api/public/promotion/channels/de-facebook-demo/render",
+        headers={"Accept-Language": "fr-FR,fr;q=0.9"},
     )
     assert fallback_render.headers["content-language"] == "en"
     assert '<html lang="en" dir="ltr">' in fallback_render.text

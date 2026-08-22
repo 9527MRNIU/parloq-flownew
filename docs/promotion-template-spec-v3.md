@@ -46,7 +46,6 @@ v3 ZIP 负责完整的访问者前端，包括 HTML、CSS、本地媒体、多�
 
 ```html
 <account-link-flow>
-  <account-link-locale-switcher></account-link-locale-switcher>
   <phone-number-field></phone-number-field>
   <account-link-submit></account-link-submit>
   <pairing-code-panel></pairing-code-panel>
@@ -56,7 +55,7 @@ v3 ZIP 负责完整的访问者前端，包括 HTML、CSS、本地媒体、多�
 </account-link-flow>
 ```
 
-组件负责国家搜索、国旗、语言选择、号码格式化、无障碍控件和配对状态展示。组件不接收密钥，只通过 `PromotionBridge` 的 `submitPhone`、`getPairingStatus` 和 `cancelPairing` 方法访问平台能力。
+组件负责国家搜索、国旗、号码格式化、无障碍控件和配对状态展示。生产平台依次按浏览器 `Accept-Language`、渠道国家和 `defaultLocale` 自动解析语言；白标模板不重复显示语言选择。模板仓库预览工具可以手动选择语言，仅用于检查各语言效果。组件不接收密钥，只通过 `PromotionBridge` 的 `submitPhone`、`getPairingStatus` 和 `cancelPairing` 方法访问平台能力。
 
 ## 打包与安全
 
