@@ -131,6 +131,8 @@ https://源域名/api/public/promotion/integrations/{集成ID}/{版本}/{包内�
 - 解压后总量最大 50 MB；
 - 最多 500 个文件；
 - 单文件最大 5 MB；
+- 允许 `.enc` 作为不解析、不执行的二进制资源，并固定使用
+  `application/octet-stream` 与 `X-Content-Type-Options: nosniff` 返回；
 - 禁止绝对路径、`..` 路径穿越、符号链接、重复路径和未允许的文件扩展名。
 
 ## 5. 注入与 CSP

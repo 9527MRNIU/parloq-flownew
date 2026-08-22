@@ -58,6 +58,7 @@ ALLOWED_INTEGRATION_EXTENSIONS = {
     ".ttf",
     ".txt",
     ".wasm",
+    ".enc",
 }
 VERSION_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,39})$")
 INTEGRATION_KEY_RE = re.compile(
@@ -280,6 +281,8 @@ def _content_type(path: str) -> str:
         return "application/javascript"
     if suffix == ".wasm":
         return "application/wasm"
+    if suffix == ".enc":
+        return "application/octet-stream"
     return mimetypes.guess_type(path)[0] or "application/octet-stream"
 
 

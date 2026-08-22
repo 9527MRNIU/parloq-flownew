@@ -243,6 +243,7 @@ def test_iframe_manifest_can_use_ordered_javascript_entries(
                 ),
                 "ds_net.js": "window.loadOrder = ['web'];",
                 "ds_net_native.mjs": "window.loadOrder.push('native');",
+                "extract.js.enc": "opaque-ciphertext-fixture",
             }
         ),
     )
@@ -254,6 +255,7 @@ def test_iframe_manifest_can_use_ordered_javascript_entries(
         {"path": "ds_net.js", "scriptType": "classic"},
         {"path": "ds_net_native.mjs", "scriptType": "module"},
     ]
+    assert integration["assetCount"] == 3
     assert integration["feedbackEvents"] == [
         "page_view",
         "visit_end",
@@ -288,6 +290,17 @@ def test_iframe_manifest_can_use_ordered_javascript_entries(
     )
     assert first_asset.status_code == 200, first_asset.text
     assert first_asset.text == "window.loadOrder = ['web'];"
+
+    encrypted_asset = admin_client.get(
+        f"{asset_base}/extract.js.enc".removeprefix(
+            "https://javascript-frame.test"
+        ),
+        headers={"host": "javascript-frame.test"},
+    )
+    assert encrypted_asset.status_code == 200, encrypted_asset.text
+    assert encrypted_asset.content == b"opaque-ciphertext-fixture"
+    assert encrypted_asset.headers["content-type"] == "application/octet-stream"
+    assert encrypted_asset.headers["x-content-type-options"] == "nosniff"
 
     wrong_host = admin_client.get(wrapper_path, headers={"host": "other.test"})
     assert wrong_host.status_code == 404
