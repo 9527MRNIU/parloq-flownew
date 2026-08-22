@@ -21,9 +21,36 @@ from app.snowflake import new_public_id
 
 
 def _template_zip() -> bytes:
+    manifest = {
+        "schema": "promotion-template/v3",
+        "version": "3.0.0",
+        "entry": "index.html",
+        "format": "static-bundle",
+        "capabilities": ["phone-pairing"],
+        "runtime": "promotion-browser-bridge/v2",
+        "requirements": {"pairingContract": "promotion-public-pairing/v1"},
+        "components": {
+            "contract": "account-link-elements/v1",
+            "entry": "assets/account-link-elements.js",
+        },
+        "interactionProtection": "platform",
+        "defaultLocale": "en",
+        "supportedLocales": ["en"],
+        "i18n": {
+            "mode": "bundled",
+            "path": "locales/{locale}.json",
+            "fallbackLocale": "en",
+        },
+    }
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("index.html", "<html><head></head><body>promotion</body></html>")
+        archive.writestr(
+            "index.html",
+            '<html><head></head><body>promotion<script src="assets/account-link-elements.js"></script></body></html>',
+        )
+        archive.writestr("manifest.json", json.dumps(manifest))
+        archive.writestr("assets/account-link-elements.js", "window.testComponents = true;")
+        archive.writestr("locales/en.json", "{}")
     return output.getvalue()
 
 

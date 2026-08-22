@@ -93,8 +93,6 @@ parloq-flow/
 ├── services/
 │   ├── wa-gateway-baileys/          # 当前生产 WhatsApp 数据面
 │   └── wa-gateway/                  # 旧 whatsmeow 实验实现，不在当前 Compose 中
-├── examples/
-│   └── promotion-template-demo/     # 可直接导入的推广模板示例
 ├── deploy/                          # 生产 Compose、服务器本机更新及基础设施工具
 ├── docs/                            # 架构、ID、模板和生产交接文档
 ├── docker-compose.yml               # 仅用于本地开发
@@ -384,18 +382,18 @@ curl -fsS https://center.parloq.com/readyz
 
 完整的发布、站点、证书和人工回滚流程见 [生产部署与交接文档](docs/production-deployment.md)。
 
-## 推广模板示例
+## 推广模板
 
-[examples/promotion-template-demo.zip](examples/promotion-template-demo.zip) 是可直接导入的多语言推广模板，包含响应式手机号收集页面、Baileys 配对流程、九种本地化资源和标准运行时集成。
+推广模板及其前端组件统一在独立模板仓库维护。本系统不再保存示例模板、组件源码或组件下载接口，只导入符合 v3 的完整模板 ZIP，并注入运行配置与 `PromotionBridge`。
 
 使用步骤：
 
-1. 在 **推广 → 模板管理** 中导入 ZIP；
+1. 在模板仓库构建完整 ZIP，或在 **推广 → 模板管理 → 远程仓库** 添加已包含编译组件的目录；
 2. 在 **推广 → 渠道管理** 中绑定可用域名、账号分组和协议路由；
 3. 启用渠道并访问渲染地址；
 4. 验证页面访问、停留、手机号、配对码和账号入池归因。
 
-自定义模板请遵循 [推广模板规范 v1](docs/promotion-template-spec-v1.md) 或 [推广模板规范 v2](docs/promotion-template-spec-v2.md)。
+自定义模板请遵循 [推广模板规范 v3](docs/promotion-template-spec-v3.md)。
 
 ## 开发约定
 

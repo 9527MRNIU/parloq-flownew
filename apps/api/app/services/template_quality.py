@@ -11,8 +11,9 @@ CSS_GZIP_BUDGET = 80 * 1024
 LARGE_IMAGE_BYTES = 1024 * 1024
 JS_EXTENSIONS = {".js", ".mjs", ".cjs"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif"}
-PLATFORM_COMPONENTS = {
+STANDARD_COMPONENTS = {
     "account-link-flow",
+    "account-link-locale-switcher",
     "phone-number-field",
     "account-link-submit",
     "pairing-code-panel",
@@ -53,7 +54,7 @@ class _TemplateHtmlInspector(HTMLParser):
             self.images.append(attributes)
         if normalized_tag == "iframe":
             self.iframes.append(attributes.get("src") or "iframe")
-        if normalized_tag in PLATFORM_COMPONENTS:
+        if normalized_tag in STANDARD_COMPONENTS:
             self.component_tags.add(normalized_tag)
         resource_attributes = {
             "script": ("src",),
@@ -270,25 +271,26 @@ def inspect_template_quality(
                 )
             )
 
-    schema = str(manifest.get("schema") or "promotion-template/v1")
-    if schema != "promotion-template/v2":
+    schema = str(manifest.get("schema") or "")
+    if schema != "promotion-template/v3":
         warnings.append(
             _warning(
-                "legacy_template_schema",
-                "v1 模板仅保留兼容；新模板应使用 promotion-template/v2。",
+                "unsupported_template_schema",
+                "模板必须使用 promotion-template/v3。",
             )
         )
     else:
-        requirements = manifest.get("requirements") or {}
-        missing_components = sorted(PLATFORM_COMPONENTS - inspector.component_tags)
+        components = manifest.get("components") or {}
+        missing_components = sorted(STANDARD_COMPONENTS - inspector.component_tags)
         if (
-            requirements.get("componentKit") != "account-link-elements/v1"
+            components.get("contract") != "account-link-elements/v1"
+            or not components.get("entry")
             or missing_components
         ):
             warnings.append(
                 _warning(
-                    "platform_component_kit",
-                    "v2 模板应声明并使用 account-link-elements/v1 白标组件。",
+                    "bundled_component_kit",
+                    "v3 模板必须声明并打包 account-link-elements/v1 组件。",
                     missing_components,
                 )
             )

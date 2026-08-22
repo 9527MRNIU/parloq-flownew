@@ -1,8 +1,8 @@
 # Promotion template specification v2
 
-Status: the only standard for new templates (`promotion-template/v2`). Existing
-v1 templates remain supported for compatibility, but must not be used as the
-starting point for new work.
+Status: historical and unsupported by the current importer
+(`promotion-template/v2`). Use
+[`promotion-template/v3`](promotion-template-spec-v3.md).
 
 Machine-readable schema:
 [`schemas/promotion-template-v2.schema.json`](schemas/promotion-template-v2.schema.json).

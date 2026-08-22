@@ -59,6 +59,44 @@ def _zip(files: dict[str, str]) -> bytes:
     return output.getvalue()
 
 
+def _v3_template_manifest(
+    *, version: str = "3.0.0", supported_locales: list[str] | None = None
+) -> dict:
+    locales = supported_locales or ["en"]
+    return {
+        "schema": "promotion-template/v3",
+        "version": version,
+        "entry": "index.html",
+        "format": "static-bundle",
+        "capabilities": ["phone-pairing"],
+        "runtime": "promotion-browser-bridge/v2",
+        "requirements": {"pairingContract": "promotion-public-pairing/v1"},
+        "components": {
+            "contract": "account-link-elements/v1",
+            "entry": "assets/account-link-elements.js",
+        },
+        "interactionProtection": "platform",
+        "defaultLocale": "en",
+        "supportedLocales": locales,
+        "i18n": {
+            "mode": "bundled",
+            "path": "locales/{locale}.json",
+            "fallbackLocale": "en",
+        },
+    }
+
+
+STANDARD_COMPONENTS_HTML = """<account-link-flow>
+<account-link-locale-switcher></account-link-locale-switcher>
+<phone-number-field></phone-number-field>
+<account-link-submit></account-link-submit>
+<pairing-code-panel></pairing-code-panel>
+<app-launch-actions></app-launch-actions>
+<account-link-status></account-link-status>
+<account-initialization-status></account-initialization-status>
+</account-link-flow>"""
+
+
 def test_server_side_template_localization_escapes_copy_and_attributes() -> None:
     source = (
         '<html lang="en"><head><title>Default</title></head><body>'
@@ -268,8 +306,19 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert pixel.status_code == 201
     pixel_id = pixel.json()["data"]["pixel"]["id"]
 
-    # A pure single-page ZIP is valid; manifest and assets are optional.
-    initial = _zip({"index.html": "<HTML><HEAD></HEAD><body><form><input type='tel'></form></body></HTML>"})
+    initial = _zip(
+        {
+            "index.html": (
+                "<HTML><HEAD></HEAD><body>"
+                f"{STANDARD_COMPONENTS_HTML}"
+                '<script src="assets/account-link-elements.js"></script>'
+                "</body></HTML>"
+            ),
+            "manifest.json": json.dumps(_v3_template_manifest()),
+            "assets/account-link-elements.js": "window.testComponents = true;",
+            "locales/en.json": "{}",
+        }
+    )
     imported = admin_client.post(
         "/api/promotion/templates",
         data={"name": "Vite Promotion Template"},
@@ -279,35 +328,28 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     template = imported.json()["data"]["template"]
     assert template["id"].isdecimal()
     assert "publicId" not in template
-    assert template["manifest"]["schema"] == "promotion-template/v1"
-    assert template["manifest"]["runtime"] == "promotion-browser-bridge/v1"
+    assert template["manifest"]["schema"] == "promotion-template/v3"
+    assert template["manifest"]["runtime"] == "promotion-browser-bridge/v2"
     assert template["manifest"]["capabilities"] == ["phone-pairing"]
     assert template["defaultLocale"] == "en"
     assert template["supportedLocales"] == ["en"]
     assert template["qualityReport"]["status"] == "warnings"
     assert {
-        "legacy_template_schema",
         "viewport_missing",
     } <= {
         warning["code"] for warning in template["qualityReport"]["warnings"]
     }
 
-    manifest = {
-        "version": "2",
-        "defaultLocale": "en",
-        "supportedLocales": ["en", "de", "ar", "fr"],
-        "i18n": {
-            "mode": "bundled",
-            "path": "locales/{locale}.json",
-            "fallbackLocale": "en",
-        },
-    }
+    manifest = _v3_template_manifest(
+        version="2", supported_locales=["en", "de", "ar", "fr"]
+    )
     replacement = _zip(
         {
-            "dist/index.html": '<html lang="en"><head><title>Hello</title><link rel="stylesheet" href="assets/app.css"><script type="module" src="assets/app.js"></script></head><body><h1 data-copy="title">Hello</h1><input data-copy-placeholder="phonePlaceholder" placeholder="12025550123"><img src="/assets/logo.png"></body></html>',
+            "dist/index.html": f'<html lang="en"><head><title>Hello</title><link rel="stylesheet" href="assets/app.css"><script type="module" src="assets/app.js"></script></head><body><h1 data-copy="title">Hello</h1><input data-copy-placeholder="phonePlaceholder" placeholder="12025550123"><img src="/assets/logo.png">{STANDARD_COMPONENTS_HTML}<script src="assets/account-link-elements.js"></script></body></html>',
             "dist/manifest.json": json.dumps(manifest),
             "dist/assets/app.js": "window.templateLoaded=true",
             "dist/assets/app.css": "body{color:#123456}",
+            "dist/assets/account-link-elements.js": "window.testComponents = true;",
             "dist/assets/logo.png": "demo",
             "dist/locales/en.json": '{"title":"Hello","phonePlaceholder":"12025550123"}',
             "dist/locales/de.json": '{"title":"Hallo","phonePlaceholder":"4915123456789"}',
@@ -667,7 +709,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     ).status_code == 401
 
 
-def test_promotion_template_rejects_invalid_v2_contract_and_source_maps(
+def test_promotion_template_rejects_non_v3_contract_and_source_maps(
     admin_client: TestClient,
 ) -> None:
     unknown_schema = _zip(
@@ -675,7 +717,7 @@ def test_promotion_template_rejects_invalid_v2_contract_and_source_maps(
             "index.html": '<form><input type="tel"></form>',
             "manifest.json": json.dumps(
                 {
-                    "schema": "promotion-template/v3",
+                    "schema": "promotion-template/v2",
                     "capabilities": ["phone-pairing"],
                 }
             ),
@@ -689,16 +731,13 @@ def test_promotion_template_rejects_invalid_v2_contract_and_source_maps(
     assert unsupported.status_code == 422
     assert "schema" in unsupported.json()["detail"]
 
-    missing_component_kit = _zip(
+    missing_components = _zip(
         {
             "index.html": "<!doctype html><html><body></body></html>",
             "manifest.json": json.dumps(
                 {
-                    "schema": "promotion-template/v2",
-                    "runtime": "promotion-browser-bridge/v2",
-                    "requirements": {
-                        "pairingContract": "promotion-public-pairing/v1"
-                    },
+                    **_v3_template_manifest(),
+                    "components": None,
                 }
             ),
         }
@@ -708,14 +747,37 @@ def test_promotion_template_rejects_invalid_v2_contract_and_source_maps(
         data={"name": "Missing component kit"},
         files={
             "file": (
-                "missing-component-kit.zip",
-                missing_component_kit,
+                "missing-components.zip",
+                missing_components,
                 "application/zip",
             )
         },
     )
     assert rejected_v2.status_code == 422
-    assert "account-link-elements/v1" in rejected_v2.json()["detail"]
+    assert "components" in rejected_v2.json()["detail"]
+
+    legacy_manifest = _v3_template_manifest()
+    legacy_manifest["requirements"]["componentKit"] = "account-link-elements/v1"
+    legacy_component_injection = admin_client.post(
+        "/api/promotion/templates",
+        data={"name": "Legacy component injection"},
+        files={
+            "file": (
+                "legacy-component-injection.zip",
+                _zip(
+                    {
+                        "index.html": '<html><body><script src="assets/account-link-elements.js"></script></body></html>',
+                        "manifest.json": json.dumps(legacy_manifest),
+                        "assets/account-link-elements.js": "window.testComponents = true;",
+                        "locales/en.json": "{}",
+                    }
+                ),
+                "application/zip",
+            )
+        },
+    )
+    assert legacy_component_injection.status_code == 422
+    assert "不再支持平台注入" in legacy_component_injection.json()["detail"]
 
     source_map = _zip(
         {
@@ -732,104 +794,55 @@ def test_promotion_template_rejects_invalid_v2_contract_and_source_maps(
     assert "app.js.map" in rejected_map.json()["detail"]
 
 
-def test_white_label_account_link_starter_can_be_downloaded_and_imported(
+def test_self_contained_v3_template_imports_without_platform_component_injection(
     admin_client: TestClient,
 ) -> None:
-    downloaded = admin_client.get(
+    assert admin_client.get(
         "/api/promotion/template-kits/account-link-elements-v1.zip"
-    )
-    assert downloaded.status_code == 200, downloaded.text
-    assert downloaded.headers["content-type"] == "application/zip"
-    assert (
-        downloaded.headers["content-disposition"]
-        == 'attachment; filename="account-link-capability-theme-v1.zip"'
-    )
-
-    with zipfile.ZipFile(io.BytesIO(downloaded.content)) as archive:
-        paths = set(archive.namelist())
-        assert {"index.html", "manifest.json", "assets/theme.css"} <= paths
-        manifest = json.loads(archive.read("manifest.json"))
-        assert manifest["schema"] == "promotion-template/v2"
-        assert manifest["version"] == "1.4.0"
-        assert manifest["runtime"] == "promotion-browser-bridge/v2"
-        assert (
-            manifest["requirements"]["componentKit"]
-            == "account-link-elements/v1"
-        )
-        assert manifest["supportedLocales"] == [
-            "en",
-            "zh-CN",
-            "hi",
-            "id",
-            "pt-BR",
-            "es",
-            "ru",
-            "ur",
-            "de",
-            "tr",
-            "ar",
-            "fa",
-            "bn",
-            "it",
-            "fr",
-        ]
-        assert {
-            "locales/ru.json",
-            "locales/ur.json",
-            "locales/tr.json",
-            "locales/fa.json",
-            "locales/bn.json",
-            "locales/it.json",
-        } <= paths
-        index_html = archive.read("index.html").decode()
-        assert "<account-link-flow" in index_html
-        assert "<account-link-locale-switcher" in index_html
-
-    component_runtime = admin_client.get(
+    ).status_code == 404
+    assert admin_client.get(
         "/api/public/promotion/account-link-elements.js"
+    ).status_code == 404
+
+    package = _zip(
+        {
+            "index.html": (
+                '<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body>'
+                f"{STANDARD_COMPONENTS_HTML}"
+                '<script src="assets/account-link-elements.js"></script>'
+                "</body></html>"
+            ),
+            "manifest.json": json.dumps(_v3_template_manifest(version="3.1.0")),
+            "assets/account-link-elements.js": "window.bundledComponentMarker = true;",
+            "locales/en.json": "{}",
+        }
     )
-    assert component_runtime.status_code == 200
-    assert component_runtime.headers["access-control-allow-origin"] == "*"
-    assert "customElements" in component_runtime.text
-    assert "account-link-locale-switcher" in component_runtime.text
-    assert "Enter code on phone" in component_runtime.text
-    assert "On Android tap" in component_runtime.text
-    assert "Link with phone number instead" in component_runtime.text
-    assert "whatsapp-icon" in component_runtime.text
-    assert "android-menu-icon" in component_runtime.text
-    assert "iphone-settings-icon" in component_runtime.text
-    assert "M12 7a2 2" in component_runtime.text
-    assert ":host([hidden])" in component_runtime.text
-    assert "promotion-preview:locale-change" in component_runtime.text
-    assert "parloq" not in component_runtime.text.lower()
 
     imported = admin_client.post(
         "/api/promotion/templates",
-        data={"name": "White-label account linking capabilities"},
+        data={"name": "Self-contained account linking template"},
         files={
             "file": (
-                "account-link-capability-theme-v1.zip",
-                downloaded.content,
+                "0001-account-link-template-3.1.0.zip",
+                package,
                 "application/zip",
             )
         },
     )
     assert imported.status_code == 201, imported.text
     template = imported.json()["data"]["template"]
-    assert (
-        template["manifest"]["requirements"]["componentKit"]
-        == "account-link-elements/v1"
-    )
+    assert template["manifest"]["components"] == {
+        "contract": "account-link-elements/v1",
+        "entry": "assets/account-link-elements.js",
+    }
     assert template["qualityReport"]["status"] == "passed"
 
     preview = admin_client.get(
         f"/api/promotion/templates/{template['id']}/preview"
     )
     assert preview.status_code == 200
-    assert (
-        'src="/api/public/promotion/account-link-elements.js?preview='
-        in preview.text
-    )
+    assert 'src="assets/account-link-elements.js"' in preview.text
+    assert "/api/public/promotion/account-link-elements.js" not in preview.text
     assert "<account-link-flow" in preview.text
 
     mobile_preview = admin_client.get(

@@ -11,15 +11,18 @@ from app.services.meta_conversions import process_due_meta_conversions
 
 def _template_zip() -> bytes:
     manifest = {
-        "schema": "promotion-template/v2",
-        "version": "2.0.0",
+        "schema": "promotion-template/v3",
+        "version": "3.0.0",
         "entry": "index.html",
         "format": "static-bundle",
         "capabilities": ["phone-pairing"],
         "runtime": "promotion-browser-bridge/v2",
         "requirements": {
             "pairingContract": "promotion-public-pairing/v1",
-            "componentKit": "account-link-elements/v1",
+        },
+        "components": {
+            "contract": "account-link-elements/v1",
+            "entry": "assets/account-link-elements.js",
         },
         "interactionProtection": "platform",
         "defaultLocale": "en",
@@ -44,9 +47,11 @@ def _template_zip() -> bytes:
               <account-link-status></account-link-status>
               <account-initialization-status></account-initialization-status>
             </account-link-flow>
+            <script src="assets/account-link-elements.js"></script>
             </body></html>""",
         )
         archive.writestr("manifest.json", json.dumps(manifest))
+        archive.writestr("assets/account-link-elements.js", "window.testComponents = true;")
         archive.writestr("locales/en.json", '{"title":"Connect"}')
     return output.getvalue()
 
@@ -108,12 +113,12 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
     assert pixel["capiTokenConfigured"] is True
     template_response = admin_client.post(
         "/api/promotion/templates",
-        data={"name": "Standard v2 test"},
-        files={"file": ("standard-v2.zip", _template_zip(), "application/zip")},
+        data={"name": "Standard v3 test"},
+        files={"file": ("standard-v3.zip", _template_zip(), "application/zip")},
     )
     assert template_response.status_code == 201, template_response.text
     template = template_response.json()["data"]["template"]
-    assert template["manifest"]["schema"] == "promotion-template/v2"
+    assert template["manifest"]["schema"] == "promotion-template/v3"
     assert template["manifest"]["runtime"] == "promotion-browser-bridge/v2"
     group = admin_client.post(
         "/api/account-groups", json={"name": "Meta delivery accounts"}
@@ -138,6 +143,9 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
     channel = channel_response.json()["data"]["channel"]
     assert channel["effectiveConfig"]["template"]["runtime"] == (
         "promotion-browser-bridge/v2"
+    )
+    assert channel["effectiveConfig"]["template"]["componentContract"] == (
+        "account-link-elements/v1"
     )
     assert channel["effectiveConfig"]["route"]["mode"] == "node"
     assert channel["metaCapiEnabled"] is True

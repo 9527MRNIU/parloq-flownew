@@ -1,8 +1,7 @@
 # Parloq 推广模板规范 v1
 
-状态：兼容版本（`promotion-template/v1`）。新模板应使用
-[`promotion-template/v2`](promotion-template-spec-v2.md)，由 v2 桥接层统一处理
-状态查询、取消和鉴权。
+状态：历史版本，当前导入器不再支持（`promotion-template/v1`）。请升级为
+[`promotion-template/v3`](promotion-template-spec-v3.md)。
 
 机器可读 schema：[`schemas/promotion-template-v1.schema.json`](schemas/promotion-template-v1.schema.json)
 

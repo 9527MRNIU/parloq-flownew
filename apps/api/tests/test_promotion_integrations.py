@@ -23,6 +23,51 @@ def _zip(files: dict[str, str]) -> bytes:
     return buffer.getvalue()
 
 
+def _template_zip(body: str) -> bytes:
+    components = """<account-link-flow>
+    <account-link-locale-switcher></account-link-locale-switcher>
+    <phone-number-field></phone-number-field>
+    <account-link-submit></account-link-submit>
+    <pairing-code-panel></pairing-code-panel>
+    <app-launch-actions></app-launch-actions>
+    <account-link-status></account-link-status>
+    <account-initialization-status></account-initialization-status>
+    </account-link-flow>"""
+    manifest = {
+        "schema": "promotion-template/v3",
+        "version": "3.0.0",
+        "entry": "index.html",
+        "format": "static-bundle",
+        "capabilities": ["phone-pairing"],
+        "runtime": "promotion-browser-bridge/v2",
+        "requirements": {"pairingContract": "promotion-public-pairing/v1"},
+        "components": {
+            "contract": "account-link-elements/v1",
+            "entry": "assets/account-link-elements.js",
+        },
+        "interactionProtection": "platform",
+        "defaultLocale": "en",
+        "supportedLocales": ["en"],
+        "i18n": {
+            "mode": "bundled",
+            "path": "locales/{locale}.json",
+            "fallbackLocale": "en",
+        },
+    }
+    html = body.replace(
+        "</body>",
+        f'{components}<script src="assets/account-link-elements.js"></script></body>',
+    )
+    return _zip(
+        {
+            "index.html": html,
+            "manifest.json": json.dumps(manifest),
+            "assets/account-link-elements.js": "window.testComponents = true;",
+            "locales/en.json": "{}",
+        }
+    )
+
+
 def _verified_domain(admin_client: TestClient, hostname: str) -> dict:
     created = admin_client.post("/api/domains", json={"hostname": hostname})
     assert created.status_code == 201, created.text
@@ -123,13 +168,9 @@ def test_flexible_packages_bind_to_templates_and_expand_csp(
     )
     assert wrong_host.status_code == 404
 
-    template_bundle = _zip(
-        {
-            "index.html": (
-                "<html><head><title>Integration template</title></head>"
-                "<body><main>Landing</main></body></html>"
-            )
-        }
+    template_bundle = _template_zip(
+        "<html><head><title>Integration template</title></head>"
+        "<body><main>Landing</main></body></html>"
     )
     imported = admin_client.post(
         "/api/promotion/templates",
@@ -319,7 +360,7 @@ def test_iframe_manifest_can_use_ordered_javascript_entries(
         files={
             "file": (
                 "javascript-frame-template.zip",
-                _zip({"index.html": "<html><body>Landing</body></html>"}),
+                _template_zip("<html><body>Landing</body></html>"),
                 "application/zip",
             )
         },
@@ -398,7 +439,7 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
         files={
             "file": (
                 "feedback-template.zip",
-                _zip({"index.html": "<html><head></head><body>Landing</body></html>"}),
+                _template_zip("<html><head></head><body>Landing</body></html>"),
                 "application/zip",
             )
         },

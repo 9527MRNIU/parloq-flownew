@@ -8,6 +8,7 @@ template.zip
 ├── manifest.json
 ├── assets/
 │   ├── app.css
+│   ├── account-link-elements.js
 │   └── brand.webp
 └── locales/
     ├── en.json
@@ -25,12 +26,12 @@ template.zip
 | 文件数量 | 500 |
 | 单文件大小 | 5 MB |
 
-## manifest v2
+## manifest v3
 
 ```json
 {
-  "schema": "promotion-template/v2",
-  "version": "2.0.0",
+  "schema": "promotion-template/v3",
+  "version": "3.0.0",
   "name": "中文活动落地页",
   "description": "用于中文市场的账号链接活动。",
   "entry": "index.html",
@@ -38,8 +39,11 @@ template.zip
   "capabilities": ["phone-pairing"],
   "runtime": "promotion-browser-bridge/v2",
   "requirements": {
-    "pairingContract": "promotion-public-pairing/v1",
-    "componentKit": "account-link-elements/v1"
+    "pairingContract": "promotion-public-pairing/v1"
+  },
+  "components": {
+    "contract": "account-link-elements/v1",
+    "entry": "assets/account-link-elements.js"
   },
   "interactionProtection": "platform",
   "defaultLocale": "en",
@@ -55,7 +59,8 @@ template.zip
 ## 字段约定
 
 - `schema`、`entry`、`capabilities`、`runtime` 和 `interactionProtection` 必须使用示例中的固定值；
-- `requirements.pairingContract` 固定为 `promotion-public-pairing/v1`，`requirements.componentKit` 固定为 `account-link-elements/v1`；
+- `requirements.pairingContract` 固定为 `promotion-public-pairing/v1`；
+- `components.contract` 固定为 `account-link-elements/v1`；`components.entry` 是 ZIP 内的安全相对 JS 路径，文件必须存在并被 `index.html` 加载；
 - `format` 可使用 `static-bundle` 或 `vite-dist`；
 - `version` 为 1–40 字符的模板业务版本；
 - `name` 和 `description` 是可选的管理端预填信息；名称最多 120 字符，说明最多 2000 字符。官方产物使用中文填写，导入后仍可手动修改；
@@ -66,7 +71,7 @@ template.zip
 
 ## 打包注意事项
 
-不要把项目源代码目录直接压缩。应先执行生产构建，再把构建产物中的文件放到 ZIP 根目录。导入系统前解压检查一次，确保 `index.html` 不是多套了一层目录。
+不要把未构建的项目源代码目录直接压缩。应在模板仓库执行生产构建，确保标准组件脚本已同步到模板目录，再把完整产物放到 ZIP 根目录。导入系统前解压检查一次，确保 `index.html` 不是多套了一层目录。
 
 导入或替换 ZIP 后，模板管理页会生成轻量质量报告，显示 JS/CSS gzip
 估算、图片体积以及外部资源、iframe、图片属性、懒加载和 viewport 等建议。

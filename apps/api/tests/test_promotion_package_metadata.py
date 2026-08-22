@@ -15,19 +15,45 @@ def _zip(files: dict[str, str]) -> bytes:
     return output.getvalue()
 
 
+def _v3_template_manifest(**metadata: str) -> dict:
+    return {
+        "schema": "promotion-template/v3",
+        "version": metadata.pop("version", "1.0.0"),
+        **metadata,
+        "entry": "index.html",
+        "format": "static-bundle",
+        "capabilities": ["phone-pairing"],
+        "runtime": "promotion-browser-bridge/v2",
+        "requirements": {"pairingContract": "promotion-public-pairing/v1"},
+        "components": {
+            "contract": "account-link-elements/v1",
+            "entry": "assets/account-link-elements.js",
+        },
+        "interactionProtection": "platform",
+        "defaultLocale": "en",
+        "supportedLocales": ["en"],
+        "i18n": {
+            "mode": "bundled",
+            "path": "locales/{locale}.json",
+            "fallbackLocale": "en",
+        },
+    }
+
+
 def test_template_package_metadata_can_prefill_and_be_overridden(
     admin_client: TestClient,
 ) -> None:
     package = _zip(
         {
-            "index.html": "<html><head></head><body>模板</body></html>",
+            "index.html": '<html><head></head><body>模板<script src="assets/account-link-elements.js"></script></body></html>',
+            "assets/account-link-elements.js": "window.testComponents = true;",
+            "locales/en.json": "{}",
             "manifest.json": json.dumps(
-                {
-                    "schema": "promotion-template/v1",
-                    "version": "2.3.0",
-                    "name": "中文活动落地页",
-                    "description": "用于中文市场的账号链接活动。",
-                },
+                _v3_template_manifest(
+                    version="2.3.0",
+                    name="中文活动落地页",
+                    description="用于中文市场的账号链接活动。",
+                ),
                 ensure_ascii=False,
             ),
         }

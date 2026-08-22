@@ -28,6 +28,32 @@ def _zip(files: dict[str, str]) -> bytes:
     return buffer.getvalue()
 
 
+def _v3_manifest(*, name: str, description: str | None, version: str) -> dict:
+    return {
+        "schema": "promotion-template/v3",
+        "version": version,
+        "name": name,
+        "description": description,
+        "entry": "index.html",
+        "format": "static-bundle",
+        "capabilities": ["phone-pairing"],
+        "runtime": "promotion-browser-bridge/v2",
+        "requirements": {"pairingContract": "promotion-public-pairing/v1"},
+        "components": {
+            "contract": "account-link-elements/v1",
+            "entry": "assets/account-link-elements.js",
+        },
+        "interactionProtection": "platform",
+        "defaultLocale": "en",
+        "supportedLocales": ["en"],
+        "i18n": {
+            "mode": "bundled",
+            "path": "locales/{locale}.json",
+            "fallbackLocale": "en",
+        },
+    }
+
+
 def _verified_domain(admin_client: TestClient, hostname: str) -> dict:
     created = admin_client.post("/api/domains", json={"hostname": hostname})
     assert created.status_code == 201, created.text
@@ -87,15 +113,17 @@ class FakeRepositoryState:
         if artifact.kind == "template":
             return _zip(
                 {
-                    "index.html": "<html><head></head><body>Repository template</body></html>",
+                    "index.html": '<html><head></head><body>Repository template<script src="assets/account-link-elements.js"></script></body></html>',
                     "manifest.json": json.dumps(
-                        {
-                            "name": artifact.name,
-                            "description": artifact.description,
-                            "version": artifact.version,
-                        },
+                        _v3_manifest(
+                            name=artifact.name,
+                            description=artifact.description,
+                            version=artifact.version,
+                        ),
                         ensure_ascii=False,
                     ),
+                    "assets/account-link-elements.js": "window.repositoryComponents = true;",
+                    "locales/en.json": "{}",
                 }
             )
         return _zip(
@@ -178,20 +206,24 @@ def test_github_client_reads_catalog_and_source_directory_without_release_zip() 
             }
         ).encode(),
         "manifest": json.dumps(
-            {
-                "name": "仓库模板",
-                "description": "直接读取源码目录。",
-                "version": "1.0.0",
-            },
+            _v3_manifest(
+                name="仓库模板",
+                description="直接读取源码目录。",
+                version="1.0.0",
+            ),
             ensure_ascii=False,
         ).encode(),
-        "index": b"<html><body>repository</body></html>",
+        "index": b'<html><body>repository<script src="assets/account-link-elements.js"></script></body></html>',
+        "components": b"window.repositoryComponents = true;",
+        "locale": b"{}",
         "readme": b"not part of the imported template",
     }
     paths = {
         "artifacts/catalog.json": "catalog",
         "themes/repository-template/manifest.json": "manifest",
         "themes/repository-template/index.html": "index",
+        "themes/repository-template/assets/account-link-elements.js": "components",
+        "themes/repository-template/locales/en.json": "locale",
         "themes/repository-template/README.md": "readme",
     }
 
@@ -244,10 +276,17 @@ def test_github_client_reads_catalog_and_source_directory_without_release_zip() 
         assert [file.path for file in artifact.files] == [
             "themes/repository-template/manifest.json",
             "themes/repository-template/index.html",
+            "themes/repository-template/assets/account-link-elements.js",
+            "themes/repository-template/locales/en.json",
         ]
         archive_bytes = client.archive_artifact(artifact)
         with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
-            assert sorted(archive.namelist()) == ["index.html", "manifest.json"]
+            assert sorted(archive.namelist()) == [
+                "assets/account-link-elements.js",
+                "index.html",
+                "locales/en.json",
+                "manifest.json",
+            ]
     finally:
         http.close()
 
@@ -300,7 +339,10 @@ def test_repository_template_can_be_added_and_updated_without_overwriting_name(
     assert available.json()["data"]["rows"][0]["localStatus"] == "update"
     local = admin_client.get("/api/promotion/templates")
     assert local.status_code == 200, local.text
-    source = local.json()["data"]["rows"][0]["repositorySource"]
+    local_row = next(
+        row for row in local.json()["data"]["rows"] if row["id"] == template["id"]
+    )
+    source = local_row["repositorySource"]
     assert source["sequence"] == "0001"
     assert source["localStatus"] == "update"
     assert source["remoteVersion"] == "2.0.0"

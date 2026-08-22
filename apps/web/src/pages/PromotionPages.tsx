@@ -3,7 +3,6 @@ import {
   BookOpenIcon,
   ChevronLeftIcon,
   CopyIcon,
-  DownloadIcon,
   EyeIcon,
   ExternalLinkIcon,
   LoaderCircleIcon,
@@ -38,7 +37,6 @@ import {
 } from "react-icons/si";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
-  apiDownload,
   apiRequest,
   formatDateTime,
   formatLocalDateInput,
@@ -1475,24 +1473,6 @@ export function PromotionTemplatesPage() {
       toast.error("复制失败，请检查浏览器剪贴板权限");
     }
   }
-  async function downloadCapabilityTheme() {
-    try {
-      const result = await apiDownload(
-        "/api/promotion/template-kits/account-link-elements-v1.zip",
-      );
-      const url = URL.createObjectURL(result.blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = decodeURIComponent(
-        result.filename || "account-link-capability-theme-v1.zip",
-      );
-      anchor.click();
-      URL.revokeObjectURL(url);
-      toast.success("白标能力主题已下载");
-    } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "下载失败");
-    }
-  }
   async function savePolicy() {
     if (!canManage || !policyLoaded || policyError) return;
     setPolicySaving(true);
@@ -1954,7 +1934,7 @@ export function PromotionTemplatesPage() {
         open={designSpecDrawer}
         onClose={() => setDesignSpecDrawer(false)}
         title="推广模板设计规范"
-        description="面向设计、开发和 AI 生成的 v2 白标组件主题标准。可下载能力主题或复制完整 AI 提示词。"
+        description="面向设计、开发和 AI 生成的 v3 自包含模板标准。模板及组件统一在模板仓库维护。"
         footer={
           <>
             <Button
@@ -1962,10 +1942,6 @@ export function PromotionTemplatesPage() {
               onClick={() => setDesignSpecDrawer(false)}
             >
               关闭
-            </Button>
-            <Button variant="outline" onClick={() => void downloadCapabilityTheme()}>
-              <DownloadIcon size={16} />
-              下载白标能力主题
             </Button>
             <Button onClick={() => void copyDesignSpec()}>
               <CopyIcon size={16} />
@@ -1978,8 +1954,8 @@ export function PromotionTemplatesPage() {
           <div className="template-design-spec__intro">
             <strong>使用方式</strong>
             <p>
-              下载白标能力主题后，只改布局、CSS、品牌内容和资源；也可以复制完整规范给
-              AI，再补充品牌名称、视觉风格、主色、目标国家和文案语气。
+              在模板仓库中创建或修改模板，由模板仓库构建出包含标准组件脚本的完整
+              ZIP；也可以复制完整规范给 AI，再补充品牌名称、视觉风格、主色、目标国家和文案语气。
             </p>
           </div>
           {TEMPLATE_DESIGN_SECTIONS.map((section) => (

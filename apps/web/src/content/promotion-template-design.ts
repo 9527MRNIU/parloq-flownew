@@ -9,6 +9,7 @@ export type TemplateDesignSection = {
 export const TEMPLATE_FILE_TREE = `index.html
 manifest.json
 assets/
+  account-link-elements.js
   theme.css
   images/...
   fonts/...
@@ -18,15 +19,18 @@ locales/
   ...`;
 
 export const TEMPLATE_MANIFEST_EXAMPLE = `{
-  "schema": "promotion-template/v2",
-  "version": "2.0.0",
+  "schema": "promotion-template/v3",
+  "version": "3.0.0",
   "entry": "index.html",
   "format": "static-bundle",
   "capabilities": ["phone-pairing"],
   "runtime": "promotion-browser-bridge/v2",
   "requirements": {
-    "pairingContract": "promotion-public-pairing/v1",
-    "componentKit": "account-link-elements/v1"
+    "pairingContract": "promotion-public-pairing/v1"
+  },
+  "components": {
+    "contract": "account-link-elements/v1",
+    "entry": "assets/account-link-elements.js"
   },
   "interactionProtection": "platform",
   "defaultLocale": "en",
@@ -76,7 +80,7 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
       "真实公开地址由平台生成，格式为 https://域名/短码；模板不得展示或跳转到 /api/public/... 内部路由。",
       "不得保存号码、账号凭据、令牌或渠道签名，也不得直接调用账号中心或底层网关。",
       "Meta Pixel、匿名设备信号、右键及 DevTools 防护均由平台注入，模板不得重复实现。",
-      "号码解析、国家识别、绑定状态机、配对码复制和 App 唤起使用 account-link-elements/v1，主题只负责布局、样式和客户内容。",
+      "号码解析、国家识别、绑定状态机、配对码复制和 App 唤起使用模板包内的 account-link-elements/v1；平台只提供 PromotionBridge 和运行配置。",
     ],
   },
   {
@@ -84,7 +88,8 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
     description:
       "ZIP 解压后可直接找到唯一的 index.html；允许外层只有一层 dist 目录。",
     bullets: [
-      "模板包资源必须自包含并使用相对路径；模板不得自行声明外部 JavaScript、隐藏 iframe 或跨域回传，已在平台集成管理登记并绑定的运行时集成除外。",
+      "模板包资源必须自包含并使用相对路径，必须包含 manifest.components.entry 指向的标准组件脚本；模板不得自行声明外部 JavaScript、隐藏 iframe 或跨域回传，已在平台集成管理登记并绑定的运行时集成除外。",
+      "标准组件源码统一在模板仓库 packages/runtime 维护，构建时复制到每个模板 ZIP；不要从系统仓库引用或下载组件。",
       "ZIP 不超过 20 MB，解压总量不超过 50 MB，文件数不超过 500，单文件不超过 5 MB。",
       "生产构建关闭 source map；图片优先 WebP/AVIF，字体放在 assets/fonts 并使用 font-display: swap。",
     ],
@@ -93,10 +98,11 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
   {
     title: "3. manifest.json",
     description:
-      "新模板使用 promotion-template/v2，并显式声明所需账号接入契约。",
+      "新模板使用 promotion-template/v3，并显式声明账号接入契约和包内组件入口。",
     bullets: [
       "version 使用语义版本；entry 固定为 index.html。",
-      "runtime 固定为 promotion-browser-bridge/v2；requirements.pairingContract 固定为 promotion-public-pairing/v1；requirements.componentKit 固定为 account-link-elements/v1。",
+      "runtime 固定为 promotion-browser-bridge/v2；requirements.pairingContract 固定为 promotion-public-pairing/v1。",
+      "components.contract 固定为 account-link-elements/v1；components.entry 必须指向 ZIP 内由模板仓库构建的相对 JS 文件。",
       "interactionProtection 固定为 platform，表示防护策略由平台统一管理。",
       "supportedLocales 必须包含 defaultLocale，语言码使用 BCP 47 风格。",
     ],
@@ -105,7 +111,7 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
   {
     title: "4. 白标账号绑定组件",
     description:
-      "新主题应直接组合平台组件，不复制号码解析、轮询、复制、App 唤起或同步状态逻辑。",
+      "新主题组合包内标准组件；组件源码在模板仓库统一维护，构建后随每个 ZIP 一起交付。",
     bullets: [
       "account-link-locale-switcher 使用语言本地名称快速切换 supportedLocales；生成绑定码后自动锁定，避免中途切换遗留绑定任务。",
       "phone-number-field 以浏览器本地化推断默认国家，用户可以手动切换；渠道国家不作为号码前缀来源。",
@@ -115,7 +121,7 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
       "组件内置 15 个基础语言包：en、zh-CN、hi、id、pt-BR、es、ru、ur、de、tr、ar、fa、bn、it、fr；地区语言码按基础语言回退。",
       "account-link-status 统一处理等待、重连、成功、失败、过期、取消和号码已绑定。",
       "account-initialization-status 在绑定成功后展示资料同步状态；同步失败不能推翻绑定成功。",
-      "通过 CSS Variables 和 ::part() 定制视觉，不得修改组件内部网络行为。",
+      "通过 CSS Variables 和 ::part() 定制视觉；需要修改标准组件行为时，只修改模板仓库 packages/runtime，再重新构建受影响的 ZIP。",
     ],
     code: ACCOUNT_LINK_COMPONENT_EXAMPLE,
   },
@@ -170,7 +176,7 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
   {
     title: "9. 导入前验收清单",
     bullets: [
-      "ZIP 可导入且 manifest 通过 v2 校验。",
+      "ZIP 可导入且 manifest 通过 v3 校验，components.entry 文件存在并由 index.html 加载。",
       "后台预览可走完模拟提交、配对码、等待和成功状态，不创建真实账号。",
       "浏览器本地国家推断、手动国家切换、号码粘贴和国际号码规范化均通过。",
       "已绑定号码显示稳定提示，不会再次创建账号或配对任务。",

@@ -5,26 +5,26 @@ import hashlib
 from app.services.template_quality import inspect_template_quality
 
 
-def _v2_manifest() -> dict:
+def _v3_manifest() -> dict:
     return {
-        "schema": "promotion-template/v2",
-        "requirements": {
-            "pairingContract": "promotion-public-pairing/v1",
-            "componentKit": "account-link-elements/v1",
+        "schema": "promotion-template/v3",
+        "components": {
+            "contract": "account-link-elements/v1",
+            "entry": "assets/account-link-elements.js",
         },
     }
 
 
-def test_template_quality_passes_platform_component_template() -> None:
+def test_template_quality_passes_bundled_component_template() -> None:
     html = """<!doctype html>
     <html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
-    <body><account-link-flow><phone-number-field></phone-number-field>
+    <body><account-link-flow><account-link-locale-switcher></account-link-locale-switcher><phone-number-field></phone-number-field>
     <account-link-submit></account-link-submit><pairing-code-panel></pairing-code-panel>
     <app-launch-actions></app-launch-actions><account-link-status></account-link-status>
     <account-initialization-status></account-initialization-status></account-link-flow></body></html>
     """
     report = inspect_template_quality(
-        manifest=_v2_manifest(),
+        manifest=_v3_manifest(),
         index_html=html,
         assets=[("assets/theme.css", "text/css", b"body{margin:0}")],
         expanded_bytes=len(html),
@@ -72,7 +72,7 @@ def test_template_quality_groups_actionable_warnings() -> None:
         "image_dimensions",
         "image_lazy_loading",
         "viewport_zoom_locked",
-        "legacy_template_schema",
+        "unsupported_template_schema",
     } <= codes
 
 
@@ -81,13 +81,13 @@ def test_template_quality_counts_inline_script_and_style() -> None:
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script>window.inlineValue = 'inline'</script>
     <style>body { color: #111; }</style></head><body>
-    <account-link-flow><phone-number-field></phone-number-field>
+    <account-link-flow><account-link-locale-switcher></account-link-locale-switcher><phone-number-field></phone-number-field>
     <account-link-submit></account-link-submit><pairing-code-panel></pairing-code-panel>
     <app-launch-actions></app-launch-actions><account-link-status></account-link-status>
     <account-initialization-status></account-initialization-status>
     </account-link-flow></body></html>"""
     report = inspect_template_quality(
-        manifest=_v2_manifest(),
+        manifest=_v3_manifest(),
         index_html=html,
         assets=[],
         expanded_bytes=len(html),

@@ -552,7 +552,8 @@ def channel_row(db: DbSession, item: PromotionChannel) -> dict:
                 "runtime": manifest.get("runtime"),
                 "capabilities": manifest.get("capabilities", []),
                 "pairingContract": (manifest.get("requirements") or {}).get("pairingContract", "promotion-public-pairing/v1"),
-                "componentKit": (manifest.get("requirements") or {}).get("componentKit"),
+                "componentContract": (manifest.get("components") or {}).get("contract"),
+                "componentEntry": (manifest.get("components") or {}).get("entry"),
             },
             "route": {
                 "mode": route_mode,
@@ -611,60 +612,54 @@ def _manifest_protocol(manifest: dict) -> dict:
         "模板说明",
         allow_empty=True,
     )
-    schema = str(manifest.get("schema") or "promotion-template/v1")
-    if schema not in {
-        "promotion-template/v1",
-        "promotion-template/v2",
-        "parloq-promotion-template/v1",
-    }:
-        raise HTTPException(status_code=422, detail="manifest schema 仅支持 promotion-template/v1 或 v2")
-    normalized_schema = (
-        "promotion-template/v2" if schema == "promotion-template/v2" else "promotion-template/v1"
-    )
-    entry = str(manifest.get("entry") or "index.html")
+    schema = str(manifest.get("schema") or "")
+    if schema != "promotion-template/v3":
+        raise HTTPException(
+            status_code=422,
+            detail="manifest schema 必须是 promotion-template/v3",
+        )
+    normalized_schema = "promotion-template/v3"
+    version = manifest.get("version")
+    if not isinstance(version, str) or not version.strip() or len(version.strip()) > 40:
+        raise HTTPException(status_code=422, detail="manifest version 必须是 1–40 个字符")
+    version = version.strip()
+    entry = str(manifest.get("entry") or "")
     if entry != "index.html":
         raise HTTPException(status_code=422, detail="manifest entry 必须是 index.html")
-    bundle_format = str(manifest.get("format") or "static-bundle")
+    bundle_format = str(manifest.get("format") or "")
     if bundle_format not in {"static-bundle", "vite-dist"}:
         raise HTTPException(status_code=422, detail="manifest format 仅支持 static-bundle/vite-dist")
-    raw_capabilities = manifest.get("capabilities") or ["phone-pairing"]
-    if not isinstance(raw_capabilities, list) or any(
-        value != "phone-pairing" for value in raw_capabilities
-    ):
+    raw_capabilities = manifest.get("capabilities")
+    if raw_capabilities != ["phone-pairing"]:
         raise HTTPException(status_code=422, detail="manifest capabilities 目前仅支持 phone-pairing")
-    capabilities = list(dict.fromkeys(raw_capabilities))
-    if "phone-pairing" not in capabilities:
-        raise HTTPException(status_code=422, detail="模板必须声明 phone-pairing 能力")
-    default = str(manifest.get("defaultLocale") or "en").replace("_", "-")
+    capabilities = ["phone-pairing"]
+    if manifest.get("interactionProtection") != "platform":
+        raise HTTPException(status_code=422, detail="manifest interactionProtection 必须是 platform")
+    default = str(manifest.get("defaultLocale") or "").replace("_", "-")
     if not LOCALE_RE.fullmatch(default): raise HTTPException(status_code=422, detail="manifest defaultLocale 格式不正确")
-    raw_supported = manifest.get("supportedLocales") or [default]
-    if not isinstance(raw_supported, list) or len(raw_supported) > 128: raise HTTPException(status_code=422, detail="manifest supportedLocales 格式不正确")
+    raw_supported = manifest.get("supportedLocales")
+    if not isinstance(raw_supported, list) or not raw_supported or len(raw_supported) > 128: raise HTTPException(status_code=422, detail="manifest supportedLocales 格式不正确")
     supported = []
     for raw in raw_supported:
         locale = str(raw).replace("_", "-")
         if not LOCALE_RE.fullmatch(locale): raise HTTPException(status_code=422, detail="manifest supportedLocales 包含无效 locale")
         if locale not in supported: supported.append(locale)
-    if default not in supported: supported.insert(0, default)
-    raw_i18n = manifest.get("i18n") if isinstance(manifest.get("i18n"), dict) else {}
-    mode = str(raw_i18n.get("mode") or "bundled")
+    if len(supported) != len(raw_supported):
+        raise HTTPException(status_code=422, detail="manifest supportedLocales 不能重复")
+    if default not in supported:
+        raise HTTPException(status_code=422, detail="manifest defaultLocale 必须包含在 supportedLocales 中")
+    raw_i18n = manifest.get("i18n")
+    if not isinstance(raw_i18n, dict):
+        raise HTTPException(status_code=422, detail="manifest i18n 格式不正确")
+    mode = str(raw_i18n.get("mode") or "")
     if mode not in {"bundled", "runtime"}: raise HTTPException(status_code=422, detail="manifest i18n.mode 仅支持 bundled/runtime")
-    path = str(raw_i18n.get("path") or "locales/{locale}.json")
-    if ".." in PurePosixPath(path).parts or path.startswith("/"): raise HTTPException(status_code=422, detail="manifest i18n.path 不安全")
-    fallback = str(raw_i18n.get("fallbackLocale") or default).replace("_", "-")
-    if fallback not in supported: fallback = default
-    runtime = str(
-        manifest.get("runtime")
-        or (
-            "promotion-browser-bridge/v2"
-            if normalized_schema == "promotion-template/v2"
-            else "promotion-browser-bridge/v1"
-        )
-    )
-    expected_runtime = (
-        "promotion-browser-bridge/v2"
-        if normalized_schema == "promotion-template/v2"
-        else "promotion-browser-bridge/v1"
-    )
+    path = str(raw_i18n.get("path") or "")
+    if not path or ".." in PurePosixPath(path).parts or path.startswith("/"): raise HTTPException(status_code=422, detail="manifest i18n.path 不安全")
+    fallback = str(raw_i18n.get("fallbackLocale") or "").replace("_", "-")
+    if fallback not in supported:
+        raise HTTPException(status_code=422, detail="manifest i18n.fallbackLocale 必须包含在 supportedLocales 中")
+    runtime = str(manifest.get("runtime") or "")
+    expected_runtime = "promotion-browser-bridge/v2"
     if runtime != expected_runtime:
         raise HTTPException(
             status_code=422,
@@ -674,26 +669,39 @@ def _manifest_protocol(manifest: dict) -> dict:
     if not isinstance(requirements, dict):
         raise HTTPException(status_code=422, detail="manifest requirements 格式不正确")
     pairing_contract = str(
-        requirements.get("pairingContract") or "promotion-public-pairing/v1"
+        requirements.get("pairingContract") or ""
     )
     if pairing_contract != "promotion-public-pairing/v1":
         raise HTTPException(status_code=422, detail="模板请求了不支持的账号接入契约")
-    component_kit = requirements.get("componentKit")
-    if component_kit not in {None, "account-link-elements/v1"}:
-        raise HTTPException(status_code=422, detail="模板请求了不支持的白标组件库")
-    if (
-        normalized_schema == "promotion-template/v2"
-        and component_kit != "account-link-elements/v1"
-    ):
+    if "componentKit" in requirements:
         raise HTTPException(
             status_code=422,
-            detail="promotion-template/v2 必须声明 account-link-elements/v1 白标组件库",
+            detail="promotion-template/v3 不再支持平台注入 componentKit",
         )
+    if set(requirements) != {"pairingContract"}:
+        raise HTTPException(status_code=422, detail="manifest requirements 包含不支持的字段")
+    raw_components = manifest.get("components")
+    if not isinstance(raw_components, dict):
+        raise HTTPException(status_code=422, detail="manifest components 格式不正确")
+    if set(raw_components) != {"contract", "entry"}:
+        raise HTTPException(status_code=422, detail="manifest components 包含不支持的字段")
+    if raw_components.get("contract") != "account-link-elements/v1":
+        raise HTTPException(status_code=422, detail="模板请求了不支持的组件契约")
+    raw_component_entry = str(raw_components.get("entry") or "").replace("\\", "/")
+    component_entry = PurePosixPath(raw_component_entry)
+    if (
+        not raw_component_entry
+        or component_entry.is_absolute()
+        or ".." in component_entry.parts
+        or component_entry.suffix.lower() != ".js"
+    ):
+        raise HTTPException(status_code=422, detail="manifest components.entry 必须是安全的相对 JS 路径")
     return {
         **manifest,
         **({"name": name} if name is not None else {}),
         **({"description": description} if description is not None else {}),
         "schema": normalized_schema,
+        "version": version,
         "entry": entry,
         "format": bundle_format,
         "capabilities": capabilities,
@@ -701,7 +709,10 @@ def _manifest_protocol(manifest: dict) -> dict:
         "requirements": {
             **requirements,
             "pairingContract": pairing_contract,
-            **({"componentKit": component_kit} if component_kit else {}),
+        },
+        "components": {
+            "contract": "account-link-elements/v1",
+            "entry": component_entry.as_posix(),
         },
         "interactionProtection": "platform",
         "defaultLocale": default,
@@ -743,10 +754,24 @@ def _safe_bundle(raw: bytes) -> tuple[dict, str, list[tuple[str, str, bytes]], i
     normalized_values = {path[len(prefix):]: content for path, content in values.items() if path.startswith(prefix)}
     values = normalized_values
     try:
-        manifest = json.loads(values["manifest.json"].decode("utf-8")) if "manifest.json" in values else {"version": "1", "entry": "index.html", "format": "vite-dist", "defaultLocale": "en", "supportedLocales": ["en"], "i18n": {"mode": "bundled", "path": "locales/{locale}.json", "fallbackLocale": "en"}}
+        if "manifest.json" not in values:
+            raise HTTPException(status_code=422, detail="模板包必须包含 manifest.json")
+        manifest = json.loads(values["manifest.json"].decode("utf-8"))
         index_html = values["index.html"].decode("utf-8")
     except (UnicodeDecodeError, json.JSONDecodeError): raise HTTPException(status_code=422, detail="manifest.json 或 index.html 编码无效") from None
     manifest = _manifest_protocol(validate_structured_json(manifest))
+    component_entry = manifest["components"]["entry"]
+    if component_entry not in values or not values[component_entry]:
+        raise HTTPException(status_code=422, detail=f"模板包缺少组件文件：{component_entry}")
+    component_reference = re.compile(
+        rf'<script\b[^>]+src=["\']{re.escape(component_entry)}["\']',
+        re.I,
+    )
+    if not component_reference.search(index_html):
+        raise HTTPException(
+            status_code=422,
+            detail=f"index.html 未加载组件文件：{component_entry}",
+        )
     assets = [(path, mimetypes.guess_type(path)[0] or "application/octet-stream", content) for path, content in values.items() if path not in {"manifest.json", "index.html"}]
     quality_report = inspect_template_quality(
         manifest=manifest,
@@ -1037,24 +1062,6 @@ def _preview_asset_response(
             "Access-Control-Allow-Origin": "*",
             "Cross-Origin-Resource-Policy": "cross-origin",
             "Referrer-Policy": "no-referrer",
-        },
-    )
-
-
-@router.get("/api/promotion/template-kits/account-link-elements-v1.zip")
-def download_account_link_starter(_current_user: CurrentUser) -> Response:
-    root = Path(__file__).resolve().parents[1] / "template_kits" / "account_link_v1"
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in sorted(item for item in root.rglob("*") if item.is_file()):
-            archive.write(path, path.relative_to(root).as_posix())
-    return Response(
-        buffer.getvalue(),
-        media_type="application/zip",
-        headers={
-            "Content-Disposition": 'attachment; filename="account-link-capability-theme-v1.zip"',
-            "Cache-Control": "private, no-store",
-            "X-Content-Type-Options": "nosniff",
         },
     )
 
@@ -1409,12 +1416,6 @@ def preview_template(
         },
         separators=(",", ":"),
     ).replace("<", "\\u003c")
-    component_kit = (manifest.get("requirements") or {}).get("componentKit")
-    component_runtime = (
-        f'<script src="/api/public/promotion/account-link-elements.js?preview={preview_token}" defer></script>'
-        if component_kit == "account-link-elements/v1"
-        else ""
-    )
     preview_parent_origin = json.dumps(_request_origin(request))
     preview_runtime = (
         f'<script type="application/json" id="promotion-runtime-config">{preview_config}</script>'
@@ -1443,7 +1444,6 @@ def preview_template(
         "getPairingStatus:async()=>promotionPreviewResponse({data:promotionPreviewData()}),"
         "cancelPairing:async()=>{setPromotionPreviewState('cancelled');return promotionPreviewResponse({data:promotionPreviewData()})}};"
         "</script>"
-        f"{component_runtime}"
         f"<script>{LANDING_GUARD_JS}</script>"
     )
     html = _inject_after_head_open(
@@ -2257,12 +2257,6 @@ def _render_html(
         f'<script type="application/json" id="promotion-runtime-config">{config}</script>'
         '<script src="/api/public/promotion/tracker.js" defer></script>'
         '<script src="/api/public/promotion/guard.js" defer></script>'
-        + (
-            '<script src="/api/public/promotion/account-link-elements.js" defer></script>'
-            if ((template.manifest_json or {}).get("requirements") or {}).get("componentKit")
-            == "account-link-elements/v1"
-            else ""
-        )
     )
     html = re.sub(r'(["\'])/assets/', rf'\1/api/public/promotion/channels/{slug}/assets/assets/', html)
     if re.search(r"<head\b[^>]*>", html, re.I):
@@ -2355,19 +2349,6 @@ def render_fission_channel(
 def tracker_script() -> Response:
     return Response(
         (PUBLIC_RUNTIME_DIR / "promotion-tracker.js").read_bytes(),
-        media_type="application/javascript",
-        headers={
-            "Cache-Control": "public, max-age=300",
-            "Access-Control-Allow-Origin": "*",
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
-
-
-@router.get("/api/public/promotion/account-link-elements.js")
-def account_link_elements_script() -> Response:
-    return Response(
-        (PUBLIC_RUNTIME_DIR / "account-link-elements.js").read_bytes(),
         media_type="application/javascript",
         headers={
             "Cache-Control": "public, max-age=300",

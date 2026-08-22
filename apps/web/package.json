@@ -4,7 +4,6 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build:account-link-elements": "esbuild src/public-runtime/account-link-elements.ts --bundle --format=iife --target=es2020 --minify --outfile=../api/app/public/account-link-elements.js",
     "build:promotion-integration-frame": "esbuild src/public-runtime/promotion-integration-frame.ts --bundle --format=iife --target=es2020 --minify --outfile=../api/app/public/promotion-integration-frame.js",
     "build:promotion-tracker": "esbuild src/public-runtime/promotion-tracker.ts --bundle --format=iife --target=es2020 --minify --outfile=../api/app/public/promotion-tracker.js",
     "dev": "vite",
@@ -22,7 +21,6 @@
     "country-flag-icons": "^1.6.20",
     "date-fns": "^4.4.0",
     "input-otp": "^1.5.0",
-    "libphonenumber-js": "1.13.11",
     "lucide-react": "^0.468.0",
     "qrcode.react": "^4.2.0",
     "radix-ui": "^1.4.3",
