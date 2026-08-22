@@ -18,7 +18,7 @@ def _v3_manifest() -> dict:
 def test_template_quality_passes_bundled_component_template() -> None:
     html = """<!doctype html>
     <html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
-    <body><account-link-flow><account-link-locale-switcher></account-link-locale-switcher><phone-number-field></phone-number-field>
+    <body><account-link-flow><phone-number-field></phone-number-field>
     <account-link-submit></account-link-submit><pairing-code-panel></pairing-code-panel>
     <app-launch-actions></app-launch-actions><account-link-status></account-link-status>
     <account-initialization-status></account-initialization-status></account-link-flow></body></html>
@@ -33,6 +33,56 @@ def test_template_quality_passes_bundled_component_template() -> None:
     assert report["status"] == "passed"
     assert report["warnings"] == []
     assert report["metrics"]["cssGzipBytes"] > 0
+
+
+def test_template_quality_ignores_embedded_svg_namespaces() -> None:
+    html = """<!doctype html>
+    <html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+    <body><account-link-flow><phone-number-field></phone-number-field>
+    <account-link-submit></account-link-submit><pairing-code-panel></pairing-code-panel>
+    <app-launch-actions></app-launch-actions><account-link-status></account-link-status>
+    <account-initialization-status></account-initialization-status></account-link-flow></body></html>
+    """
+    report = inspect_template_quality(
+        manifest=_v3_manifest(),
+        index_html=html,
+        assets=[
+            (
+                "assets/account-link-elements.js",
+                "application/javascript",
+                b'''const flag = '<svg xmlns="http://www.w3.org/2000/svg"></svg>';''',
+            )
+        ],
+        expanded_bytes=len(html),
+    )
+
+    assert report["status"] == "passed"
+    assert report["warnings"] == []
+
+
+def test_template_quality_detects_javascript_network_loads() -> None:
+    report = inspect_template_quality(
+        manifest={"schema": "promotion-template/v1"},
+        index_html=(
+            '<html><head><meta name="viewport" '
+            'content="width=device-width, initial-scale=1"></head><body></body></html>'
+        ),
+        assets=[
+            (
+                "assets/app.js",
+                "application/javascript",
+                b'''fetch("https://api.example.test/data");''',
+            )
+        ],
+        expanded_bytes=200,
+    )
+
+    warning = next(
+        warning
+        for warning in report["warnings"]
+        if warning["code"] == "external_resource"
+    )
+    assert warning["paths"] == ["assets/app.js"]
 
 
 def test_template_quality_groups_actionable_warnings() -> None:
@@ -81,7 +131,7 @@ def test_template_quality_counts_inline_script_and_style() -> None:
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script>window.inlineValue = 'inline'</script>
     <style>body { color: #111; }</style></head><body>
-    <account-link-flow><account-link-locale-switcher></account-link-locale-switcher><phone-number-field></phone-number-field>
+    <account-link-flow><phone-number-field></phone-number-field>
     <account-link-submit></account-link-submit><pairing-code-panel></pairing-code-panel>
     <app-launch-actions></app-launch-actions><account-link-status></account-link-status>
     <account-initialization-status></account-initialization-status>

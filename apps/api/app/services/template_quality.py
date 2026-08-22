@@ -13,7 +13,6 @@ JS_EXTENSIONS = {".js", ".mjs", ".cjs"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif"}
 STANDARD_COMPONENTS = {
     "account-link-flow",
-    "account-link-locale-switcher",
     "phone-number-field",
     "account-link-submit",
     "pairing-code-panel",
@@ -21,7 +20,42 @@ STANDARD_COMPONENTS = {
     "account-link-status",
     "account-initialization-status",
 }
-EXTERNAL_URL_RE = re.compile(r"(?:https?:)?//", re.I)
+NETWORK_URL_PATTERN = r"(?:(?:https?:)?//)"
+EXTERNAL_URL_RE = re.compile(NETWORK_URL_PATTERN, re.I)
+CSS_EXTERNAL_RESOURCE_RE = re.compile(
+    rf"""
+    (?:
+        url\s*\(\s*
+        |
+        @import\s+(?:url\s*\(\s*)?
+    )
+    ["']?\s*{NETWORK_URL_PATTERN}
+    """,
+    re.I | re.X,
+)
+JS_EXTERNAL_RESOURCE_RE = re.compile(
+    rf"""
+    (?:
+        \b(?:fetch|import)\s*\(\s*
+        |
+        \b(?:new\s+)?(?:WebSocket|EventSource|Worker|SharedWorker)\s*\(\s*
+        |
+        \b(?:navigator\s*\.\s*)?sendBeacon\s*\(\s*
+        |
+        \bwindow\s*\.\s*open\s*\(\s*
+        |
+        \.\s*open\s*\(\s*["'][A-Z]+["']\s*,\s*
+        |
+        \b(?:src|href)\s*(?:=|:)\s*
+        |
+        \bsetAttribute\s*\(\s*["'](?:src|href)["']\s*,\s*
+        |
+        \b(?:window\s*\.\s*)?location(?:\s*\.\s*href)?\s*=\s*
+    )
+    ["'`]\s*{NETWORK_URL_PATTERN}
+    """,
+    re.I | re.X,
+)
 SOURCE_MAP_RE = re.compile(r"sourceMappingURL\s*=", re.I)
 
 
@@ -87,10 +121,6 @@ class _TemplateHtmlInspector(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self._text_resource_tag:
             self._text_resource_data.append(data)
-            if EXTERNAL_URL_RE.search(data):
-                self.external_references.add(
-                    f"index.html <{self._text_resource_tag}>"
-                )
 
 
 def _gzip_size(content: bytes) -> int:
@@ -184,8 +214,15 @@ def inspect_template_quality(
         )
 
     external_paths = set(inspector.external_references)
-    for path, _, content in [*js_assets, *css_assets]:
-        if EXTERNAL_URL_RE.search(content.decode("utf-8", errors="ignore")):
+    if any(JS_EXTERNAL_RESOURCE_RE.search(content) for content in inspector.inline_scripts):
+        external_paths.add("index.html <script>")
+    if any(CSS_EXTERNAL_RESOURCE_RE.search(content) for content in inspector.inline_styles):
+        external_paths.add("index.html <style>")
+    for path, _, content in js_assets:
+        if JS_EXTERNAL_RESOURCE_RE.search(content.decode("utf-8", errors="ignore")):
+            external_paths.add(path)
+    for path, _, content in css_assets:
+        if CSS_EXTERNAL_RESOURCE_RE.search(content.decode("utf-8", errors="ignore")):
             external_paths.add(path)
     if external_paths:
         warnings.append(
