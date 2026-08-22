@@ -302,10 +302,10 @@ docker compose --env-file .env.example config --quiet
 
 ### 首次配置私有仓库
 
-生产脚本使用 GitHub Token 在服务器仓库执行 `git fetch`。Compose 随后直接使用
-同一台服务器上的仓库目录作为 build context，不会再次从 GitHub 下载源码。Token
-必须具有该私人仓库的 `Contents: Read-only` 权限，不得写进 `.env`、Git URL、
-Compose 文件或仓库。
+生产脚本使用 GitHub Token 在服务器仓库执行只读 Git 操作。`/root/parloq-flow`
+始终保留为 `main` 发布控制器；选中的远程分支检出到相邻 worktree 后作为 Compose
+build context，不会在镜像构建时再次从 GitHub 下载源码。Token 必须具有该私人仓库
+的 `Contents: Read-only` 权限，不得写进 `.env`、Git URL、Compose 文件或仓库。
 
 不需要单独运行配置命令。第一次在生产服务器执行一键更新时，如果服务器还没有
 Token，脚本会在终端提示输入（输入内容不回显），并直接保存到：
@@ -329,15 +329,22 @@ Token，脚本会在终端提示输入（输入内容不回显），并直接保
 
 ### 一键更新
 
-代码推送到 `main` 后，在生产服务器的仓库根目录执行：
+代码推送到远程分支后，在生产服务器的仓库根目录执行：
 
 ```bash
 bash deploy/release-production.sh
 ```
 
-脚本直接在服务器本机使用 Token 更新 `origin/main`，然后把生产 Compose 配置
-同步到宝塔已经登记的 `parloq-flow` 目录，使用 Compose/BuildKit 缓存构建 API、
-Web 和 Baileys 网关，并执行 `docker compose up`。API 在对外启动前自动执行
+交互终端会列出远程分支，直接回车默认发布 `main`；也可以跳过菜单显式指定：
+
+```bash
+bash deploy/release-production.sh --branch codex/example-feature
+```
+
+脚本先更新 `origin/main` 以保持发布器为最新版本，再把选中分支的准确提交检出到
+`/root/parloq-flow.release-source`。生产 Compose 配置同步到宝塔已经登记的
+`parloq-flow` 目录，并使用该 worktree 和 Compose/BuildKit 缓存构建 API、Web 和
+Baileys 网关。生产 `.env` 同时记录分支名与完整 Git SHA。API 在对外启动前自动执行
 Alembic，Worker 等 API 健康后再完成更新。整个过程不调用宝塔 API、不创建计划
 任务、不导出 tar，也不上传镜像。发布完全成功后，每个应用组件保留最近 3 个
 镜像版本，运行中的镜像始终保留，同时清理超过 7 天的 BuildKit 构建缓存。脚本

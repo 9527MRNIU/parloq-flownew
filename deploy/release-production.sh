@@ -3,13 +3,14 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+RELEASE_SOURCE_DIR="${PARLOQ_RELEASE_SOURCE_DIR:-${PROJECT_DIR}.release-source}"
 COMPOSE_DIR="${PARLOQ_COMPOSE_DIR:-/www/server/panel/data/compose/parloq-flow}"
 COMPOSE_FILE="${COMPOSE_DIR}/docker-compose.yaml"
 ENV_FILE="${COMPOSE_DIR}/.env"
 GITHUB_TOKEN_FILE="${COMPOSE_DIR}/github-token"
-MANAGED_COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.production.yml"
 IMAGE_RETENTION="${PARLOQ_IMAGE_RETENTION:-3}"
 BUILD_CACHE_MAX_AGE="${PARLOQ_BUILD_CACHE_MAX_AGE:-168h}"
+ORIGINAL_ARGUMENTS=("$@")
 
 log() {
   printf '[parloq-release] %s\n' "$*"
@@ -19,6 +20,40 @@ die() {
   printf '[parloq-release] ERROR: %s\n' "$*" >&2
   exit 1
 }
+
+usage() {
+  cat <<'EOF'
+Usage: bash deploy/release-production.sh [--branch <remote-branch>]
+
+Without --branch, an interactive terminal shows the remote branches and uses main by default.
+Non-interactive runs without --branch also use main.
+EOF
+}
+
+release_branch_argument=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --branch)
+      [ "$#" -ge 2 ] || die "--branch requires a remote branch name"
+      [ -z "${release_branch_argument}" ] || die "--branch may only be provided once"
+      release_branch_argument="$2"
+      shift 2
+      ;;
+    --branch=*)
+      [ -z "${release_branch_argument}" ] || die "--branch may only be provided once"
+      release_branch_argument="${1#--branch=}"
+      [ -n "${release_branch_argument}" ] || die "--branch requires a remote branch name"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
 
 for command_name in git docker flock curl mktemp sort; do
   command -v "${command_name}" >/dev/null 2>&1 || die "${command_name} is required"
@@ -32,7 +67,15 @@ esac
 [ -d "${COMPOSE_DIR}" ] || die "BaoTa Compose directory does not exist: ${COMPOSE_DIR}"
 [ -f "${COMPOSE_FILE}" ] || die "BaoTa Compose file does not exist: ${COMPOSE_FILE}"
 [ -f "${ENV_FILE}" ] || die "production env file does not exist: ${ENV_FILE}"
-[ -f "${MANAGED_COMPOSE_FILE}" ] || die "managed Compose template is missing"
+case "${RELEASE_SOURCE_DIR}" in
+  /*) ;;
+  *) die "PARLOQ_RELEASE_SOURCE_DIR must be an absolute path" ;;
+esac
+[ "${RELEASE_SOURCE_DIR}" != "${PROJECT_DIR}" ] \
+  || die "release source directory must differ from the main checkout"
+case "${RELEASE_SOURCE_DIR}/" in
+  "${PROJECT_DIR}/"*) die "release source directory must not be inside the main checkout" ;;
+esac
 
 token_candidate=""
 askpass_file=""
@@ -49,6 +92,26 @@ cleanup_local_files() {
   fi
 }
 trap cleanup_local_files EXIT
+
+create_git_askpass() {
+  [ -z "${askpass_file}" ] || return 0
+  askpass_file="$(mktemp /tmp/parloq-git-askpass.XXXXXX)"
+  chmod 700 "${askpass_file}"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'case "$1" in' \
+    '  *Username*) printf "%s\n" "x-access-token" ;;' \
+    '  *Password*) tr -d "\r\n" <"${PARLOQ_GITHUB_TOKEN_FILE:?}" ;;' \
+    '  *) exit 1 ;;' \
+    'esac' >"${askpass_file}"
+}
+
+git_with_auth() {
+  GIT_ASKPASS="${askpass_file}" \
+    GIT_TERMINAL_PROMPT=0 \
+    PARLOQ_GITHUB_TOKEN_FILE="${GITHUB_TOKEN_FILE}" \
+    git "$@"
+}
 
 normalize_management_origin() {
   raw_origin="$1"
@@ -157,25 +220,11 @@ if [ -n "$(git ls-files --others --exclude-standard)" ]; then
   die "working tree has untracked files"
 fi
 
+create_git_askpass
+
 if [ "${PARLOQ_RELEASE_AFTER_GIT_UPDATE:-0}" != 1 ]; then
-  askpass_file="$(mktemp /tmp/parloq-git-askpass.XXXXXX)"
-  cleanup_askpass() {
-    rm -f -- "${askpass_file}"
-    askpass_file=""
-  }
-  chmod 700 "${askpass_file}"
-  printf '%s\n' \
-    '#!/usr/bin/env bash' \
-    'case "$1" in' \
-    '  *Username*) printf "%s\n" "x-access-token" ;;' \
-    '  *Password*) tr -d "\r\n" <"${PARLOQ_GITHUB_TOKEN_FILE:?}" ;;' \
-    '  *) exit 1 ;;' \
-    'esac' >"${askpass_file}"
   fetch_main() {
-    GIT_ASKPASS="${askpass_file}" \
-      GIT_TERMINAL_PROMPT=0 \
-      PARLOQ_GITHUB_TOKEN_FILE="${GITHUB_TOKEN_FILE}" \
-      git fetch origin main
+    git_with_auth fetch --no-tags origin main
   }
   if ! fetch_main; then
     log "Git 更新失败，Token 可能已失效，请重新输入后重试。"
@@ -183,21 +232,163 @@ if [ "${PARLOQ_RELEASE_AFTER_GIT_UPDATE:-0}" != 1 ]; then
     fetch_main || die "could not fetch origin/main with the configured GitHub token"
   fi
   git merge --ff-only origin/main
-  cleanup_askpass
+  rm -f -- "${askpass_file}"
+  askpass_file=""
   export PARLOQ_RELEASE_AFTER_GIT_UPDATE=1
-  exec bash "${SCRIPT_DIR}/release-production.sh"
+  exec bash "${SCRIPT_DIR}/release-production.sh" "${ORIGINAL_ARGUMENTS[@]}"
 fi
 
-head_sha="$(git rev-parse HEAD)"
-[ "${head_sha}" = "$(git rev-parse origin/main)" ] || die "HEAD is not equal to origin/main"
-short_sha="$(git rev-parse --short=12 HEAD)"
-api_image="parloq-flow-api-server:${short_sha}"
-web_image="parloq-flow-web-server:${short_sha}"
-gateway_image="parloq-flow-wa-gateway-server:${short_sha}"
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] \
+  || die "HEAD is not equal to origin/main"
+
+load_remote_branches() {
+  local remote_output=""
+  local branch_name=""
+  local ref_name=""
+  local _object_id=""
+  local found_main=0
+  local discovered_branches=()
+  local sorted_branches=()
+
+  if ! remote_output="$(git_with_auth ls-remote --heads origin)"; then
+    die "could not list remote branches with the configured GitHub token"
+  fi
+  while IFS=$'\t' read -r _object_id ref_name; do
+    case "${ref_name}" in
+      refs/heads/*) branch_name="${ref_name#refs/heads/}" ;;
+      *) continue ;;
+    esac
+    git check-ref-format --branch "${branch_name}" >/dev/null 2>&1 || continue
+    discovered_branches+=("${branch_name}")
+    [ "${branch_name}" != "main" ] || found_main=1
+  done <<<"${remote_output}"
+
+  [ "${found_main}" = 1 ] || die "origin/main was not found in the remote branch list"
+  mapfile -t sorted_branches < <(printf '%s\n' "${discovered_branches[@]}" | LC_ALL=C sort -u)
+  REMOTE_BRANCHES=("main")
+  for branch_name in "${sorted_branches[@]}"; do
+    [ "${branch_name}" = "main" ] || REMOTE_BRANCHES+=("${branch_name}")
+  done
+}
+
+remote_branch_exists() {
+  local expected="$1"
+  local branch_name=""
+  for branch_name in "${REMOTE_BRANCHES[@]}"; do
+    [ "${branch_name}" != "${expected}" ] || return 0
+  done
+  return 1
+}
+
+select_release_branch() {
+  local selection=""
+  local branch_name=""
+  local choice_number=1
+
+  if [ -n "${release_branch_argument}" ]; then
+    remote_branch_exists "${release_branch_argument}" \
+      || die "remote branch does not exist: ${release_branch_argument}"
+    release_branch="${release_branch_argument}"
+    return
+  fi
+  if [ ! -t 0 ]; then
+    release_branch="main"
+    log "非交互运行未指定 --branch，默认发布 main。"
+    return
+  fi
+
+  printf '可发布的远程分支：\n'
+  for branch_name in "${REMOTE_BRANCHES[@]}"; do
+    if [ "${branch_name}" = "main" ]; then
+      printf '  %d) %s（默认）\n' "${choice_number}" "${branch_name}"
+    else
+      printf '  %d) %s\n' "${choice_number}" "${branch_name}"
+    fi
+    choice_number=$((choice_number + 1))
+  done
+  if ! IFS= read -r -p '请选择分支编号或输入分支名，直接回车发布 main: ' selection; then
+    printf '\n'
+    die "branch selection was cancelled"
+  fi
+  if [ -z "${selection}" ]; then
+    release_branch="main"
+    return
+  fi
+  if remote_branch_exists "${selection}"; then
+    release_branch="${selection}"
+    return
+  fi
+  choice_number=1
+  for branch_name in "${REMOTE_BRANCHES[@]}"; do
+    if [ "${selection}" = "${choice_number}" ]; then
+      release_branch="${branch_name}"
+      return
+    fi
+    choice_number=$((choice_number + 1))
+  done
+  die "invalid remote branch selection: ${selection}"
+}
+
+resolve_common_git_dir() {
+  local checkout_dir="$1"
+  local common_dir=""
+  common_dir="$(git -C "${checkout_dir}" rev-parse --git-common-dir)" || return 1
+  case "${common_dir}" in
+    /*) (cd "${common_dir}" && pwd -P) ;;
+    *) (cd "${checkout_dir}/${common_dir}" && pwd -P) ;;
+  esac
+}
+
+prepare_release_source() {
+  local project_common_dir=""
+  local release_common_dir=""
+
+  if [ -e "${RELEASE_SOURCE_DIR}" ]; then
+    [ -d "${RELEASE_SOURCE_DIR}" ] || die "release source path is not a directory: ${RELEASE_SOURCE_DIR}"
+    [ ! -L "${RELEASE_SOURCE_DIR}" ] || die "release source directory must not be a symlink"
+    project_common_dir="$(resolve_common_git_dir "${PROJECT_DIR}")" \
+      || die "could not resolve the main checkout Git directory"
+    release_common_dir="$(resolve_common_git_dir "${RELEASE_SOURCE_DIR}")" \
+      || die "existing release source is not a Git worktree: ${RELEASE_SOURCE_DIR}"
+    [ "${project_common_dir}" = "${release_common_dir}" ] \
+      || die "existing release source belongs to a different Git repository"
+    [ -z "$(git -C "${RELEASE_SOURCE_DIR}" status --porcelain --untracked-files=all)" ] \
+      || die "release source worktree has local changes: ${RELEASE_SOURCE_DIR}"
+    git -C "${RELEASE_SOURCE_DIR}" switch --detach "${target_sha}"
+  else
+    git worktree add --detach "${RELEASE_SOURCE_DIR}" "${target_sha}"
+  fi
+  [ "$(git -C "${RELEASE_SOURCE_DIR}" rev-parse HEAD)" = "${target_sha}" ] \
+    || die "release source HEAD does not match the selected remote branch"
+  MANAGED_COMPOSE_FILE="${RELEASE_SOURCE_DIR}/deploy/docker-compose.production.yml"
+  [ -f "${MANAGED_COMPOSE_FILE}" ] || die "selected branch is missing the managed Compose template"
+}
+
+load_remote_branches
+select_release_branch
 
 lock_file="${COMPOSE_DIR}/.release.lock"
 exec 9>"${lock_file}"
 flock -n 9 || die "another Parloq Flow update is already running"
+
+target_ref="refs/remotes/origin/${release_branch}"
+target_refspec="+refs/heads/${release_branch}:${target_ref}"
+git_with_auth fetch --no-tags origin "${target_refspec}" \
+  || die "could not fetch origin/${release_branch} with the configured GitHub token"
+target_sha="$(git rev-parse --verify "${target_ref}^{commit}")" \
+  || die "could not resolve origin/${release_branch} to a commit"
+log "已选择远程分支 ${release_branch}，目标提交 ${target_sha}。"
+if [ "${release_branch}" != "main" ] \
+  && ! git merge-base --is-ancestor origin/main "${target_sha}"; then
+  log "WARNING: ${release_branch} 没有包含当前 main 的全部提交，将按所选分支原样发布。"
+fi
+prepare_release_source
+
+head_sha="${target_sha}"
+short_sha="${head_sha:0:12}"
+api_image="parloq-flow-api-server:${short_sha}"
+web_image="parloq-flow-web-server:${short_sha}"
+gateway_image="parloq-flow-wa-gateway-server:${short_sha}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 env_backup="${ENV_FILE}.backup-server-${short_sha}-${timestamp}"
@@ -241,7 +432,8 @@ update_env() {
   fi
 }
 
-update_env PARLOQ_SOURCE_ROOT "${PROJECT_DIR}"
+update_env PARLOQ_SOURCE_ROOT "${RELEASE_SOURCE_DIR}"
+update_env PARLOQ_GIT_BRANCH "${release_branch}"
 update_env PARLOQ_GIT_REF "${head_sha}"
 update_env PARLOQ_APP_PULL_POLICY build
 update_env PARLOQ_API_IMAGE "${api_image}"
@@ -260,7 +452,7 @@ mv "${env_candidate}" "${ENV_FILE}"
 mv "${compose_candidate}" "${COMPOSE_FILE}"
 
 cd "${COMPOSE_DIR}"
-log "服务器开始构建 ${short_sha} 并更新宝塔 Compose 项目。"
+log "服务器开始构建 ${release_branch} @ ${short_sha} 并更新宝塔 Compose 项目。"
 docker compose \
   --env-file "${ENV_FILE}" \
   -f "${COMPOSE_FILE}" \
@@ -370,6 +562,6 @@ else
   log "WARNING: BuildKit 缓存清理失败，不影响本次发布结果。"
 fi
 
-log "${head_sha} 构建和更新完成。"
+log "${release_branch} @ ${head_sha} 构建和更新完成。"
 log "配置备份：${env_backup}"
 log "Compose 备份：${compose_backup}"

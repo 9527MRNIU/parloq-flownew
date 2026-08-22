@@ -113,10 +113,23 @@ bash deploy/release-production.sh
 管理站点可使用宝塔默认的 `Host=127.0.0.1` 回环反代；容器会使用保存的管理域名
 完成内部路由。客户推广域名仍必须保留原始 Host，不能使用该管理入口标记。
 
-脚本使用 Token 执行 `git fetch`，以 fast-forward 方式更新服务器仓库到
-`origin/main`，然后以服务器本机 `/root/parloq-flow` 的源码目录作为 build
-context，使用 BuildKit 缓存构建三个镜像并直接更新宝塔登记的 Compose 项目。
-全程不调用宝塔 API、不重复下载构建源码，也不创建宝塔计划任务。
+交互终端运行时，脚本会从 GitHub 读取当前真实存在的远程分支并显示编号菜单，
+直接回车默认发布 `main`。也可以显式指定分支：
+
+```bash
+bash deploy/release-production.sh --branch codex/example-feature
+```
+
+非交互运行没有提供 `--branch` 时同样默认发布 `main`。不存在的分支会在构建前被
+拒绝；目标分支没有包含当前 `main` 的全部提交时会显示警告，但仍按所选分支的
+准确提交发布。
+
+脚本使用 Token 先以 fast-forward 方式更新服务器主仓库到 `origin/main`，主仓库
+始终作为最新发布控制器。所选远程分支以 detached HEAD 检出到固定的相邻 worktree
+`/root/parloq-flow.release-source`，Compose 从该目录构建三个镜像并直接更新宝塔
+登记的 Compose 项目。生产 `.env` 会记录 `PARLOQ_GIT_BRANCH` 和完整的
+`PARLOQ_GIT_REF`；镜像标签及 revision 校验继续使用不可变 Git SHA。全程不调用
+宝塔 API、不重复下载构建源码，也不创建宝塔计划任务。
 
 发布完成前，脚本会同时验证容器健康、配置域名的 SPA 首页、登录安全接口以及宝塔
 默认转发 Host 模式。任一检查失败都会触发原镜像和 Compose 配置恢复。

@@ -32,6 +32,27 @@ class ProductionReleaseScriptTests(unittest.TestCase):
         )
         self.assertEqual(checked.returncode, 0, checked.stderr)
 
+    def test_release_cli_documents_branch_selection(self) -> None:
+        checked = subprocess.run(
+            ["bash", str(SCRIPT), "--help"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertIn("--branch <remote-branch>", checked.stdout)
+        self.assertIn("uses main by default", checked.stdout)
+
+    def test_release_cli_rejects_duplicate_branch_arguments(self) -> None:
+        checked = subprocess.run(
+            ["bash", str(SCRIPT), "--branch", "main", "--branch", "feature"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertIn("--branch may only be provided once", checked.stderr)
+
     def test_release_has_no_baota_api_or_ssh_dependency(self) -> None:
         self.assertNotIn("baota_api.py", self.script)
         self.assertNotIn("BAOTA_", self.script)
@@ -68,6 +89,34 @@ class ProductionReleaseScriptTests(unittest.TestCase):
         self.assertNotIn("https://github.com", self.compose)
         self.assertNotIn("GIT_AUTH_TOKEN", self.compose)
         self.assertIn("up -d --build --remove-orphans --wait", self.script)
+
+    def test_release_selects_only_real_remote_branches(self) -> None:
+        self.assertIn("git_with_auth ls-remote --heads origin", self.script)
+        self.assertIn('REMOTE_BRANCHES=("main")', self.script)
+        self.assertIn("可发布的远程分支", self.script)
+        self.assertIn('release_branch="main"', self.script)
+        self.assertIn("remote branch does not exist", self.script)
+        self.assertIn('git check-ref-format --branch "${branch_name}"', self.script)
+        self.assertIn('target_refspec="+refs/heads/${release_branch}:${target_ref}"', self.script)
+
+    def test_release_keeps_main_as_controller_and_builds_from_a_worktree(self) -> None:
+        self.assertIn('production updates must run from main', self.script)
+        self.assertIn('git merge --ff-only origin/main', self.script)
+        self.assertIn('git worktree add --detach "${RELEASE_SOURCE_DIR}"', self.script)
+        self.assertIn('git -C "${RELEASE_SOURCE_DIR}" switch --detach', self.script)
+        self.assertIn(
+            'update_env PARLOQ_SOURCE_ROOT "${RELEASE_SOURCE_DIR}"', self.script
+        )
+        self.assertIn(
+            'MANAGED_COMPOSE_FILE="${RELEASE_SOURCE_DIR}/deploy/docker-compose.production.yml"',
+            self.script,
+        )
+
+    def test_release_records_selected_branch_and_immutable_commit(self) -> None:
+        self.assertIn('update_env PARLOQ_GIT_BRANCH "${release_branch}"', self.script)
+        self.assertIn('update_env PARLOQ_GIT_REF "${head_sha}"', self.script)
+        self.assertIn('head_sha="${target_sha}"', self.script)
+        self.assertIn('revision="$(docker inspect', self.script)
 
     def test_release_is_isolated_from_waba_and_preserves_data(self) -> None:
         self.assertNotIn("/data/waba", self.script)
