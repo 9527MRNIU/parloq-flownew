@@ -46,16 +46,12 @@ from app.models import (
 from app.security import utcnow
 from app.serializers import iso
 from app.services.promotion_integrations import (
-    GENERATED_IFRAME_ENTRY,
-    HTML_EXTENSIONS,
     MAX_INTEGRATION_ZIP,
     domain_is_ready,
-    generated_iframe_document,
     integration_feedback_contract,
     integration_source_urls,
     parse_integration_package,
     replace_integration_package,
-    uses_generated_iframe_document,
     verify_integration_embed_token,
 )
 from app.services.promotion_event_rate_limits import (
@@ -1145,60 +1141,50 @@ def public_integration_asset(
     normalized = PurePosixPath(asset_path.replace("\\", "/"))
     if normalized.is_absolute() or ".." in normalized.parts or not normalized.parts:
         raise HTTPException(status_code=404)
-    normalized_path = normalized.as_posix()
+    asset = db.scalar(
+        select(PromotionIntegrationAsset).where(
+            PromotionIntegrationAsset.integration_id == item.id,
+            PromotionIntegrationAsset.path == normalized.as_posix(),
+        )
+    )
+    if asset is None:
+        raise HTTPException(status_code=404)
+    content = asset.content
+    feedback_enabled, _ = integration_feedback_contract(item)
+    iframe_entry = next(
+        (
+            str(entrypoint.get("path") or "")
+            for entrypoint in item.entrypoints_json or []
+            if entrypoint.get("path")
+        ),
+        "",
+    )
     if (
-        normalized_path == GENERATED_IFRAME_ENTRY
-        and uses_generated_iframe_document(item)
+        feedback_enabled
+        and item.integration_type == "iframe"
+        and asset.path == iframe_entry
     ):
-        content = generated_iframe_document(item, domain).encode("utf-8")
-        media_type = "text/html"
-    else:
-        asset = db.scalar(
-            select(PromotionIntegrationAsset).where(
-                PromotionIntegrationAsset.integration_id == item.id,
-                PromotionIntegrationAsset.path == normalized_path,
-            )
+        try:
+            document = content.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(
+                status_code=500,
+                detail="iframe 入口不是 UTF-8 HTML",
+            ) from None
+        runtime = (
+            '<script src="/api/public/promotion/integrations/runtime.js" '
+            f'data-integration-id="{entity_id(item)}"></script>'
         )
-        if asset is None:
-            raise HTTPException(status_code=404)
-        content = asset.content
-        media_type = asset.content_type
-        feedback_enabled, _ = integration_feedback_contract(item)
-        iframe_entry = next(
-            (
-                str(entrypoint.get("path") or "")
-                for entrypoint in item.entrypoints_json or []
-                if entrypoint.get("path")
-            ),
-            "",
+        head = re.search(r"<head\b[^>]*>", document, re.I)
+        document = (
+            document[: head.end()] + runtime + document[head.end() :]
+            if head
+            else runtime + document
         )
-        if (
-            feedback_enabled
-            and item.integration_type == "iframe"
-            and asset.path == iframe_entry
-            and PurePosixPath(asset.path).suffix.lower() in HTML_EXTENSIONS
-        ):
-            try:
-                document = content.decode("utf-8")
-            except UnicodeDecodeError:
-                raise HTTPException(
-                    status_code=500,
-                    detail="iframe 入口不是 UTF-8 HTML",
-                ) from None
-            runtime = (
-                '<script src="/api/public/promotion/integrations/runtime.js" '
-                f'data-integration-id="{entity_id(item)}"></script>'
-            )
-            head = re.search(r"<head\b[^>]*>", document, re.I)
-            document = (
-                document[: head.end()] + runtime + document[head.end() :]
-                if head
-                else runtime + document
-            )
-            content = document.encode("utf-8")
+        content = document.encode("utf-8")
     return Response(
         content,
-        media_type=media_type,
+        media_type=asset.content_type,
         headers={
             "Cache-Control": "public, max-age=31536000, immutable",
             "X-Content-Type-Options": "nosniff",

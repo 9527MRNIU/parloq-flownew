@@ -1114,9 +1114,9 @@ export default function PromotionIntegrationsPage() {
           </>
           {!editing ? (
             <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
-              ZIP 有唯一 HTML 入口时自动识别为 iframe；没有 HTML 时，所有 JS/MJS
-              默认识别为 JavaScript 集成。纯 JS 如需在 iframe 内运行，请在
-              integration.json 中设置 type: iframe，并用 entry 或 entries 声明入口。
+              iframe 集成包必须包含一个 HTML/HTM 入口。ZIP 只有一个 HTML
+              时会自动识别；存在多个 HTML 时，请在 integration.json 中用 entry
+              指定入口。只有 JS/MJS 的包只能作为 JavaScript 集成导入。
             </div>
           ) : null}
         </div>

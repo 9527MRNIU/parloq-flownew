@@ -32,6 +32,7 @@ rm -f -- \
   "$importable_dir/ds_net.js" \
   "$importable_dir/ds_net_native.js" \
   "$importable_dir/bootstrap.js" \
+  "$importable_dir/index.html" \
   "$importable_dir/integration.json"
 rmdir -- "$importable_dir" 2>/dev/null || true
 rm -f -- \

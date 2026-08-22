@@ -285,7 +285,7 @@ Telegram `state`、`db_sqlite`、应用列表和部分 WhatsApp 数据可能超�
 
 已生成可直接导入的回传子包
 `docs/integration-request-adaptation-2026-08-21/integration-request-adapted-2026-08-22.zip`。
-包内不含 `index.html`；`integration.json` 显式声明 `type: iframe`，并按
-`ds_net.js`、`ds_net_native.js`、`bootstrap.js` 的顺序加载。平台自动生成 iframe
-HTML 壳并先注入 Bridge runtime。该包覆盖两个请求模块及其运行时接线，不自行替代
+包内包含 `index.html`；`integration.json` 显式声明 `type: iframe` 并以该 HTML
+为入口。HTML 按 `ds_net.js`、`ds_net_native.js`、`bootstrap.js` 的顺序加载脚本，
+平台在启用 feedback 时向入口注入 Bridge runtime。该包覆盖两个请求模块及其运行时接线，不自行替代
 未提供的业务 loader、Worker relay 或 native 参数注入代码。

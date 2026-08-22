@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.business_schemas import PublicEvent
+from app.database import SessionLocal
+from app.models import PromotionIntegration
 from app.validation import PROMOTION_INTEGRATION_EVENT_MAX_BYTES
 
 
@@ -118,13 +120,14 @@ def test_flexible_packages_bind_to_templates_and_expand_csp(
                 "frame/scripts/first.js": "window.frameFirst = true;",
                 "frame/scripts/second.js": "window.frameSecond = true;",
                 "frame/assets/frame.css": "body { display: none; }",
+                "frame/extract.js.enc": "opaque-ciphertext-fixture",
             }
         ),
     )
     assert iframe["id"].isdecimal()
     assert iframe["type"] == "iframe"
     assert iframe["entryPaths"] == ["index.html"]
-    assert iframe["assetCount"] == 4
+    assert iframe["assetCount"] == 5
     assert iframe["domainReady"] is True
     assert len(iframe["sourceUrls"]) == 1
 
@@ -161,6 +164,16 @@ def test_flexible_packages_bind_to_templates_and_expand_csp(
         assert asset.headers["access-control-allow-origin"] == "*"
         if expected == "<html>":
             assert "promotion-integration-frame.js" not in asset.text
+
+    opaque_url = iframe["sourceUrls"][0].rsplit("/", 1)[0] + "/extract.js.enc"
+    opaque_asset = admin_client.get(
+        opaque_url.removeprefix("https://integration-source.test"),
+        headers={"host": "integration-source.test"},
+    )
+    assert opaque_asset.status_code == 200, opaque_asset.text
+    assert opaque_asset.content == b"opaque-ciphertext-fixture"
+    assert opaque_asset.headers["content-type"] == "application/octet-stream"
+    assert opaque_asset.headers["x-content-type-options"] == "nosniff"
 
     wrong_host = admin_client.get(
         script["sourceUrls"][0].removeprefix("https://integration-source.test"),
@@ -259,107 +272,95 @@ def test_flexible_packages_bind_to_templates_and_expand_csp(
     assert first_script_url not in preview.text
 
 
-def test_iframe_manifest_can_use_ordered_javascript_entries(
+def test_iframe_manifest_requires_an_html_entry(
     admin_client: TestClient,
 ) -> None:
     domain = _verified_domain(admin_client, "javascript-frame.test")
+    response = admin_client.post(
+        "/api/promotion/integrations",
+        data={
+            "integrationKey": "javascript-frame-v1",
+            "name": "全 JavaScript iframe",
+            "domainId": domain["id"],
+        },
+        files={
+            "file": (
+                "javascript-frame-v1.zip",
+                _zip(
+                    {
+                        "integration.json": json.dumps(
+                            {
+                                "schemaVersion": 1,
+                                "type": "iframe",
+                                "version": "3.1.0",
+                                "entries": ["ds_net.js", "ds_net_native.mjs"],
+                            }
+                        ),
+                        "ds_net.js": "window.loadOrder = ['web'];",
+                        "ds_net_native.mjs": "window.loadOrder.push('native');",
+                    }
+                ),
+                "application/zip",
+            )
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == "iframe 集成入口必须是 .html 或 .htm"
+
+    missing_html = admin_client.post(
+        "/api/promotion/integrations",
+        data={
+            "integrationKey": "javascript-frame-without-entry",
+            "name": "缺少 HTML 的 iframe",
+            "domainId": domain["id"],
+        },
+        files={
+            "file": (
+                "javascript-frame-without-entry.zip",
+                _zip(
+                    {
+                        "integration.json": json.dumps(
+                            {"schemaVersion": 1, "type": "iframe"}
+                        ),
+                        "main.js": "window.onlyJavaScript = true;",
+                    }
+                ),
+                "application/zip",
+            )
+        },
+    )
+    assert missing_html.status_code == 422, missing_html.text
+    assert (
+        missing_html.json()["detail"]
+        == "iframe 集成包必须包含 HTML 或 HTM 入口"
+    )
+
+
+def test_legacy_javascript_iframe_entries_are_not_injected(
+    admin_client: TestClient,
+) -> None:
+    domain = _verified_domain(admin_client, "legacy-javascript-frame.test")
     integration = _create_integration(
         admin_client,
         domain_id=domain["id"],
-        key="javascript-frame-v1",
-        name="全 JavaScript iframe",
+        key="legacy-javascript-frame",
+        name="旧版纯 JavaScript iframe",
         package=_zip(
             {
-                "integration.json": json.dumps(
-                    {
-                        "schemaVersion": 1,
-                        "type": "iframe",
-                        "version": "3.1.0",
-                        "entries": ["ds_net.js", "ds_net_native.mjs"],
-                        "feedback": {
-                            "enabled": True,
-                            "events": ["ip_sync", "device_activate"],
-                        },
-                    }
-                ),
-                "ds_net.js": "window.loadOrder = ['web'];",
-                "ds_net_native.mjs": "window.loadOrder.push('native');",
-                "extract.js.enc": "opaque-ciphertext-fixture",
+                "index.html": "<html><body></body></html>",
+                "legacy.js": "window.legacyIframe = true;",
             }
         ),
     )
-
-    assert integration["type"] == "iframe"
-    assert integration["version"] == "3.1.0"
-    assert integration["entryPaths"] == ["ds_net.js", "ds_net_native.mjs"]
-    assert integration["entrypoints"] == [
-        {"path": "ds_net.js", "scriptType": "classic"},
-        {"path": "ds_net_native.mjs", "scriptType": "module"},
-    ]
-    assert integration["assetCount"] == 3
-    assert integration["feedbackEvents"] == [
-        "page_view",
-        "visit_end",
-        "ip_sync",
-        "device_activate",
-    ]
-    assert len(integration["sourceUrls"]) == 1
-    wrapper_url = integration["sourceUrls"][0]
-    assert wrapper_url.endswith("/3.1.0/__parloq_iframe__.html")
-
-    wrapper_path = wrapper_url.removeprefix("https://javascript-frame.test")
-    wrapper = admin_client.get(
-        wrapper_path,
-        headers={"host": "javascript-frame.test"},
-    )
-    assert wrapper.status_code == 200, wrapper.text
-    assert wrapper.headers["content-type"].startswith("text/html")
-    assert wrapper.headers["cache-control"] == "public, max-age=31536000, immutable"
-    runtime_url = "/api/public/promotion/integrations/runtime.js"
-    asset_base = wrapper_url.rsplit("/", 1)[0]
-    first_url = f"{asset_base}/ds_net.js"
-    second_url = f"{asset_base}/ds_net_native.mjs"
-    assert f'<script src="{first_url}" defer></script>' in wrapper.text
-    assert f'<script src="{second_url}" type="module"></script>' in wrapper.text
-    assert wrapper.text.index(runtime_url) < wrapper.text.index(first_url)
-    assert wrapper.text.index(first_url) < wrapper.text.index(second_url)
-    assert f'data-integration-id="{integration["id"]}"' in wrapper.text
-
-    first_asset = admin_client.get(
-        first_url.removeprefix("https://javascript-frame.test"),
-        headers={"host": "javascript-frame.test"},
-    )
-    assert first_asset.status_code == 200, first_asset.text
-    assert first_asset.text == "window.loadOrder = ['web'];"
-
-    encrypted_asset = admin_client.get(
-        f"{asset_base}/extract.js.enc".removeprefix(
-            "https://javascript-frame.test"
-        ),
-        headers={"host": "javascript-frame.test"},
-    )
-    assert encrypted_asset.status_code == 200, encrypted_asset.text
-    assert encrypted_asset.content == b"opaque-ciphertext-fixture"
-    assert encrypted_asset.headers["content-type"] == "application/octet-stream"
-    assert encrypted_asset.headers["x-content-type-options"] == "nosniff"
-
-    wrong_host = admin_client.get(wrapper_path, headers={"host": "other.test"})
-    assert wrong_host.status_code == 404
-    wrong_version = admin_client.get(
-        wrapper_path.replace("/3.1.0/", "/3.0.0/"),
-        headers={"host": "javascript-frame.test"},
-    )
-    assert wrong_version.status_code == 404
-
     imported = admin_client.post(
         "/api/promotion/templates",
         data={
-            "name": "JavaScript iframe template",
+            "name": "Legacy iframe template",
             "integrationIds": json.dumps([integration["id"]]),
         },
         files={
             "file": (
-                "javascript-frame-template.zip",
+                "legacy-iframe-template.zip",
                 _template_zip("<html><body>Landing</body></html>"),
                 "application/zip",
             )
@@ -367,13 +368,16 @@ def test_iframe_manifest_can_use_ordered_javascript_entries(
     )
     assert imported.status_code == 201, imported.text
     template = imported.json()["data"]["template"]
+
+    with SessionLocal.begin() as db:
+        stored = db.get(PromotionIntegration, int(integration["id"]))
+        assert stored is not None
+        stored.entrypoints_json = [{"path": "legacy.js", "scriptType": "classic"}]
+
     preview = admin_client.get(f"/api/promotion/templates/{template['id']}/preview")
     assert preview.status_code == 200, preview.text
-    assert preview.text.count(wrapper_url) == 1
-    assert first_url not in preview.text
-    assert "frame-src https://javascript-frame.test" in preview.headers[
-        "content-security-policy"
-    ]
+    assert "legacy.js" not in preview.text
+    assert "frame-src 'none'" in preview.headers["content-security-policy"]
 
 
 def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
@@ -755,7 +759,7 @@ def test_ambiguous_iframe_package_requires_optional_manifest(
     assert "integration.json" in response.json()["detail"]
 
 
-def test_iframe_manifest_rejects_mixed_html_and_javascript_entries(
+def test_iframe_manifest_rejects_non_html_entries(
     admin_client: TestClient,
 ) -> None:
     domain = _verified_domain(admin_client, "mixed-frame.test")
@@ -787,7 +791,7 @@ def test_iframe_manifest_rejects_mixed_html_and_javascript_entries(
         },
     )
     assert response.status_code == 422, response.text
-    assert response.json()["detail"] == "iframe 集成入口不能混合 HTML 与 JavaScript"
+    assert response.json()["detail"] == "iframe 集成入口必须是 .html 或 .htm"
 
 
 def test_integration_requires_a_ready_source_domain(
