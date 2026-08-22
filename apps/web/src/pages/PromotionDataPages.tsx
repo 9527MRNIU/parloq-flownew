@@ -17,6 +17,10 @@ import {
 } from "recharts";
 import { apiRequest, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import {
+  CountryDisplay,
+  countryDisplayName,
+} from "../components/country-display";
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
 import {
   Button,
@@ -522,7 +526,10 @@ export function PromotionChannelStatisticsPage() {
               onValueChange={setCountryCode}
               options={[
                 { value: "all", label: "全部国家" },
-                ...countries.map((value) => ({ value, label: value })),
+                ...countries.map((value) => ({
+                  value,
+                  label: `${countryDisplayName(value)} · ${value}`,
+                })),
               ]}
             />
             <MultiSelect
@@ -569,7 +576,8 @@ export function PromotionChannelStatisticsPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead className="expand-column" />
-                  <TableHead adaptive>渠道 / 国家</TableHead>
+                  <TableHead adaptive>渠道</TableHead>
+                  <TableHead>国家</TableHead>
                   <TableHead>登录请求（次数 / 人数）</TableHead>
                   <TableHead>登录成功（次数 / 人数）</TableHead>
                   <TableHead>请求登录率</TableHead>
@@ -604,8 +612,10 @@ export function PromotionChannelStatisticsPage() {
                         <div className="cell-main">
                           <strong>{row.name}</strong>
                           <span>{row.id || "等待 ID 迁移"}</span>
-                          <span>{row.countryCode || "-"}</span>
                         </div>
+                      </TableCell>
+                      <TableCell>
+                        <CountryDisplay code={row.countryCode} />
                       </TableCell>
                       <TableCell>
                         <div className="cell-main"><strong>{row.loginRequest.toLocaleString()} 次</strong><span>{row.loginRequestUv.toLocaleString()} 人</span></div>
@@ -624,7 +634,7 @@ export function PromotionChannelStatisticsPage() {
                   );
                   const detail = open ? (
                     <TableRow key={`${row.readKey}-detail`} className="table-detail-row">
-                      <TableCell colSpan={8 + visibleColumns.length}>
+                      <TableCell colSpan={9 + visibleColumns.length}>
                         <div className="p-2">
                           <div className="mb-2 flex items-center justify-between"><strong>每日广告成本明细</strong><span className="text-xs text-muted-foreground">修改后 600ms 自动保存</span></div>
                           {row.daily.length ? row.daily.map((item) => (

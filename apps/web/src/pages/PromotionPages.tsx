@@ -6,7 +6,6 @@ import {
   DownloadIcon,
   EyeIcon,
   ExternalLinkIcon,
-  Globe2Icon,
   LoaderCircleIcon,
   MonitorIcon,
   PauseIcon,
@@ -20,16 +19,13 @@ import {
   Trash2Icon,
   UploadCloudIcon,
 } from "lucide-react";
-import * as CountryFlags from "country-flag-icons/react/3x2";
 import {
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type ComponentType,
   type FormEvent,
-  type SVGProps,
 } from "react";
 import type { IconType } from "react-icons";
 import {
@@ -83,6 +79,10 @@ import {
   DrawerFormField,
   DrawerFormSection,
 } from "../components/drawer-form";
+import {
+  CountryDisplay,
+  countryDisplayName,
+} from "../components/country-display";
 import { useAuth } from "../auth/AuthContext";
 import { countryOptions } from "../lib/countries";
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
@@ -102,13 +102,6 @@ import {
 
 const CHANNEL_RANDOM_CODE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
 
-const COUNTRY_NAME_BY_CODE = new Map(
-  countryOptions.map((option) => [
-    option.value,
-    option.label.split(" · ")[0] || option.value,
-  ]),
-);
-
 const PLATFORM_CONFIG: Record<
   string,
   { label: string; icon: IconType; color: string }
@@ -120,32 +113,6 @@ const PLATFORM_CONFIG: Record<
   tiktok: { label: "TikTok", icon: SiTiktok, color: "#000000" },
   youtube: { label: "YouTube", icon: SiYoutube, color: "#ff0000" },
 };
-
-function countryDisplayName(code: string): string {
-  const normalized = code.trim().toUpperCase();
-  return COUNTRY_NAME_BY_CODE.get(normalized) || normalized || "-";
-}
-
-function CountryFlag({ code }: { code: string }) {
-  const normalized = code.trim().toUpperCase();
-  const Flag = (
-    CountryFlags as unknown as Record<
-      string,
-      ComponentType<SVGProps<SVGSVGElement>>
-    >
-  )[normalized];
-
-  if (!Flag) {
-    return <Globe2Icon aria-hidden="true" className="h-4 w-6 text-muted-foreground" />;
-  }
-
-  return (
-    <Flag
-      aria-hidden="true"
-      className="block h-4 w-6 shrink-0 overflow-hidden rounded-[2px] shadow-sm ring-1 ring-black/10"
-    />
-  );
-}
 
 function platformDisplayName(platform: string): string {
   const normalized = platform.trim().toLowerCase();
@@ -2986,10 +2953,7 @@ export function PromotionChannelsPage() {
                     />
                   </TableCell>
                   <TableCell>
-                    <div className="flex min-w-max items-center justify-center gap-2">
-                      <CountryFlag code={row.countryCode} />
-                      <span>{countryDisplayName(row.countryCode)}</span>
-                    </div>
+                    <CountryDisplay code={row.countryCode} />
                   </TableCell>
                   <TableCell>
                     <div className="flex min-w-max items-center justify-center gap-2">
