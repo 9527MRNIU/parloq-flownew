@@ -201,6 +201,13 @@ def test_github_client_reads_catalog_and_source_directory_without_release_zip() 
                         "slug": "repository-template",
                         "source": "themes/repository-template",
                         "manifest": "manifest.json",
+                    },
+                    {
+                        "sequence": "0001",
+                        "kind": "integration",
+                        "slug": "repository-integration",
+                        "source": "integrations/repository-integration",
+                        "manifest": "integration.json",
                     }
                 ],
             }
@@ -217,6 +224,19 @@ def test_github_client_reads_catalog_and_source_directory_without_release_zip() 
         "components": b"window.repositoryComponents = true;",
         "locale": b"{}",
         "readme": b"not part of the imported template",
+        "integration-manifest": json.dumps(
+            {
+                "schemaVersion": 1,
+                "type": "script",
+                "version": "1.0.0",
+                "integrationKey": "repository-integration",
+                "name": "仓库集成",
+                "description": "与模板共用编号空间中的数字。",
+                "entry": "runtime.js",
+            },
+            ensure_ascii=False,
+        ).encode(),
+        "integration-runtime": b"window.repositoryIntegration = true;",
     }
     paths = {
         "artifacts/catalog.json": "catalog",
@@ -225,6 +245,8 @@ def test_github_client_reads_catalog_and_source_directory_without_release_zip() 
         "themes/repository-template/assets/account-link-elements.js": "components",
         "themes/repository-template/locales/en.json": "locale",
         "themes/repository-template/README.md": "readme",
+        "integrations/repository-integration/integration.json": "integration-manifest",
+        "integrations/repository-integration/runtime.js": "integration-runtime",
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -270,8 +292,12 @@ def test_github_client_reads_catalog_and_source_directory_without_release_zip() 
             repository="owner/private-repository",
             client=http,
         )
-        snapshot = client.scan(kind="template")
-        artifact = snapshot.artifacts[0]
+        snapshot = client.scan(kind=None)
+        assert {(value.kind, value.sequence) for value in snapshot.artifacts} == {
+            ("template", "0001"),
+            ("integration", "0001"),
+        }
+        artifact = next(value for value in snapshot.artifacts if value.kind == "template")
         assert artifact.name == "仓库模板"
         assert [file.path for file in artifact.files] == [
             "themes/repository-template/manifest.json",
@@ -404,6 +430,7 @@ def test_repository_integration_requires_domain_then_updates_in_place(
     assert renamed.status_code == 200, renamed.text
     state.integration = replace(
         state.integration,
+        sequence="0001",
         version="2.0.0",
         source_sha="integration-source-v2",
     )
@@ -412,11 +439,11 @@ def test_repository_integration_requires_domain_then_updates_in_place(
     local = admin_client.get("/api/promotion/integrations")
     assert local.status_code == 200, local.text
     source = local.json()["data"]["rows"][0]["repositorySource"]
-    assert source["sequence"] == "0002"
+    assert source["sequence"] == "0001"
     assert source["localStatus"] == "update"
     assert source["remoteVersion"] == "2.0.0"
     updated = admin_client.post(
-        "/api/promotion/integrations/repository/0002/import",
+        "/api/promotion/integrations/repository/0001/import",
         json={},
     )
     assert updated.status_code == 200, updated.text

@@ -97,6 +97,7 @@ from app.services.github_repository import (
     github_repository_snapshot,
     refresh_github_repository_snapshot,
     repository_local_status,
+    repository_source_matches_artifact,
     remote_artifact_row,
     stored_repository_source,
     with_repository_source,
@@ -436,8 +437,7 @@ def _template_repository_source(
             value
             for value in snapshot.artifacts
             if value.kind == "template"
-            and value.sequence == source.get("sequence")
-            and snapshot.repository == source.get("repository")
+            and repository_source_matches_artifact(source, snapshot, value)
         ),
         None,
     )
@@ -804,12 +804,7 @@ def _repository_template(
     items = list(db.scalars(statement).all())
     for item in items:
         source = stored_repository_source(item.manifest_json)
-        if (
-            source.get("provider") == "github"
-            and source.get("repository") == snapshot.repository
-            and source.get("kind") == artifact.kind
-            and source.get("sequence") == artifact.sequence
-        ):
+        if repository_source_matches_artifact(source, snapshot, artifact):
             return item
     for item in items:
         manifest = item.manifest_json or {}

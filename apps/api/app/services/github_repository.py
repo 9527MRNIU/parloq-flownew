@@ -311,6 +311,23 @@ def stored_repository_source(manifest: dict | None) -> dict[str, str]:
     }
 
 
+def repository_source_matches_artifact(
+    source: dict[str, str],
+    snapshot: GitHubRepositorySnapshot,
+    artifact: GitHubRemoteArtifact,
+) -> bool:
+    if not (
+        source.get("provider") == "github"
+        and source.get("repository") == snapshot.repository
+        and source.get("kind") == artifact.kind
+    ):
+        return False
+    source_slug = source.get("slug")
+    if source_slug:
+        return source_slug == artifact.slug
+    return source.get("sequence") == artifact.sequence
+
+
 def repository_local_status(
     manifest: dict | None,
     version: str,
@@ -318,12 +335,7 @@ def repository_local_status(
     artifact: GitHubRemoteArtifact,
 ) -> str:
     source = stored_repository_source(manifest)
-    linked = bool(
-        source.get("provider") == "github"
-        and source.get("repository") == snapshot.repository
-        and source.get("kind") == artifact.kind
-        and source.get("sequence") == artifact.sequence
-    )
+    linked = repository_source_matches_artifact(source, snapshot, artifact)
     if linked and source.get("sourceSha") == artifact.source_sha:
         return "current"
     if linked and version == artifact.version:
@@ -562,7 +574,9 @@ class GitHubRepositoryClient:
             repository=self.repository,
             ref=self.ref,
             commit_sha=commit_sha,
-            artifacts=tuple(sorted(artifacts, key=lambda value: value.sequence)),
+            artifacts=tuple(
+                sorted(artifacts, key=lambda value: (value.kind, value.sequence))
+            ),
         )
 
     def archive_artifact(self, artifact: GitHubRemoteArtifact) -> bytes:
