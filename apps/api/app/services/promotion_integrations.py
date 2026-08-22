@@ -36,6 +36,7 @@ MAX_INTEGRATION_FILE = 5 * 1024 * 1024
 MAX_INTEGRATION_FILES = 500
 MAX_INTEGRATION_MANIFEST = 64 * 1024
 INTEGRATION_MANIFEST = "integration.json"
+GENERATED_IFRAME_ENTRY = "__parloq_iframe__.html"
 SCRIPT_EXTENSIONS = {".js", ".mjs"}
 HTML_EXTENSIONS = {".html", ".htm"}
 ALLOWED_INTEGRATION_EXTENSIONS = {
@@ -144,11 +145,60 @@ def integration_source_urls(
     item: PromotionIntegration,
     domain: DomainRecord,
 ) -> list[str]:
+    if uses_generated_iframe_document(item):
+        return [integration_asset_url(item, domain, GENERATED_IFRAME_ENTRY)]
     return [
         integration_asset_url(item, domain, str(entrypoint.get("path") or ""))
         for entrypoint in item.entrypoints_json or []
         if entrypoint.get("path")
     ]
+
+
+def uses_generated_iframe_document(item: PromotionIntegration) -> bool:
+    entrypoints = item.entrypoints_json or []
+    paths = [
+        str(entrypoint.get("path") or "")
+        for entrypoint in entrypoints
+        if entrypoint.get("path")
+    ]
+    return bool(
+        item.integration_type == "iframe"
+        and paths
+        and all(PurePosixPath(path).suffix.lower() in SCRIPT_EXTENSIONS for path in paths)
+    )
+
+
+def generated_iframe_document(
+    item: PromotionIntegration,
+    domain: DomainRecord,
+) -> str:
+    if not uses_generated_iframe_document(item):
+        raise ValueError("integration does not use a generated iframe document")
+    runtime = (
+        '<script src="/api/public/promotion/integrations/runtime.js" '
+        f'data-integration-id="{entity_id(item)}"></script>'
+    )
+    scripts: list[str] = []
+    for entrypoint in item.entrypoints_json or []:
+        path = str(entrypoint.get("path") or "")
+        if not path:
+            continue
+        source_url = html_lib.escape(
+            integration_asset_url(item, domain, path),
+            quote=True,
+        )
+        script_type = str(entrypoint.get("scriptType") or "classic")
+        module = ' type="module"' if script_type == "module" else " defer"
+        scripts.append(f'<script src="{source_url}"{module}></script>')
+    return "\n".join(
+        [
+            "<!doctype html>",
+            '<html><head><meta charset="utf-8">',
+            runtime,
+            *scripts,
+            "</head><body></body></html>",
+        ]
+    )
 
 
 def integration_feedback_contract(item: PromotionIntegration) -> tuple[bool, tuple[str, ...]]:
@@ -274,6 +324,23 @@ def _default_entrypoints(
         for path in values
         if PurePosixPath(path).suffix.lower() in SCRIPT_EXTENSIONS
     )
+    if requested_type == "iframe" and not html_paths:
+        if not script_paths:
+            raise HTTPException(
+                status_code=422,
+                detail="iframe 集成包没有可识别的 HTML 或 JavaScript 入口",
+            )
+        return "iframe", tuple(
+            IntegrationPackageEntrypoint(
+                path=path,
+                script_type=(
+                    "module"
+                    if PurePosixPath(path).suffix.lower() == ".mjs"
+                    else "classic"
+                ),
+            )
+            for path in script_paths
+        )
     if requested_type == "iframe" or (requested_type is None and html_paths):
         candidates = index_paths or html_paths
         if len(candidates) != 1:
@@ -314,6 +381,7 @@ def _manifest_entrypoints(
         raise HTTPException(status_code=422, detail="集成 entries 必须是非空数组")
     entrypoints: list[IntegrationPackageEntrypoint] = []
     seen: set[str] = set()
+    iframe_entry_kinds: set[str] = set()
     for configured_entry in configured:
         if isinstance(configured_entry, str):
             path = _normalized_archive_path(configured_entry)
@@ -331,12 +399,24 @@ def _manifest_entrypoints(
             raise HTTPException(status_code=422, detail=f"集成入口文件不存在：{path}")
         suffix = PurePosixPath(path).suffix.lower()
         if integration_type == "iframe":
-            if suffix not in HTML_EXTENSIONS:
+            if suffix in HTML_EXTENSIONS:
+                iframe_entry_kinds.add("html")
+                script_type = "classic"
+            elif suffix in SCRIPT_EXTENSIONS:
+                iframe_entry_kinds.add("script")
+                script_type = configured_script_type or (
+                    "module" if suffix == ".mjs" else "classic"
+                )
+                if script_type not in {"classic", "module"}:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="scriptType 必须是 classic 或 module",
+                    )
+            else:
                 raise HTTPException(
                     status_code=422,
-                    detail="iframe 集成入口必须是 .html 或 .htm",
+                    detail="iframe 集成入口必须是 HTML、JS 或 MJS",
                 )
-            script_type = "classic"
         else:
             if suffix not in SCRIPT_EXTENSIONS:
                 raise HTTPException(
@@ -355,8 +435,14 @@ def _manifest_entrypoints(
         entrypoints.append(
             IntegrationPackageEntrypoint(path=path, script_type=script_type)
         )
-    if integration_type == "iframe" and len(entrypoints) != 1:
-        raise HTTPException(status_code=422, detail="iframe 集成只能指定一个 HTML 入口")
+    if integration_type == "iframe":
+        if len(iframe_entry_kinds) > 1:
+            raise HTTPException(
+                status_code=422,
+                detail="iframe 集成入口不能混合 HTML 与 JavaScript",
+            )
+        if "html" in iframe_entry_kinds and len(entrypoints) != 1:
+            raise HTTPException(status_code=422, detail="iframe 集成只能指定一个 HTML 入口")
     return tuple(entrypoints)
 
 
@@ -482,7 +568,8 @@ def _package_contract(
                 "path": entrypoint.path,
                 **(
                     {"scriptType": entrypoint.script_type}
-                    if integration_type == "script"
+                    if PurePosixPath(entrypoint.path).suffix.lower()
+                    in SCRIPT_EXTENSIONS
                     else {}
                 ),
             }
@@ -533,6 +620,11 @@ def parse_integration_package(raw: bytes) -> IntegrationPackage:
             raise HTTPException(status_code=422, detail=f"集成文件大小不一致：{path}")
         values[path] = content
     values = _strip_single_root(values)
+    if GENERATED_IFRAME_ENTRY in values:
+        raise HTTPException(
+            status_code=422,
+            detail=f"集成包不能占用平台保留路径：{GENERATED_IFRAME_ENTRY}",
+        )
     integration_type, entrypoints, version, manifest = _package_contract(
         values,
         package_sha256,
@@ -542,6 +634,7 @@ def parse_integration_package(raw: bytes) -> IntegrationPackage:
         integration_type == "iframe"
         and isinstance(feedback, dict)
         and feedback.get("enabled")
+        and PurePosixPath(entrypoints[0].path).suffix.lower() in HTML_EXTENSIONS
     ):
         try:
             values[entrypoints[0].path].decode("utf-8")
@@ -643,20 +736,34 @@ def active_template_integrations(
     active: list[ActivePromotionIntegration] = []
     for item, domain in rows:
         integrities = item.integrities_json or {}
-        entrypoints = tuple(
-            ActiveIntegrationEntrypoint(
-                path=str(entrypoint.get("path") or ""),
-                script_type=str(entrypoint.get("scriptType") or "classic"),
-                source_url=integration_asset_url(
-                    item,
-                    domain,
-                    str(entrypoint.get("path") or ""),
+        if uses_generated_iframe_document(item):
+            entrypoints = (
+                ActiveIntegrationEntrypoint(
+                    path=GENERATED_IFRAME_ENTRY,
+                    script_type="classic",
+                    source_url=integration_asset_url(
+                        item,
+                        domain,
+                        GENERATED_IFRAME_ENTRY,
+                    ),
+                    integrity=None,
                 ),
-                integrity=integrities.get(str(entrypoint.get("path") or "")),
             )
-            for entrypoint in item.entrypoints_json or []
-            if entrypoint.get("path")
-        )
+        else:
+            entrypoints = tuple(
+                ActiveIntegrationEntrypoint(
+                    path=str(entrypoint.get("path") or ""),
+                    script_type=str(entrypoint.get("scriptType") or "classic"),
+                    source_url=integration_asset_url(
+                        item,
+                        domain,
+                        str(entrypoint.get("path") or ""),
+                    ),
+                    integrity=integrities.get(str(entrypoint.get("path") or "")),
+                )
+                for entrypoint in item.entrypoints_json or []
+                if entrypoint.get("path")
+            )
         if entrypoints:
             feedback_enabled, feedback_events = integration_feedback_contract(item)
             active.append(

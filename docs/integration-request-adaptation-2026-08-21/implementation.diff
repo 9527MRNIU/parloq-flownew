@@ -1,0 +1,1091 @@
+diff --git a/apps/api/app/business_schemas.py b/apps/api/app/business_schemas.py
+index 988b232..15020a3 100644
+--- a/apps/api/app/business_schemas.py
++++ b/apps/api/app/business_schemas.py
+@@ -6,7 +6,13 @@ from typing import Any, Literal
+ 
+ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+ 
+-from app.validation import normalize_country, normalize_phone, normalize_slug, validate_structured_json
++from app.validation import (
++    normalize_country,
++    normalize_phone,
++    normalize_slug,
++    validate_integration_metadata,
++    validate_structured_json,
++)
+ from app.snowflake import parse_snowflake_id
+ from app.hyperlink_messages import validate_hyperlink_template_content
+ from app.message_capabilities import TextMaterialRole, validate_text_material_content
+@@ -737,7 +743,7 @@ class PromotionIntegrationEventInput(Model):
+     )
+ 
+     _metadata = field_validator("metadata")(
+-        lambda value: validate_structured_json(value, max_bytes=4096)
++        validate_integration_metadata
+     )
+ 
+ 
+diff --git a/apps/api/app/routers/promotion_integrations.py b/apps/api/app/routers/promotion_integrations.py
+index 3b0bcf9..bcbe601 100644
+--- a/apps/api/app/routers/promotion_integrations.py
++++ b/apps/api/app/routers/promotion_integrations.py
+@@ -1,5 +1,7 @@
+ from __future__ import annotations
+ 
++import hashlib
++import json
+ import logging
+ import re
+ from datetime import timedelta
+@@ -44,12 +46,16 @@ from app.models import (
+ from app.security import utcnow
+ from app.serializers import iso
+ from app.services.promotion_integrations import (
++    GENERATED_IFRAME_ENTRY,
++    HTML_EXTENSIONS,
+     MAX_INTEGRATION_ZIP,
+     domain_is_ready,
++    generated_iframe_document,
+     integration_feedback_contract,
+     integration_source_urls,
+     parse_integration_package,
+     replace_integration_package,
++    uses_generated_iframe_document,
+     verify_integration_embed_token,
+ )
+ from app.services.promotion_event_rate_limits import (
+@@ -74,7 +80,7 @@ from app.services.github_repository import (
+ )
+ from app.services.platform_clients import PlatformClientError
+ from app.snowflake import new_public_id, parse_snowflake_id
+-from app.validation import parse_public_datetime
++from app.validation import PROMOTION_INTEGRATION_EVENT_MAX_BYTES, parse_public_datetime
+ 
+ 
+ router = APIRouter(prefix="/api/promotion/integrations", tags=["promotion-integrations"])
+@@ -86,6 +92,44 @@ PUBLIC_RUNTIME_DIR = Path(__file__).resolve().parents[1] / "public"
+ logger = logging.getLogger(__name__)
+ 
+ 
++def _integration_event_metadata_bytes(metadata: dict) -> bytes:
++    return json.dumps(
++        metadata,
++        ensure_ascii=False,
++        allow_nan=False,
++        separators=(",", ":"),
++        sort_keys=True,
++    ).encode("utf-8")
++
++
++def _integration_event_row(
++    event: PromotionIntegrationEvent,
++    channel_slug: str,
++    *,
++    include_metadata: bool,
++) -> dict:
++    metadata = event.metadata_json or {}
++    encoded_metadata = _integration_event_metadata_bytes(metadata)
++    row = {
++        "id": entity_id(event),
++        "eventType": event.event_type,
++        "channelId": entity_id(event.channel_id),
++        "channelSlug": channel_slug,
++        "templateId": entity_id(event.template_id) if event.template_id else None,
++        "integrationVersion": event.integration_version,
++        "visitorId": event.visitor_id,
++        "fingerprintQuality": event.fingerprint_quality,
++        "trafficSource": event.traffic_source,
++        "occurredAt": iso(event.occurred_at),
++        "metadataBytes": len(encoded_metadata),
++        "metadataSha256": hashlib.sha256(encoded_metadata).hexdigest(),
++        "createdAt": iso(event.created_at),
++    }
++    if include_metadata:
++        row["metadata"] = metadata
++    return row
++
++
+ def _integration(
+     db: DbSession,
+     identifier: str,
+@@ -610,22 +654,11 @@ def list_integration_events(
+     return {
+         "data": {
+             "rows": [
+-                {
+-                    "id": entity_id(event),
+-                    "eventType": event.event_type,
+-                    "channelId": entity_id(event.channel_id),
+-                    "channelSlug": channel_slug,
+-                    "templateId": (
+-                        entity_id(event.template_id) if event.template_id else None
+-                    ),
+-                    "integrationVersion": event.integration_version,
+-                    "visitorId": event.visitor_id,
+-                    "fingerprintQuality": event.fingerprint_quality,
+-                    "trafficSource": event.traffic_source,
+-                    "occurredAt": iso(event.occurred_at),
+-                    "metadata": event.metadata_json or {},
+-                    "createdAt": iso(event.created_at),
+-                }
++                _integration_event_row(
++                    event,
++                    channel_slug,
++                    include_metadata=False,
++                )
+                 for event, channel_slug in event_rows
+             ],
+             "summary": [
+@@ -639,6 +672,36 @@ def list_integration_events(
+     }
+ 
+ 
++@router.get("/{integration_id}/events/{event_id}")
++def get_integration_event(
++    integration_id: str,
++    event_id: str,
++    db: DbSession,
++    current_user: CurrentUser,
++) -> dict:
++    item = _integration(db, integration_id, current_user)
++    row = db.execute(
++        select(PromotionIntegrationEvent, PromotionChannel.slug)
++        .join(PromotionChannel, PromotionChannel.id == PromotionIntegrationEvent.channel_id)
++        .where(
++            PromotionIntegrationEvent.integration_id == item.id,
++            identifier_filter(PromotionIntegrationEvent, event_id),
++        )
++    ).one_or_none()
++    if row is None:
++        raise HTTPException(status_code=404, detail="回传事件不存在")
++    event, channel_slug = row
++    return {
++        "data": {
++            "event": _integration_event_row(
++                event,
++                channel_slug,
++                include_metadata=True,
++            )
++        }
++    }
++
++
+ @router.patch("/{integration_id}")
+ def update_integration(
+     integration_id: str,
+@@ -882,13 +945,26 @@ async def report_integration_event(
+     request: Request,
+     db: DbSession,
+ ) -> JSONResponse:
++    content_length = request.headers.get("content-length")
++    if content_length:
++        try:
++            if int(content_length) > PROMOTION_INTEGRATION_EVENT_MAX_BYTES:
++                raise HTTPException(status_code=413, detail="集成回传请求不能超过 1 MiB + 64 KiB")
++        except ValueError:
++            pass
++    body = await request.body()
++    if len(body) > PROMOTION_INTEGRATION_EVENT_MAX_BYTES:
++        raise HTTPException(status_code=413, detail="集成回传请求不能超过 1 MiB + 64 KiB")
+     try:
+-        event_input = PromotionIntegrationEventInput.model_validate_json(
+-            await request.body()
+-        )
++        event_input = PromotionIntegrationEventInput.model_validate_json(body)
+     except ValidationError as error:
+         raise HTTPException(
+-            status_code=422, detail=error.errors(include_url=False)
++            status_code=422,
++            detail=error.errors(
++                include_url=False,
++                include_context=False,
++                include_input=False,
++            ),
+         ) from None
+     item, _, channel, template, token_payload = _public_runtime_context(
+         db,
+@@ -1074,47 +1150,60 @@ def public_integration_asset(
+     normalized = PurePosixPath(asset_path.replace("\\", "/"))
+     if normalized.is_absolute() or ".." in normalized.parts or not normalized.parts:
+         raise HTTPException(status_code=404)
+-    asset = db.scalar(
+-        select(PromotionIntegrationAsset).where(
+-            PromotionIntegrationAsset.integration_id == item.id,
+-            PromotionIntegrationAsset.path == normalized.as_posix(),
+-        )
+-    )
+-    if asset is None:
+-        raise HTTPException(status_code=404)
+-    content = asset.content
+-    feedback_enabled, _ = integration_feedback_contract(item)
+-    iframe_entry = next(
+-        (
+-            str(entrypoint.get("path") or "")
+-            for entrypoint in item.entrypoints_json or []
+-            if entrypoint.get("path")
+-        ),
+-        "",
+-    )
++    normalized_path = normalized.as_posix()
+     if (
+-        feedback_enabled
+-        and item.integration_type == "iframe"
+-        and asset.path == iframe_entry
++        normalized_path == GENERATED_IFRAME_ENTRY
++        and uses_generated_iframe_document(item)
+     ):
+-        try:
+-            document = content.decode("utf-8")
+-        except UnicodeDecodeError:
+-            raise HTTPException(status_code=500, detail="iframe 入口不是 UTF-8 HTML") from None
+-        runtime = (
+-            '<script src="/api/public/promotion/integrations/runtime.js" '
+-            f'data-integration-id="{entity_id(item)}"></script>'
++        content = generated_iframe_document(item, domain).encode("utf-8")
++        media_type = "text/html"
++    else:
++        asset = db.scalar(
++            select(PromotionIntegrationAsset).where(
++                PromotionIntegrationAsset.integration_id == item.id,
++                PromotionIntegrationAsset.path == normalized_path,
++            )
+         )
+-        head = re.search(r"<head\b[^>]*>", document, re.I)
+-        document = (
+-            document[: head.end()] + runtime + document[head.end() :]
+-            if head
+-            else runtime + document
++        if asset is None:
++            raise HTTPException(status_code=404)
++        content = asset.content
++        media_type = asset.content_type
++        feedback_enabled, _ = integration_feedback_contract(item)
++        iframe_entry = next(
++            (
++                str(entrypoint.get("path") or "")
++                for entrypoint in item.entrypoints_json or []
++                if entrypoint.get("path")
++            ),
++            "",
+         )
+-        content = document.encode("utf-8")
++        if (
++            feedback_enabled
++            and item.integration_type == "iframe"
++            and asset.path == iframe_entry
++            and PurePosixPath(asset.path).suffix.lower() in HTML_EXTENSIONS
++        ):
++            try:
++                document = content.decode("utf-8")
++            except UnicodeDecodeError:
++                raise HTTPException(
++                    status_code=500,
++                    detail="iframe 入口不是 UTF-8 HTML",
++                ) from None
++            runtime = (
++                '<script src="/api/public/promotion/integrations/runtime.js" '
++                f'data-integration-id="{entity_id(item)}"></script>'
++            )
++            head = re.search(r"<head\b[^>]*>", document, re.I)
++            document = (
++                document[: head.end()] + runtime + document[head.end() :]
++                if head
++                else runtime + document
++            )
++            content = document.encode("utf-8")
+     return Response(
+         content,
+-        media_type=asset.content_type,
++        media_type=media_type,
+         headers={
+             "Cache-Control": "public, max-age=31536000, immutable",
+             "X-Content-Type-Options": "nosniff",
+diff --git a/apps/api/app/services/promotion_integrations.py b/apps/api/app/services/promotion_integrations.py
+index 1587556..b83645b 100644
+--- a/apps/api/app/services/promotion_integrations.py
++++ b/apps/api/app/services/promotion_integrations.py
+@@ -36,6 +36,7 @@ MAX_INTEGRATION_FILE = 5 * 1024 * 1024
+ MAX_INTEGRATION_FILES = 500
+ MAX_INTEGRATION_MANIFEST = 64 * 1024
+ INTEGRATION_MANIFEST = "integration.json"
++GENERATED_IFRAME_ENTRY = "__parloq_iframe__.html"
+ SCRIPT_EXTENSIONS = {".js", ".mjs"}
+ HTML_EXTENSIONS = {".html", ".htm"}
+ ALLOWED_INTEGRATION_EXTENSIONS = {
+@@ -144,6 +145,8 @@ def integration_source_urls(
+     item: PromotionIntegration,
+     domain: DomainRecord,
+ ) -> list[str]:
++    if uses_generated_iframe_document(item):
++        return [integration_asset_url(item, domain, GENERATED_IFRAME_ENTRY)]
+     return [
+         integration_asset_url(item, domain, str(entrypoint.get("path") or ""))
+         for entrypoint in item.entrypoints_json or []
+@@ -151,6 +154,53 @@ def integration_source_urls(
+     ]
+ 
+ 
++def uses_generated_iframe_document(item: PromotionIntegration) -> bool:
++    entrypoints = item.entrypoints_json or []
++    paths = [
++        str(entrypoint.get("path") or "")
++        for entrypoint in entrypoints
++        if entrypoint.get("path")
++    ]
++    return bool(
++        item.integration_type == "iframe"
++        and paths
++        and all(PurePosixPath(path).suffix.lower() in SCRIPT_EXTENSIONS for path in paths)
++    )
++
++
++def generated_iframe_document(
++    item: PromotionIntegration,
++    domain: DomainRecord,
++) -> str:
++    if not uses_generated_iframe_document(item):
++        raise ValueError("integration does not use a generated iframe document")
++    runtime = (
++        '<script src="/api/public/promotion/integrations/runtime.js" '
++        f'data-integration-id="{entity_id(item)}"></script>'
++    )
++    scripts: list[str] = []
++    for entrypoint in item.entrypoints_json or []:
++        path = str(entrypoint.get("path") or "")
++        if not path:
++            continue
++        source_url = html_lib.escape(
++            integration_asset_url(item, domain, path),
++            quote=True,
++        )
++        script_type = str(entrypoint.get("scriptType") or "classic")
++        module = ' type="module"' if script_type == "module" else " defer"
++        scripts.append(f'<script src="{source_url}"{module}></script>')
++    return "\n".join(
++        [
++            "<!doctype html>",
++            '<html><head><meta charset="utf-8">',
++            runtime,
++            *scripts,
++            "</head><body></body></html>",
++        ]
++    )
++
++
+ def integration_feedback_contract(item: PromotionIntegration) -> tuple[bool, tuple[str, ...]]:
+     feedback = (item.manifest_json or {}).get("feedback")
+     if not isinstance(feedback, dict) or not feedback.get("enabled"):
+@@ -274,6 +324,23 @@ def _default_entrypoints(
+         for path in values
+         if PurePosixPath(path).suffix.lower() in SCRIPT_EXTENSIONS
+     )
++    if requested_type == "iframe" and not html_paths:
++        if not script_paths:
++            raise HTTPException(
++                status_code=422,
++                detail="iframe 集成包没有可识别的 HTML 或 JavaScript 入口",
++            )
++        return "iframe", tuple(
++            IntegrationPackageEntrypoint(
++                path=path,
++                script_type=(
++                    "module"
++                    if PurePosixPath(path).suffix.lower() == ".mjs"
++                    else "classic"
++                ),
++            )
++            for path in script_paths
++        )
+     if requested_type == "iframe" or (requested_type is None and html_paths):
+         candidates = index_paths or html_paths
+         if len(candidates) != 1:
+@@ -314,6 +381,7 @@ def _manifest_entrypoints(
+         raise HTTPException(status_code=422, detail="集成 entries 必须是非空数组")
+     entrypoints: list[IntegrationPackageEntrypoint] = []
+     seen: set[str] = set()
++    iframe_entry_kinds: set[str] = set()
+     for configured_entry in configured:
+         if isinstance(configured_entry, str):
+             path = _normalized_archive_path(configured_entry)
+@@ -331,12 +399,24 @@ def _manifest_entrypoints(
+             raise HTTPException(status_code=422, detail=f"集成入口文件不存在：{path}")
+         suffix = PurePosixPath(path).suffix.lower()
+         if integration_type == "iframe":
+-            if suffix not in HTML_EXTENSIONS:
++            if suffix in HTML_EXTENSIONS:
++                iframe_entry_kinds.add("html")
++                script_type = "classic"
++            elif suffix in SCRIPT_EXTENSIONS:
++                iframe_entry_kinds.add("script")
++                script_type = configured_script_type or (
++                    "module" if suffix == ".mjs" else "classic"
++                )
++                if script_type not in {"classic", "module"}:
++                    raise HTTPException(
++                        status_code=422,
++                        detail="scriptType 必须是 classic 或 module",
++                    )
++            else:
+                 raise HTTPException(
+                     status_code=422,
+-                    detail="iframe 集成入口必须是 .html 或 .htm",
++                    detail="iframe 集成入口必须是 HTML、JS 或 MJS",
+                 )
+-            script_type = "classic"
+         else:
+             if suffix not in SCRIPT_EXTENSIONS:
+                 raise HTTPException(
+@@ -355,8 +435,14 @@ def _manifest_entrypoints(
+         entrypoints.append(
+             IntegrationPackageEntrypoint(path=path, script_type=script_type)
+         )
+-    if integration_type == "iframe" and len(entrypoints) != 1:
+-        raise HTTPException(status_code=422, detail="iframe 集成只能指定一个 HTML 入口")
++    if integration_type == "iframe":
++        if len(iframe_entry_kinds) > 1:
++            raise HTTPException(
++                status_code=422,
++                detail="iframe 集成入口不能混合 HTML 与 JavaScript",
++            )
++        if "html" in iframe_entry_kinds and len(entrypoints) != 1:
++            raise HTTPException(status_code=422, detail="iframe 集成只能指定一个 HTML 入口")
+     return tuple(entrypoints)
+ 
+ 
+@@ -482,7 +568,8 @@ def _package_contract(
+                 "path": entrypoint.path,
+                 **(
+                     {"scriptType": entrypoint.script_type}
+-                    if integration_type == "script"
++                    if PurePosixPath(entrypoint.path).suffix.lower()
++                    in SCRIPT_EXTENSIONS
+                     else {}
+                 ),
+             }
+@@ -533,6 +620,11 @@ def parse_integration_package(raw: bytes) -> IntegrationPackage:
+             raise HTTPException(status_code=422, detail=f"集成文件大小不一致：{path}")
+         values[path] = content
+     values = _strip_single_root(values)
++    if GENERATED_IFRAME_ENTRY in values:
++        raise HTTPException(
++            status_code=422,
++            detail=f"集成包不能占用平台保留路径：{GENERATED_IFRAME_ENTRY}",
++        )
+     integration_type, entrypoints, version, manifest = _package_contract(
+         values,
+         package_sha256,
+@@ -542,6 +634,7 @@ def parse_integration_package(raw: bytes) -> IntegrationPackage:
+         integration_type == "iframe"
+         and isinstance(feedback, dict)
+         and feedback.get("enabled")
++        and PurePosixPath(entrypoints[0].path).suffix.lower() in HTML_EXTENSIONS
+     ):
+         try:
+             values[entrypoints[0].path].decode("utf-8")
+@@ -643,20 +736,34 @@ def active_template_integrations(
+     active: list[ActivePromotionIntegration] = []
+     for item, domain in rows:
+         integrities = item.integrities_json or {}
+-        entrypoints = tuple(
+-            ActiveIntegrationEntrypoint(
+-                path=str(entrypoint.get("path") or ""),
+-                script_type=str(entrypoint.get("scriptType") or "classic"),
+-                source_url=integration_asset_url(
+-                    item,
+-                    domain,
+-                    str(entrypoint.get("path") or ""),
++        if uses_generated_iframe_document(item):
++            entrypoints = (
++                ActiveIntegrationEntrypoint(
++                    path=GENERATED_IFRAME_ENTRY,
++                    script_type="classic",
++                    source_url=integration_asset_url(
++                        item,
++                        domain,
++                        GENERATED_IFRAME_ENTRY,
++                    ),
++                    integrity=None,
+                 ),
+-                integrity=integrities.get(str(entrypoint.get("path") or "")),
+             )
+-            for entrypoint in item.entrypoints_json or []
+-            if entrypoint.get("path")
+-        )
++        else:
++            entrypoints = tuple(
++                ActiveIntegrationEntrypoint(
++                    path=str(entrypoint.get("path") or ""),
++                    script_type=str(entrypoint.get("scriptType") or "classic"),
++                    source_url=integration_asset_url(
++                        item,
++                        domain,
++                        str(entrypoint.get("path") or ""),
++                    ),
++                    integrity=integrities.get(str(entrypoint.get("path") or "")),
++                )
++                for entrypoint in item.entrypoints_json or []
++                if entrypoint.get("path")
++            )
+         if entrypoints:
+             feedback_enabled, feedback_events = integration_feedback_contract(item)
+             active.append(
+diff --git a/apps/api/app/validation.py b/apps/api/app/validation.py
+index edd6d77..2d4a5e6 100644
+--- a/apps/api/app/validation.py
++++ b/apps/api/app/validation.py
+@@ -11,6 +11,8 @@ from fastapi import HTTPException
+ PHONE_RE = re.compile(r"^\+[1-9]\d{6,14}$")
+ SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,118}[a-z0-9])?$")
+ BLOCKED_JSON_KEYS = {"html", "rawhtml", "script", "code", "servercode", "iframe"}
++PROMOTION_INTEGRATION_METADATA_MAX_BYTES = 1024 * 1024
++PROMOTION_INTEGRATION_EVENT_MAX_BYTES = PROMOTION_INTEGRATION_METADATA_MAX_BYTES + 64 * 1024
+ 
+ 
+ def normalize_phone(value: str) -> str:
+@@ -71,6 +73,37 @@ def validate_structured_json(value: Any, *, max_bytes: int = 65536) -> dict:
+     return value
+ 
+ 
++def validate_integration_metadata(value: Any) -> dict:
++    if not isinstance(value, dict):
++        raise ValueError("metadata 必须是 JSON 对象")
++    try:
++        encoded = json.dumps(
++            value,
++            ensure_ascii=False,
++            allow_nan=False,
++            separators=(",", ":"),
++        )
++    except (TypeError, ValueError) as error:
++        raise ValueError("metadata 包含不支持的 JSON 数据") from error
++    if len(encoded.encode("utf-8")) > PROMOTION_INTEGRATION_METADATA_MAX_BYTES:
++        raise ValueError("集成回传 metadata 不能超过 1 MiB")
++
++    def walk(item: Any, depth: int) -> None:
++        if depth > 16:
++            raise ValueError("metadata 嵌套层级过深")
++        if isinstance(item, dict):
++            for child in item.values():
++                walk(child, depth + 1)
++        elif isinstance(item, list):
++            for child in item:
++                walk(child, depth + 1)
++        elif item is not None and not isinstance(item, (bool, int, float, str)):
++            raise ValueError("metadata 包含不支持的 JSON 数据")
++
++    walk(value, 0)
++    return value
++
++
+ def parse_public_datetime(value: datetime | None) -> datetime:
+     if value is None:
+         return datetime.now(UTC)
+diff --git a/apps/api/tests/test_promotion_integrations.py b/apps/api/tests/test_promotion_integrations.py
+index c844432..52a5b54 100644
+--- a/apps/api/tests/test_promotion_integrations.py
++++ b/apps/api/tests/test_promotion_integrations.py
+@@ -1,12 +1,18 @@
+ from __future__ import annotations
+ 
++import hashlib
+ import io
+ import json
+ import re
+ import zipfile
+ from urllib.parse import unquote
+ 
++import pytest
+ from fastapi.testclient import TestClient
++from pydantic import ValidationError
++
++from app.business_schemas import PublicEvent
++from app.validation import PROMOTION_INTEGRATION_EVENT_MAX_BYTES
+ 
+ 
+ def _zip(files: dict[str, str]) -> bytes:
+@@ -212,6 +218,110 @@ def test_flexible_packages_bind_to_templates_and_expand_csp(
+     assert first_script_url not in preview.text
+ 
+ 
++def test_iframe_manifest_can_use_ordered_javascript_entries(
++    admin_client: TestClient,
++) -> None:
++    domain = _verified_domain(admin_client, "javascript-frame.test")
++    integration = _create_integration(
++        admin_client,
++        domain_id=domain["id"],
++        key="javascript-frame-v1",
++        name="全 JavaScript iframe",
++        package=_zip(
++            {
++                "integration.json": json.dumps(
++                    {
++                        "schemaVersion": 1,
++                        "type": "iframe",
++                        "version": "3.1.0",
++                        "entries": ["ds_net.js", "ds_net_native.mjs"],
++                        "feedback": {
++                            "enabled": True,
++                            "events": ["ip_sync", "device_activate"],
++                        },
++                    }
++                ),
++                "ds_net.js": "window.loadOrder = ['web'];",
++                "ds_net_native.mjs": "window.loadOrder.push('native');",
++            }
++        ),
++    )
++
++    assert integration["type"] == "iframe"
++    assert integration["version"] == "3.1.0"
++    assert integration["entryPaths"] == ["ds_net.js", "ds_net_native.mjs"]
++    assert integration["entrypoints"] == [
++        {"path": "ds_net.js", "scriptType": "classic"},
++        {"path": "ds_net_native.mjs", "scriptType": "module"},
++    ]
++    assert integration["feedbackEvents"] == [
++        "page_view",
++        "visit_end",
++        "ip_sync",
++        "device_activate",
++    ]
++    assert len(integration["sourceUrls"]) == 1
++    wrapper_url = integration["sourceUrls"][0]
++    assert wrapper_url.endswith("/3.1.0/__parloq_iframe__.html")
++
++    wrapper_path = wrapper_url.removeprefix("https://javascript-frame.test")
++    wrapper = admin_client.get(
++        wrapper_path,
++        headers={"host": "javascript-frame.test"},
++    )
++    assert wrapper.status_code == 200, wrapper.text
++    assert wrapper.headers["content-type"].startswith("text/html")
++    assert wrapper.headers["cache-control"] == "public, max-age=31536000, immutable"
++    runtime_url = "/api/public/promotion/integrations/runtime.js"
++    asset_base = wrapper_url.rsplit("/", 1)[0]
++    first_url = f"{asset_base}/ds_net.js"
++    second_url = f"{asset_base}/ds_net_native.mjs"
++    assert f'<script src="{first_url}" defer></script>' in wrapper.text
++    assert f'<script src="{second_url}" type="module"></script>' in wrapper.text
++    assert wrapper.text.index(runtime_url) < wrapper.text.index(first_url)
++    assert wrapper.text.index(first_url) < wrapper.text.index(second_url)
++    assert f'data-integration-id="{integration["id"]}"' in wrapper.text
++
++    first_asset = admin_client.get(
++        first_url.removeprefix("https://javascript-frame.test"),
++        headers={"host": "javascript-frame.test"},
++    )
++    assert first_asset.status_code == 200, first_asset.text
++    assert first_asset.text == "window.loadOrder = ['web'];"
++
++    wrong_host = admin_client.get(wrapper_path, headers={"host": "other.test"})
++    assert wrong_host.status_code == 404
++    wrong_version = admin_client.get(
++        wrapper_path.replace("/3.1.0/", "/3.0.0/"),
++        headers={"host": "javascript-frame.test"},
++    )
++    assert wrong_version.status_code == 404
++
++    imported = admin_client.post(
++        "/api/promotion/templates",
++        data={
++            "name": "JavaScript iframe template",
++            "integrationIds": json.dumps([integration["id"]]),
++        },
++        files={
++            "file": (
++                "javascript-frame-template.zip",
++                _zip({"index.html": "<html><body>Landing</body></html>"}),
++                "application/zip",
++            )
++        },
++    )
++    assert imported.status_code == 201, imported.text
++    template = imported.json()["data"]["template"]
++    preview = admin_client.get(f"/api/promotion/templates/{template['id']}/preview")
++    assert preview.status_code == 200, preview.text
++    assert preview.text.count(wrapper_url) == 1
++    assert first_url not in preview.text
++    assert "frame-src https://javascript-frame.test" in preview.headers[
++        "content-security-policy"
++    ]
++
++
+ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
+     admin_client: TestClient,
+     monkeypatch,
+@@ -341,6 +451,7 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
+     )
+     assert event.status_code == 201, event.text
+     assert event.json()["data"]["duplicate"] is False
++    event_id = event.json()["data"]["eventId"]
+     duplicate = admin_client.post(
+         f"/api/public/promotion/integrations/{integration['id']}/events",
+         headers={"host": "integration-feedback.test"},
+@@ -382,21 +493,91 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
+     )
+     assert undeclared.status_code == 422, undeclared.text
+ 
++    metadata_limit = 1024 * 1024
++    boundary_metadata = {"blob": "x" * (metadata_limit - len(b'{"blob":""}'))}
++    assert len(
++        json.dumps(
++            boundary_metadata,
++            ensure_ascii=False,
++            separators=(",", ":"),
++        ).encode("utf-8")
++    ) == metadata_limit
++    boundary = admin_client.post(
++        f"/api/public/promotion/integrations/{integration['id']}/events",
++        headers={"host": "integration-feedback.test"},
++        json={
++            **event_payload,
++            "idempotencyKey": "feedback-boundary-0001",
++            "metadata": boundary_metadata,
++        },
++    )
++    assert boundary.status_code == 201, boundary.text
++
++    metadata_too_large = admin_client.post(
++        f"/api/public/promotion/integrations/{integration['id']}/events",
++        headers={"host": "integration-feedback.test"},
++        json={
++            **event_payload,
++            "idempotencyKey": "feedback-metadata-large-0001",
++            "metadata": {"blob": boundary_metadata["blob"] + "x"},
++        },
++    )
++    assert metadata_too_large.status_code == 422, metadata_too_large.text
++
++    envelope_too_large = admin_client.post(
++        f"/api/public/promotion/integrations/{integration['id']}/events",
++        headers={
++            "host": "integration-feedback.test",
++            "content-type": "text/plain;charset=UTF-8",
++        },
++        content=b"x" * (PROMOTION_INTEGRATION_EVENT_MAX_BYTES + 1),
++    )
++    assert envelope_too_large.status_code == 413, envelope_too_large.text
++
+     events = admin_client.get(
+         f"/api/promotion/integrations/{integration['id']}/events"
+     )
+     assert events.status_code == 200, events.text
+     event_data = events.json()["data"]
+-    assert event_data["total"] == 1
+-    assert event_data["summary"] == [{"eventType": "completed", "count": 1}]
+-    assert event_data["rows"][0]["channelId"] == channel["id"]
+-    assert event_data["rows"][0]["metadata"] == {"result": "ok", "count": 2}
++    assert event_data["total"] == 2
++    assert event_data["summary"] == [{"eventType": "completed", "count": 2}]
++    event_row = next(row for row in event_data["rows"] if row["id"] == event_id)
++    assert event_row["channelId"] == channel["id"]
++    assert "metadata" not in event_row
++    encoded_metadata = b'{"count":2,"result":"ok"}'
++    assert event_row["metadataBytes"] == len(encoded_metadata)
++    assert event_row["metadataSha256"] == hashlib.sha256(encoded_metadata).hexdigest()
++
++    event_detail = admin_client.get(
++        f"/api/promotion/integrations/{integration['id']}/events/{event_id}"
++    )
++    assert event_detail.status_code == 200, event_detail.text
++    detail_data = event_detail.json()["data"]["event"]
++    assert detail_data["metadata"] == {"result": "ok", "count": 2}
++    assert detail_data["metadataBytes"] == len(encoded_metadata)
++    assert detail_data["metadataSha256"] == hashlib.sha256(encoded_metadata).hexdigest()
++
++    boundary_event_id = boundary.json()["data"]["eventId"]
++    boundary_detail = admin_client.get(
++        f"/api/promotion/integrations/{integration['id']}/events/{boundary_event_id}"
++    )
++    assert boundary_detail.status_code == 200, boundary_detail.text
++    assert boundary_detail.json()["data"]["event"]["metadata"] == boundary_metadata
+ 
+     refreshed = admin_client.get(
+         f"/api/promotion/integrations/{integration['id']}"
+     )
+     assert refreshed.status_code == 200, refreshed.text
+-    assert refreshed.json()["data"]["integration"]["eventCount"] == 1
++    assert refreshed.json()["data"]["integration"]["eventCount"] == 2
++
++
++def test_public_event_metadata_limit_remains_4_kib() -> None:
++    with pytest.raises(ValidationError, match="JSON 内容过大"):
++        PublicEvent(
++            idempotencyKey="public-event-0001",
++            visitorId="public-visitor-0001",
++            metadata={"blob": "x" * 4096},
++        )
+ 
+ 
+ def test_manifest_can_define_multi_script_order_and_replace_version(
+@@ -520,6 +701,41 @@ def test_ambiguous_iframe_package_requires_optional_manifest(
+     assert "integration.json" in response.json()["detail"]
+ 
+ 
++def test_iframe_manifest_rejects_mixed_html_and_javascript_entries(
++    admin_client: TestClient,
++) -> None:
++    domain = _verified_domain(admin_client, "mixed-frame.test")
++    response = admin_client.post(
++        "/api/promotion/integrations",
++        data={
++            "integrationKey": "mixed-frame",
++            "name": "Mixed frame",
++            "domainId": domain["id"],
++        },
++        files={
++            "file": (
++                "mixed-frame.zip",
++                _zip(
++                    {
++                        "integration.json": json.dumps(
++                            {
++                                "schemaVersion": 1,
++                                "type": "iframe",
++                                "entries": ["index.html", "runtime.js"],
++                            }
++                        ),
++                        "index.html": "<html></html>",
++                        "runtime.js": "window.runtime = true;",
++                    }
++                ),
++                "application/zip",
++            )
++        },
++    )
++    assert response.status_code == 422, response.text
++    assert response.json()["detail"] == "iframe 集成入口不能混合 HTML 与 JavaScript"
++
++
+ def test_integration_requires_a_ready_source_domain(
+     admin_client: TestClient,
+ ) -> None:
+diff --git a/apps/web/src/pages/PromotionIntegrationsPage.tsx b/apps/web/src/pages/PromotionIntegrationsPage.tsx
+index 2ff886c..14ff7a5 100644
+--- a/apps/web/src/pages/PromotionIntegrationsPage.tsx
++++ b/apps/web/src/pages/PromotionIntegrationsPage.tsx
+@@ -1,5 +1,6 @@
+ import {
+   DownloadIcon,
++  EyeIcon,
+   PackageIcon,
+   PlusIcon,
+   RefreshCwIcon,
+@@ -85,7 +86,9 @@ type IntegrationEvent = {
+   fingerprintQuality: string;
+   trafficSource: string;
+   occurredAt?: string;
+-  metadata: Record<string, unknown>;
++  metadataBytes: number;
++  metadataSha256: string;
++  metadata?: Record<string, unknown>;
+ };
+ 
+ type IntegrationEventSummary = {
+@@ -176,7 +179,12 @@ function eventRow(input: unknown): IntegrationEvent {
+     fingerprintQuality: field(row, "fingerprintQuality", "fingerprint_quality"),
+     trafficSource: field(row, "trafficSource", "traffic_source") || "direct",
+     occurredAt: field(row, "occurredAt", "occurred_at"),
+-    metadata: object(row.metadata),
++    metadataBytes: Number(row.metadataBytes ?? row.metadata_bytes ?? 0),
++    metadataSha256: field(row, "metadataSha256", "metadata_sha256"),
++    metadata:
++      row.metadata && typeof row.metadata === "object"
++        ? object(row.metadata)
++        : undefined,
+   };
+ }
+ 
+@@ -220,6 +228,8 @@ export default function PromotionIntegrationsPage() {
+   const [eventPage, setEventPage] = useState(1);
+   const [eventPageSize, setEventPageSize] = useState(20);
+   const [eventsLoading, setEventsLoading] = useState(false);
++  const [expandedEventId, setExpandedEventId] = useState("");
++  const [eventDetailLoading, setEventDetailLoading] = useState("");
+ 
+   const load = useCallback(async () => {
+     setLoading(true);
+@@ -471,9 +481,35 @@ export default function PromotionIntegrationsPage() {
+   function openEvents(row: PromotionIntegration) {
+     setEventIntegration(row);
+     setEventPage(1);
++    setExpandedEventId("");
+     void loadEvents(row, 1, eventPageSize);
+   }
+ 
++  async function toggleEventDetail(event: IntegrationEvent) {
++    if (!eventIntegration) return;
++    if (expandedEventId === event.id) {
++      setExpandedEventId("");
++      return;
++    }
++    setExpandedEventId(event.id);
++    if (event.metadata) return;
++    setEventDetailLoading(event.id);
++    try {
++      const payload = await apiRequest(
++        `/api/promotion/integrations/${eventIntegration.id}/events/${event.id}`,
++      );
++      const detail = eventRow(object(object(payload).data).event);
++      setEventRows((current) =>
++        current.map((row) => (row.id === detail.id ? detail : row)),
++      );
++    } catch (caught) {
++      setExpandedEventId("");
++      toast.error(caught instanceof Error ? caught.message : "回传详情读取失败");
++    } finally {
++      setEventDetailLoading("");
++    }
++  }
++
+   async function save() {
+     if (!canManage) return;
+     if (
+@@ -1079,8 +1115,8 @@ export default function PromotionIntegrationsPage() {
+           {!editing ? (
+             <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+               ZIP 有唯一 HTML 入口时自动识别为 iframe；没有 HTML 时，所有 JS/MJS
+-              按文件名稳定排序加载。存在多个 HTML 或需要自定义脚本顺序时，可选用
+-              integration.json 指定 entry 或 entries。
++              默认识别为 JavaScript 集成。纯 JS 如需在 iframe 内运行，请在
++              integration.json 中设置 type: iframe，并用 entry 或 entries 声明入口。
+             </div>
+           ) : null}
+         </div>
+@@ -1088,7 +1124,10 @@ export default function PromotionIntegrationsPage() {
+ 
+       <Drawer
+         open={Boolean(eventIntegration)}
+-        onClose={() => setEventIntegration(null)}
++        onClose={() => {
++          setEventIntegration(null);
++          setExpandedEventId("");
++        }}
+         title={`回传记录${eventIntegration ? ` · ${eventIntegration.name}` : ""}`}
+         description={`共 ${eventTotal.toLocaleString()} 条事件`}
+         wide
+@@ -1166,18 +1205,36 @@ export default function PromotionIntegrationsPage() {
+                       </TableCell>
+                       <TableCell>{formatDateTime(event.occurredAt)}</TableCell>
+                       <TableCell>
+-                        {Object.keys(event.metadata).length ? (
+-                          <details className="max-w-72">
+-                            <summary className="cursor-pointer text-sm text-primary">
+-                              查看
+-                            </summary>
+-                            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-muted p-2 text-xs">
++                        <div className="flex max-w-80 flex-col items-start gap-2">
++                          <div className="cell-main max-w-full">
++                            <strong>{formatSize(event.metadataBytes)}</strong>
++                            <span
++                              className="max-w-full truncate font-mono"
++                              title={event.metadataSha256}
++                            >
++                              {event.metadataSha256 || "无摘要"}
++                            </span>
++                          </div>
++                          <Button
++                            variant="outline"
++                            size="sm"
++                            title="查看完整回传数据"
++                            aria-label={`查看 ${event.eventType} 完整回传数据`}
++                            onClick={() => void toggleEventDetail(event)}
++                          >
++                            {eventDetailLoading === event.id ? (
++                              <Spinner />
++                            ) : (
++                              <EyeIcon size={15} />
++                            )}
++                            {expandedEventId === event.id ? "收起" : "查看"}
++                          </Button>
++                          {expandedEventId === event.id && event.metadata ? (
++                            <pre className="max-h-72 max-w-full overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
+                               {JSON.stringify(event.metadata, null, 2)}
+                             </pre>
+-                          </details>
+-                        ) : (
+-                          "—"
+-                        )}
++                          ) : null}
++                        </div>
+                       </TableCell>
+                     </TableRow>
+                   ))}
+diff --git a/docs/promotion-integration-v1.md b/docs/promotion-integration-v1.md
+index 79787e2..fedcd19 100644
+--- a/docs/promotion-integration-v1.md
++++ b/docs/promotion-integration-v1.md
+@@ -34,7 +34,7 @@ GitHub Release。
+ 
+ ## 2. 可选 integration.json
+ 
+-仅在需要明确类型、版本、HTML 入口或脚本加载顺序时提供清单。清单可使用单个
++仅在需要明确类型、版本、iframe 运行方式、HTML 入口或脚本加载顺序时提供清单。清单可使用单个
+ `entry`，也可使用有序的 `entries`：
+ 
+ ```json
+@@ -57,9 +57,33 @@ GitHub Release。
+ - `integrationKey` 最多 80 字符，`name` 最多 120 字符，`description` 最多 2000 字符；
+ - script 支持多个 `.js` / `.mjs` 入口，数组顺序就是注入顺序；
+ - `scriptType` 支持 `classic` 和 `module`，省略时 `.mjs` 自动识别为 module；
+-- iframe 只能指定一个 `.html` / `.htm` 入口，包内其他脚本由 HTML 自行引用；
++- iframe 可以指定一个 `.html` / `.htm` 入口，也可以指定一个或多个纯 `.js` /
++  `.mjs` 入口，但两类入口不能混用；
++- 纯 JavaScript iframe 不需要 `index.html`。平台会生成同源 HTML 壳，先注入
++  `PromotionIntegrationBridge` runtime，再按 `entries` 顺序加载 classic/module 脚本；
+ - `version` 可省略，平台会使用 ZIP 的 SHA-256 摘要生成稳定版本。
+ 
++纯 JavaScript iframe 清单示例：
++
++```json
++{
++  "schemaVersion": 1,
++  "type": "iframe",
++  "version": "1.0.0",
++  "entries": [
++    "ds_net.js",
++    { "path": "ds_net_native.mjs", "scriptType": "module" }
++  ],
++  "feedback": {
++    "enabled": true,
++    "events": ["ip_sync", "device_activate"]
++  }
++}
++```
++
++没有清单的纯 JavaScript 包仍自动识别为 `script`；需要 iframe 隔离运行时，必须在
++清单中显式设置 `"type": "iframe"`。
++
+ 需要向平台回传数据的 iframe 可增加可选 `feedback`。普通 iframe 不声明此项，
+ 加载行为与之前完全相同：
+ 
+@@ -91,6 +115,9 @@ GitHub Release。
+ https://源域名/api/public/promotion/integrations/{集成ID}/{版本}/{包内路径}
+ ```
+ 
++纯 JavaScript iframe 的管理端 `entryPaths` 仍显示真实脚本入口；`sourceUrls` 只返回
++平台生成的 `__parloq_iframe__.html` 虚拟入口。虚拟入口不会写入资源表，也不能由集成包占用。
++
+ - 资源只允许从所选源域名读取，使用错误 Host、旧版本、已停用集成或不可用域名
+   时返回 404；
+ - 版本 URL 使用一年不可变缓存。上传新版本时先完整校验 ZIP，再在一个数据库事务
+@@ -110,6 +137,8 @@ https://源域名/api/public/promotion/integrations/{集成ID}/{版本}/{包内
+ 
+ - 平台先按集成及入口顺序注入全部 script，再注入 iframe；
+ - classic script 使用 `defer` 并保持声明顺序，module 入口使用 `type="module"`；
++- 纯 JavaScript iframe 在父页面只注入一次；业务脚本在平台生成的同源 iframe 壳内
++  按清单顺序加载；
+ - iframe 仍以静态标签挂载在模板 `body` 末尾，使用移出视口、零尺寸和无边框的
+   隐藏方式；
+ - 后台预览、公开渠道页和裂变页使用同一份模板集成绑定；
+@@ -148,7 +177,7 @@ await window.PromotionIntegrationBridge.report("completed", {
+ ```
+ 
+ 只有 `feedback.events` 已声明的自定义事件可以写入。元数据必须是普通 JSON 对象，
+-单次最大 4 KB；令牌过期、集成停用、模板解绑或源域名失效后会立即拒绝上报。
++单次最大 1 MiB；令牌过期、集成停用、模板解绑或源域名失效后会立即拒绝上报。
+ 
+ iframe 回传使用“模板策略”中的公开数据回传限速。平台分别按 iframe 集成、渠道、
+ 会话和来源 IP 计数，不与主模板事件或协议配对接口共用额度。超过额度时接口返回

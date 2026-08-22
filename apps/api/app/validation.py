@@ -11,6 +11,8 @@ from fastapi import HTTPException
 PHONE_RE = re.compile(r"^\+[1-9]\d{6,14}$")
 SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,118}[a-z0-9])?$")
 BLOCKED_JSON_KEYS = {"html", "rawhtml", "script", "code", "servercode", "iframe"}
+PROMOTION_INTEGRATION_METADATA_MAX_BYTES = 1024 * 1024
+PROMOTION_INTEGRATION_EVENT_MAX_BYTES = PROMOTION_INTEGRATION_METADATA_MAX_BYTES + 64 * 1024
 
 
 def normalize_phone(value: str) -> str:
@@ -66,6 +68,37 @@ def validate_structured_json(value: Any, *, max_bytes: int = 65536) -> dict:
                 raise ValueError("不允许提交可执行脚本")
         elif item is not None and not isinstance(item, (bool, int, float)):
             raise ValueError("JSON 包含不支持的数据类型")
+
+    walk(value, 0)
+    return value
+
+
+def validate_integration_metadata(value: Any) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError("metadata 必须是 JSON 对象")
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError("metadata 包含不支持的 JSON 数据") from error
+    if len(encoded.encode("utf-8")) > PROMOTION_INTEGRATION_METADATA_MAX_BYTES:
+        raise ValueError("集成回传 metadata 不能超过 1 MiB")
+
+    def walk(item: Any, depth: int) -> None:
+        if depth > 16:
+            raise ValueError("metadata 嵌套层级过深")
+        if isinstance(item, dict):
+            for child in item.values():
+                walk(child, depth + 1)
+        elif isinstance(item, list):
+            for child in item:
+                walk(child, depth + 1)
+        elif item is not None and not isinstance(item, (bool, int, float, str)):
+            raise ValueError("metadata 包含不支持的 JSON 数据")
 
     walk(value, 0)
     return value

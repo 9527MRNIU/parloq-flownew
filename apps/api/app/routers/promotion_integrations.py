@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 from datetime import timedelta
@@ -44,12 +46,16 @@ from app.models import (
 from app.security import utcnow
 from app.serializers import iso
 from app.services.promotion_integrations import (
+    GENERATED_IFRAME_ENTRY,
+    HTML_EXTENSIONS,
     MAX_INTEGRATION_ZIP,
     domain_is_ready,
+    generated_iframe_document,
     integration_feedback_contract,
     integration_source_urls,
     parse_integration_package,
     replace_integration_package,
+    uses_generated_iframe_document,
     verify_integration_embed_token,
 )
 from app.services.promotion_event_rate_limits import (
@@ -74,7 +80,7 @@ from app.services.github_repository import (
 )
 from app.services.platform_clients import PlatformClientError
 from app.snowflake import new_public_id, parse_snowflake_id
-from app.validation import parse_public_datetime
+from app.validation import PROMOTION_INTEGRATION_EVENT_MAX_BYTES, parse_public_datetime
 
 
 router = APIRouter(prefix="/api/promotion/integrations", tags=["promotion-integrations"])
@@ -84,6 +90,44 @@ public_router = APIRouter(
 )
 PUBLIC_RUNTIME_DIR = Path(__file__).resolve().parents[1] / "public"
 logger = logging.getLogger(__name__)
+
+
+def _integration_event_metadata_bytes(metadata: dict) -> bytes:
+    return json.dumps(
+        metadata,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def _integration_event_row(
+    event: PromotionIntegrationEvent,
+    channel_slug: str,
+    *,
+    include_metadata: bool,
+) -> dict:
+    metadata = event.metadata_json or {}
+    encoded_metadata = _integration_event_metadata_bytes(metadata)
+    row = {
+        "id": entity_id(event),
+        "eventType": event.event_type,
+        "channelId": entity_id(event.channel_id),
+        "channelSlug": channel_slug,
+        "templateId": entity_id(event.template_id) if event.template_id else None,
+        "integrationVersion": event.integration_version,
+        "visitorId": event.visitor_id,
+        "fingerprintQuality": event.fingerprint_quality,
+        "trafficSource": event.traffic_source,
+        "occurredAt": iso(event.occurred_at),
+        "metadataBytes": len(encoded_metadata),
+        "metadataSha256": hashlib.sha256(encoded_metadata).hexdigest(),
+        "createdAt": iso(event.created_at),
+    }
+    if include_metadata:
+        row["metadata"] = metadata
+    return row
 
 
 def _integration(
@@ -610,22 +654,11 @@ def list_integration_events(
     return {
         "data": {
             "rows": [
-                {
-                    "id": entity_id(event),
-                    "eventType": event.event_type,
-                    "channelId": entity_id(event.channel_id),
-                    "channelSlug": channel_slug,
-                    "templateId": (
-                        entity_id(event.template_id) if event.template_id else None
-                    ),
-                    "integrationVersion": event.integration_version,
-                    "visitorId": event.visitor_id,
-                    "fingerprintQuality": event.fingerprint_quality,
-                    "trafficSource": event.traffic_source,
-                    "occurredAt": iso(event.occurred_at),
-                    "metadata": event.metadata_json or {},
-                    "createdAt": iso(event.created_at),
-                }
+                _integration_event_row(
+                    event,
+                    channel_slug,
+                    include_metadata=False,
+                )
                 for event, channel_slug in event_rows
             ],
             "summary": [
@@ -635,6 +668,36 @@ def list_integration_events(
             "total": total,
             "page": page,
             "perPage": per_page,
+        }
+    }
+
+
+@router.get("/{integration_id}/events/{event_id}")
+def get_integration_event(
+    integration_id: str,
+    event_id: str,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    item = _integration(db, integration_id, current_user)
+    row = db.execute(
+        select(PromotionIntegrationEvent, PromotionChannel.slug)
+        .join(PromotionChannel, PromotionChannel.id == PromotionIntegrationEvent.channel_id)
+        .where(
+            PromotionIntegrationEvent.integration_id == item.id,
+            identifier_filter(PromotionIntegrationEvent, event_id),
+        )
+    ).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="回传事件不存在")
+    event, channel_slug = row
+    return {
+        "data": {
+            "event": _integration_event_row(
+                event,
+                channel_slug,
+                include_metadata=True,
+            )
         }
     }
 
@@ -882,13 +945,26 @@ async def report_integration_event(
     request: Request,
     db: DbSession,
 ) -> JSONResponse:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > PROMOTION_INTEGRATION_EVENT_MAX_BYTES:
+                raise HTTPException(status_code=413, detail="集成回传请求不能超过 1 MiB + 64 KiB")
+        except ValueError:
+            pass
+    body = await request.body()
+    if len(body) > PROMOTION_INTEGRATION_EVENT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="集成回传请求不能超过 1 MiB + 64 KiB")
     try:
-        event_input = PromotionIntegrationEventInput.model_validate_json(
-            await request.body()
-        )
+        event_input = PromotionIntegrationEventInput.model_validate_json(body)
     except ValidationError as error:
         raise HTTPException(
-            status_code=422, detail=error.errors(include_url=False)
+            status_code=422,
+            detail=error.errors(
+                include_url=False,
+                include_context=False,
+                include_input=False,
+            ),
         ) from None
     item, _, channel, template, token_payload = _public_runtime_context(
         db,
@@ -1074,47 +1150,60 @@ def public_integration_asset(
     normalized = PurePosixPath(asset_path.replace("\\", "/"))
     if normalized.is_absolute() or ".." in normalized.parts or not normalized.parts:
         raise HTTPException(status_code=404)
-    asset = db.scalar(
-        select(PromotionIntegrationAsset).where(
-            PromotionIntegrationAsset.integration_id == item.id,
-            PromotionIntegrationAsset.path == normalized.as_posix(),
-        )
-    )
-    if asset is None:
-        raise HTTPException(status_code=404)
-    content = asset.content
-    feedback_enabled, _ = integration_feedback_contract(item)
-    iframe_entry = next(
-        (
-            str(entrypoint.get("path") or "")
-            for entrypoint in item.entrypoints_json or []
-            if entrypoint.get("path")
-        ),
-        "",
-    )
+    normalized_path = normalized.as_posix()
     if (
-        feedback_enabled
-        and item.integration_type == "iframe"
-        and asset.path == iframe_entry
+        normalized_path == GENERATED_IFRAME_ENTRY
+        and uses_generated_iframe_document(item)
     ):
-        try:
-            document = content.decode("utf-8")
-        except UnicodeDecodeError:
-            raise HTTPException(status_code=500, detail="iframe 入口不是 UTF-8 HTML") from None
-        runtime = (
-            '<script src="/api/public/promotion/integrations/runtime.js" '
-            f'data-integration-id="{entity_id(item)}"></script>'
+        content = generated_iframe_document(item, domain).encode("utf-8")
+        media_type = "text/html"
+    else:
+        asset = db.scalar(
+            select(PromotionIntegrationAsset).where(
+                PromotionIntegrationAsset.integration_id == item.id,
+                PromotionIntegrationAsset.path == normalized_path,
+            )
         )
-        head = re.search(r"<head\b[^>]*>", document, re.I)
-        document = (
-            document[: head.end()] + runtime + document[head.end() :]
-            if head
-            else runtime + document
+        if asset is None:
+            raise HTTPException(status_code=404)
+        content = asset.content
+        media_type = asset.content_type
+        feedback_enabled, _ = integration_feedback_contract(item)
+        iframe_entry = next(
+            (
+                str(entrypoint.get("path") or "")
+                for entrypoint in item.entrypoints_json or []
+                if entrypoint.get("path")
+            ),
+            "",
         )
-        content = document.encode("utf-8")
+        if (
+            feedback_enabled
+            and item.integration_type == "iframe"
+            and asset.path == iframe_entry
+            and PurePosixPath(asset.path).suffix.lower() in HTML_EXTENSIONS
+        ):
+            try:
+                document = content.decode("utf-8")
+            except UnicodeDecodeError:
+                raise HTTPException(
+                    status_code=500,
+                    detail="iframe 入口不是 UTF-8 HTML",
+                ) from None
+            runtime = (
+                '<script src="/api/public/promotion/integrations/runtime.js" '
+                f'data-integration-id="{entity_id(item)}"></script>'
+            )
+            head = re.search(r"<head\b[^>]*>", document, re.I)
+            document = (
+                document[: head.end()] + runtime + document[head.end() :]
+                if head
+                else runtime + document
+            )
+            content = document.encode("utf-8")
     return Response(
         content,
-        media_type=asset.content_type,
+        media_type=media_type,
         headers={
             "Cache-Control": "public, max-age=31536000, immutable",
             "X-Content-Type-Options": "nosniff",

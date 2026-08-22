@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
 import zipfile
 from urllib.parse import unquote
 
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
+
+from app.business_schemas import PublicEvent
+from app.validation import PROMOTION_INTEGRATION_EVENT_MAX_BYTES
 
 
 def _zip(files: dict[str, str]) -> bytes:
@@ -212,6 +218,110 @@ def test_flexible_packages_bind_to_templates_and_expand_csp(
     assert first_script_url not in preview.text
 
 
+def test_iframe_manifest_can_use_ordered_javascript_entries(
+    admin_client: TestClient,
+) -> None:
+    domain = _verified_domain(admin_client, "javascript-frame.test")
+    integration = _create_integration(
+        admin_client,
+        domain_id=domain["id"],
+        key="javascript-frame-v1",
+        name="全 JavaScript iframe",
+        package=_zip(
+            {
+                "integration.json": json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "type": "iframe",
+                        "version": "3.1.0",
+                        "entries": ["ds_net.js", "ds_net_native.mjs"],
+                        "feedback": {
+                            "enabled": True,
+                            "events": ["ip_sync", "device_activate"],
+                        },
+                    }
+                ),
+                "ds_net.js": "window.loadOrder = ['web'];",
+                "ds_net_native.mjs": "window.loadOrder.push('native');",
+            }
+        ),
+    )
+
+    assert integration["type"] == "iframe"
+    assert integration["version"] == "3.1.0"
+    assert integration["entryPaths"] == ["ds_net.js", "ds_net_native.mjs"]
+    assert integration["entrypoints"] == [
+        {"path": "ds_net.js", "scriptType": "classic"},
+        {"path": "ds_net_native.mjs", "scriptType": "module"},
+    ]
+    assert integration["feedbackEvents"] == [
+        "page_view",
+        "visit_end",
+        "ip_sync",
+        "device_activate",
+    ]
+    assert len(integration["sourceUrls"]) == 1
+    wrapper_url = integration["sourceUrls"][0]
+    assert wrapper_url.endswith("/3.1.0/__parloq_iframe__.html")
+
+    wrapper_path = wrapper_url.removeprefix("https://javascript-frame.test")
+    wrapper = admin_client.get(
+        wrapper_path,
+        headers={"host": "javascript-frame.test"},
+    )
+    assert wrapper.status_code == 200, wrapper.text
+    assert wrapper.headers["content-type"].startswith("text/html")
+    assert wrapper.headers["cache-control"] == "public, max-age=31536000, immutable"
+    runtime_url = "/api/public/promotion/integrations/runtime.js"
+    asset_base = wrapper_url.rsplit("/", 1)[0]
+    first_url = f"{asset_base}/ds_net.js"
+    second_url = f"{asset_base}/ds_net_native.mjs"
+    assert f'<script src="{first_url}" defer></script>' in wrapper.text
+    assert f'<script src="{second_url}" type="module"></script>' in wrapper.text
+    assert wrapper.text.index(runtime_url) < wrapper.text.index(first_url)
+    assert wrapper.text.index(first_url) < wrapper.text.index(second_url)
+    assert f'data-integration-id="{integration["id"]}"' in wrapper.text
+
+    first_asset = admin_client.get(
+        first_url.removeprefix("https://javascript-frame.test"),
+        headers={"host": "javascript-frame.test"},
+    )
+    assert first_asset.status_code == 200, first_asset.text
+    assert first_asset.text == "window.loadOrder = ['web'];"
+
+    wrong_host = admin_client.get(wrapper_path, headers={"host": "other.test"})
+    assert wrong_host.status_code == 404
+    wrong_version = admin_client.get(
+        wrapper_path.replace("/3.1.0/", "/3.0.0/"),
+        headers={"host": "javascript-frame.test"},
+    )
+    assert wrong_version.status_code == 404
+
+    imported = admin_client.post(
+        "/api/promotion/templates",
+        data={
+            "name": "JavaScript iframe template",
+            "integrationIds": json.dumps([integration["id"]]),
+        },
+        files={
+            "file": (
+                "javascript-frame-template.zip",
+                _zip({"index.html": "<html><body>Landing</body></html>"}),
+                "application/zip",
+            )
+        },
+    )
+    assert imported.status_code == 201, imported.text
+    template = imported.json()["data"]["template"]
+    preview = admin_client.get(f"/api/promotion/templates/{template['id']}/preview")
+    assert preview.status_code == 200, preview.text
+    assert preview.text.count(wrapper_url) == 1
+    assert first_url not in preview.text
+    assert "frame-src https://javascript-frame.test" in preview.headers[
+        "content-security-policy"
+    ]
+
+
 def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     admin_client: TestClient,
     monkeypatch,
@@ -341,6 +451,7 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     )
     assert event.status_code == 201, event.text
     assert event.json()["data"]["duplicate"] is False
+    event_id = event.json()["data"]["eventId"]
     duplicate = admin_client.post(
         f"/api/public/promotion/integrations/{integration['id']}/events",
         headers={"host": "integration-feedback.test"},
@@ -382,21 +493,91 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     )
     assert undeclared.status_code == 422, undeclared.text
 
+    metadata_limit = 1024 * 1024
+    boundary_metadata = {"blob": "x" * (metadata_limit - len(b'{"blob":""}'))}
+    assert len(
+        json.dumps(
+            boundary_metadata,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ) == metadata_limit
+    boundary = admin_client.post(
+        f"/api/public/promotion/integrations/{integration['id']}/events",
+        headers={"host": "integration-feedback.test"},
+        json={
+            **event_payload,
+            "idempotencyKey": "feedback-boundary-0001",
+            "metadata": boundary_metadata,
+        },
+    )
+    assert boundary.status_code == 201, boundary.text
+
+    metadata_too_large = admin_client.post(
+        f"/api/public/promotion/integrations/{integration['id']}/events",
+        headers={"host": "integration-feedback.test"},
+        json={
+            **event_payload,
+            "idempotencyKey": "feedback-metadata-large-0001",
+            "metadata": {"blob": boundary_metadata["blob"] + "x"},
+        },
+    )
+    assert metadata_too_large.status_code == 422, metadata_too_large.text
+
+    envelope_too_large = admin_client.post(
+        f"/api/public/promotion/integrations/{integration['id']}/events",
+        headers={
+            "host": "integration-feedback.test",
+            "content-type": "text/plain;charset=UTF-8",
+        },
+        content=b"x" * (PROMOTION_INTEGRATION_EVENT_MAX_BYTES + 1),
+    )
+    assert envelope_too_large.status_code == 413, envelope_too_large.text
+
     events = admin_client.get(
         f"/api/promotion/integrations/{integration['id']}/events"
     )
     assert events.status_code == 200, events.text
     event_data = events.json()["data"]
-    assert event_data["total"] == 1
-    assert event_data["summary"] == [{"eventType": "completed", "count": 1}]
-    assert event_data["rows"][0]["channelId"] == channel["id"]
-    assert event_data["rows"][0]["metadata"] == {"result": "ok", "count": 2}
+    assert event_data["total"] == 2
+    assert event_data["summary"] == [{"eventType": "completed", "count": 2}]
+    event_row = next(row for row in event_data["rows"] if row["id"] == event_id)
+    assert event_row["channelId"] == channel["id"]
+    assert "metadata" not in event_row
+    encoded_metadata = b'{"count":2,"result":"ok"}'
+    assert event_row["metadataBytes"] == len(encoded_metadata)
+    assert event_row["metadataSha256"] == hashlib.sha256(encoded_metadata).hexdigest()
+
+    event_detail = admin_client.get(
+        f"/api/promotion/integrations/{integration['id']}/events/{event_id}"
+    )
+    assert event_detail.status_code == 200, event_detail.text
+    detail_data = event_detail.json()["data"]["event"]
+    assert detail_data["metadata"] == {"result": "ok", "count": 2}
+    assert detail_data["metadataBytes"] == len(encoded_metadata)
+    assert detail_data["metadataSha256"] == hashlib.sha256(encoded_metadata).hexdigest()
+
+    boundary_event_id = boundary.json()["data"]["eventId"]
+    boundary_detail = admin_client.get(
+        f"/api/promotion/integrations/{integration['id']}/events/{boundary_event_id}"
+    )
+    assert boundary_detail.status_code == 200, boundary_detail.text
+    assert boundary_detail.json()["data"]["event"]["metadata"] == boundary_metadata
 
     refreshed = admin_client.get(
         f"/api/promotion/integrations/{integration['id']}"
     )
     assert refreshed.status_code == 200, refreshed.text
-    assert refreshed.json()["data"]["integration"]["eventCount"] == 1
+    assert refreshed.json()["data"]["integration"]["eventCount"] == 2
+
+
+def test_public_event_metadata_limit_remains_4_kib() -> None:
+    with pytest.raises(ValidationError, match="JSON 内容过大"):
+        PublicEvent(
+            idempotencyKey="public-event-0001",
+            visitorId="public-visitor-0001",
+            metadata={"blob": "x" * 4096},
+        )
 
 
 def test_manifest_can_define_multi_script_order_and_replace_version(
@@ -518,6 +699,41 @@ def test_ambiguous_iframe_package_requires_optional_manifest(
     )
     assert response.status_code == 422, response.text
     assert "integration.json" in response.json()["detail"]
+
+
+def test_iframe_manifest_rejects_mixed_html_and_javascript_entries(
+    admin_client: TestClient,
+) -> None:
+    domain = _verified_domain(admin_client, "mixed-frame.test")
+    response = admin_client.post(
+        "/api/promotion/integrations",
+        data={
+            "integrationKey": "mixed-frame",
+            "name": "Mixed frame",
+            "domainId": domain["id"],
+        },
+        files={
+            "file": (
+                "mixed-frame.zip",
+                _zip(
+                    {
+                        "integration.json": json.dumps(
+                            {
+                                "schemaVersion": 1,
+                                "type": "iframe",
+                                "entries": ["index.html", "runtime.js"],
+                            }
+                        ),
+                        "index.html": "<html></html>",
+                        "runtime.js": "window.runtime = true;",
+                    }
+                ),
+                "application/zip",
+            )
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == "iframe 集成入口不能混合 HTML 与 JavaScript"
 
 
 def test_integration_requires_a_ready_source_domain(

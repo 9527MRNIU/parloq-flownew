@@ -34,7 +34,7 @@ GitHub Release。
 
 ## 2. 可选 integration.json
 
-仅在需要明确类型、版本、HTML 入口或脚本加载顺序时提供清单。清单可使用单个
+仅在需要明确类型、版本、iframe 运行方式、HTML 入口或脚本加载顺序时提供清单。清单可使用单个
 `entry`，也可使用有序的 `entries`：
 
 ```json
@@ -57,8 +57,32 @@ GitHub Release。
 - `integrationKey` 最多 80 字符，`name` 最多 120 字符，`description` 最多 2000 字符；
 - script 支持多个 `.js` / `.mjs` 入口，数组顺序就是注入顺序；
 - `scriptType` 支持 `classic` 和 `module`，省略时 `.mjs` 自动识别为 module；
-- iframe 只能指定一个 `.html` / `.htm` 入口，包内其他脚本由 HTML 自行引用；
+- iframe 可以指定一个 `.html` / `.htm` 入口，也可以指定一个或多个纯 `.js` /
+  `.mjs` 入口，但两类入口不能混用；
+- 纯 JavaScript iframe 不需要 `index.html`。平台会生成同源 HTML 壳，先注入
+  `PromotionIntegrationBridge` runtime，再按 `entries` 顺序加载 classic/module 脚本；
 - `version` 可省略，平台会使用 ZIP 的 SHA-256 摘要生成稳定版本。
+
+纯 JavaScript iframe 清单示例：
+
+```json
+{
+  "schemaVersion": 1,
+  "type": "iframe",
+  "version": "1.0.0",
+  "entries": [
+    "ds_net.js",
+    { "path": "ds_net_native.mjs", "scriptType": "module" }
+  ],
+  "feedback": {
+    "enabled": true,
+    "events": ["ip_sync", "device_activate"]
+  }
+}
+```
+
+没有清单的纯 JavaScript 包仍自动识别为 `script`；需要 iframe 隔离运行时，必须在
+清单中显式设置 `"type": "iframe"`。
 
 需要向平台回传数据的 iframe 可增加可选 `feedback`。普通 iframe 不声明此项，
 加载行为与之前完全相同：
@@ -91,6 +115,9 @@ GitHub Release。
 https://源域名/api/public/promotion/integrations/{集成ID}/{版本}/{包内路径}
 ```
 
+纯 JavaScript iframe 的管理端 `entryPaths` 仍显示真实脚本入口；`sourceUrls` 只返回
+平台生成的 `__parloq_iframe__.html` 虚拟入口。虚拟入口不会写入资源表，也不能由集成包占用。
+
 - 资源只允许从所选源域名读取，使用错误 Host、旧版本、已停用集成或不可用域名
   时返回 404；
 - 版本 URL 使用一年不可变缓存。上传新版本时先完整校验 ZIP，再在一个数据库事务
@@ -110,6 +137,8 @@ https://源域名/api/public/promotion/integrations/{集成ID}/{版本}/{包内�
 
 - 平台先按集成及入口顺序注入全部 script，再注入 iframe；
 - classic script 使用 `defer` 并保持声明顺序，module 入口使用 `type="module"`；
+- 纯 JavaScript iframe 在父页面只注入一次；业务脚本在平台生成的同源 iframe 壳内
+  按清单顺序加载；
 - iframe 仍以静态标签挂载在模板 `body` 末尾，使用移出视口、零尺寸和无边框的
   隐藏方式；
 - 后台预览、公开渠道页和裂变页使用同一份模板集成绑定；
@@ -148,7 +177,7 @@ await window.PromotionIntegrationBridge.report("completed", {
 ```
 
 只有 `feedback.events` 已声明的自定义事件可以写入。元数据必须是普通 JSON 对象，
-单次最大 4 KB；令牌过期、集成停用、模板解绑或源域名失效后会立即拒绝上报。
+单次最大 1 MiB；令牌过期、集成停用、模板解绑或源域名失效后会立即拒绝上报。
 
 iframe 回传使用“模板策略”中的公开数据回传限速。平台分别按 iframe 集成、渠道、
 会话和来源 IP 计数，不与主模板事件或协议配对接口共用额度。超过额度时接口返回

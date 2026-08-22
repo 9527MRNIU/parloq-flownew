@@ -1,2 +1,0 @@
-# Preserve forensic evidence byte-for-byte and ignore source-format whitespace.
-evidence/** -text -whitespace

@@ -1,5 +1,6 @@
 import {
   DownloadIcon,
+  EyeIcon,
   PackageIcon,
   PlusIcon,
   RefreshCwIcon,
@@ -85,7 +86,9 @@ type IntegrationEvent = {
   fingerprintQuality: string;
   trafficSource: string;
   occurredAt?: string;
-  metadata: Record<string, unknown>;
+  metadataBytes: number;
+  metadataSha256: string;
+  metadata?: Record<string, unknown>;
 };
 
 type IntegrationEventSummary = {
@@ -176,7 +179,12 @@ function eventRow(input: unknown): IntegrationEvent {
     fingerprintQuality: field(row, "fingerprintQuality", "fingerprint_quality"),
     trafficSource: field(row, "trafficSource", "traffic_source") || "direct",
     occurredAt: field(row, "occurredAt", "occurred_at"),
-    metadata: object(row.metadata),
+    metadataBytes: Number(row.metadataBytes ?? row.metadata_bytes ?? 0),
+    metadataSha256: field(row, "metadataSha256", "metadata_sha256"),
+    metadata:
+      row.metadata && typeof row.metadata === "object"
+        ? object(row.metadata)
+        : undefined,
   };
 }
 
@@ -220,6 +228,8 @@ export default function PromotionIntegrationsPage() {
   const [eventPage, setEventPage] = useState(1);
   const [eventPageSize, setEventPageSize] = useState(20);
   const [eventsLoading, setEventsLoading] = useState(false);
+  const [expandedEventId, setExpandedEventId] = useState("");
+  const [eventDetailLoading, setEventDetailLoading] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -471,7 +481,33 @@ export default function PromotionIntegrationsPage() {
   function openEvents(row: PromotionIntegration) {
     setEventIntegration(row);
     setEventPage(1);
+    setExpandedEventId("");
     void loadEvents(row, 1, eventPageSize);
+  }
+
+  async function toggleEventDetail(event: IntegrationEvent) {
+    if (!eventIntegration) return;
+    if (expandedEventId === event.id) {
+      setExpandedEventId("");
+      return;
+    }
+    setExpandedEventId(event.id);
+    if (event.metadata) return;
+    setEventDetailLoading(event.id);
+    try {
+      const payload = await apiRequest(
+        `/api/promotion/integrations/${eventIntegration.id}/events/${event.id}`,
+      );
+      const detail = eventRow(object(object(payload).data).event);
+      setEventRows((current) =>
+        current.map((row) => (row.id === detail.id ? detail : row)),
+      );
+    } catch (caught) {
+      setExpandedEventId("");
+      toast.error(caught instanceof Error ? caught.message : "回传详情读取失败");
+    } finally {
+      setEventDetailLoading("");
+    }
   }
 
   async function save() {
@@ -1079,8 +1115,8 @@ export default function PromotionIntegrationsPage() {
           {!editing ? (
             <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
               ZIP 有唯一 HTML 入口时自动识别为 iframe；没有 HTML 时，所有 JS/MJS
-              按文件名稳定排序加载。存在多个 HTML 或需要自定义脚本顺序时，可选用
-              integration.json 指定 entry 或 entries。
+              默认识别为 JavaScript 集成。纯 JS 如需在 iframe 内运行，请在
+              integration.json 中设置 type: iframe，并用 entry 或 entries 声明入口。
             </div>
           ) : null}
         </div>
@@ -1088,7 +1124,10 @@ export default function PromotionIntegrationsPage() {
 
       <Drawer
         open={Boolean(eventIntegration)}
-        onClose={() => setEventIntegration(null)}
+        onClose={() => {
+          setEventIntegration(null);
+          setExpandedEventId("");
+        }}
         title={`回传记录${eventIntegration ? ` · ${eventIntegration.name}` : ""}`}
         description={`共 ${eventTotal.toLocaleString()} 条事件`}
         wide
@@ -1166,18 +1205,36 @@ export default function PromotionIntegrationsPage() {
                       </TableCell>
                       <TableCell>{formatDateTime(event.occurredAt)}</TableCell>
                       <TableCell>
-                        {Object.keys(event.metadata).length ? (
-                          <details className="max-w-72">
-                            <summary className="cursor-pointer text-sm text-primary">
-                              查看
-                            </summary>
-                            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-muted p-2 text-xs">
+                        <div className="flex max-w-80 flex-col items-start gap-2">
+                          <div className="cell-main max-w-full">
+                            <strong>{formatSize(event.metadataBytes)}</strong>
+                            <span
+                              className="max-w-full truncate font-mono"
+                              title={event.metadataSha256}
+                            >
+                              {event.metadataSha256 || "无摘要"}
+                            </span>
+                          </div>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            title="查看完整回传数据"
+                            aria-label={`查看 ${event.eventType} 完整回传数据`}
+                            onClick={() => void toggleEventDetail(event)}
+                          >
+                            {eventDetailLoading === event.id ? (
+                              <Spinner />
+                            ) : (
+                              <EyeIcon size={15} />
+                            )}
+                            {expandedEventId === event.id ? "收起" : "查看"}
+                          </Button>
+                          {expandedEventId === event.id && event.metadata ? (
+                            <pre className="max-h-72 max-w-full overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
                               {JSON.stringify(event.metadata, null, 2)}
                             </pre>
-                          </details>
-                        ) : (
-                          "—"
-                        )}
+                          ) : null}
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}

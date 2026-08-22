@@ -6,7 +6,13 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.validation import normalize_country, normalize_phone, normalize_slug, validate_structured_json
+from app.validation import (
+    normalize_country,
+    normalize_phone,
+    normalize_slug,
+    validate_integration_metadata,
+    validate_structured_json,
+)
 from app.snowflake import parse_snowflake_id
 from app.hyperlink_messages import validate_hyperlink_template_content
 from app.message_capabilities import TextMaterialRole, validate_text_material_content
@@ -737,7 +743,7 @@ class PromotionIntegrationEventInput(Model):
     )
 
     _metadata = field_validator("metadata")(
-        lambda value: validate_structured_json(value, max_bytes=4096)
+        validate_integration_metadata
     )
 
 
