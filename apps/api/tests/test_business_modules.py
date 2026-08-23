@@ -822,7 +822,9 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert 'e.key==="F12"' in guard.text
     assert 'input[type="tel"]' in guard.text
     assert 'replace(/\\+/g,"")' in guard.text
-    assert 'window-gap' in guard.text
+    assert 'window-gap' not in guard.text
+    assert "outerWidth" not in guard.text
+    assert "outerHeight" not in guard.text
     assert 'debugger-delay' in guard.text
     assert "parloq" not in guard.text.lower()
 
@@ -834,7 +836,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
                 "idempotencyKey": "inspection-event-0001",
                 "visitorId": "visitor-inspection-0001",
                 "sessionToken": config["sessionToken"],
-                "metadata": {"reason": "window-gap", "mode": "enhanced"},
+                "metadata": {"reason": "mobile-console", "mode": "enhanced"},
             }
         ),
     )
