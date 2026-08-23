@@ -27,7 +27,7 @@
 
 ## 导入边界
 
-系统只接受自包含 ZIP。必须有唯一的 `index.html` 和有效 `manifest.json`，入口不能改为其他文件。当前限制为：ZIP 最大 20 MB、解压后最大 50 MB、单文件最大 5 MB、文件数最多 500 个。
+系统只接受自包含 ZIP。必须有唯一的 `index.html` 和有效 `manifest.json`，入口不能改为其他文件。当前限制为：ZIP 和解压后总量均最大 64 MB、普通单文件最大 5 MB、MP4/WebM 视频单文件最大 50 MB、文件数最多 500 个。
 
 系统只接受 `promotion-template/v3`。v1/v2 包需要先在模板仓库升级并重新构建。
 

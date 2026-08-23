@@ -99,6 +99,7 @@ import {
 } from "../content/promotion-template-design";
 
 const CHANNEL_RANDOM_CODE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
+const TEMPLATE_PACKAGE_MAX_BYTES = 64 * 1024 * 1024;
 
 const PLATFORM_CONFIG: Record<
   string,
@@ -1357,6 +1358,12 @@ export function PromotionTemplatesPage() {
   }
   async function chooseTemplatePackage(next: File | null) {
     const requestId = ++packageInspectionRequest.current;
+    if (next && next.size > TEMPLATE_PACKAGE_MAX_BYTES) {
+      setFile(null);
+      setPackageInspecting(false);
+      toast.error("模板 ZIP 不能超过 64 MB");
+      return;
+    }
     setFile(next);
     if (!next || editing) {
       setPackageInspecting(false);
@@ -2280,7 +2287,7 @@ export function PromotionTemplatesPage() {
                 ? "正在读取包内名称和说明…"
                 : editing
                   ? "不选择则只保存管理信息和集成配置；选择后同时替换模板资源"
-                  : "仅支持 .zip，最大 20 MB；包内元数据会自动填写且可修改"}
+                  : "仅支持 .zip，最大 64 MB；MP4/WebM 单文件最大 50 MB"}
             </span>
           </label>
           <label className="field">

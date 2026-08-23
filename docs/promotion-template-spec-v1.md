@@ -39,7 +39,7 @@ locales/
 - 页面引用资源必须使用相对路径，例如 `assets/app.css`。
 - Vite 项目应设置相对资源基址，产物不得依赖部署根路径。
 - 不允许 `..`、绝对文件系统路径、符号链接或多个 `index.html`。
-- 单个文件不超过 5 MB，ZIP 不超过 20 MB，解压总量不超过 50 MB，文件数不超过 500。
+- 普通单文件不超过 5 MB，MP4/WebM 视频单文件不超过 50 MB，ZIP 和解压总量均不超过 64 MB，文件数不超过 500。
 - 不上传 source map；生产构建必须关闭 `sourcemap`。
 
 ## 3. manifest.json

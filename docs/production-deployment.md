@@ -87,7 +87,7 @@ API 容器设置 `AUTO_MIGRATE=true`，启动时先执行 Alembic，再开始监
 
 自定义片段只拥有以下 marker 内容，不整体覆盖宝塔 vhost 或代理文件：
 
-- vhost：Cloudflare-only 源站限制、12 MB 请求体、安全响应头；
+- vhost：Cloudflare-only 源站限制、64 MB 请求体、安全响应头；
 - proxy：`X-Forwarded-*`、10 秒连接超时、120 秒收发超时、关闭请求缓冲。
 
 参考内容在 `deploy/nginx.center.parloq.com.conf`，该文件不能直接安装成 vhost。

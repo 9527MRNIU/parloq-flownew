@@ -113,12 +113,19 @@ from app.validation import parse_public_datetime, validate_structured_json
 router = APIRouter(tags=["promotion"])
 logger = logging.getLogger(__name__)
 REPORT_TIMEZONE = ZoneInfo("Asia/Shanghai")
-MAX_ZIP = 20 * 1024 * 1024
-MAX_TOTAL = 50 * 1024 * 1024
-MAX_FILE = 5 * 1024 * 1024
+MIB = 1024 * 1024
+MAX_ZIP = 64 * MIB
+MAX_TOTAL = 64 * MIB
+MAX_FILE = 5 * MIB
+MAX_VIDEO_FILE = 50 * MIB
 MAX_FILES = 500
 PREVIEW_ASSET_TOKEN_TTL_SECONDS = 300
-ALLOWED_EXTENSIONS = {".html", ".css", ".js", ".json", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".txt"}
+VIDEO_EXTENSIONS = {".mp4", ".webm"}
+VIDEO_CONTENT_TYPES = {".mp4": "video/mp4", ".webm": "video/webm"}
+ALLOWED_EXTENSIONS = {
+    ".html", ".css", ".js", ".json", ".png", ".jpg", ".jpeg", ".gif",
+    ".webp", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".txt",
+} | VIDEO_EXTENSIONS
 LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z]{2,4})?$")
 COUNTRY_DEFAULT_LOCALE = {
     "US":"en","GB":"en","CA":"en","AU":"en","NZ":"en","IE":"en","IN":"hi","PK":"ur","BD":"bn","LK":"si","NP":"ne",
@@ -727,7 +734,7 @@ def _manifest_protocol(manifest: dict) -> dict:
 
 
 def _safe_bundle(raw: bytes) -> tuple[dict, str, list[tuple[str, str, bytes]], int, dict]:
-    if len(raw) > MAX_ZIP: raise HTTPException(status_code=413, detail="ZIP 文件超过 20MB")
+    if len(raw) > MAX_ZIP: raise HTTPException(status_code=413, detail="ZIP 文件超过 64MB")
     try: archive = zipfile.ZipFile(io.BytesIO(raw))
     except zipfile.BadZipFile: raise HTTPException(status_code=422, detail="模板包不是有效 ZIP") from None
     files = [info for info in archive.infolist() if not info.is_dir()]
@@ -740,11 +747,16 @@ def _safe_bundle(raw: bytes) -> tuple[dict, str, list[tuple[str, str, bytes]], i
         if (info.external_attr >> 16) & 0o170000 == stat.S_IFLNK:
             raise HTTPException(status_code=422, detail="模板包不能包含符号链接")
         normalized = path.as_posix()
-        if PurePosixPath(normalized).suffix.lower() not in ALLOWED_EXTENSIONS:
+        extension = PurePosixPath(normalized).suffix.lower()
+        if extension not in ALLOWED_EXTENSIONS:
             raise HTTPException(status_code=422, detail=f"模板文件类型不允许：{normalized}")
-        if info.file_size > MAX_FILE: raise HTTPException(status_code=422, detail=f"单文件超过 5MB：{normalized}")
+        max_file_size = MAX_VIDEO_FILE if extension in VIDEO_EXTENSIONS else MAX_FILE
+        if info.file_size > max_file_size:
+            file_kind = "视频文件" if extension in VIDEO_EXTENSIONS else "单文件"
+            detail = f"{file_kind}超过 {max_file_size // MIB}MB"
+            raise HTTPException(status_code=422, detail=f"{detail}：{normalized}")
         total += info.file_size
-        if total > MAX_TOTAL: raise HTTPException(status_code=422, detail="模板解压总大小超过 50MB")
+        if total > MAX_TOTAL: raise HTTPException(status_code=422, detail="模板解压总大小超过 64MB")
         values[normalized] = archive.read(info)
     index_candidates = [path for path in values if path == "index.html" or path.endswith("/index.html")]
     if len(index_candidates) != 1:
@@ -772,7 +784,17 @@ def _safe_bundle(raw: bytes) -> tuple[dict, str, list[tuple[str, str, bytes]], i
             status_code=422,
             detail=f"index.html 未加载组件文件：{component_entry}",
         )
-    assets = [(path, mimetypes.guess_type(path)[0] or "application/octet-stream", content) for path, content in values.items() if path not in {"manifest.json", "index.html"}]
+    assets = [
+        (
+            path,
+            VIDEO_CONTENT_TYPES.get(PurePosixPath(path).suffix.lower())
+            or mimetypes.guess_type(path)[0]
+            or "application/octet-stream",
+            content,
+        )
+        for path, content in values.items()
+        if path not in {"manifest.json", "index.html"}
+    ]
     quality_report = inspect_template_quality(
         manifest=manifest,
         index_html=index_html,
@@ -949,7 +971,7 @@ def _sandbox_csp(
         f"connect-src {origin} https://connect.facebook.net https://www.facebook.com{external_connections}; "
         f"img-src {origin} data: blob: https://www.facebook.com; "
         f"style-src 'unsafe-inline' {origin}; font-src {origin} data:; "
-        f"media-src 'none'; object-src 'none'; frame-src {frames}; "
+        f"media-src {origin} data: blob:; object-src 'none'; frame-src {frames}; "
         f"form-action {origin}; frame-ancestors 'none'"
     )
 
@@ -1024,11 +1046,72 @@ def _verify_preview_asset_token(template_id: str, token: str) -> None:
         raise HTTPException(status_code=404) from None
 
 
+def _range_not_satisfiable(
+    content_type: str,
+    total_size: int,
+    headers: dict[str, str],
+) -> Response:
+    return Response(
+        status_code=416,
+        media_type=content_type,
+        headers={
+            **headers,
+            "Content-Range": f"bytes */{total_size}",
+            "Content-Length": "0",
+        },
+    )
+
+
+def _asset_response(
+    content: bytes,
+    content_type: str,
+    request: Request,
+    headers: dict[str, str],
+) -> Response:
+    if content_type not in VIDEO_CONTENT_TYPES.values():
+        return Response(content, media_type=content_type, headers=headers)
+
+    total_size = len(content)
+    video_headers = {**headers, "Accept-Ranges": "bytes"}
+    range_header = request.headers.get("range", "").strip()
+    if not range_header:
+        return Response(content, media_type=content_type, headers=video_headers)
+
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header)
+    if match is None or total_size == 0 or not any(match.groups()):
+        return _range_not_satisfiable(content_type, total_size, video_headers)
+    start_raw, end_raw = match.groups()
+    if start_raw:
+        start = int(start_raw)
+        end = int(end_raw) if end_raw else total_size - 1
+    else:
+        suffix_length = int(end_raw)
+        if suffix_length <= 0:
+            return _range_not_satisfiable(content_type, total_size, video_headers)
+        start = max(total_size - suffix_length, 0)
+        end = total_size - 1
+    if start >= total_size or start > end:
+        return _range_not_satisfiable(content_type, total_size, video_headers)
+    end = min(end, total_size - 1)
+    partial = content[start : end + 1]
+    return Response(
+        partial,
+        status_code=206,
+        media_type=content_type,
+        headers={
+            **video_headers,
+            "Content-Range": f"bytes {start}-{end}/{total_size}",
+            "Content-Length": str(len(partial)),
+        },
+    )
+
+
 def _preview_asset_response(
     db: DbSession,
     item: PromotionTemplate,
     asset_path: str,
     asset_root: str,
+    request: Request,
 ) -> Response:
     normalized = PurePosixPath(asset_path)
     if normalized.is_absolute() or ".." in normalized.parts:
@@ -1048,10 +1131,11 @@ def _preview_asset_response(
             rb"\1" + f"{asset_root}assets/".encode(),
             content,
         )
-    return Response(
+    return _asset_response(
         content,
-        media_type=asset.content_type,
-        headers={
+        asset.content_type,
+        request,
+        {
             "Cache-Control": "private, no-store",
             "X-Content-Type-Options": "nosniff",
             "Access-Control-Allow-Origin": "*",
@@ -1511,6 +1595,7 @@ def signed_preview_asset(
     template_id: str,
     preview_token: str,
     asset_path: str,
+    request: Request,
     db: DbSession,
 ) -> Response:
     item = db.scalar(
@@ -1525,14 +1610,14 @@ def signed_preview_asset(
         f"/api/promotion/templates/{entity_id(item)}/preview/assets/"
         f"_signed/{preview_token}/"
     )
-    return _preview_asset_response(db, item, asset_path, asset_root)
+    return _preview_asset_response(db, item, asset_path, asset_root, request)
 
 
 @router.get("/api/promotion/templates/{template_id}/preview/assets/{asset_path:path}")
-def preview_asset(template_id: str, asset_path: str, db: DbSession, current_user: CurrentUser) -> Response:
+def preview_asset(template_id: str, asset_path: str, request: Request, db: DbSession, current_user: CurrentUser) -> Response:
     item = _template(db, template_id, current_user)
     asset_root = f"/api/promotion/templates/{entity_id(item)}/preview/assets/"
-    return _preview_asset_response(db, item, asset_path, asset_root)
+    return _preview_asset_response(db, item, asset_path, asset_root, request)
 
 
 @router.delete("/api/promotion/templates/{template_id}")
@@ -2427,7 +2512,12 @@ def promotion_asset(slug: str, asset_path: str, request: Request, db: DbSession)
     content = asset.content
     if asset.content_type in {"text/css", "application/javascript", "text/javascript"}:
         content = re.sub(rb'(["\'(])/assets/', rb'\1/api/public/promotion/channels/' + slug.encode() + rb'/assets/assets/', content)
-    return Response(content, media_type=asset.content_type, headers={"Cache-Control": "public, max-age=300", "X-Content-Type-Options": "nosniff", "Access-Control-Allow-Origin": "*"})
+    return _asset_response(
+        content,
+        asset.content_type,
+        request,
+        {"Cache-Control": "public, max-age=300", "X-Content-Type-Options": "nosniff", "Access-Control-Allow-Origin": "*"},
+    )
 
 
 @router.post("/api/public/promotion/channels/{slug}/events")

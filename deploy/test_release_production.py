@@ -8,6 +8,7 @@ import unittest
 SCRIPT = Path(__file__).with_name("release-production.sh")
 COMPOSE = Path(__file__).with_name("docker-compose.production.yml")
 WEB_DIR = Path(__file__).parents[1] / "apps" / "web"
+NGINX_REFERENCE = Path(__file__).with_name("nginx.center.parloq.com.conf")
 
 
 class ProductionReleaseScriptTests(unittest.TestCase):
@@ -22,6 +23,7 @@ class ProductionReleaseScriptTests(unittest.TestCase):
         cls.web_origin_entrypoint = (WEB_DIR / "management-origin.envsh").read_text(
             encoding="utf-8"
         )
+        cls.nginx_reference = NGINX_REFERENCE.read_text(encoding="utf-8")
 
     def test_script_is_valid_bash(self) -> None:
         checked = subprocess.run(
@@ -83,6 +85,12 @@ class ProductionReleaseScriptTests(unittest.TestCase):
         self.assertIn("$http_x_forwarded_host", self.web_nginx)
         self.assertIn('"127.0.0.1" 1;', self.web_nginx)
         self.assertIn("BaoTa loopback Host mode", self.script)
+
+    def test_template_video_upload_body_limit_reaches_both_proxies(self) -> None:
+        self.assertEqual(self.web_nginx.count("client_max_body_size 64m;"), 2)
+        self.assertIn("client_max_body_size 64m;", self.nginx_reference)
+        self.assertNotIn("client_max_body_size 12m;", self.web_nginx)
+        self.assertNotIn("client_max_body_size 12m;", self.nginx_reference)
 
     def test_compose_builds_from_the_server_checkout(self) -> None:
         self.assertIn("PARLOQ_SOURCE_ROOT", self.compose)

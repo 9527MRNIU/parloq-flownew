@@ -89,8 +89,8 @@ export const TEMPLATE_DESIGN_SECTIONS: TemplateDesignSection[] = [
     bullets: [
       "模板包资源必须自包含并使用相对路径，必须包含 manifest.components.entry 指向的标准组件脚本；模板不得自行声明外部 JavaScript、隐藏 iframe 或跨域回传，已在平台集成管理登记并绑定的运行时集成除外。",
       "标准组件源码统一在模板仓库 packages/runtime 维护，构建时复制到每个模板 ZIP；不要从系统仓库引用或下载组件。",
-      "ZIP 不超过 20 MB，解压总量不超过 50 MB，文件数不超过 500，单文件不超过 5 MB。",
-      "生产构建关闭 source map；图片优先 WebP/AVIF，字体放在 assets/fonts 并使用 font-display: swap。",
+      "ZIP 和解压总量均不超过 64 MB，文件数不超过 500；普通文件不超过 5 MB，MP4/WebM 视频单文件不超过 50 MB。",
+      "生产构建关闭 source map；图片优先 WebP/AVIF，视频使用 MP4(H.264/AAC) 或 WebM(VP9/Opus)，字体放在 assets/fonts 并使用 font-display: swap。",
     ],
     code: TEMPLATE_FILE_TREE,
   },

@@ -22,7 +22,8 @@ from app.models import (
     PersonalAccount,
     PromotionEvent,
 )
-from app.routers.promotion import _localize_template_html
+from app.routers import promotion as promotion_router
+from app.routers.promotion import MAX_VIDEO_FILE, _localize_template_html
 from app.security import utcnow
 from app.services.wa_gateway import GatewayError, WaGatewayClient
 from app.services.account_metadata_sync import (
@@ -51,7 +52,7 @@ def _device_fingerprint(**overrides: str) -> dict:
     }
 
 
-def _zip(files: dict[str, str]) -> bytes:
+def _zip(files: dict[str, str | bytes]) -> bytes:
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
         for path, content in files.items():
@@ -306,6 +307,10 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert pixel.status_code == 201
     pixel_id = pixel.json()["data"]["pixel"]["id"]
 
+    mp4_content = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isomiso2"
+    webm_content = b"\x1a\x45\xdf\xa3webm-demo-content"
+    assert MAX_VIDEO_FILE == 50 * 1024 * 1024
+
     initial = _zip(
         {
             "index.html": (
@@ -351,6 +356,8 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
             "dist/assets/app.css": "body{color:#123456}",
             "dist/assets/account-link-elements.js": "window.testComponents = true;",
             "dist/assets/logo.png": "demo",
+            "dist/assets/hero.mp4": mp4_content,
+            "dist/assets/loop.webm": webm_content,
             "dist/locales/en.json": '{"title":"Hello","phonePlaceholder":"12025550123"}',
             "dist/locales/de.json": '{"title":"Hallo","phonePlaceholder":"4915123456789"}',
             "dist/locales/ar.json": '{"title":"تابع برقم هاتفك","phonePlaceholder":"966501234567"}',
@@ -390,6 +397,9 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     ]
     assert "allow-same-origin" not in preview.headers["content-security-policy"]
     assert "connect-src http://testserver" in preview.headers["content-security-policy"]
+    assert "media-src http://testserver data: blob:" in preview.headers[
+        "content-security-policy"
+    ]
     assert '"previewMode": true' in preview.text
     assert '"previewDevice": "desktop"' in preview.text
     assert "promotionPreviewState='code_issued'" in preview.text
@@ -430,6 +440,25 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     signed_css = admin_client.get(f"{signed_asset_root}assets/app.css")
     assert signed_css.status_code == 200
     assert signed_css.headers["access-control-allow-origin"] == "*"
+    signed_video = admin_client.get(
+        f"{signed_asset_root}assets/hero.mp4",
+        headers={"Range": "bytes=4-11"},
+    )
+    assert signed_video.status_code == 206
+    assert signed_video.content == mp4_content[4:12]
+    assert signed_video.headers["content-type"].startswith("video/mp4")
+    assert signed_video.headers["accept-ranges"] == "bytes"
+    assert signed_video.headers["content-range"] == f"bytes 4-11/{len(mp4_content)}"
+    invalid_video_range = admin_client.get(
+        f"{signed_asset_root}assets/hero.mp4",
+        headers={"Range": "bytes=999-"},
+    )
+    assert invalid_video_range.status_code == 416
+    assert invalid_video_range.headers["content-range"] == f"bytes */{len(mp4_content)}"
+    signed_webm = admin_client.get(f"{signed_asset_root}assets/loop.webm")
+    assert signed_webm.status_code == 200
+    assert signed_webm.content == webm_content
+    assert signed_webm.headers["content-type"].startswith("video/webm")
     tampered_root = signed_asset_root.replace("_signed/", "_signed/x", 1)
     assert admin_client.get(f"{tampered_root}assets/app.css").status_code == 404
     preview_token = signed_asset_root.rstrip("/").rsplit("/", 1)[-1]
@@ -636,6 +665,9 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert 'placeholder="4915123456789"' in render.text
     assert '"localizedCopy": {"title": "Hallo"' in render.text
     assert "maximum-scale=1,user-scalable=no" in render.text
+    assert "media-src http://testserver data: blob:" in render.headers[
+        "content-security-policy"
+    ]
     assert 'src="assets/app.js"' in render.text
     assert "/api/public/promotion/channels/de-facebook-demo/assets/assets/logo.png" in render.text
     assert "/assets/assets/assets/" not in render.text
@@ -667,6 +699,16 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert admin_client.get(
         "/api/public/promotion/channels/de-facebook-demo/assets/assets/app.css"
     ).status_code == 200
+    public_video = admin_client.get(
+        "/api/public/promotion/channels/de-facebook-demo/assets/assets/hero.mp4",
+        headers={"Range": "bytes=-8"},
+    )
+    assert public_video.status_code == 206
+    assert public_video.content == mp4_content[-8:]
+    assert public_video.headers["accept-ranges"] == "bytes"
+    assert public_video.headers["content-range"] == (
+        f"bytes {len(mp4_content) - 8}-{len(mp4_content) - 1}/{len(mp4_content)}"
+    )
     locale_asset = admin_client.get(
         "/api/public/promotion/channels/de-facebook-demo/assets/locales/de.json"
     )
@@ -749,6 +791,32 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert admin_client.get(
         f"/api/promotion/templates/{template['id']}/preview/assets/assets/app.css"
     ).status_code == 401
+
+
+def test_promotion_template_enforces_video_specific_file_limit(
+    admin_client: TestClient, monkeypatch
+) -> None:
+    monkeypatch.setattr(promotion_router, "MAX_VIDEO_FILE", 32)
+    package = _zip(
+        {
+            "index.html": (
+                f"<html><body>{STANDARD_COMPONENTS_HTML}"
+                '<script src="assets/account-link-elements.js"></script>'
+                '<video src="assets/too-large.mp4"></video></body></html>'
+            ),
+            "manifest.json": json.dumps(_v3_template_manifest()),
+            "assets/account-link-elements.js": "window.testComponents = true;",
+            "assets/too-large.mp4": b"0" * 33,
+        }
+    )
+    rejected = admin_client.post(
+        "/api/promotion/templates",
+        data={"name": "Oversized video template"},
+        files={"file": ("oversized-video.zip", package, "application/zip")},
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"].startswith("视频文件超过 ")
+    assert rejected.json()["detail"].endswith("：assets/too-large.mp4")
 
 
 def test_promotion_template_rejects_non_v3_contract_and_source_maps(

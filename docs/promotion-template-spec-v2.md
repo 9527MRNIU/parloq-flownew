@@ -45,9 +45,9 @@ new pairing attempts; the template contract does not change.
 ```
 
 The ZIP and localization constraints are unchanged from v1: one `index.html`,
-self-contained relative assets, no source maps or external scripts, ZIP at most
-20 MB, expanded content at most 50 MB, at most 500 files and at most 5 MB per
-file.
+self-contained relative assets, no source maps or external scripts, ZIP and
+expanded content at most 64 MB, at most 500 files, ordinary files at most 5 MB,
+and MP4/WebM video files at most 50 MB each.
 
 New v2 templates must declare
 `requirements.componentKit="account-link-elements/v1"` and compose the
