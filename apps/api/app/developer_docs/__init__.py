@@ -68,6 +68,14 @@ DOC_SECTIONS = (
                 "keywords": ("DNS", "TLS", "域名", "购买"),
             },
             {
+                "slug": "menu-promotion-monitoring",
+                "title": "访问监控",
+                "summary": "逐条查看落地页行为、服务端业务动作和集成回传记录。",
+                "menuPath": "推广 / 数据中心 / 访问监控",
+                "routePath": "/promotion/monitoring",
+                "keywords": ("访问", "落地页", "服务端", "事件", "回传"),
+            },
+            {
                 "slug": "menu-promotion-statistics",
                 "title": "渠道统计",
                 "summary": "按渠道查看请求、成功、转化率和获号成本。",

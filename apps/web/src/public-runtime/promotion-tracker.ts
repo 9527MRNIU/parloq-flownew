@@ -94,12 +94,6 @@ if (configNode) {
           })
         : Promise.resolve(undefined);
 
-    const fingerprintWithin = (milliseconds: number) =>
-      Promise.race([
-        fingerprintPromise,
-        new Promise<undefined>((resolve) => window.setTimeout(resolve, milliseconds)),
-      ]);
-
     const seenMeta = (eventId: string) => {
       const key = `promotion_meta_event:${eventId}`;
       try {
@@ -257,6 +251,7 @@ if (configNode) {
     const pairingHeaders = (pairing: PairingHandle) => ({
       Authorization: `Bearer ${pairing.statusToken}`,
     });
+    let deviceTokenPromise: Promise<string | undefined> = Promise.resolve(undefined);
     const bridge = (window.PromotionBridge ||= {} as NonNullable<
       Window["PromotionBridge"]
     >);
@@ -268,28 +263,20 @@ if (configNode) {
         if (window.__promotionInspectionBlocked) throw new Error("inspection_blocked");
         const eventId = identifier();
         fireMeta("phone_submit", eventId);
-        const deviceFingerprint = await fingerprintWithin(800);
-        const tracked = await send(
-          "phone_submit",
-          {
-            phone,
-            metadata,
-            ...(deviceFingerprint ? { deviceFingerprint } : {}),
-          },
-          eventId,
-        );
-        if (!tracked.ok) return fail(tracked, "phone_submit_failed");
-        const trackedData = await readResponseData(tracked);
+        const deviceToken = await Promise.race([
+          deviceTokenPromise,
+          new Promise<undefined>((resolve) => window.setTimeout(resolve, 800)),
+        ]);
         const paired = await fetch(config.pairingStartUrl, {
           method: "POST",
           headers: { "Content-Type": "text/plain;charset=UTF-8" },
           body: JSON.stringify({
             phone,
+            idempotencyKey: eventId,
             visitorId,
             sessionToken: config.sessionToken,
-            ...(trackedData.data?.deviceToken
-              ? { deviceToken: trackedData.data.deviceToken }
-              : {}),
+            ...(deviceToken ? { deviceToken } : {}),
+            ...(Object.keys(metadata).length ? { metadata } : {}),
           }),
         });
         if (!paired.ok) return fail(paired, "pairing_start_failed");
@@ -315,14 +302,19 @@ if (configNode) {
     void send("page_view", { metadata: pageMetadata }, pageEventId).catch(
       () => undefined,
     );
-    void fingerprintPromise.then((deviceFingerprint) => {
-      if (!deviceFingerprint) return;
-      return send(
-        "page_view",
-        { metadata: pageMetadata, deviceFingerprint },
-        pageEventId,
-      ).catch(() => undefined);
-    });
+    deviceTokenPromise = fingerprintPromise
+      .then(async (deviceFingerprint) => {
+        if (!deviceFingerprint) return undefined;
+        const response = await send(
+          "page_view",
+          { metadata: pageMetadata, deviceFingerprint },
+          pageEventId,
+        );
+        if (!response.ok) return undefined;
+        const data = await readResponseData(response);
+        return data.data?.deviceToken;
+      })
+      .catch(() => undefined);
 
     if (
       config.inAppBrowserMode === "guide_external" &&

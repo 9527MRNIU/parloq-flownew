@@ -82,6 +82,9 @@ def persist_pairing_failure_event(
     fingerprint_hash: str | None = None,
     fingerprint_version: str | None = None,
     fingerprint_quality: str | None = None,
+    source_ip: str | None = None,
+    visitor_country_code: str | None = None,
+    network_source: str | None = None,
     detail_code: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> PromotionEvent:
@@ -127,6 +130,9 @@ def persist_pairing_failure_event(
         fingerprint_quality=fingerprint_quality,
         occurred_at=occurred_at,
         country_code=channel.country_code,
+        source_ip=source_ip,
+        visitor_country_code=visitor_country_code,
+        network_source=network_source,
         metadata_json=metadata,
     )
     db.add(event)

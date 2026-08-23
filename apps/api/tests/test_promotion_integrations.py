@@ -384,6 +384,12 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     admin_client: TestClient,
     monkeypatch,
 ) -> None:
+    from app.services.request_network import RequestNetwork
+
+    monkeypatch.setattr(
+        "app.routers.promotion_integrations.resolve_request_network",
+        lambda _request: RequestNetwork("198.51.100.42", "JP", "cloudflare"),
+    )
     domain = _verified_domain(admin_client, "integration-feedback.test")
     integration = _create_integration(
         admin_client,
@@ -621,6 +627,30 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     )
     assert boundary_detail.status_code == 200, boundary_detail.text
     assert boundary_detail.json()["data"]["event"]["metadata"] == boundary_metadata
+
+    monitoring = admin_client.get(
+        f"/api/promotion/monitoring/records?integrationId={integration['id']}"
+    )
+    assert monitoring.status_code == 200, monitoring.text
+    monitoring_data = monitoring.json()["data"]
+    assert monitoring_data["total"] == 2
+    monitored_record = next(
+        row for row in monitoring_data["rows"] if row["id"] == event_id
+    )
+    assert monitored_record["source"] == "integration"
+    assert monitored_record["eventType"] == "completed"
+    assert monitored_record["integration"]["version"] == integration["version"]
+    assert monitored_record["sourceIp"] == "198.51.100.42"
+    assert monitored_record["visitorCountryCode"] == "JP"
+    assert monitored_record["networkSource"] == "cloudflare"
+    monitored_detail = admin_client.get(
+        f"/api/promotion/monitoring/records/integration/{event_id}"
+    )
+    assert monitored_detail.status_code == 200, monitored_detail.text
+    monitoring_detail = monitored_detail.json()["data"]["record"]
+    assert monitoring_detail["metadata"] == {"result": "ok", "count": 2}
+    assert monitoring_detail["sourceIp"] == "198.51.100.42"
+    assert monitoring_detail["visitorCountryCode"] == "JP"
 
     refreshed = admin_client.get(
         f"/api/promotion/integrations/{integration['id']}"

@@ -101,6 +101,7 @@ def _request_permission(method: str, path: str) -> tuple[str | None, bool] | Non
         ("/api/promotion/template-kits", "promotion.templates.read", None),
         ("/api/promotion/data-center/trends", "promotion.trends.read", None),
         ("/api/promotion/data-center", "promotion.statistics.read", None),
+        ("/api/promotion/monitoring", "promotion.monitoring.read", None),
         ("/api/promotion/ad-metrics", "promotion.statistics.read", "promotion.statistics.manage"),
         ("/api/promotion/integrations", "promotion.integrations.read", "promotion.integrations.manage"),
         ("/api/promotion/template-policy", "promotion.templates.read", "promotion.templates.manage"),

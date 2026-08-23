@@ -28,6 +28,7 @@ from app.routers import (
     personal_accounts,
     promotion,
     promotion_integrations,
+    promotion_monitoring,
     promotion_policy,
     protocol_nodes,
     system,
@@ -78,6 +79,7 @@ app.include_router(domains.order_router)
 app.include_router(promotion.router)
 app.include_router(promotion_integrations.router)
 app.include_router(promotion_integrations.public_router)
+app.include_router(promotion_monitoring.router)
 app.include_router(promotion_policy.router)
 app.include_router(system.router)
 app.include_router(system_configuration.router)

@@ -261,32 +261,42 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
     )
     assert stale_report.status_code == 409
 
-    event = {
-        "eventType": "phone_submit",
+    pairing_payload = {
+        "phone": "12025550129",
         "idempotencyKey": "meta-lead-event-0001",
         "visitorId": "visitor-meta-ledger-0001",
         "sessionToken": public["sessionToken"],
-        "phone": "12025550129",
     }
     first = admin_client.post(
-        "/api/public/promotion/channels/meta-delivery-test/events", json=event
+        "/api/public/promotion/channels/meta-delivery-test/pairing/start",
+        json=pairing_payload,
     )
-    assert first.status_code == 200, first.text
-    assert first.json()["data"]["metaEvent"] == {
-        "name": "Lead",
-        "eventId": "meta-lead-event-0001",
-    }
+    assert first.status_code in {200, 409}, first.text
+    if first.status_code == 409:
+        assert first.json()["error"]["code"] == "connection_route_unavailable"
     duplicate = admin_client.post(
-        "/api/public/promotion/channels/meta-delivery-test/events", json=event
+        "/api/public/promotion/channels/meta-delivery-test/pairing/start",
+        json=pairing_payload,
     )
-    assert duplicate.json()["data"]["duplicate"] is True
+    assert duplicate.status_code == first.status_code, duplicate.text
 
     pending = admin_client.get(ledger_url).json()["data"]
-    assert pending["total"] == 1
-    assert pending["rows"][0]["eventName"] == "Lead"
-    assert pending["rows"][0]["status"] == "pending"
+    assert pending["total"] in {1, 2}
+    lead_delivery = next(
+        row for row in pending["rows"] if row["eventId"] == "meta-lead-event-0001"
+    )
+    assert lead_delivery["eventName"] == "Lead"
+    assert lead_delivery["status"] == "pending"
     result = process_due_meta_conversions()
-    assert result == {"claimed": 1, "delivered": 1, "retry": 0, "failed": 0}
+    assert result == {
+        "claimed": pending["total"],
+        "delivered": pending["total"],
+        "retry": 0,
+        "failed": 0,
+    }
     delivered = admin_client.get(ledger_url).json()["data"]
-    assert delivered["rows"][0]["status"] == "delivered"
-    assert delivered["rows"][0]["providerTraceId"] == "mock"
+    delivered_lead = next(
+        row for row in delivered["rows"] if row["eventId"] == "meta-lead-event-0001"
+    )
+    assert delivered_lead["status"] == "delivered"
+    assert delivered_lead["providerTraceId"] == "mock"

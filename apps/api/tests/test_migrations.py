@@ -135,6 +135,92 @@ def test_menu_management_removal_is_reversible(tmp_path: Path) -> None:
     engine.dispose()
 
 
+def test_promotion_monitoring_menu_migration_is_reversible(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'promotion-monitoring.db'}"
+    _alembic(database_url, "0056_remove_menu_management")
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        menu = connection.execute(
+            sa.text(
+                "SELECT name, route_path, permission_key, sort_order "
+                "FROM system_menus "
+                "WHERE public_id = 'menu_promotion_visit_monitoring'"
+            )
+        ).one()
+        assert menu == (
+            "访问监控",
+            "/promotion/monitoring",
+            "promotion.monitoring.read",
+            121,
+        )
+        roles = connection.execute(
+            sa.text(
+                "SELECT role.system_key FROM role_menu_permissions AS permission "
+                "JOIN user_groups AS role ON role.id = permission.role_id "
+                "JOIN system_menus AS menu ON menu.id = permission.menu_id "
+                "WHERE menu.public_id = 'menu_promotion_visit_monitoring' "
+                "ORDER BY role.system_key"
+            )
+        ).scalars().all()
+        # A fresh migration-only database has the built-in admin role; the
+        # application bootstrap creates the optional operator role later.
+        assert roles == ["admin"]
+    engine.dispose()
+
+    _alembic_downgrade(database_url, "0056_remove_menu_management")
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        assert connection.execute(
+            sa.text(
+                "SELECT 1 FROM system_menus "
+                "WHERE public_id = 'menu_promotion_visit_monitoring'"
+            )
+        ).scalar_one_or_none() is None
+        sibling_orders = connection.execute(
+            sa.text(
+                "SELECT public_id, sort_order FROM system_menus "
+                "WHERE public_id IN "
+                "('menu_promotion_statistics', 'menu_promotion_trends') "
+                "ORDER BY sort_order"
+            )
+        ).all()
+        assert sibling_orders == [
+            ("menu_promotion_statistics", 121),
+            ("menu_promotion_trends", 122),
+        ]
+    engine.dispose()
+
+
+def test_promotion_network_context_migration_is_reversible(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'promotion-network.db'}"
+    _alembic(database_url, "0057_visit_monitoring")
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    expected = {"source_ip", "visitor_country_code", "network_source"}
+    for table in (
+        "promotion_events",
+        "promotion_integration_events",
+        "account_pairing_attempts",
+    ):
+        columns = {column["name"] for column in inspector.get_columns(table)}
+        assert expected <= columns
+    engine.dispose()
+
+    _alembic_downgrade(database_url, "0057_visit_monitoring")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    for table in (
+        "promotion_events",
+        "promotion_integration_events",
+        "account_pairing_attempts",
+    ):
+        columns = {column["name"] for column in inspector.get_columns(table)}
+        assert expected.isdisjoint(columns)
+    engine.dispose()
+
+
 def test_custom_role_is_not_expanded_by_forward_repairs(tmp_path: Path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'custom-role-upgrade.db'}"
     _alembic(database_url, "0005_system_promotion_domains")

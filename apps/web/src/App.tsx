@@ -22,6 +22,7 @@ const PromotionIntegrationsPage = lazy(() => import("./pages/PromotionIntegratio
 const DomainsPage = lazy(() => import("./pages/DomainsPage").then((module) => ({ default: module.DomainsPage })));
 const PromotionChannelStatisticsPage = lazy(() => import("./pages/PromotionDataPages").then((module) => ({ default: module.PromotionChannelStatisticsPage })));
 const PromotionTrendPage = lazy(() => import("./pages/PromotionDataPages").then((module) => ({ default: module.PromotionTrendPage })));
+const PromotionMonitoringPage = lazy(() => import("./pages/PromotionMonitoringPage"));
 const HyperlinkDataPackagesPage = lazy(() => import("./pages/HyperlinkResourcePages").then((module) => ({ default: module.HyperlinkDataPackagesPage })));
 const HyperlinkStrategiesPage = lazy(() => import("./pages/HyperlinkResourcePages").then((module) => ({ default: module.HyperlinkStrategiesPage })));
 const HyperlinkTasksPage = lazy(() => import("./pages/HyperlinkResourcePages").then((module) => ({ default: module.HyperlinkTasksPage })));
@@ -127,6 +128,7 @@ export default function App() {
             element={<PromotionChannelStatisticsPage />}
           />
           <Route path="/promotion/trends" element={<PromotionTrendPage />} />
+          <Route path="/promotion/monitoring" element={<PromotionMonitoringPage />} />
           <Route
             path="/promotion/data-center"
             element={<Navigate to="/promotion/statistics" replace />}

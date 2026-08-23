@@ -3,13 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import hmac
-import ipaddress
 
 from redis import Redis
 from redis.exceptions import RedisError
 from starlette.requests import Request
 
 from app.config import get_settings
+from app.services.request_network import resolve_request_network
 
 
 _CONSUME_LIMITS_SCRIPT = """
@@ -60,26 +60,7 @@ def redis_client() -> Redis:
 
 
 def public_request_ip(request: Request) -> str:
-    candidates = [
-        request.headers.get("CF-Connecting-IP", ""),
-        request.headers.get("X-Real-IP", ""),
-    ]
-    forwarded = request.headers.get("X-Forwarded-For", "")
-    if forwarded:
-        candidates.extend(part.strip() for part in forwarded.split(","))
-    for candidate in candidates:
-        try:
-            return ipaddress.ip_address(candidate.strip()).compressed
-        except ValueError:
-            continue
-    if request.client is not None:
-        try:
-            peer = ipaddress.ip_address(request.client.host.strip())
-            if not (peer.is_private or peer.is_loopback or peer.is_link_local):
-                return peer.compressed
-        except ValueError:
-            pass
-    return "unknown"
+    return resolve_request_network(request).source_ip or "unknown"
 
 
 def _subject_digest(subject: str) -> str:

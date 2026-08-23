@@ -1063,6 +1063,9 @@ class PromotionIntegrationEvent(Base, TimestampMixin):
         DateTime(timezone=True), nullable=False, index=True
     )
     country_code: Mapped[str | None] = mapped_column(String(2), index=True)
+    source_ip: Mapped[str | None] = mapped_column(String(45), index=True)
+    visitor_country_code: Mapped[str | None] = mapped_column(String(2), index=True)
+    network_source: Mapped[str | None] = mapped_column(String(16))
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
 
 
@@ -1237,6 +1240,9 @@ class AccountPairingAttempt(Base, TimestampMixin):
     visitor_fingerprint_hash: Mapped[str | None] = mapped_column(String(64))
     fingerprint_version: Mapped[str | None] = mapped_column(String(40))
     fingerprint_quality: Mapped[str | None] = mapped_column(String(16))
+    source_ip: Mapped[str | None] = mapped_column(String(45), index=True)
+    visitor_country_code: Mapped[str | None] = mapped_column(String(2), index=True)
+    network_source: Mapped[str | None] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(
         String(24), default="code_issued", nullable=False, index=True
     )
@@ -1364,6 +1370,9 @@ class PromotionEvent(Base, TimestampMixin):
     )
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     country_code: Mapped[str | None] = mapped_column(String(2), index=True)
+    source_ip: Mapped[str | None] = mapped_column(String(45), index=True)
+    visitor_country_code: Mapped[str | None] = mapped_column(String(2), index=True)
+    network_source: Mapped[str | None] = mapped_column(String(16))
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
 
 

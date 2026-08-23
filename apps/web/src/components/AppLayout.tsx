@@ -111,6 +111,11 @@ export const navigation: NavSection[] = [
         icon: ChartNoAxesCombinedIcon,
         children: [
           {
+            label: "访问监控",
+            to: "/promotion/monitoring",
+            permissionKey: "promotion.monitoring.read",
+          },
+          {
             label: "渠道统计",
             to: "/promotion/statistics",
             permissionKey: "promotion.statistics.read",

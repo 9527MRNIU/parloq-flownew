@@ -88,6 +88,7 @@ from app.services.promotion_event_rate_limits import (
     consume_promotion_event_rate_limits,
 )
 from app.services.public_rate_limits import public_request_ip
+from app.services.request_network import RequestNetwork, resolve_request_network
 from app.services.github_repository import (
     GitHubRemoteArtifact,
     GitHubRepositoryConfigurationError,
@@ -364,6 +365,7 @@ def _recorded_pairing_failure_response(
     db: DbSession,
     channel: PromotionChannel,
     *,
+    network: RequestNetwork,
     visitor_id: str,
     traffic_source: str,
     code: str,
@@ -389,6 +391,9 @@ def _recorded_pairing_failure_response(
         ),
         fingerprint_version=(device_identity.version if device_identity else None),
         fingerprint_quality=(device_identity.quality if device_identity else None),
+        source_ip=network.source_ip,
+        visitor_country_code=network.visitor_country_code,
+        network_source=network.network_source,
         extra=metadata,
     )
     return _public_pairing_error(
@@ -398,6 +403,106 @@ def _recorded_pairing_failure_response(
         retryable=retryable,
         retry_after_seconds=retry_after_seconds,
     )
+
+
+def _persist_server_phone_submit(
+    db: DbSession,
+    request: Request,
+    *,
+    channel: PromotionChannel,
+    payload: PromotionPairingStart,
+    traffic_source: str,
+    occurred_at: datetime,
+    device_identity=None,
+) -> PromotionEvent:
+    """Record an accepted number submission inside the pairing API boundary."""
+
+    idempotency_key = payload.idempotency_key or f"phone_submit:{uuid4().hex}"
+    network = resolve_request_network(request)
+    existing = db.scalar(
+        select(PromotionEvent).where(
+            PromotionEvent.channel_id == channel.id,
+            PromotionEvent.idempotency_key == idempotency_key,
+        )
+    )
+    if existing is not None:
+        return existing
+
+    lead = db.scalar(
+        select(PromotionLead).where(
+            PromotionLead.channel_id == channel.id,
+            PromotionLead.phone_e164 == payload.phone,
+        )
+    )
+    if lead is None:
+        lead = PromotionLead(
+            public_id=new_public_id("plead"),
+            channel_id=channel.id,
+            phone_e164=payload.phone,
+            country_code=channel.country_code,
+            first_seen_at=occurred_at,
+            last_seen_at=occurred_at,
+            submission_count=1,
+        )
+        db.add(lead)
+        db.flush()
+    else:
+        lead.last_seen_at = occurred_at
+        lead.submission_count += 1
+        lead.country_code = channel.country_code
+
+    event = PromotionEvent(
+        public_id=new_public_id("pevt"),
+        channel_id=channel.id,
+        event_type="phone_submit",
+        idempotency_key=idempotency_key,
+        visitor_id=payload.visitor_id,
+        visitor_fingerprint_hash=(
+            device_identity.fingerprint_hash if device_identity else None
+        ),
+        fingerprint_version=(device_identity.version if device_identity else None),
+        fingerprint_quality=(device_identity.quality if device_identity else None),
+        lead_id=lead.id,
+        occurred_at=occurred_at,
+        country_code=channel.country_code,
+        source_ip=network.source_ip,
+        visitor_country_code=network.visitor_country_code,
+        network_source=network.network_source,
+        metadata_json={
+            **payload.metadata,
+            "trafficSource": traffic_source,
+            "submissionSource": "pairing_start",
+        },
+    )
+    db.add(event)
+
+    from app.services.meta_conversions import enqueue_meta_conversion
+
+    enqueue_meta_conversion(
+        db,
+        channel=channel,
+        event_key="phone_submit",
+        event_id=idempotency_key,
+        event_time=occurred_at,
+        request=request,
+        phone=payload.phone,
+        visitor_id=payload.visitor_id,
+        custom_data={"trafficSource": traffic_source},
+    )
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        duplicate = db.scalar(
+            select(PromotionEvent).where(
+                PromotionEvent.channel_id == channel.id,
+                PromotionEvent.idempotency_key == idempotency_key,
+            )
+        )
+        if duplicate is None:
+            raise
+        return duplicate
+    return event
 
 
 def _template(db: DbSession, identifier: str, user) -> PromotionTemplate:
@@ -2610,23 +2715,15 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
             },
             headers={"Access-Control-Allow-Origin": "null"},
         )
-    if payload.event_type == "phone_submit" and not payload.phone: raise HTTPException(status_code=422, detail="phone_submit 必须包含手机号")
     now = utcnow(); occurred_at = parse_public_datetime(payload.occurred_at)
     occurred_ts = int(occurred_at.timestamp())
     if occurred_ts < int(token_payload["iat"]) - 300 or occurred_ts > int(token_payload["exp"]) + 300 or occurred_at > now + timedelta(minutes=5):
         raise HTTPException(status_code=422, detail="occurredAt 超出推广会话有效窗口")
-    lead = None
-    if payload.phone:
-        lead = db.scalar(select(PromotionLead).where(PromotionLead.channel_id == channel.id, PromotionLead.phone_e164 == payload.phone))
-        if lead: lead.last_seen_at = now; lead.submission_count += 1; lead.country_code = channel.country_code
-        else:
-            lead = PromotionLead(public_id=new_public_id("plead"), channel_id=channel.id, phone_e164=payload.phone, country_code=channel.country_code, first_seen_at=now, last_seen_at=now, submission_count=1)
-            db.add(lead)
-            db.flush()
     metadata = dict(payload.metadata)
     metadata["trafficSource"] = token_payload.get("trafficSource", "direct")
     if fingerprint_details is not None:
         metadata["deviceFingerprint"] = fingerprint_details
+    network = resolve_request_network(request)
     event = PromotionEvent(
         public_id=new_public_id("pevt"),
         channel_id=channel.id,
@@ -2638,9 +2735,12 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
         ),
         fingerprint_version=fingerprint.version if fingerprint else None,
         fingerprint_quality=fingerprint.quality if fingerprint else None,
-        lead_id=lead.id if lead else None,
+        lead_id=None,
         occurred_at=occurred_at,
         country_code=channel.country_code,
+        source_ip=network.source_ip,
+        visitor_country_code=network.visitor_country_code,
+        network_source=network.network_source,
         metadata_json=metadata,
     )
     db.add(event)
@@ -2656,7 +2756,7 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
         event_id=payload.idempotency_key,
         event_time=occurred_at,
         request=request,
-        phone=payload.phone,
+        phone=None,
         visitor_id=payload.visitor_id,
         custom_data={"trafficSource": metadata["trafficSource"]},
     )
@@ -2790,6 +2890,7 @@ async def report_meta_domain_unavailable(
 
 @router.post("/api/public/promotion/channels/{slug}/pairing/start")
 async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JSONResponse:
+    network = resolve_request_network(request)
     raw_body = await request.body()
     try:
         payload = PromotionPairingStart.model_validate_json(raw_body)
@@ -2812,6 +2913,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 return _recorded_pairing_failure_response(
                     db,
                     channel,
+                    network=network,
                     visitor_id=visitor_id,
                     traffic_source=str(
                         session_payload.get("trafficSource", "direct")
@@ -2843,6 +2945,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             return _recorded_pairing_failure_response(
                 db,
                 channel,
+                network=network,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="device_identity_invalid",
@@ -2851,6 +2954,15 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 stage="device_validation",
             )
     now = utcnow()
+    _persist_server_phone_submit(
+        db,
+        request,
+        channel=channel,
+        payload=payload,
+        traffic_source=str(traffic_source),
+        occurred_at=now,
+        device_identity=device_identity,
+    )
     from app.services.pairing_rate_limits import (
         PairingRateLimitRequest,
         PairingRateLimitUnavailable,
@@ -2889,6 +3001,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
         return _recorded_pairing_failure_response(
             db,
             channel,
+            network=network,
             visitor_id=payload.visitor_id,
             traffic_source=str(traffic_source),
             code="service_temporarily_unavailable",
@@ -2904,6 +3017,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
         return _recorded_pairing_failure_response(
             db,
             channel,
+            network=network,
             visitor_id=payload.visitor_id,
             traffic_source=str(traffic_source),
             code="rate_limited",
@@ -2936,6 +3050,9 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             ),
             occurred_at=now,
             country_code=channel.country_code,
+            source_ip=network.source_ip,
+            visitor_country_code=network.visitor_country_code,
+            network_source=network.network_source,
             metadata_json={"trafficSource": traffic_source},
         )
     )
@@ -2962,6 +3079,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
         return _recorded_pairing_failure_response(
             db,
             channel,
+            network=network,
             visitor_id=payload.visitor_id,
             traffic_source=str(traffic_source),
             code="number_unavailable",
@@ -2997,6 +3115,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             return _recorded_pairing_failure_response(
                 db,
                 channel,
+                network=network,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="pairing_in_progress",
@@ -3014,6 +3133,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             return _recorded_pairing_failure_response(
                 db,
                 channel,
+                network=network,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="pairing_in_progress",
@@ -3035,6 +3155,10 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
     )
 
     if active_attempt is not None:
+        if active_attempt.source_ip is None:
+            active_attempt.source_ip = network.source_ip
+            active_attempt.visitor_country_code = network.visitor_country_code
+            active_attempt.network_source = network.network_source
         protocol = db.get(
             ProtocolNode,
             active_attempt.protocol_node_id or item.protocol_id,
@@ -3068,6 +3192,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             return _recorded_pairing_failure_response(
                 db,
                 channel,
+                network=network,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="protocol_unavailable",
@@ -3086,6 +3211,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             return _recorded_pairing_failure_response(
                 db,
                 channel,
+                network=network,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="protocol_capacity_limited",
@@ -3103,6 +3229,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             return _recorded_pairing_failure_response(
                 db,
                 channel,
+                network=network,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="protocol_unavailable",
@@ -3120,6 +3247,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             return _recorded_pairing_failure_response(
                 db,
                 channel,
+                network=network,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="channel_configuration_unavailable",
@@ -3140,6 +3268,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             return _recorded_pairing_failure_response(
                 db,
                 channel,
+                network=network,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="channel_configuration_unavailable",
@@ -3182,6 +3311,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             return _recorded_pairing_failure_response(
                 db,
                 channel,
+                network=network,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="number_unavailable",
@@ -3217,6 +3347,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 return _recorded_pairing_failure_response(
                     db,
                     channel,
+                    network=network,
                     visitor_id=payload.visitor_id,
                     traffic_source=str(traffic_source),
                     code="account_already_linked",
@@ -3228,6 +3359,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             return _recorded_pairing_failure_response(
                 db,
                 channel,
+                network=network,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="number_unavailable",
@@ -3295,6 +3427,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             return _recorded_pairing_failure_response(
                 db,
                 channel,
+                network=network,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="service_temporarily_unavailable",
@@ -3311,6 +3444,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             return _recorded_pairing_failure_response(
                 db,
                 channel,
+                network=network,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="rate_limited",
@@ -3338,6 +3472,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 return _recorded_pairing_failure_response(
                     db,
                     channel,
+                    network=network,
                     visitor_id=payload.visitor_id,
                     traffic_source=str(traffic_source),
                     code="connection_route_unavailable",
@@ -3374,6 +3509,9 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 fingerprint_quality=(
                     device_identity.quality if device_identity else None
                 ),
+                source_ip=network.source_ip,
+                visitor_country_code=network.visitor_country_code,
+                network_source=network.network_source,
                 status="code_issued",
                 expires_at=now + timedelta(minutes=3),
             )
@@ -3395,6 +3533,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
         return _recorded_pairing_failure_response(
             db,
             channel,
+            network=network,
             visitor_id=payload.visitor_id,
             traffic_source=str(traffic_source),
             code="number_unavailable",
@@ -3476,6 +3615,9 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 fingerprint_quality=active_attempt.fingerprint_quality,
                 occurred_at=now,
                 country_code=channel.country_code,
+                source_ip=active_attempt.source_ip,
+                visitor_country_code=active_attempt.visitor_country_code,
+                network_source=active_attempt.network_source,
                 metadata_json={
                     "accountId": str(item.id),
                     "trafficSource": traffic_source,
@@ -3687,6 +3829,9 @@ def public_pairing_status(
                     fingerprint_quality=attempt.fingerprint_quality,
                     occurred_at=utcnow(),
                     country_code=channel.country_code,
+                    source_ip=attempt.source_ip,
+                    visitor_country_code=attempt.visitor_country_code,
+                    network_source=attempt.network_source,
                     metadata_json={
                         "accountId": str(item.id),
                         "trafficSource": (
@@ -3909,6 +4054,15 @@ async def report_internal_success(request: Request, db: DbSession) -> JSONRespon
     now = utcnow()
     if occurred_at < now - timedelta(days=30) or occurred_at > now + timedelta(minutes=5):
         raise HTTPException(status_code=422, detail="成功事件时间超出允许窗口")
+    attempt = db.scalar(
+        select(AccountPairingAttempt)
+        .where(
+            AccountPairingAttempt.channel_id == channel.id,
+            AccountPairingAttempt.visitor_id == payload.visitor_id,
+        )
+        .order_by(AccountPairingAttempt.created_at.desc())
+        .limit(1)
+    )
     db.add(
         PromotionEvent(
             public_id=new_public_id("pevt"),
@@ -3918,6 +4072,11 @@ async def report_internal_success(request: Request, db: DbSession) -> JSONRespon
             visitor_id=payload.visitor_id,
             occurred_at=occurred_at,
             country_code=channel.country_code,
+            source_ip=attempt.source_ip if attempt else None,
+            visitor_country_code=(
+                attempt.visitor_country_code if attempt else None
+            ),
+            network_source=attempt.network_source if attempt else None,
             metadata_json=payload.metadata,
         )
     )

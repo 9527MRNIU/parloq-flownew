@@ -5,6 +5,7 @@ import {
   RefreshCwIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   apiDownload,
@@ -14,7 +15,9 @@ import {
 } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { AccountStatusIndicator } from "../components/account-status-indicator";
+import { CountryDisplay } from "../components/country-display";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
+import { MonitoringLandingCell } from "../components/monitoring-landing-cell";
 import {
   ListPagination,
   ListTableCard,
@@ -716,6 +719,8 @@ type IntakeAttempt = {
   status: string;
   terminalReason: string;
   providerCode: string;
+  sourceIp?: string | null;
+  visitorCountryCode?: string | null;
   failureReason?: {
     code: string;
     label: string;
@@ -726,12 +731,15 @@ type IntakeAttempt = {
     id: string;
     name: string;
     phone: string;
+    countryCode?: string | null;
     admissionStatus: string;
     status: string;
     validationStatus: string;
     metadataSyncStatus: string;
   };
-  channel: { id: string; name: string } | null;
+  channel: { id: string; name: string; slug: string } | null;
+  landing: { hostname?: string | null; url: string } | null;
+  template: { id: string; name: string; version: string } | null;
   protocol: { id: string; name: string } | null;
   group: { id: string; name: string } | null;
   syncJob: { id: string; status: string; lastError: string } | null;
@@ -801,6 +809,21 @@ function admissionBadge(status: string) {
   return <Badge tone="neutral">未进入账号池</Badge>;
 }
 
+function IntakeDetailField({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <>
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="min-w-0 break-all">{children || "-"}</dd>
+    </>
+  );
+}
+
 export function AccountIntakePage() {
   const [rows, setRows] = useState<IntakeAttempt[]>([]);
   const [loading, setLoading] = useState(true);
@@ -810,6 +833,7 @@ export function AccountIntakePage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState(0);
+  const [selectedAttempt, setSelectedAttempt] = useState<IntakeAttempt | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -834,6 +858,15 @@ export function AccountIntakePage() {
   }, [page, pageSize, query, statusFilter]);
 
   useEffect(() => void load(), [load]);
+
+  async function copyLandingUrl(value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success("访问地址已复制");
+    } catch {
+      toast.error("复制失败，请手动复制");
+    }
+  }
 
   return (
     <StandardListPage viewport>
@@ -891,32 +924,37 @@ export function AccountIntakePage() {
         ) : rows.length ? (
           <Table layout="list">
             <TableHeader><TableRow>
-              <TableHead adaptive>号码 / 账号</TableHead>
-              <TableHead>接入类型</TableHead>
-              <TableHead>接入状态</TableHead>
-              <TableHead>入池结果</TableHead>
-              <TableHead>渠道</TableHead>
-              <TableHead>协议 / 分组</TableHead>
-              <TableHead>资料同步</TableHead>
-              <TableHead>发起时间</TableHead>
+              <TableHead className="text-center" adaptive>号码 / 账号</TableHead>
+              <TableHead className="text-center">分组</TableHead>
+              <TableHead className="text-center">接入状态</TableHead>
+              <TableHead className="text-center">接入类型</TableHead>
+              <TableHead className="text-center">号码国家</TableHead>
+              <TableHead className="text-center">访问国家</TableHead>
+              <TableHead className="text-center">访问 IP</TableHead>
+              <TableHead className="text-center">落地页</TableHead>
+              <TableHead className="text-center">渠道</TableHead>
+              <TableHead className="text-center">模板</TableHead>
+              <TableHead className="text-center">协议</TableHead>
+              <TableHead className="text-center">入池结果</TableHead>
+              <TableHead className="text-center">资料同步</TableHead>
+              <TableHead className="text-center">记录时间</TableHead>
+              <TableHead className="text-center">操作</TableHead>
             </TableRow></TableHeader>
             <TableBody>{rows.map((row) => {
               const failure = attemptFailureReason(row);
               return (
               <TableRow key={row.id}>
-                <TableCell>
-                  <div className="cell-main min-w-[210px]">
+                <TableCell className="text-center align-middle">
+                  <div className="cell-main mx-auto min-w-[210px] justify-items-center text-center">
                     <strong>{formatPhoneDisplay(row.account.phone) || row.account.name}</strong>
                     <span title={row.account.id}>{row.account.id}</span>
                   </div>
                 </TableCell>
-                <TableCell>
-                  <Badge tone="neutral">
-                    {row.attemptType === "reauthentication" ? "重新认证" : "首次绑定"}
-                  </Badge>
+                <TableCell className="text-center align-middle">
+                  <span className="whitespace-nowrap">{row.group?.name || "未分组"}</span>
                 </TableCell>
-                <TableCell>
-                  <div className="flex min-w-[150px] flex-col items-start gap-1">
+                <TableCell className="text-center align-middle">
+                  <div className="flex min-w-[150px] flex-col items-center gap-1 text-center">
                     {attemptBadge(row.status)}
                           {row.failureReason || row.terminalReason ? (
                       <span
@@ -938,27 +976,69 @@ export function AccountIntakePage() {
                     ) : null}
                   </div>
                 </TableCell>
-                <TableCell>{admissionBadge(row.account.admissionStatus)}</TableCell>
-                <TableCell>
-                  <div className="cell-main min-w-[140px]">
+                <TableCell className="text-center align-middle">
+                  <Badge tone="neutral">
+                    {row.attemptType === "reauthentication" ? "重新认证" : "首次绑定"}
+                  </Badge>
+                </TableCell>
+                <TableCell className="text-center align-middle">
+                  {row.account.countryCode ? (
+                    <CountryDisplay code={row.account.countryCode} />
+                  ) : "-"}
+                </TableCell>
+                <TableCell className="text-center align-middle">
+                  {row.visitorCountryCode ? (
+                    <CountryDisplay code={row.visitorCountryCode} />
+                  ) : "-"}
+                </TableCell>
+                <TableCell className="text-center align-middle tabular-nums">
+                  <span className="whitespace-nowrap">{row.sourceIp || "-"}</span>
+                </TableCell>
+                <TableCell className="text-center align-middle">
+                  {row.landing && row.channel ? (
+                    <MonitoringLandingCell
+                      hostname={row.landing.hostname}
+                      url={row.landing.url}
+                      slug={row.channel.slug}
+                      onCopy={(value) => void copyLandingUrl(value)}
+                    />
+                  ) : "-"}
+                </TableCell>
+                <TableCell className="text-center align-middle">
+                  <div className="cell-main mx-auto min-w-[140px] justify-items-center text-center">
                     <strong>{row.channel?.name || "渠道已删除"}</strong>
                     <span>{row.channel?.id || "-"}</span>
                   </div>
                 </TableCell>
-                <TableCell>
-                  <div className="cell-main min-w-[170px]">
-                    <strong>{row.protocol?.name || "协议不可用"}</strong>
-                    <span>{row.group?.name || "未分组"}</span>
-                  </div>
+                <TableCell className="text-center align-middle">
+                  {row.template ? (
+                    <div className="cell-main mx-auto min-w-[145px] justify-items-center text-center">
+                      <strong>{row.template.name}</strong>
+                      <span>v{row.template.version || "-"}</span>
+                    </div>
+                  ) : "模板已删除"}
                 </TableCell>
-                <TableCell>
+                <TableCell className="text-center align-middle">
+                  <span className="whitespace-nowrap">{row.protocol?.name || "协议不可用"}</span>
+                </TableCell>
+                <TableCell className="text-center align-middle">
+                  {admissionBadge(row.account.admissionStatus)}
+                </TableCell>
+                <TableCell className="text-center align-middle">
                   {row.syncJob ? (
                     <Badge tone={row.syncJob.status === "succeeded" ? "success" : row.syncJob.status === "failed" ? "danger" : "warning"}>
                       {row.syncJob.status === "succeeded" ? "同步完成" : row.syncJob.status === "failed" ? "同步失败" : "后台同步中"}
                     </Badge>
-                  ) : <span className="text-muted-foreground">尚未触发</span>}
+                  ) : <Badge tone="neutral" className="badge-outline">尚未触发</Badge>}
                 </TableCell>
-                <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
+                <TableCell className="text-center align-middle text-muted-foreground">
+                  <span className="whitespace-nowrap">{formatDateTime(row.createdAt)}</span>
+                </TableCell>
+                <TableCell className="text-center align-middle">
+                  <Button variant="outline" size="sm" onClick={() => setSelectedAttempt(row)}>
+                    查看详情
+                  </Button>
+                </TableCell>
               </TableRow>
               );
             })}</TableBody>
@@ -967,6 +1047,89 @@ export function AccountIntakePage() {
           <EmptyState title="暂无接入记录" description="访客从渠道落地页发起首次绑定或重新认证后，会显示在这里。" />
         )}
       </ListTableCard>
+      <Drawer
+        open={Boolean(selectedAttempt)}
+        onClose={() => setSelectedAttempt(null)}
+        title={`接入详情${selectedAttempt ? ` · ${selectedAttempt.id}` : ""}`}
+        description={
+          selectedAttempt
+            ? `${attemptLabel[selectedAttempt.status] || selectedAttempt.status} · ${formatDateTime(selectedAttempt.createdAt)}`
+            : ""
+        }
+        wide
+        footer={<Button onClick={() => setSelectedAttempt(null)}>关闭</Button>}
+      >
+        {selectedAttempt ? (
+          <div className="grid gap-4 lg:grid-cols-2">
+            <section className="rounded-lg border p-4">
+              <strong>基础信息</strong>
+              <dl className="mt-3 grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
+                <IntakeDetailField label="记录 ID">{selectedAttempt.id}</IntakeDetailField>
+                <IntakeDetailField label="号码">{formatPhoneDisplay(selectedAttempt.account.phone)}</IntakeDetailField>
+                <IntakeDetailField label="账号 ID">{selectedAttempt.account.id}</IntakeDetailField>
+                <IntakeDetailField label="接入类型">
+                  {selectedAttempt.attemptType === "reauthentication" ? "重新认证" : "首次绑定"}
+                </IntakeDetailField>
+              </dl>
+            </section>
+            <section className="rounded-lg border p-4">
+              <strong>访问网络</strong>
+              <dl className="mt-3 grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
+                <IntakeDetailField label="号码国家">
+                  {selectedAttempt.account.countryCode ? (
+                    <CountryDisplay code={selectedAttempt.account.countryCode} className="justify-start" />
+                  ) : "未采集"}
+                </IntakeDetailField>
+                <IntakeDetailField label="访问国家">
+                  {selectedAttempt.visitorCountryCode ? (
+                    <CountryDisplay code={selectedAttempt.visitorCountryCode} className="justify-start" />
+                  ) : "未采集"}
+                </IntakeDetailField>
+                <IntakeDetailField label="访问 IP">{selectedAttempt.sourceIp || "未采集"}</IntakeDetailField>
+              </dl>
+            </section>
+            <section className="rounded-lg border p-4">
+              <strong>推广信息</strong>
+              <dl className="mt-3 grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
+                <IntakeDetailField label="落地页">{selectedAttempt.landing?.hostname || "内部访问地址"}</IntakeDetailField>
+                <IntakeDetailField label="渠道">{selectedAttempt.channel?.name || "渠道已删除"}</IntakeDetailField>
+                <IntakeDetailField label="模板">
+                  {selectedAttempt.template
+                    ? `${selectedAttempt.template.name} · v${selectedAttempt.template.version || "-"}`
+                    : "模板已删除"}
+                </IntakeDetailField>
+              </dl>
+              {selectedAttempt.landing ? (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => window.open(selectedAttempt.landing?.url, "_blank", "noopener,noreferrer")}
+                  >
+                    打开落地页
+                  </Button>
+                  <Button variant="outline" onClick={() => void copyLandingUrl(selectedAttempt.landing?.url || "")}>
+                    复制落地页
+                  </Button>
+                </div>
+              ) : null}
+            </section>
+            <section className="rounded-lg border p-4">
+              <strong>处理结果</strong>
+              <dl className="mt-3 grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
+                <IntakeDetailField label="接入状态">{attemptBadge(selectedAttempt.status)}</IntakeDetailField>
+                <IntakeDetailField label="失败原因">
+                  {selectedAttempt.failureReason || selectedAttempt.terminalReason
+                    ? attemptFailureReason(selectedAttempt).label
+                    : "-"}
+                </IntakeDetailField>
+                <IntakeDetailField label="入池结果">{admissionBadge(selectedAttempt.account.admissionStatus)}</IntakeDetailField>
+                <IntakeDetailField label="协议">{selectedAttempt.protocol?.name || "协议不可用"}</IntakeDetailField>
+                <IntakeDetailField label="分组">{selectedAttempt.group?.name || "未分组"}</IntakeDetailField>
+              </dl>
+            </section>
+          </div>
+        ) : null}
+      </Drawer>
     </StandardListPage>
   );
 }

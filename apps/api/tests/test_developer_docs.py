@@ -19,8 +19,8 @@ def test_developer_docs_catalog_matches_checked_in_content(
     data = response.json()["data"]
     pages = [page for section in data["sections"] for page in section["pages"]]
     assert data["defaultPage"] == "overview"
-    assert len(pages) == 29
-    assert len([page for page in pages if page["slug"].startswith("menu-")]) == 22
+    assert len(pages) == 30
+    assert len([page for page in pages if page["slug"].startswith("menu-")]) == 23
 
     expected = [page["slug"] for section in DOC_SECTIONS for page in section["pages"]]
     assert [page["slug"] for page in pages] == expected

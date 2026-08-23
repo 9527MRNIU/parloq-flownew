@@ -930,6 +930,11 @@ body {
   background: var(--muted);
   color: var(--muted-foreground);
 }
+.badge-outline {
+  border-color: var(--border);
+  background: var(--background);
+  color: var(--muted-foreground);
+}
 .badge-success {
   border-color: var(--status-success-border);
   background: var(--status-success-bg);

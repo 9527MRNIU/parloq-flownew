@@ -28,10 +28,12 @@ from app.models import (
     AccountGroup,
     AccountLifecycleEvent,
     AccountProxyBinding,
+    DomainRecord,
     IpAllocationPolicy,
     MessageDelivery,
     PersonalAccount,
     PromotionChannel,
+    PromotionTemplate,
     ProxyEndpoint,
     ProtocolNode,
     RoleActionPermission,
@@ -1544,6 +1546,20 @@ def list_intake_attempts(
     result = []
     for attempt, account in rows:
         channel = db.get(PromotionChannel, attempt.channel_id)
+        template = (
+            db.get(PromotionTemplate, channel.template_id)
+            if channel is not None
+            else None
+        )
+        domain = (
+            db.get(DomainRecord, channel.domain_id)
+            if channel is not None and channel.domain_id is not None
+            else None
+        )
+        hostname = ""
+        if channel is not None and domain is not None:
+            prefix = (channel.subdomain_prefix or "").strip().lower()
+            hostname = f"{prefix}.{domain.hostname}" if prefix else domain.hostname
         protocol = db.get(ProtocolNode, attempt.protocol_node_id)
         group = db.get(AccountGroup, attempt.account_group_id)
         latest_job = db.scalar(
@@ -1580,18 +1596,46 @@ def list_intake_attempts(
                     else None
                 ),
                 "visitorId": attempt.visitor_id,
+                "sourceIp": attempt.source_ip,
+                "visitorCountryCode": attempt.visitor_country_code,
                 "account": {
                     "id": str(account.id),
                     "name": account.name,
                     "phone": account.phone_e164,
+                    "countryCode": account.country_code,
                     "admissionStatus": account.admission_status,
                     "status": account.status,
                     "validationStatus": account.validation_status,
                     "metadataSyncStatus": account.metadata_sync_status,
                 },
                 "channel": (
-                    {"id": str(channel.id), "name": channel.name}
+                    {
+                        "id": str(channel.id),
+                        "name": channel.name,
+                        "slug": channel.slug,
+                    }
                     if channel is not None
+                    else None
+                ),
+                "landing": (
+                    {
+                        "hostname": hostname or None,
+                        "url": (
+                            f"https://{hostname}/{channel.slug}"
+                            if hostname
+                            else f"/api/public/promotion/channels/{channel.slug}/render"
+                        ),
+                    }
+                    if channel is not None
+                    else None
+                ),
+                "template": (
+                    {
+                        "id": str(template.id),
+                        "name": template.name,
+                        "version": template.version,
+                    }
+                    if template is not None
                     else None
                 ),
                 "protocol": (

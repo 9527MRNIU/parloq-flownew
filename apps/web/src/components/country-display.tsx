@@ -1,5 +1,6 @@
-import getUnicodeFlagIcon from "country-flag-icons/unicode";
+import * as CountryFlags from "country-flag-icons/react/3x2";
 import { Globe2Icon } from "lucide-react";
+import type { ComponentType, SVGProps } from "react";
 import { countryOptions } from "../lib/countries";
 import { cn } from "../lib/utils";
 
@@ -17,17 +18,22 @@ export function countryDisplayName(code: string): string {
 
 export function CountryFlag({ code }: { code: string }) {
   const normalized = code.trim().toUpperCase();
-  if (!COUNTRY_NAME_BY_CODE.has(normalized)) {
+  const Flag = (
+    CountryFlags as unknown as Record<
+      string,
+      ComponentType<SVGProps<SVGSVGElement>>
+    >
+  )[normalized];
+
+  if (!Flag) {
     return <Globe2Icon aria-hidden="true" className="h-4 w-6 text-muted-foreground" />;
   }
 
   return (
-    <span
+    <Flag
       aria-hidden="true"
-      className="inline-flex h-4 w-6 shrink-0 items-center justify-center overflow-hidden text-lg leading-none"
-    >
-      {getUnicodeFlagIcon(normalized)}
-    </span>
+      className="block h-4 w-6 shrink-0 overflow-hidden rounded-[2px] shadow-sm ring-1 ring-black/10"
+    />
   );
 }
 

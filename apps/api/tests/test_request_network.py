@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+from starlette.requests import Request
+
+from app.services.request_network import resolve_request_network
+
+
+def _request(
+    *,
+    client: tuple[str, int],
+    headers: dict[str, str] | None = None,
+) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": [
+                (key.lower().encode(), value.encode())
+                for key, value in (headers or {}).items()
+            ],
+            "client": client,
+            "server": ("testserver", 80),
+            "scheme": "http",
+        }
+    )
+
+
+def test_cloudflare_network_headers_are_used_behind_private_proxy() -> None:
+    value = resolve_request_network(
+        _request(
+            client=("172.18.0.4", 42000),
+            headers={
+                "CF-Connecting-IP": "2001:4860:4860::8888",
+                "CF-IPCountry": "ca",
+                "X-Real-IP": "192.0.2.7",
+            },
+        )
+    )
+
+    assert value.source_ip == "2001:4860:4860::8888"
+    assert value.visitor_country_code == "CA"
+    assert value.network_source == "cloudflare"
+
+
+def test_spoofed_forwarding_headers_are_ignored_for_public_peer() -> None:
+    value = resolve_request_network(
+        _request(
+            client=("8.8.8.8", 42000),
+            headers={
+                "CF-Connecting-IP": "1.1.1.1",
+                "CF-IPCountry": "US",
+                "X-Real-IP": "9.9.9.9",
+            },
+        )
+    )
+
+    assert value.source_ip == "8.8.8.8"
+    assert value.visitor_country_code is None
+    assert value.network_source == "peer"
+
+
+def test_proxy_ip_fallback_does_not_invent_a_country() -> None:
+    value = resolve_request_network(
+        _request(
+            client=("127.0.0.1", 42000),
+            headers={"X-Forwarded-For": "8.8.4.4, 172.18.0.4"},
+        )
+    )
+
+    assert value.source_ip == "8.8.4.4"
+    assert value.visitor_country_code is None
+    assert value.network_source == "proxy"

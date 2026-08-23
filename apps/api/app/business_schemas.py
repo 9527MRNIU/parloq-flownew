@@ -749,19 +749,20 @@ class PromotionIntegrationEventInput(Model):
 
 class PromotionEventInput(PublicEvent):
     event_type: Literal[
-        "page_view", "phone_submit", "visit_end", "inspection_detected"
+        "page_view", "visit_end", "inspection_detected"
     ] = Field(alias="eventType")
-    phone: str | None = None
     session_token: str = Field(alias="sessionToken", min_length=20, max_length=1000)
     device_fingerprint: PromotionDeviceFingerprint | None = Field(
         default=None, alias="deviceFingerprint"
     )
 
-    _phone = field_validator("phone")(lambda value: normalize_phone(value) if value else None)
-
 
 class PromotionPairingStart(Model):
     phone: str
+    idempotency_key: str | None = Field(
+        default=None, alias="idempotencyKey", min_length=8, max_length=160
+    )
+    metadata: dict = Field(default_factory=dict)
     session_token: str = Field(alias="sessionToken", min_length=20, max_length=1000)
     visitor_id: str = Field(alias="visitorId", min_length=8, max_length=80)
     device_token: str | None = Field(
@@ -769,6 +770,9 @@ class PromotionPairingStart(Model):
     )
 
     _phone = field_validator("phone")(normalize_phone)
+    _metadata = field_validator("metadata")(
+        lambda value: validate_structured_json(value, max_bytes=4096)
+    )
 
 
 class MetaDomainUnavailableInput(Model):

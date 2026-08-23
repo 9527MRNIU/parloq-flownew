@@ -92,8 +92,9 @@ def _request_user_data(
     phone: str | None,
     visitor_id: str | None,
 ) -> dict[str, Any]:
-    forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
-    client_ip = forwarded or (request.client.host if request.client else "")
+    from app.services.request_network import resolve_request_network
+
+    client_ip = resolve_request_network(request).source_ip or ""
     user_agent = request.headers.get("user-agent", "")[:1000]
     result: dict[str, Any] = {}
     if client_ip:

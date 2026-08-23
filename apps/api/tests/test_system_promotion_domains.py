@@ -955,18 +955,6 @@ def test_promotion_data_center_aggregates_uv_costs_and_successes(
     events = [
         {"eventType": "page_view", "idempotencyKey": "analytics-page-view-0001"},
         {"eventType": "page_view", "idempotencyKey": "analytics-page-view-0002"},
-        {
-            "eventType": "phone_submit",
-            "idempotencyKey": "analytics-phone-submit-0001",
-            "phone": "+12025550188",
-            "countryCode": "DE",
-        },
-        {
-            "eventType": "phone_submit",
-            "idempotencyKey": "analytics-phone-submit-0002",
-            "phone": "+12025550188",
-            "countryCode": "DE",
-        },
     ]
     for event in events:
         response = admin_client.post(
@@ -974,6 +962,18 @@ def test_promotion_data_center_aggregates_uv_costs_and_successes(
             json={**common, **event},
         )
         assert response.status_code == 200, response.text
+    for suffix in ("0001", "0002"):
+        response = admin_client.post(
+            "/api/public/promotion/channels/analytics-channel/pairing/start",
+            json={
+                **common,
+                "phone": "+12025550188",
+                "idempotencyKey": f"analytics-phone-submit-{suffix}",
+            },
+        )
+        assert response.status_code in {200, 409}, response.text
+        if response.status_code == 409:
+            assert response.json()["error"]["code"] == "connection_route_unavailable"
     public_success = admin_client.post(
         "/api/public/promotion/channels/analytics-channel/events",
         json={

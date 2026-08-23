@@ -61,6 +61,7 @@ from app.services.promotion_event_rate_limits import (
     normalized_promotion_event_rate_limit_policy,
 )
 from app.services.public_rate_limits import public_request_ip
+from app.services.request_network import resolve_request_network
 from app.services.github_repository import (
     GitHubRemoteArtifact,
     GitHubRepositoryConfigurationError,
@@ -1070,6 +1071,7 @@ async def report_integration_event(
     metadata = dict(event_input.metadata)
     if fingerprint_details is not None:
         metadata["deviceFingerprint"] = fingerprint_details
+    network = resolve_request_network(request)
     event = PromotionIntegrationEvent(
         public_id=new_public_id("piev"),
         integration_id=item.id,
@@ -1087,6 +1089,9 @@ async def report_integration_event(
         traffic_source=str(token_payload.get("trafficSource", "direct")),
         occurred_at=occurred_at,
         country_code=channel.country_code,
+        source_ip=network.source_ip,
+        visitor_country_code=network.visitor_country_code,
+        network_source=network.network_source,
         metadata_json=metadata,
     )
     db.add(event)
