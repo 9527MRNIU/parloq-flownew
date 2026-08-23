@@ -43,7 +43,25 @@ def test_cloudflare_network_headers_are_used_behind_private_proxy() -> None:
     assert value.network_source == "cloudflare"
 
 
-def test_spoofed_forwarding_headers_are_ignored_for_public_peer() -> None:
+def test_cloudflare_network_headers_survive_uvicorn_public_peer_rewrite() -> None:
+    value = resolve_request_network(
+        _request(
+            client=("104.194.82.11", 42000),
+            headers={
+                "CF-Connecting-IP": "104.194.82.11",
+                "CF-IPCountry": "us",
+                "X-Real-IP": "104.23.251.226",
+                "X-Forwarded-For": "104.194.82.11, 104.23.251.226",
+            },
+        )
+    )
+
+    assert value.source_ip == "104.194.82.11"
+    assert value.visitor_country_code == "US"
+    assert value.network_source == "cloudflare"
+
+
+def test_mismatched_spoofed_forwarding_headers_are_ignored_for_public_peer() -> None:
     value = resolve_request_network(
         _request(
             client=("8.8.8.8", 42000),
@@ -58,6 +76,22 @@ def test_spoofed_forwarding_headers_are_ignored_for_public_peer() -> None:
     assert value.source_ip == "8.8.8.8"
     assert value.visitor_country_code is None
     assert value.network_source == "peer"
+
+
+def test_cloudflare_non_country_codes_are_not_persisted() -> None:
+    value = resolve_request_network(
+        _request(
+            client=("1.1.1.1", 42000),
+            headers={
+                "CF-Connecting-IP": "1.1.1.1",
+                "CF-IPCountry": "XX",
+            },
+        )
+    )
+
+    assert value.source_ip == "1.1.1.1"
+    assert value.visitor_country_code is None
+    assert value.network_source == "cloudflare"
 
 
 def test_proxy_ip_fallback_does_not_invent_a_country() -> None:

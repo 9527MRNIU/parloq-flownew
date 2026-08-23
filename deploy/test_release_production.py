@@ -92,6 +92,27 @@ class ProductionReleaseScriptTests(unittest.TestCase):
         self.assertNotIn("client_max_body_size 12m;", self.web_nginx)
         self.assertNotIn("client_max_body_size 12m;", self.nginx_reference)
 
+    def test_cloudflare_network_headers_reach_the_api(self) -> None:
+        forwarded_for_count = self.web_nginx.count(
+            "proxy_set_header X-Forwarded-For"
+        )
+        self.assertEqual(
+            self.web_nginx.count("proxy_set_header CF-Connecting-IP"),
+            forwarded_for_count,
+        )
+        self.assertEqual(
+            self.web_nginx.count("proxy_set_header CF-IPCountry"),
+            forwarded_for_count,
+        )
+        self.assertIn(
+            "proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;",
+            self.nginx_reference,
+        )
+        self.assertIn(
+            "proxy_set_header CF-IPCountry $http_cf_ipcountry;",
+            self.nginx_reference,
+        )
+
     def test_compose_builds_from_the_server_checkout(self) -> None:
         self.assertIn("PARLOQ_SOURCE_ROOT", self.compose)
         self.assertNotIn("https://github.com", self.compose)

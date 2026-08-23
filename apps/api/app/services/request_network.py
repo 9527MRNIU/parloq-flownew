@@ -45,21 +45,25 @@ def _cloudflare_country(request: Request) -> str | None:
 def resolve_request_network(request: Request) -> RequestNetwork:
     """Resolve a server-trusted network snapshot for a public request.
 
-    Production public traffic reaches the API through the private web proxy, so
-    forwarded headers are considered only when the direct peer is private or
-    loopback. Cloudflare's connecting IP is preferred because managed promotion
-    domains are proxied by Cloudflare. The request body is never consulted.
+    Production public traffic reaches the API through the private web proxy.
+    Uvicorn may already have replaced ``request.client`` with the left-most
+    forwarded visitor address, so a coherent Cloudflare header pair is also
+    accepted when ``CF-Connecting-IP`` matches that normalized public peer.
+    Other forwarded headers still require a private or loopback peer. The
+    request body is never consulted.
     """
 
-    if _trusted_proxy_peer(request):
-        cloudflare_ip = _ip(request.headers.get("CF-Connecting-IP"))
-        if cloudflare_ip:
-            return RequestNetwork(
-                source_ip=cloudflare_ip,
-                visitor_country_code=_cloudflare_country(request),
-                network_source="cloudflare",
-            )
+    peer_ip = _ip(request.client.host if request.client else None)
+    trusted_proxy_peer = _trusted_proxy_peer(request)
+    cloudflare_ip = _ip(request.headers.get("CF-Connecting-IP"))
+    if cloudflare_ip and (trusted_proxy_peer or cloudflare_ip == peer_ip):
+        return RequestNetwork(
+            source_ip=cloudflare_ip,
+            visitor_country_code=_cloudflare_country(request),
+            network_source="cloudflare",
+        )
 
+    if trusted_proxy_peer:
         real_ip = _ip(request.headers.get("X-Real-IP"))
         if real_ip:
             return RequestNetwork(real_ip, None, "proxy")
@@ -70,7 +74,6 @@ def resolve_request_network(request: Request) -> RequestNetwork:
             if forwarded_ip and ipaddress.ip_address(forwarded_ip).is_global:
                 return RequestNetwork(forwarded_ip, None, "proxy")
 
-    peer_ip = _ip(request.client.host if request.client else None)
     return RequestNetwork(
         source_ip=peer_ip,
         visitor_country_code=None,
