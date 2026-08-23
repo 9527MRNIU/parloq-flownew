@@ -21,7 +21,6 @@ type RuntimeConfig = {
 type EventExtra = {
   phone?: string;
   metadata?: Record<string, unknown>;
-  deviceFingerprint?: string;
 };
 
 type PairingHandle = {
@@ -70,21 +69,13 @@ if (configNode) {
   if (config?.eventUrl && config.pairingStartUrl) {
     const startedAt = Date.now();
     const meta = config.meta || {};
-    const mapping = meta.eventMapping || {};
-    const identifier = () =>
-      crypto.randomUUID?.() ||
-      `${Date.now().toString(36)}-${crypto.getRandomValues(new Uint32Array(2)).join("-")}`;
-    let visitorId: string;
-    try {
-      visitorId = localStorage.getItem("promotion_visitor_id") || identifier();
-      localStorage.setItem("promotion_visitor_id", visitorId);
-    } catch {
-      visitorId = identifier();
-    }
-
-    const fingerprintPromise: Promise<string | undefined> = new Promise((resolve) => {
+    let resolvedFingerprint = "";
+    const fingerprintPromise: Promise<string> = new Promise((resolve) => {
       const collect = () =>
-        void collectDeviceFingerprint().then(resolve, () => resolve(undefined));
+        void collectDeviceFingerprint().then((value) => {
+          resolvedFingerprint = value;
+          resolve(value);
+        });
       if ("requestIdleCallback" in window) {
         window.requestIdleCallback(collect, { timeout: 250 });
       } else {
@@ -101,12 +92,6 @@ if (configNode) {
         // Pixel de-duplication is best effort when storage is unavailable.
       }
       return false;
-    };
-
-    const fireMeta = (eventKey: string, eventId: string) => {
-      const name = mapping[eventKey];
-      if (!window.fbq || !name || !eventId || seenMeta(eventId)) return;
-      window.fbq("track", name, {}, { eventID: eventId });
     };
 
     if (
@@ -160,20 +145,23 @@ if (configNode) {
     }
 
     const clientContext = collectClientContext();
-    const body = (eventType: string, eventId: string, extra: EventExtra = {}) =>
+    const body = (
+      eventType: string,
+      deviceFingerprint: string,
+      extra: EventExtra = {},
+    ) =>
       JSON.stringify({
         eventType,
-        idempotencyKey: eventId,
-        visitorId,
+        deviceFingerprint,
         ...extra,
         metadata: withClientContext(extra.metadata || {}, clientContext),
       });
 
-    const send = (eventType: string, extra: EventExtra = {}, eventId = identifier()) =>
+    const send = async (eventType: string, extra: EventExtra = {}) =>
       fetch(config.eventUrl, {
         method: "POST",
         headers: { "Content-Type": "text/plain;charset=UTF-8" },
-        body: body(eventType, eventId, extra),
+        body: body(eventType, await fingerprintPromise, extra),
         keepalive: true,
       });
 
@@ -181,7 +169,6 @@ if (configNode) {
       try {
         return (await response.clone().json()) as {
           data?: {
-            deviceToken?: string;
             metaEvent?: { name?: string; eventId?: string };
           };
         };
@@ -226,7 +213,6 @@ if (configNode) {
     const pairingHeaders = (pairing: PairingHandle) => ({
       Authorization: `Bearer ${pairing.statusToken}`,
     });
-    let deviceTokenPromise: Promise<string | undefined> = Promise.resolve(undefined);
     const bridge = (window.PromotionBridge ||= {} as NonNullable<
       Window["PromotionBridge"]
     >);
@@ -236,20 +222,13 @@ if (configNode) {
       metadata: Record<string, unknown> = {},
     ) => {
         if (window.__promotionInspectionBlocked) throw new Error("inspection_blocked");
-        const eventId = identifier();
-        fireMeta("phone_submit", eventId);
-        const deviceToken = await Promise.race([
-          deviceTokenPromise,
-          new Promise<undefined>((resolve) => window.setTimeout(resolve, 800)),
-        ]);
+        const deviceFingerprint = await fingerprintPromise;
         const paired = await fetch(config.pairingStartUrl, {
           method: "POST",
           headers: { "Content-Type": "text/plain;charset=UTF-8" },
           body: JSON.stringify({
             phone,
-            idempotencyKey: eventId,
-            visitorId,
-            ...(deviceToken ? { deviceToken } : {}),
+            deviceFingerprint,
             metadata: withClientContext(metadata, clientContext),
           }),
         });
@@ -270,24 +249,7 @@ if (configNode) {
         headers: pairingHeaders(pairing),
       });
 
-    const pageEventId = identifier();
-    fireMeta("page_view", pageEventId);
-    void send("page_view", {}, pageEventId).catch(
-      () => undefined,
-    );
-    deviceTokenPromise = fingerprintPromise
-      .then(async (deviceFingerprint) => {
-        if (!deviceFingerprint) return undefined;
-        const response = await send(
-          "page_view",
-          { deviceFingerprint },
-          pageEventId,
-        );
-        if (!response.ok) return undefined;
-        const data = await readResponseData(response);
-        return data.data?.deviceToken;
-      })
-      .catch(() => undefined);
+    void send("page_view").then(readMetaEvent).catch(() => undefined);
 
     if (
       config.inAppBrowserMode === "guide_external" &&
@@ -314,12 +276,12 @@ if (configNode) {
       if (phone?.value) void bridge.submitPhone(phone.value).catch(() => undefined);
     });
     addEventListener("pagehide", () => {
-      const eventId = identifier();
+      if (!resolvedFingerprint) return;
       navigator.sendBeacon(
         config.eventUrl,
         new Blob(
           [
-            body("visit_end", eventId, {
+            body("visit_end", resolvedFingerprint, {
               metadata: { durationMs: Math.max(0, Date.now() - startedAt) },
             }),
           ],

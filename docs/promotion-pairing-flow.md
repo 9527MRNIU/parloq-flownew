@@ -3,6 +3,9 @@
 本文档说明推广落地页中“提交号码 → 获取配对码 → 等待手机确认 → 完成接入”
 的当前业务链路。内容以模板开发和问题排查需要为准，不展开内部表结构细节。
 
+当前契约版本为 `promotion-browser-bridge/v2`，本文档最后按 2026-08-24 的
+`main` 分支实现核对。
+
 ## 一、先看结论
 
 模板只调用平台注入的 `window.PromotionBridge`：
@@ -38,7 +41,7 @@ pairingStatus === "verified" && verified === true
 | 部分 | 职责 |
 | --- | --- |
 | 模板 | 收集号码、展示配对码、倒计时、轮询状态和展示结果 |
-| `PromotionBridge` | 组织请求、携带访客与设备信息、管理状态凭证和解析统一错误 |
+| `PromotionBridge` | 组织请求、采集设备指纹和基础客户端环境、管理配对状态凭证并解析统一错误 |
 | Parloq API | 验证渠道、执行限速、选择协议节点、绑定分组与代理、保存配对尝试 |
 | WhatsApp 网关 | 创建临时配对连接、申请配对码、确认手机授权、报告断线和终态 |
 | Worker | 配对成功后异步同步账号资料，不阻塞“配对成功”结果 |
@@ -53,9 +56,19 @@ pairingStatus === "verified" && verified === true
 - 渠道、语言、模板策略和营销事件配置；
 - `window.PromotionBridge` 三个方法。
 
-平台运行时还会生成一个浏览器访客标识，并按模板策略采集基础客户端环境。
-设备指纹始终启用；页面访问事件成功后还可能取得一个短期 `deviceToken`。这些都由
-Bridge 自动处理，模板不需要读取或保存。
+平台运行时始终采集时区、视口、屏幕尺寸、像素比和触控点数量等基础客户端环境，
+并使用仓库内固定版本的 ThumbmarkJS 1.10.1 计算设备指纹。指纹缓存在 `_fp`；如果
+浏览器不支持或计算失败，则生成低可信度的降级标识。
+
+原始指纹会随页面行为和开始配对请求提交。API 立即把它转换成租户隔离的 HMAC，
+原始值不落库；随后查找或创建服务端 `PromotionVisitor`，其对外标识是 Snowflake
+ID。访问事件、iframe 集成事件、配对尝试、UV、限速和 Meta 回传都关联这个服务端
+访客实体。
+
+浏览器不再生成或保存额外的访客 UUID，也没有 `visitorId`、`deviceToken` 或
+`sessionToken` 链路。iframe 集成同样复用 `_fp`，只从 URL fragment 接收非敏感的
+渠道 slug 和直推/裂变来源；每次上报时由服务端重新验证域名、渠道、模板与集成绑定。
+这些步骤均由平台运行时自动完成，模板不需要读取或保存身份字段。
 
 ## 四、请求开始配对
 
@@ -97,12 +110,16 @@ Content-Type: text/plain;charset=UTF-8
 ```json
 {
   "phone": "+4915123456789",
-  "idempotencyKey": "一次提交的唯一键",
-  "visitorId": "浏览器访客标识",
-  "deviceToken": "可选的设备凭证",
+  "deviceFingerprint": "ThumbmarkJS 指纹或低可信度降级值",
   "metadata": {
     "placement": "hero-form",
-    "clientContext": {}
+    "clientContext": {
+      "timeZone": "Europe/Berlin",
+      "viewport": [390, 844],
+      "screen": [390, 844],
+      "pixelRatio": 3,
+      "touchPoints": 5
+    }
   }
 }
 ```
@@ -110,20 +127,23 @@ Content-Type: text/plain;charset=UTF-8
 `Content-Type` 虽然是 `text/plain`，正文仍然是 JSON。这是平台运行时的请求方式，
 模板只调用 Bridge 即可。
 
+请求体不携带 User-Agent、访问 IP 或访问国家。API 从 HTTP 请求头和可信反向代理
+提供的信息中读取这些数据，避免把客户端自报值当成可信网络信息。
+
 ### 4.2 服务端依次处理
 
 正常情况下，API 按以下顺序执行：
 
 1. 校验并标准化手机号码；
 2. 根据请求路径确认直推或裂变来源，并确认渠道有效；
-3. 如果存在 `deviceToken`，验证它是否绑定当前渠道、租户和访客且未过期；
+3. 把原始指纹转换成租户 HMAC，查找或创建服务端 Snowflake 访客；
 4. 保存一次服务端 `phone_submit` 记录，并更新对应号码线索；
-5. 按访客或设备指纹、访问 IP 执行提交前限速；
+5. 按租户指纹访客、访问 IP 执行提交前限速；
 6. 保存 `pairing_check`，表示请求进入业务检查阶段；
 7. 检查号码是否已经存在、已经接入或正在由其他访问者配对；
 8. 为新接入选择渠道配置的协议节点或协议池；重新认证则沿用账号原协议；
 9. 确认新账号需要进入的账号分组；
-10. 按访客、号码和渠道执行创建配对尝试前的第二层限速；
+10. 按租户指纹访客、号码和渠道执行创建配对尝试前的第二层限速；
 11. 为账号分配并固定一条代理线路；
 12. 创建 `AccountPairingAttempt`，固化本次分组、协议节点、同步策略和过期时间；
 13. 调用 WhatsApp 网关创建或更新网关账号，并申请配对码；
@@ -309,7 +329,6 @@ Authorization: Bearer {pairing.statusToken}
 | HTTP | `error.code` | 触发情况 | 模板处理 |
 | --- | --- | --- | --- |
 | 422 | `invalid_phone` | 号码无法标准化为有效国际号码 | 保留输入界面，提示用户修正号码 |
-| 403 | `device_identity_invalid` | 可选设备凭证与当前渠道、租户或访客不匹配，或者已经失效 | 提示刷新页面后重试 |
 | 409 | `number_unavailable` | 号码属于其他租户、并发创建冲突或当前不可接入 | 显示中性“号码暂不可用”，不要泄露号码归属 |
 | 409 | `account_already_linked` | 号码已经绑定并可用 | 告知无需重复绑定，不要继续请求新配对码 |
 | 409 | `pairing_in_progress` | 其他渠道或其他访问者正在配对同一号码 | 提示已有进行中的请求，稍后再试 |
@@ -317,13 +336,9 @@ Authorization: Bearer {pairing.statusToken}
 | 409 | `protocol_capacity_limited` | 协议节点并发配对达到上限 | 显示当前繁忙，允许稍后重试 |
 | 409 | `channel_configuration_unavailable` | 新账号接入分组缺失或不可用 | 显示渠道暂不可用，停止自动重试 |
 | 409 | `connection_route_unavailable` | 无法为账号分配固定代理线路 | 显示连接线路繁忙，允许稍后重试 |
-| 429 | `rate_limited` | 访客、设备、IP、号码或渠道达到限速 | 显示稍后重试；API 已返回等待时间，但当前 Bridge 尚未透传 |
+| 429 | `rate_limited` | 指纹访客、IP、号码或渠道达到限速 | 显示稍后重试；API 已返回等待时间，但当前 Bridge 尚未透传 |
 | 502 | `gateway_failed` | 网关创建账号或申请配对码失败 | 显示服务暂时不可用，允许重新开始 |
 | 503 | `service_temporarily_unavailable` | 限速或依赖服务暂时不可用 | 显示服务暂不可用，稍后再试 |
-
-可选 `deviceToken` 失效时，开始接口返回 HTTP 403 和
-`device_identity_invalid`。模板应刷新页面重新采集设备指纹，不应重复提交旧的
-设备凭证。
 
 ## 九、模板推荐决策逻辑
 
@@ -362,6 +377,10 @@ if (pairingStatus === "verified" && verified === true) {
 
 因此，访问监控主要看到页面行为和业务节点；接入记录以
 `AccountPairingAttempt` 为主，负责展示一次真实配对尝试从开始到终态的结果。
+两类记录显示的访客 ID 都来自同一个服务端 `PromotionVisitor` Snowflake ID；UV 也
+按渠道与该访客 ID 去重，不再混用浏览器 UUID 和指纹两种口径。
+访问 IP、访问国家、浏览器和系统信息均取自服务端收到的 HTTP 请求，并随配对事件
+和配对尝试保存；它们不依赖模板在 `clientContext` 中主动上报。
 
 ## 十一、重新认证的区别
 

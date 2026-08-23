@@ -17,6 +17,7 @@ from app.models import (
     PromotionIntegration,
     PromotionIntegrationEvent,
     PromotionTemplate,
+    PromotionVisitor,
 )
 from app.serializers import iso
 
@@ -201,9 +202,7 @@ def _monitoring_sources(channel_ids: list[int], start: datetime, end: datetime):
         cast(literal(None), String).label("integration_version"),
         PromotionEvent.event_type.label("event_type"),
         PromotionEvent.idempotency_key.label("idempotency_key"),
-        PromotionEvent.visitor_id.label("visitor_id"),
-        PromotionEvent.fingerprint_version.label("fingerprint_version"),
-        PromotionEvent.fingerprint_quality.label("fingerprint_quality"),
+        PromotionEvent.promotion_visitor_id.label("promotion_visitor_id"),
         PromotionEvent.source_ip.label("source_ip"),
         PromotionEvent.visitor_country_code.label("visitor_country_code"),
         PromotionEvent.network_source.label("network_source"),
@@ -233,9 +232,7 @@ def _monitoring_sources(channel_ids: list[int], start: datetime, end: datetime):
         PromotionIntegrationEvent.integration_version.label("integration_version"),
         PromotionIntegrationEvent.event_type.label("event_type"),
         PromotionIntegrationEvent.idempotency_key.label("idempotency_key"),
-        PromotionIntegrationEvent.visitor_id.label("visitor_id"),
-        PromotionIntegrationEvent.fingerprint_version.label("fingerprint_version"),
-        PromotionIntegrationEvent.fingerprint_quality.label("fingerprint_quality"),
+        PromotionIntegrationEvent.promotion_visitor_id.label("promotion_visitor_id"),
         PromotionIntegrationEvent.source_ip.label("source_ip"),
         PromotionIntegrationEvent.visitor_country_code.label("visitor_country_code"),
         PromotionIntegrationEvent.network_source.label("network_source"),
@@ -271,6 +268,7 @@ def _record_row(mapping) -> dict[str, Any]:
     template: PromotionTemplate | None = mapping[PromotionTemplate]
     domain: DomainRecord | None = mapping[DomainRecord]
     integration: PromotionIntegration | None = mapping[PromotionIntegration]
+    visitor: PromotionVisitor | None = mapping[PromotionVisitor]
     source = str(mapping["record_source"])
     event_type = str(mapping["event_type"])
     return {
@@ -281,8 +279,8 @@ def _record_row(mapping) -> dict[str, Any]:
         "eventLabel": EVENT_LABELS.get(event_type, event_type),
         "trafficSource": str(mapping["traffic_source"] or "direct"),
         "occurredAt": iso(mapping["occurred_at"]),
-        "visitorId": mapping["visitor_id"],
-        "fingerprintQuality": mapping["fingerprint_quality"],
+        "visitorId": entity_id(visitor) if visitor else None,
+        "fingerprintQuality": visitor.fingerprint_quality if visitor else None,
         "sourceIp": mapping["source_ip"],
         "visitorCountryCode": mapping["visitor_country_code"],
         "networkSource": mapping["network_source"],
@@ -320,6 +318,7 @@ def _detail_common(
     template: PromotionTemplate | None,
     domain: DomainRecord | None,
     integration: PromotionIntegration | None = None,
+    visitor: PromotionVisitor | None = None,
 ) -> dict[str, Any]:
     metadata = event.metadata_json if isinstance(event.metadata_json, dict) else {}
     encoded = json.dumps(metadata, ensure_ascii=False, default=str).encode("utf-8")
@@ -339,9 +338,9 @@ def _detail_common(
         "idempotencyKey": event.idempotency_key,
         "trafficSource": traffic_source,
         "occurredAt": iso(event.occurred_at),
-        "visitorId": event.visitor_id,
-        "fingerprintVersion": event.fingerprint_version,
-        "fingerprintQuality": event.fingerprint_quality,
+        "visitorId": entity_id(visitor) if visitor else None,
+        "fingerprintVersion": visitor.fingerprint_version if visitor else None,
+        "fingerprintQuality": visitor.fingerprint_quality if visitor else None,
         "device": _device_summary(
             {
                 "requestContext": event.request_context_json,
@@ -426,11 +425,16 @@ def list_records(
             PromotionTemplate,
             DomainRecord,
             PromotionIntegration,
+            PromotionVisitor,
         )
         .join(PromotionChannel, PromotionChannel.id == records.c.channel_id)
         .outerjoin(PromotionTemplate, PromotionTemplate.id == PromotionChannel.template_id)
         .outerjoin(DomainRecord, DomainRecord.id == PromotionChannel.domain_id)
         .outerjoin(PromotionIntegration, PromotionIntegration.id == records.c.integration_id)
+        .outerjoin(
+            PromotionVisitor,
+            PromotionVisitor.id == records.c.promotion_visitor_id,
+        )
     )
     if source != "all":
         statement = statement.where(records.c.record_source == source)
@@ -462,7 +466,7 @@ def list_records(
         statement = statement.where(
             or_(
                 cast(records.c.record_id, String).ilike(pattern),
-                records.c.visitor_id.ilike(pattern),
+                cast(records.c.promotion_visitor_id, String).ilike(pattern),
                 records.c.source_ip.ilike(pattern),
                 records.c.visitor_country_code.ilike(pattern),
                 records.c.event_type.ilike(pattern),
@@ -519,6 +523,11 @@ def get_record(
         template = db.get(PromotionTemplate, event.template_id or channel.template_id)
         domain = db.get(DomainRecord, channel.domain_id) if channel.domain_id else None
         integration = db.get(PromotionIntegration, event.integration_id)
+        visitor = (
+            db.get(PromotionVisitor, event.promotion_visitor_id)
+            if event.promotion_visitor_id is not None
+            else None
+        )
         record = _detail_common(
             source=source,
             event=event,
@@ -526,6 +535,7 @@ def get_record(
             template=template,
             domain=domain,
             integration=integration,
+            visitor=visitor,
         )
     else:
         statement = (
@@ -544,12 +554,18 @@ def get_record(
         channel = db.get(PromotionChannel, event.channel_id)
         template = db.get(PromotionTemplate, channel.template_id)
         domain = db.get(DomainRecord, channel.domain_id) if channel.domain_id else None
+        visitor = (
+            db.get(PromotionVisitor, event.promotion_visitor_id)
+            if event.promotion_visitor_id is not None
+            else None
+        )
         record = _detail_common(
             source=source,
             event=event,
             channel=channel,
             template=template,
             domain=domain,
+            visitor=visitor,
         )
     return {"data": {"record": record}}
 

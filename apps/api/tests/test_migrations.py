@@ -248,6 +248,94 @@ def test_promotion_request_context_migration_is_reversible(tmp_path: Path) -> No
         assert "request_context_json" not in columns
     engine.dispose()
 
+
+def test_promotion_visitor_migration_backfills_existing_fingerprints(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'promotion-visitors.db'}"
+    _alembic(database_url, "0060_thumbmark_fingerprints")
+    engine = sa.create_engine(database_url)
+    fingerprint_hash = "a" * 64
+    with engine.begin() as connection:
+        tenant_id = connection.execute(
+            sa.text("SELECT id FROM user_accounts ORDER BY id LIMIT 1")
+        ).scalar_one()
+        template_id = connection.execute(
+            sa.text(
+                """
+                INSERT INTO promotion_templates
+                    (public_id, name, manifest_json, index_html, created_by)
+                VALUES
+                    ('migration-template', 'migration template', '{}',
+                     '<html></html>', :tenant_id)
+                """
+            ),
+            {"tenant_id": tenant_id},
+        ).lastrowid
+        channel_id = connection.execute(
+            sa.text(
+                """
+                INSERT INTO promotion_channels
+                    (public_id, name, country_code, template_id, slug, created_by)
+                VALUES
+                    ('migration-channel', 'migration channel', 'US',
+                     :template_id, 'migration-channel', :tenant_id)
+                """
+            ),
+            {"template_id": template_id, "tenant_id": tenant_id},
+        ).lastrowid
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO promotion_events
+                    (public_id, channel_id, event_type, idempotency_key,
+                     occurred_at, metadata_json, visitor_id,
+                     visitor_fingerprint_hash, fingerprint_version,
+                     fingerprint_quality)
+                VALUES
+                    ('migration-event', :channel_id, 'page_view',
+                     'migration-event-key', :occurred_at, '{}',
+                     'browser-visitor', :fingerprint_hash,
+                     'thumbmarkjs/1.10.1', 'high')
+                """
+            ),
+            {
+                "channel_id": channel_id,
+                "occurred_at": datetime(2026, 8, 24, tzinfo=UTC),
+                "fingerprint_hash": fingerprint_hash,
+            },
+        )
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    event_columns = {
+        column["name"] for column in inspector.get_columns("promotion_events")
+    }
+    assert "promotion_visitor_id" in event_columns
+    assert "visitor_id" not in event_columns
+    assert "visitor_fingerprint_hash" not in event_columns
+    with engine.connect() as connection:
+        visitor = connection.execute(
+            sa.text(
+                """
+                SELECT v.tenant_id, v.fingerprint_hash,
+                       v.fingerprint_version, v.fingerprint_quality,
+                       e.promotion_visitor_id
+                FROM promotion_events e
+                JOIN promotion_visitors v ON v.id = e.promotion_visitor_id
+                WHERE e.public_id = 'migration-event'
+                """
+            )
+        ).one()
+    assert visitor.tenant_id == tenant_id
+    assert visitor.fingerprint_hash == fingerprint_hash
+    assert visitor.fingerprint_version == "thumbmarkjs/1.10.1"
+    assert visitor.fingerprint_quality == "high"
+    assert visitor.promotion_visitor_id is not None
+    engine.dispose()
+
 def test_custom_role_is_not_expanded_by_forward_repairs(tmp_path: Path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'custom-role-upgrade.db'}"
     _alembic(database_url, "0005_system_promotion_domains")

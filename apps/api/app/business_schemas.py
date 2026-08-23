@@ -4,7 +4,14 @@ from datetime import date, datetime
 import re
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from app.validation import (
     normalize_country,
@@ -660,13 +667,11 @@ class PromotionChannelUpdate(Model):
 
 
 class PublicEvent(Model):
-    idempotency_key: str = Field(alias="idempotencyKey", min_length=8, max_length=160)
     event_type: str | None = Field(default=None, alias="eventType", max_length=32)
     occurred_at: datetime | None = Field(default=None, alias="occurredAt")
     channel: str | None = Field(default=None, max_length=80)
     country_code: str | None = Field(default=None, alias="countryCode")
     metadata: dict = Field(default_factory=dict)
-    visitor_id: str | None = Field(default=None, alias="visitorId", min_length=8, max_length=80)
 
     _country = field_validator("country_code")(normalize_country)
     _metadata = field_validator("metadata")(lambda value: validate_structured_json(value, max_bytes=4096))
@@ -682,13 +687,9 @@ class PromotionIntegrationEventInput(Model):
         max_length=64,
         pattern=r"^[a-z][a-z0-9_.-]{0,63}$",
     )
-    idempotency_key: str = Field(alias="idempotencyKey", min_length=8, max_length=160)
-    visitor_id: str = Field(alias="visitorId", min_length=8, max_length=80)
-    session_token: str = Field(alias="sessionToken", min_length=20, max_length=2000)
     occurred_at: datetime | None = Field(default=None, alias="occurredAt")
     metadata: dict = Field(default_factory=dict)
-    device_fingerprint: str | None = Field(
-        default=None,
+    device_fingerprint: str = Field(
         alias="deviceFingerprint",
         max_length=80,
         pattern=DEVICE_FINGERPRINT_PATTERN,
@@ -703,9 +704,7 @@ class PromotionEventInput(PublicEvent):
     event_type: Literal[
         "page_view", "visit_end", "inspection_detected"
     ] = Field(alias="eventType")
-    visitor_id: str = Field(alias="visitorId", min_length=8, max_length=80)
-    device_fingerprint: str | None = Field(
-        default=None,
+    device_fingerprint: str = Field(
         alias="deviceFingerprint",
         max_length=80,
         pattern=DEVICE_FINGERPRINT_PATTERN,
@@ -714,13 +713,11 @@ class PromotionEventInput(PublicEvent):
 
 class PromotionPairingStart(Model):
     phone: str
-    idempotency_key: str | None = Field(
-        default=None, alias="idempotencyKey", min_length=8, max_length=160
-    )
     metadata: dict = Field(default_factory=dict)
-    visitor_id: str = Field(alias="visitorId", min_length=8, max_length=80)
-    device_token: str | None = Field(
-        default=None, alias="deviceToken", min_length=40, max_length=4096
+    device_fingerprint: str = Field(
+        alias="deviceFingerprint",
+        max_length=80,
+        pattern=DEVICE_FINGERPRINT_PATTERN,
     )
 
     _phone = field_validator("phone")(normalize_phone)
@@ -742,13 +739,24 @@ class PromotionSuccessInput(Model):
     promotion_channel_id: str = Field(alias="promotionChannelId", min_length=1, max_length=64)
     event_type: Literal["login_success", "pair_success"] = Field(alias="eventType")
     idempotency_key: str = Field(alias="idempotencyKey", min_length=8, max_length=160)
-    visitor_id: str = Field(alias="visitorId", min_length=8, max_length=80)
+    pairing_attempt_id: str | None = Field(
+        default=None, alias="pairingAttemptId", min_length=1, max_length=64
+    )
+    promotion_visitor_id: str | None = Field(
+        default=None, alias="promotionVisitorId", min_length=1, max_length=64
+    )
     occurred_at: datetime | None = Field(default=None, alias="occurredAt")
     metadata: dict = Field(default_factory=dict)
 
     _metadata = field_validator("metadata")(
         lambda value: validate_structured_json(value, max_bytes=4096)
     )
+
+    @model_validator(mode="after")
+    def validate_success_subject(self):
+        if not self.pairing_attempt_id and not self.promotion_visitor_id:
+            raise ValueError("pairingAttemptId 或 promotionVisitorId 至少提供一个")
+        return self
 
 
 class MaterialCreate(StructuredCreate):

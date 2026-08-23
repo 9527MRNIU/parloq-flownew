@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import hmac
 import html as html_lib
 import io
 import json
 import mimetypes
 import re
-import secrets
 import stat
 import zipfile
 from dataclasses import dataclass
@@ -27,7 +25,6 @@ from app.models import (
     PromotionIntegrationAsset,
     PromotionTemplateIntegration,
 )
-from app.security import utcnow
 
 
 MAX_INTEGRATION_ZIP = 20 * 1024 * 1024
@@ -162,67 +159,6 @@ def integration_feedback_contract(item: PromotionIntegration) -> tuple[bool, tup
         if isinstance(value, str)
     )
     return True, tuple(dict.fromkeys((*BUILTIN_FEEDBACK_EVENTS, *events)))
-
-
-def issue_integration_embed_token(
-    integration: ActivePromotionIntegration,
-    *,
-    channel_id: str,
-    template_id: str,
-    tenant_id: int,
-    traffic_source: str,
-) -> str:
-    if not integration.feedback_enabled or traffic_source not in {"direct", "fission"}:
-        raise ValueError("unsupported integration runtime")
-    issued_at = int(utcnow().timestamp())
-    payload = {
-        "purpose": "promotion-integration-embed/v1",
-        "integration": integration.id,
-        "version": integration.version,
-        "channel": channel_id,
-        "template": template_id,
-        "tenant": str(tenant_id),
-        "trafficSource": traffic_source,
-        "iat": issued_at,
-        "exp": issued_at + 1800,
-        "nonce": secrets.token_hex(8),
-    }
-    encoded = base64.urlsafe_b64encode(
-        json.dumps(payload, separators=(",", ":")).encode()
-    ).decode().rstrip("=")
-    signature = hmac.new(
-        get_settings().app_secret_key.encode(),
-        encoded.encode(),
-        hashlib.sha256,
-    ).hexdigest()
-    return f"{encoded}.{signature}"
-
-
-def verify_integration_embed_token(token: str) -> dict:
-    try:
-        encoded, signature = token.rsplit(".", 1)
-        expected = hmac.new(
-            get_settings().app_secret_key.encode(),
-            encoded.encode(),
-            hashlib.sha256,
-        ).hexdigest()
-        if not hmac.compare_digest(signature, expected):
-            raise ValueError
-        payload = json.loads(
-            base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
-        )
-        now = int(utcnow().timestamp())
-        if (
-            payload.get("purpose") != "promotion-integration-embed/v1"
-            or payload.get("trafficSource") not in {"direct", "fission"}
-            or int(payload.get("exp", 0)) < now
-            or int(payload.get("iat", 0)) > now + 60
-            or not payload.get("nonce")
-        ):
-            raise ValueError
-    except (ValueError, TypeError, json.JSONDecodeError):
-        raise HTTPException(status_code=403, detail="集成运行会话已失效") from None
-    return payload
 
 
 def _content_type(path: str) -> str:
@@ -707,7 +643,9 @@ def integration_csp_sources(
 def inject_runtime_integrations(
     html: str,
     integrations: list[ActivePromotionIntegration],
-    iframe_tokens: dict[str, str] | None = None,
+    *,
+    channel_slug: str | None = None,
+    traffic_source: str = "direct",
 ) -> str:
     if not integrations:
         return html
@@ -733,9 +671,11 @@ def inject_runtime_integrations(
             iframe_markup.append(
                 f'<iframe src="{source_url}'
                 + (
-                    "#parloqEmbedToken="
-                    + html_lib.escape(quote(iframe_tokens[item.id], safe="-._~"), quote=True)
-                    if iframe_tokens and item.id in iframe_tokens
+                    "#parloqChannel="
+                    + html_lib.escape(quote(channel_slug, safe="-._~"), quote=True)
+                    + "&parloqTrafficSource="
+                    + html_lib.escape(quote(traffic_source, safe="-._~"), quote=True)
+                    if channel_slug and item.feedback_enabled
                     else ""
                 )
                 + '" '

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models import PromotionChannel, PromotionEvent
+from app.models import PromotionChannel, PromotionEvent, PromotionVisitor
 from app.security import utcnow
 from app.snowflake import new_public_id
 
@@ -75,13 +74,10 @@ def persist_pairing_failure_event(
     db: Session,
     *,
     channel: PromotionChannel,
-    visitor_id: str,
+    promotion_visitor: PromotionVisitor,
     reason_code: str,
     stage: str,
     traffic_source: str,
-    fingerprint_hash: str | None = None,
-    fingerprint_version: str | None = None,
-    fingerprint_quality: str | None = None,
     source_ip: str | None = None,
     visitor_country_code: str | None = None,
     network_source: str | None = None,
@@ -97,11 +93,9 @@ def persist_pairing_failure_event(
 
     canonical = canonical_pairing_failure_reason(reason_code)
     occurred_at = utcnow()
-    subject = fingerprint_hash or visitor_id
-    subject_digest = hashlib.sha256(subject.encode()).hexdigest()[:24]
     idempotency_key = (
         f"pairing_failed:{occurred_at.date().isoformat()}:{canonical}:"
-        f"{subject_digest}"
+        f"{promotion_visitor.id}"
     )
     existing = db.scalar(
         select(PromotionEvent).where(
@@ -125,10 +119,7 @@ def persist_pairing_failure_event(
         channel_id=channel.id,
         event_type="pairing_failed",
         idempotency_key=idempotency_key,
-        visitor_id=visitor_id,
-        visitor_fingerprint_hash=fingerprint_hash,
-        fingerprint_version=fingerprint_version,
-        fingerprint_quality=fingerprint_quality,
+        promotion_visitor_id=promotion_visitor.id,
         occurred_at=occurred_at,
         country_code=channel.country_code,
         source_ip=source_ip,

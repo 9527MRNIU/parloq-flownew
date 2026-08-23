@@ -90,7 +90,7 @@ def _request_user_data(
     request: Request,
     *,
     phone: str | None,
-    visitor_id: str | None,
+    visitor_key: str | None,
 ) -> dict[str, Any]:
     from app.services.request_network import resolve_request_network
 
@@ -111,8 +111,8 @@ def _request_user_data(
         normalized_phone = "".join(char for char in phone if char.isdigit())
         if normalized_phone:
             result["ph"] = [_sha256(normalized_phone)]
-    if visitor_id:
-        result["external_id"] = [_sha256(visitor_id.strip().lower())]
+    if visitor_key:
+        result["external_id"] = [_sha256(visitor_key.strip().lower())]
     return result
 
 
@@ -126,7 +126,7 @@ def enqueue_meta_conversion(
     request: Request,
     promotion_event: PromotionEvent | None = None,
     phone: str | None = None,
-    visitor_id: str | None = None,
+    visitor_key: str | None = None,
     custom_data: dict | None = None,
 ) -> MetaConversionDelivery | None:
     if not channel.pixel_id:
@@ -156,7 +156,7 @@ def enqueue_meta_conversion(
         action_source="website",
         event_source_url=source_url,
         user_data_json=_request_user_data(
-            request, phone=phone, visitor_id=visitor_id
+            request, phone=phone, visitor_key=visitor_key
         ),
         custom_data_json=custom_data or {},
         status="pending",
@@ -209,7 +209,7 @@ def probe_meta_conversion(
                 "user_data": _request_user_data(
                     request,
                     phone=None,
-                    visitor_id=f"capi-probe:{channel.id}:{event_id}",
+                    visitor_key=f"capi-probe:{channel.id}:{event_id}",
                 ),
                 "custom_data": {"probe": True},
             }

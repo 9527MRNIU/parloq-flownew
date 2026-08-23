@@ -35,7 +35,7 @@ def test_protocol_node_metrics_ingress_and_marketing_controls(
         json={"name": "Blocked ingress", "phone": "+12025551981"},
     )
     assert blocked.status_code == 409
-    assert "允许进号" in blocked.json()["detail"]
+    assert "关闭进号" in blocked.json()["detail"]
 
     enabled = admin_client.patch(
         f"/api/protocol-nodes/{node['id']}",
@@ -211,7 +211,14 @@ def test_protocol_node_create_pool_and_template_contract(
     assert contract["status"]["successCondition"] == (
         "pairingStatus === 'verified' && verified === true"
     )
-    assert "protocolId" not in contract["start"]["body"]
+    start_body = contract["start"]["body"]
+    assert "protocolId" not in start_body
+    assert "sessionToken" not in start_body
+    assert "deviceToken" not in start_body
+    assert "visitorId" not in start_body
+    assert "idempotencyKey" not in start_body
+    assert start_body["deviceFingerprint"] == "thumbmarkjs-or-fallback-value"
+    assert start_body["metadata"]["clientContext"]["timeZone"] == "Europe/Berlin"
     assert contract["rateLimit"]["source"] == "protocol-node"
     assert contract["rateLimit"]["policy"]["cancel"]["maxRequests"] == 6
     assert contract["rateLimit"]["response"]["status"] == 429

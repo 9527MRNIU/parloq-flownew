@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import pytest
-
+from app.services import device_fingerprints
 from app.services.device_fingerprints import (
     FINGERPRINT_VERSION,
     fingerprint_identity,
     fingerprint_metadata,
-    issue_device_token,
-    verify_device_token,
 )
 
 
@@ -45,35 +42,6 @@ def test_peer_style_fallback_is_tenant_scoped_and_marked_low_quality() -> None:
     assert identity.profile == "fallback"
 
 
-def test_device_token_binds_channel_tenant_and_visitor() -> None:
-    identity = fingerprint_identity(3001, THUMBMARK)
-    assert identity is not None
-    token = issue_device_token(
-        identity,
-        channel_id="4780486454931654",
-        tenant_id=3001,
-        visitor_id="visitor-device-0001",
-    )
-    verified = verify_device_token(
-        token,
-        channel_id="4780486454931654",
-        tenant_id=3001,
-        visitor_id="visitor-device-0001",
-    )
-    assert verified.fingerprint_hash == identity.fingerprint_hash
-    assert verified.limit_keys == identity.limit_keys
-
-    with pytest.raises(ValueError):
-        verify_device_token(
-            token,
-            channel_id="4780486454931654",
-            tenant_id=3001,
-            visitor_id="different-visitor",
-        )
-    with pytest.raises(ValueError):
-        verify_device_token(
-            f"{token}x",
-            channel_id="4780486454931654",
-            tenant_id=3001,
-            visitor_id="visitor-device-0001",
-        )
+def test_device_tokens_are_not_part_of_the_fingerprint_service() -> None:
+    assert not hasattr(device_fingerprints, "issue_device_token")
+    assert not hasattr(device_fingerprints, "verify_device_token")

@@ -5,7 +5,6 @@ import io
 import json
 import re
 import zipfile
-from urllib.parse import unquote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -481,36 +480,21 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
         "/api/public/promotion/channels/feedback-channel-v1/render"
     )
     assert rendered.status_code == 200, rendered.text
-    token_match = re.search(r"#parloqEmbedToken=([^\"]+)", rendered.text)
-    assert token_match is not None
-    token = unquote(token_match.group(1))
-
-    runtime = admin_client.get(
-        f"/api/public/promotion/integrations/{integration['id']}/runtime",
-        headers={
-            "host": "integration-feedback.test",
-            "authorization": f"Bearer {token}",
-        },
+    assert "#parloqChannel=feedback-channel-v1" in rendered.text
+    assert "parloqTrafficSource=direct" in rendered.text
+    assert "parloqEmbedToken" not in rendered.text
+    event_url = (
+        f"/api/public/promotion/integrations/{integration['id']}"
+        "/channels/feedback-channel-v1/events"
     )
-    assert runtime.status_code == 200, runtime.text
-    runtime_data = runtime.json()["data"]
-    assert runtime_data["integration"]["id"] == integration["id"]
-    assert runtime_data["channel"]["id"] == channel["id"]
-    assert runtime_data["template"]["id"] == template["id"]
-    assert runtime_data["events"] == integration["feedbackEvents"]
-    assert "deviceSignals" not in runtime_data
-    assert "fingerprintEnabled" not in runtime_data
-    assert runtime.headers["cache-control"] == "no-store"
 
     event_payload = {
         "eventType": "completed",
-        "idempotencyKey": "feedback-event-0001",
-        "visitorId": "visitor-feedback-0001",
-        "sessionToken": runtime_data["sessionToken"],
+        "deviceFingerprint": "0ef8bdbc97de077c45a46358ecc4ba42",
         "metadata": {"result": "ok", "count": 2},
     }
     event = admin_client.post(
-        f"/api/public/promotion/integrations/{integration['id']}/events",
+        event_url,
         headers={
             "host": "integration-feedback.test",
             "user-agent": "Mozilla/5.0 Chrome/151.0.0.0 Safari/537.36",
@@ -521,14 +505,6 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     assert event.status_code == 201, event.text
     assert event.json()["data"]["duplicate"] is False
     event_id = event.json()["data"]["eventId"]
-    duplicate = admin_client.post(
-        f"/api/public/promotion/integrations/{integration['id']}/events",
-        headers={"host": "integration-feedback.test"},
-        json=event_payload,
-    )
-    assert duplicate.status_code == 200, duplicate.text
-    assert duplicate.json()["data"]["duplicate"] is True
-
     from app.services.promotion_event_rate_limits import (
         PromotionEventRateLimitDecision,
     )
@@ -544,11 +520,10 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
             ),
         )
         limited = admin_client.post(
-            f"/api/public/promotion/integrations/{integration['id']}/events",
+            event_url,
             headers={"host": "integration-feedback.test"},
             json={
                 **event_payload,
-                "idempotencyKey": "feedback-rate-limited-0001",
             },
         )
     assert limited.status_code == 429, limited.text
@@ -556,9 +531,9 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     assert limited.json()["error"]["code"] == "report_rate_limited"
 
     undeclared = admin_client.post(
-        f"/api/public/promotion/integrations/{integration['id']}/events",
+        event_url,
         headers={"host": "integration-feedback.test"},
-        json={**event_payload, "eventType": "not_declared", "idempotencyKey": "bad-event-0001"},
+        json={**event_payload, "eventType": "not_declared"},
     )
     assert undeclared.status_code == 422, undeclared.text
 
@@ -572,29 +547,27 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
         ).encode("utf-8")
     ) == metadata_limit
     boundary = admin_client.post(
-        f"/api/public/promotion/integrations/{integration['id']}/events",
+        event_url,
         headers={"host": "integration-feedback.test"},
         json={
             **event_payload,
-            "idempotencyKey": "feedback-boundary-0001",
             "metadata": boundary_metadata,
         },
     )
     assert boundary.status_code == 201, boundary.text
 
     metadata_too_large = admin_client.post(
-        f"/api/public/promotion/integrations/{integration['id']}/events",
+        event_url,
         headers={"host": "integration-feedback.test"},
         json={
             **event_payload,
-            "idempotencyKey": "feedback-metadata-large-0001",
             "metadata": {"blob": boundary_metadata["blob"] + "x"},
         },
     )
     assert metadata_too_large.status_code == 422, metadata_too_large.text
 
     envelope_too_large = admin_client.post(
-        f"/api/public/promotion/integrations/{integration['id']}/events",
+        event_url,
         headers={
             "host": "integration-feedback.test",
             "content-type": "text/plain;charset=UTF-8",
@@ -613,7 +586,21 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     event_row = next(row for row in event_data["rows"] if row["id"] == event_id)
     assert event_row["channelId"] == channel["id"]
     assert "metadata" not in event_row
-    encoded_metadata = b'{"count":2,"result":"ok"}'
+    stored_metadata = {
+        "result": "ok",
+        "count": 2,
+        "deviceFingerprint": {
+            "version": "thumbmarkjs/1.10.1",
+            "profile": "thumbmarkjs",
+            "quality": "high",
+        },
+    }
+    encoded_metadata = json.dumps(
+        stored_metadata,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
     assert event_row["metadataBytes"] == len(encoded_metadata)
     assert event_row["metadataSha256"] == hashlib.sha256(encoded_metadata).hexdigest()
 
@@ -622,7 +609,7 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     )
     assert event_detail.status_code == 200, event_detail.text
     detail_data = event_detail.json()["data"]["event"]
-    assert detail_data["metadata"] == {"result": "ok", "count": 2}
+    assert detail_data["metadata"] == stored_metadata
     assert detail_data["metadataBytes"] == len(encoded_metadata)
     assert detail_data["metadataSha256"] == hashlib.sha256(encoded_metadata).hexdigest()
 
@@ -631,7 +618,7 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
         f"/api/promotion/integrations/{integration['id']}/events/{boundary_event_id}"
     )
     assert boundary_detail.status_code == 200, boundary_detail.text
-    assert boundary_detail.json()["data"]["event"]["metadata"] == boundary_metadata
+    assert boundary_detail.json()["data"]["event"]["metadata"]["blob"] == boundary_metadata["blob"]
 
     monitoring = admin_client.get(
         f"/api/promotion/monitoring/records?integrationId={integration['id']}"
@@ -655,7 +642,7 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     )
     assert monitored_detail.status_code == 200, monitored_detail.text
     monitoring_detail = monitored_detail.json()["data"]["record"]
-    assert monitoring_detail["metadata"] == {"result": "ok", "count": 2}
+    assert monitoring_detail["metadata"] == stored_metadata
     assert monitoring_detail["sourceIp"] == "198.51.100.42"
     assert monitoring_detail["visitorCountryCode"] == "JP"
     assert monitoring_detail["requestContext"]["language"] == "ja-JP"
@@ -673,8 +660,6 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
 def test_public_event_metadata_limit_remains_4_kib() -> None:
     with pytest.raises(ValidationError, match="JSON 内容过大"):
         PublicEvent(
-            idempotencyKey="public-event-0001",
-            visitorId="public-visitor-0001",
             metadata={"blob": "x" * 4096},
         )
 

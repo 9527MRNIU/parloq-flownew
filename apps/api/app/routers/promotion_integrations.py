@@ -12,7 +12,6 @@ from fastapi import (
     APIRouter,
     File,
     Form,
-    Header,
     HTTPException,
     Query,
     Request,
@@ -42,6 +41,7 @@ from app.models import (
     PromotionTemplate,
     PromotionTemplateIntegration,
     PromotionTemplatePolicy,
+    PromotionVisitor,
 )
 from app.security import utcnow
 from app.serializers import iso
@@ -52,7 +52,6 @@ from app.services.promotion_integrations import (
     integration_source_urls,
     parse_integration_package,
     replace_integration_package,
-    verify_integration_embed_token,
 )
 from app.services.promotion_event_rate_limits import (
     PromotionEventRateLimitRequest,
@@ -78,7 +77,7 @@ from app.services.github_repository import (
     with_repository_source,
 )
 from app.services.platform_clients import PlatformClientError
-from app.snowflake import new_public_id, parse_snowflake_id
+from app.snowflake import new_public_id
 from app.validation import PROMOTION_INTEGRATION_EVENT_MAX_BYTES, parse_public_datetime
 
 
@@ -104,6 +103,7 @@ def _integration_event_metadata_bytes(metadata: dict) -> bytes:
 def _integration_event_row(
     event: PromotionIntegrationEvent,
     channel_slug: str,
+    visitor: PromotionVisitor | None,
     *,
     include_metadata: bool,
 ) -> dict:
@@ -116,8 +116,8 @@ def _integration_event_row(
         "channelSlug": channel_slug,
         "templateId": entity_id(event.template_id) if event.template_id else None,
         "integrationVersion": event.integration_version,
-        "visitorId": event.visitor_id,
-        "fingerprintQuality": event.fingerprint_quality,
+        "visitorId": entity_id(visitor) if visitor else None,
+        "fingerprintQuality": visitor.fingerprint_quality if visitor else None,
         "trafficSource": event.traffic_source,
         "occurredAt": iso(event.occurred_at),
         "metadataBytes": len(encoded_metadata),
@@ -634,8 +634,12 @@ def list_integration_events(
     ).all()
     total = sum(int(count) for _, count in grouped)
     event_rows = db.execute(
-        select(PromotionIntegrationEvent, PromotionChannel.slug)
+        select(PromotionIntegrationEvent, PromotionChannel.slug, PromotionVisitor)
         .join(PromotionChannel, PromotionChannel.id == PromotionIntegrationEvent.channel_id)
+        .outerjoin(
+            PromotionVisitor,
+            PromotionVisitor.id == PromotionIntegrationEvent.promotion_visitor_id,
+        )
         .where(PromotionIntegrationEvent.integration_id == item.id)
         .order_by(
             PromotionIntegrationEvent.occurred_at.desc(),
@@ -650,9 +654,10 @@ def list_integration_events(
                 _integration_event_row(
                     event,
                     channel_slug,
+                    visitor,
                     include_metadata=False,
                 )
-                for event, channel_slug in event_rows
+                for event, channel_slug, visitor in event_rows
             ],
             "summary": [
                 {"eventType": event_type, "count": int(count)}
@@ -674,8 +679,12 @@ def get_integration_event(
 ) -> dict:
     item = _integration(db, integration_id, current_user)
     row = db.execute(
-        select(PromotionIntegrationEvent, PromotionChannel.slug)
+        select(PromotionIntegrationEvent, PromotionChannel.slug, PromotionVisitor)
         .join(PromotionChannel, PromotionChannel.id == PromotionIntegrationEvent.channel_id)
+        .outerjoin(
+            PromotionVisitor,
+            PromotionVisitor.id == PromotionIntegrationEvent.promotion_visitor_id,
+        )
         .where(
             PromotionIntegrationEvent.integration_id == item.id,
             identifier_filter(PromotionIntegrationEvent, event_id),
@@ -683,12 +692,13 @@ def get_integration_event(
     ).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="回传事件不存在")
-    event, channel_slug = row
+    event, channel_slug, visitor = row
     return {
         "data": {
             "event": _integration_event_row(
                 event,
                 channel_slug,
+                visitor,
                 include_metadata=True,
             )
         }
@@ -794,26 +804,16 @@ def replace_integration_version(
     return {"data": {"integration": integration_row(db, item)}}
 
 
-def _bearer_token(authorization: str | None) -> str:
-    if not authorization:
-        raise HTTPException(status_code=403, detail="缺少集成运行会话")
-    scheme, _, token = authorization.strip().partition(" ")
-    if scheme.lower() != "bearer" or not token:
-        raise HTTPException(status_code=403, detail="集成运行会话无效")
-    return token
-
-
-def _public_runtime_context(
+def _public_event_context(
     db: DbSession,
     integration_id: str,
+    channel_slug: str,
     request: Request,
-    token: str,
 ) -> tuple[
     PromotionIntegration,
     DomainRecord,
     PromotionChannel,
     PromotionTemplate,
-    dict,
 ]:
     row = db.execute(
         select(PromotionIntegration, DomainRecord)
@@ -830,24 +830,19 @@ def _public_runtime_context(
     request_host = (request.url.hostname or "").lower().rstrip(".")
     if request_host != domain.hostname or not domain_is_ready(domain):
         raise HTTPException(status_code=404)
-    payload = verify_integration_embed_token(token)
-    try:
-        channel_id = parse_snowflake_id(payload.get("channel"))
-        template_id = parse_snowflake_id(payload.get("template"))
-        tenant_id = parse_snowflake_id(payload.get("tenant"))
-    except ValueError:
-        raise HTTPException(status_code=403, detail="集成运行会话已失效") from None
-    if (
-        payload.get("integration") != entity_id(item)
-        or payload.get("version") != item.version
-        or tenant_id != item.created_by
-    ):
-        raise HTTPException(status_code=403, detail="集成运行会话已失效")
-    channel = db.get(PromotionChannel, channel_id)
-    template = db.get(PromotionTemplate, template_id)
+    channel = db.scalar(
+        select(PromotionChannel).where(
+            PromotionChannel.created_by == item.created_by,
+            PromotionChannel.slug == channel_slug,
+            PromotionChannel.status == "active",
+        )
+    )
+    if channel is None:
+        raise HTTPException(status_code=404)
+    template = db.get(PromotionTemplate, channel.template_id)
     binding = db.scalar(
         select(PromotionTemplateIntegration).where(
-            PromotionTemplateIntegration.template_id == template_id,
+            PromotionTemplateIntegration.template_id == channel.template_id,
             PromotionTemplateIntegration.integration_id == item.id,
             PromotionTemplateIntegration.enabled.is_(True),
         )
@@ -855,16 +850,13 @@ def _public_runtime_context(
     feedback_enabled, _ = integration_feedback_contract(item)
     if (
         not feedback_enabled
-        or channel is None
-        or channel.status != "active"
-        or channel.template_id != template_id
         or channel.created_by != item.created_by
         or template is None
         or template.created_by != item.created_by
         or binding is None
     ):
-        raise HTTPException(status_code=403, detail="集成运行会话已失效")
-    return item, domain, channel, template, payload
+        raise HTTPException(status_code=404)
+    return item, domain, channel, template
 
 
 @public_router.get("/runtime.js")
@@ -880,52 +872,11 @@ def integration_runtime_script() -> Response:
     )
 
 
-@public_router.get("/{integration_id}/runtime")
-def public_integration_runtime(
-    integration_id: str,
-    request: Request,
-    db: DbSession,
-    authorization: str | None = Header(default=None),
-) -> JSONResponse:
-    token = _bearer_token(authorization)
-    item, _, channel, template, payload = _public_runtime_context(
-        db, integration_id, request, token
-    )
-    _, feedback_events = integration_feedback_contract(item)
-    return JSONResponse(
-        {
-            "data": {
-                "integration": {
-                    "id": entity_id(item),
-                    "key": item.integration_key,
-                    "version": item.version,
-                },
-                "channel": {
-                    "id": entity_id(channel),
-                    "slug": channel.slug,
-                    "countryCode": channel.country_code,
-                    "trafficSource": payload.get("trafficSource", "direct"),
-                },
-                "template": {
-                    "id": entity_id(template),
-                    "version": template.version,
-                },
-                "eventUrl": f"/api/public/promotion/integrations/{entity_id(item)}/events",
-                "sessionToken": token,
-                "sessionExpiresAt": int(payload["exp"]),
-                "events": list(feedback_events),
-                "visitorStorageKey": (
-                    f"promotion_integration_visitor:{entity_id(item)}:{entity_id(channel)}"
-                ),
-            }
-        },
-        headers={"Cache-Control": "no-store"},
-    )
-
-
-@public_router.post("/{integration_id}/events")
+@public_router.post("/{integration_id}/channels/{channel_slug}/events")
+@public_router.post("/{integration_id}/channels/{channel_slug}/fission/events")
 async def report_integration_event(
     integration_id: str,
+    channel_slug: str,
     request: Request,
     db: DbSession,
 ) -> JSONResponse:
@@ -950,15 +901,23 @@ async def report_integration_event(
                 include_input=False,
             ),
         ) from None
-    item, _, channel, template, token_payload = _public_runtime_context(
-        db,
-        integration_id,
-        request,
-        event_input.session_token,
+    item, _, channel, template = _public_event_context(
+        db, integration_id, channel_slug, request
     )
+    traffic_source = "fission" if "/fission/" in request.url.path else "direct"
     _, allowed_events = integration_feedback_contract(item)
     if event_input.event_type not in allowed_events:
         raise HTTPException(status_code=422, detail="集成没有声明这个回传事件")
+    from app.services.device_fingerprints import (
+        fingerprint_metadata,
+        resolve_promotion_visitor,
+    )
+
+    promotion_visitor, device_identity = resolve_promotion_visitor(
+        db,
+        tenant_id=item.created_by,
+        raw_fingerprint=event_input.device_fingerprint,
+    )
     policy = db.scalar(
         select(PromotionTemplatePolicy).where(
             PromotionTemplatePolicy.created_by == item.created_by
@@ -973,13 +932,13 @@ async def report_integration_event(
             rate_policy,
             [
                 PromotionEventRateLimitRequest(
-                    "sessionReports", str(token_payload["nonce"])
+                    "sessionReports", promotion_visitor.fingerprint_hash
                 ),
                 PromotionEventRateLimitRequest(
                     "ipReports",
                     source_ip
                     if source_ip != "unknown"
-                    else f"session:{token_payload['nonce']}",
+                    else f"visitor:{promotion_visitor.fingerprint_hash}",
                 ),
                 PromotionEventRateLimitRequest("channelReports", "all"),
             ],
@@ -1014,52 +973,14 @@ async def report_integration_event(
             )
     occurred_at = parse_public_datetime(event_input.occurred_at)
     now = utcnow()
-    occurred_ts = int(occurred_at.timestamp())
     if (
-        occurred_ts < int(token_payload["iat"]) - 300
-        or occurred_ts > int(token_payload["exp"]) + 300
+        occurred_at < now - timedelta(minutes=5)
         or occurred_at > now + timedelta(minutes=5)
     ):
-        raise HTTPException(status_code=422, detail="occurredAt 超出集成运行会话有效窗口")
-
-    from app.services.device_fingerprints import (
-        fingerprint_identity,
-        fingerprint_metadata,
-    )
-
-    fingerprint_payload = event_input.device_fingerprint
-    fingerprint = fingerprint_identity(item.created_by, fingerprint_payload)
-    fingerprint_details = fingerprint_metadata(fingerprint)
-    existing = db.scalar(
-        select(PromotionIntegrationEvent).where(
-            PromotionIntegrationEvent.integration_id == item.id,
-            PromotionIntegrationEvent.channel_id == channel.id,
-            PromotionIntegrationEvent.idempotency_key
-            == event_input.idempotency_key,
-        )
-    )
-    if existing is not None:
-        if (
-            fingerprint is not None
-            and fingerprint_details is not None
-            and existing.visitor_fingerprint_hash is None
-            and existing.visitor_id == event_input.visitor_id
-        ):
-            existing.visitor_fingerprint_hash = fingerprint.fingerprint_hash
-            existing.fingerprint_version = fingerprint.version
-            existing.fingerprint_quality = fingerprint.quality
-            metadata = dict(existing.metadata_json or {})
-            metadata["deviceFingerprint"] = fingerprint_details
-            existing.metadata_json = metadata
-            db.commit()
-        return JSONResponse(
-            {"data": {"ok": True, "duplicate": True}},
-            headers={"Cache-Control": "no-store"},
-        )
+        raise HTTPException(status_code=422, detail="occurredAt 超出允许的上报时间范围")
     metadata = dict(event_input.metadata)
     metadata.pop("requestContext", None)
-    if fingerprint_details is not None:
-        metadata["deviceFingerprint"] = fingerprint_details
+    metadata["deviceFingerprint"] = fingerprint_metadata(device_identity)
     network = resolve_request_network(request)
     event = PromotionIntegrationEvent(
         public_id=new_public_id("piev"),
@@ -1068,14 +989,9 @@ async def report_integration_event(
         template_id=template.id,
         integration_version=item.version,
         event_type=event_input.event_type,
-        idempotency_key=event_input.idempotency_key,
-        visitor_id=event_input.visitor_id,
-        visitor_fingerprint_hash=(
-            fingerprint.fingerprint_hash if fingerprint else None
-        ),
-        fingerprint_version=fingerprint.version if fingerprint else None,
-        fingerprint_quality=fingerprint.quality if fingerprint else None,
-        traffic_source=str(token_payload.get("trafficSource", "direct")),
+        idempotency_key=f"{event_input.event_type}:{new_public_id('evt')}",
+        promotion_visitor_id=promotion_visitor.id,
+        traffic_source=traffic_source,
         occurred_at=occurred_at,
         country_code=channel.country_code,
         source_ip=network.source_ip,
@@ -1087,24 +1003,7 @@ async def report_integration_event(
         metadata_json=metadata,
     )
     db.add(event)
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        duplicate = db.scalar(
-            select(PromotionIntegrationEvent).where(
-                PromotionIntegrationEvent.integration_id == item.id,
-                PromotionIntegrationEvent.channel_id == channel.id,
-                PromotionIntegrationEvent.idempotency_key
-                == event_input.idempotency_key,
-            )
-        )
-        if duplicate is None:
-            raise
-        return JSONResponse(
-            {"data": {"ok": True, "duplicate": True}},
-            headers={"Cache-Control": "no-store"},
-        )
+    db.commit()
     return JSONResponse(
         {"data": {"ok": True, "duplicate": False, "eventId": entity_id(event)}},
         status_code=status.HTTP_201_CREATED,

@@ -7,10 +7,10 @@
 - **架构边界**：模板 ZIP 只负责展示与本地化；`tracker.js` / `guard.js` /
   `account-link-elements.js` 由平台统一注入；生产 CSP 沙箱只放行白名单域，
   模板无法外联第三方脚本或数据接收方。
-- **访问与鉴权**：浏览器访客 ID + 复合设备指纹 + 速率限制 + 幂等键去重；
-  只有具体配对任务使用服务端签发的状态 Bearer 令牌。
+- **访问与鉴权**：ThumbmarkJS 设备指纹 + 租户 HMAC + 服务端 Snowflake 访客
+  + 速率限制；只有具体配对任务使用服务端签发的状态 Bearer 令牌。
 - **事件埋点**：`page_view` / `phone_submit` / `visit_end` /
-  `inspection_detected`，幂等去重，`phone_submit` 自动归并为 lead。
+  `inspection_detected`，事件 ID 由服务端生成，`phone_submit` 自动归并为 lead。
 - **Meta 归因**：Browser Pixel + CAPI 双发、共用 `event_id` 去重、事件映射
   可配置；服务端读取 `_fbp` / `_fbc`。目前仅 Meta 一个平台。
 - **多语言**：服务端按国家→语言映射解析 locale，模板自带
@@ -41,13 +41,15 @@
 - ThumbmarkJS 自己负责组件超时、不可用和浏览器稳定化排除；平台不再维护自研
   组件组合、浏览器配置或漂移匹配键。正常 Thumbmark 标为 high，随机持久化
   回退值标为 low。
-- 设备凭证与租户、渠道和访客标识签名绑定并拥有独立有效期，配对接口不
-  接受客户端直接声明的指纹标识。
-- 原有 `visitorCheck` / `visitorAttempt` 两项限速已增强为“复合设备指纹
-  优先、浏览器 `visitorId` 回退”，没有新增重复的设备限速配置；`ipStart`
-  始终作为独立 IP 维度执行。
-- 事件与配对记录保存服务端指纹哈希、版本和质量；渠道统计增加设备增强
-  UV、浏览器 UV、指纹覆盖量、覆盖率和质量分布。
+- 服务端按租户 HMAC 查找或创建唯一的 `PromotionVisitor`，并为它分配
+  Snowflake ID；浏览器不再生成 `visitorId`，也不再签发 `deviceToken` 或
+  `sessionToken`。只有配对状态查询与取消保留本次配对专用的状态令牌。
+- 原有 `visitorCheck` / `visitorAttempt` 以及事件 `sessionReports` 限速统一
+  使用租户 HMAC 指纹键，不再保留浏览器 `visitorId` 回退，也没有新增重复的
+  设备限速配置；`ipStart` / `ipReports` 始终作为独立 IP 维度执行。
+- 原生事件、iframe 事件与配对尝试统一关联 `PromotionVisitor`；原始指纹不
+  落库，HMAC、版本和质量只保存在访客实体中。渠道 UV 与监控列表均按服务端
+  Snowflake 访客口径展示和去重。
 
 **主要落点**：
 
@@ -55,8 +57,10 @@
 - `apps/web/src/public-runtime/promotion-tracker.ts`
 - `apps/api/app/services/device_fingerprints.py`
 - `apps/api/app/routers/promotion.py`
+- `apps/api/app/routers/promotion_integrations.py`
 - `apps/api/alembic/versions/0042_device_fingerprints.py`
 - `apps/api/alembic/versions/0060_thumbmark_fingerprints.py`
+- `apps/api/alembic/versions/0061_server_promotion_visitors.py`
 - `apps/web/vendor/thumbmarkjs/`
 
 **供应链边界**：npm 发布归档、完整源码、MIT 许可证、上游提交和 SHA-256

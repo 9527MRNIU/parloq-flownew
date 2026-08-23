@@ -1,22 +1,13 @@
-import {
-  collectDeviceFingerprint,
-} from "./device-fingerprint";
+import { collectDeviceFingerprint } from "./device-fingerprint";
 import { collectClientContext, withClientContext } from "./client-context";
 
 type IntegrationRuntimeConfig = {
-  integration: { id: string; key: string; version: string };
+  integration: { id: string };
   channel: {
-    id: string;
     slug: string;
-    countryCode: string;
     trafficSource: "direct" | "fission";
   };
-  template: { id: string; version: string };
   eventUrl: string;
-  sessionToken: string;
-  sessionExpiresAt: number;
-  events: string[];
-  visitorStorageKey: string;
 };
 
 type IntegrationBridge = {
@@ -34,164 +25,77 @@ declare global {
 const script = document.currentScript as HTMLScriptElement | null;
 const integrationId = script?.dataset.integrationId || "";
 const fragment = new URLSearchParams(location.hash.replace(/^#/, ""));
-const embedToken = fragment.get("parloqEmbedToken") || "";
+const channelSlug = fragment.get("parloqChannel") || "";
+const requestedTrafficSource = fragment.get("parloqTrafficSource");
+const trafficSource = requestedTrafficSource === "fission" ? "fission" : "direct";
 
-if (integrationId && embedToken) {
+if (integrationId && channelSlug) {
   try {
     history.replaceState(null, "", `${location.pathname}${location.search}`);
   } catch {
-    // The token remains usable only for its short server-side lifetime.
+    // Fragment context is non-secret and can safely remain when history is locked.
   }
 
-  const identifier = () =>
-    crypto.randomUUID?.() ||
-      `${Date.now().toString(36)}-${crypto.getRandomValues(new Uint32Array(2)).join("-")}`;
-
-  let resolvedConfig: IntegrationRuntimeConfig | undefined;
-  let resolvedClientContext: Record<string, unknown> | undefined;
-  let clientContextResolved = false;
-  const clientContext = () => {
-    if (!clientContextResolved) {
-      resolvedClientContext = collectClientContext();
-      clientContextResolved = true;
-    }
-    return resolvedClientContext;
+  const eventUrl =
+    `/api/public/promotion/integrations/${encodeURIComponent(integrationId)}` +
+    `/channels/${encodeURIComponent(channelSlug)}` +
+    `${trafficSource === "fission" ? "/fission" : ""}/events`;
+  const config: IntegrationRuntimeConfig = {
+    integration: { id: integrationId },
+    channel: { slug: channelSlug, trafficSource },
+    eventUrl,
   };
-  const configPromise = fetch(
-    `/api/public/promotion/integrations/${encodeURIComponent(integrationId)}/runtime`,
-    {
-      headers: { Authorization: `Bearer ${embedToken}` },
-      cache: "no-store",
-    },
-  ).then(async (response) => {
-    if (!response.ok) throw new Error("integration_runtime_unavailable");
-    const payload = (await response.json()) as {
-      data?: IntegrationRuntimeConfig;
-    };
-    if (!payload.data?.eventUrl || !payload.data.sessionToken) {
-      throw new Error("integration_runtime_invalid");
-    }
-    resolvedConfig = payload.data;
-    return payload.data;
+  const configPromise = Promise.resolve(config);
+  const clientContext = collectClientContext();
+  let resolvedFingerprint = "";
+  const fingerprintPromise = collectDeviceFingerprint().then((value) => {
+    resolvedFingerprint = value;
+    return value;
   });
 
-  let resolvedVisitorId = "";
-  let visitorPromise: Promise<string> | undefined;
-  const visitorId = () =>
-    (visitorPromise ||= configPromise.then((config) => {
-      const generated = identifier();
-      try {
-        const stored = localStorage.getItem(config.visitorStorageKey);
-        if (stored) {
-          resolvedVisitorId = stored;
-          return stored;
-        }
-        localStorage.setItem(config.visitorStorageKey, generated);
-      } catch {
-        // A stable ID is best effort when iframe storage is unavailable.
-      }
-      resolvedVisitorId = generated;
-      return generated;
-    }));
-
-  let fingerprintPromise: Promise<string | undefined> | undefined;
-  const fingerprint = () =>
-    (fingerprintPromise ||= collectDeviceFingerprint().catch(() => undefined));
-
-  const eventBody = async (
-    config: IntegrationRuntimeConfig,
+  const eventBody = (
     eventType: string,
-    idempotencyKey: string,
     metadata: Record<string, unknown>,
-    deviceFingerprint?: string,
+    deviceFingerprint: string,
   ) =>
     JSON.stringify({
       eventType,
-      idempotencyKey,
-      visitorId: await visitorId(),
-      sessionToken: config.sessionToken,
+      deviceFingerprint,
       occurredAt: new Date().toISOString(),
-      metadata: withClientContext(metadata, clientContext()),
-      ...(deviceFingerprint ? { deviceFingerprint } : {}),
+      metadata: withClientContext(metadata, clientContext),
     });
 
   const send = async (
     eventType: string,
     metadata: Record<string, unknown> = {},
-    idempotencyKey = identifier(),
-    deviceFingerprint?: string,
-  ) => {
-    const config = await configPromise;
-    if (!config.events.includes(eventType)) {
-      throw new Error("integration_event_not_declared");
-    }
-    return fetch(config.eventUrl, {
+  ) =>
+    fetch(eventUrl, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=UTF-8" },
-      body: await eventBody(
-        config,
-        eventType,
-        idempotencyKey,
-        metadata,
-        deviceFingerprint,
-      ),
+      body: eventBody(eventType, metadata, await fingerprintPromise),
       keepalive: true,
     });
-  };
 
   window.PromotionIntegrationBridge = {
-    version: "promotion-integration-bridge/v1",
+    version: "promotion-integration-bridge/v2",
     ready: () => configPromise,
-    report: async (eventType, metadata = {}) => {
-      const deviceFingerprint = await Promise.race([
-        fingerprint(),
-        new Promise<undefined>((resolve) => window.setTimeout(resolve, 800)),
-      ]);
-      return send(eventType, metadata, identifier(), deviceFingerprint);
-    },
+    report: send,
   };
 
   const startedAt = Date.now();
-  void configPromise
-    .then(async () => {
-      const pageEventId = identifier();
-      const metadata = {};
-      await send("page_view", metadata, pageEventId).catch(() => undefined);
-      const deviceFingerprint = await fingerprint();
-      if (deviceFingerprint) {
-        await send(
-          "page_view",
-          metadata,
-          pageEventId,
-          deviceFingerprint,
-        ).catch(() => undefined);
-      }
-    })
-    .catch(() => undefined);
+  void send("page_view").catch(() => undefined);
 
   addEventListener("pagehide", () => {
-    if (
-      !resolvedConfig ||
-      !resolvedVisitorId ||
-      !resolvedConfig.events.includes("visit_end")
-    ) {
-      return;
-    }
+    if (!resolvedFingerprint) return;
     navigator.sendBeacon(
-      resolvedConfig.eventUrl,
+      eventUrl,
       new Blob(
         [
-          JSON.stringify({
-            eventType: "visit_end",
-            idempotencyKey: identifier(),
-            visitorId: resolvedVisitorId,
-            sessionToken: resolvedConfig.sessionToken,
-            occurredAt: new Date().toISOString(),
-            metadata: withClientContext(
-              { durationMs: Math.max(0, Date.now() - startedAt) },
-              clientContext(),
-            ),
-          }),
+          eventBody(
+            "visit_end",
+            { durationMs: Math.max(0, Date.now() - startedAt) },
+            resolvedFingerprint,
+          ),
         ],
         { type: "text/plain;charset=UTF-8" },
       ),

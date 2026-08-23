@@ -58,6 +58,7 @@ from app.models import (
     PromotionEvent,
     PromotionLead,
     PromotionIntegration,
+    PromotionVisitor,
     PersonalAccount,
     PromotionTemplate,
     PromotionTemplateIntegration,
@@ -79,7 +80,6 @@ from app.services.promotion_integrations import (
     active_template_integrations,
     inject_runtime_integrations,
     integration_csp_sources,
-    issue_integration_embed_token,
 )
 from app.services.promotion_event_rate_limits import (
     DEFAULT_PROMOTION_EVENT_RATE_LIMIT_POLICY,
@@ -178,7 +178,6 @@ def _pairing_status_token(
     channel: PromotionChannel,
     account: PersonalAccount,
     attempt: AccountPairingAttempt,
-    visitor_id: str,
 ) -> str:
     issued_at = int(utcnow().timestamp())
     expires_at = int(_utc_datetime(attempt.expires_at).timestamp())
@@ -186,7 +185,6 @@ def _pairing_status_token(
         "channel": entity_id(channel),
         "account": str(account.id),
         "attempt": entity_id(attempt),
-        "visitor": visitor_id,
         "iat": issued_at,
         "pairExp": expires_at,
         "exp": max(issued_at + 600, expires_at + 420),
@@ -339,13 +337,12 @@ def _recorded_pairing_failure_response(
     *,
     network: RequestNetwork,
     request_context: dict | None = None,
-    visitor_id: str,
+    promotion_visitor: PromotionVisitor,
     traffic_source: str,
     code: str,
     message: str,
     status_code: int,
     stage: str,
-    device_identity=None,
     detail_code: str | None = None,
     retryable: bool = False,
     retry_after_seconds: int | None = None,
@@ -354,16 +351,11 @@ def _recorded_pairing_failure_response(
     persist_pairing_failure_event(
         db,
         channel=channel,
-        visitor_id=visitor_id,
+        promotion_visitor=promotion_visitor,
         reason_code=code,
         detail_code=detail_code or code,
         stage=stage,
         traffic_source=traffic_source,
-        fingerprint_hash=(
-            device_identity.fingerprint_hash if device_identity else None
-        ),
-        fingerprint_version=(device_identity.version if device_identity else None),
-        fingerprint_quality=(device_identity.quality if device_identity else None),
         source_ip=network.source_ip,
         visitor_country_code=network.visitor_country_code,
         network_source=network.network_source,
@@ -385,13 +377,13 @@ def _persist_server_phone_submit(
     *,
     channel: PromotionChannel,
     payload: PromotionPairingStart,
+    promotion_visitor: PromotionVisitor,
     traffic_source: str,
     occurred_at: datetime,
-    device_identity=None,
 ) -> PromotionEvent:
     """Record an accepted number submission inside the pairing API boundary."""
 
-    idempotency_key = payload.idempotency_key or f"phone_submit:{uuid4().hex}"
+    idempotency_key = f"phone_submit:{uuid4().hex}"
     network = resolve_request_network(request)
     request_context = public_request_context(request, network, received_at=occurred_at)
     existing = db.scalar(
@@ -431,12 +423,7 @@ def _persist_server_phone_submit(
         channel_id=channel.id,
         event_type="phone_submit",
         idempotency_key=idempotency_key,
-        visitor_id=payload.visitor_id,
-        visitor_fingerprint_hash=(
-            device_identity.fingerprint_hash if device_identity else None
-        ),
-        fingerprint_version=(device_identity.version if device_identity else None),
-        fingerprint_quality=(device_identity.quality if device_identity else None),
+        promotion_visitor_id=promotion_visitor.id,
         lead_id=lead.id,
         occurred_at=occurred_at,
         country_code=channel.country_code,
@@ -462,7 +449,7 @@ def _persist_server_phone_submit(
         event_time=occurred_at,
         request=request,
         phone=payload.phone,
-        visitor_id=payload.visitor_id,
+        visitor_key=promotion_visitor.fingerprint_hash,
         custom_data={"trafficSource": traffic_source},
     )
     try:
@@ -2445,18 +2432,6 @@ def _render_html(
     )
     html = _localize_template_html(html, resolved, localized_copy)
     runtime_integrations = active_template_integrations(db, template.id)
-    iframe_tokens = {
-        integration.id: issue_integration_embed_token(
-            integration,
-            channel_id=entity_id(channel),
-            template_id=entity_id(template),
-            tenant_id=channel.created_by,
-            traffic_source=traffic_source,
-        )
-        for integration in runtime_integrations
-        if integration.integration_type == "iframe"
-        and integration.feedback_enabled
-    }
     from app.services.meta_conversions import normalized_meta_event_mapping
 
     pixel = db.get(MetaPixel, channel.pixel_id) if channel.pixel_id else None
@@ -2478,7 +2453,10 @@ def _render_html(
         rendered = re.sub(r"</head\s*>", runtime + "</head>", html, count=1, flags=re.I) if re.search(r"</head\s*>", html, re.I) else html + runtime
         return (
             inject_runtime_integrations(
-                rendered, runtime_integrations, iframe_tokens=iframe_tokens
+                rendered,
+                runtime_integrations,
+                channel_slug=slug,
+                traffic_source=traffic_source,
             ),
             resolved,
             runtime_integrations,
@@ -2486,7 +2464,8 @@ def _render_html(
     rendered = inject_runtime_integrations(
         base + runtime + html,
         runtime_integrations,
-        iframe_tokens=iframe_tokens,
+        channel_slug=slug,
+        traffic_source=traffic_source,
     )
     return rendered, resolved, runtime_integrations
 
@@ -2605,10 +2584,24 @@ def promotion_asset(slug: str, asset_path: str, request: Request, db: DbSession)
 @router.post("/api/public/promotion/channels/{slug}/events")
 @router.post("/api/public/promotion/channels/{slug}/fission/events")
 async def report_event(slug: str, request: Request, db: DbSession) -> JSONResponse:
-    try: payload = PromotionEventInput.model_validate_json(await request.body())
-    except ValidationError as exc: raise HTTPException(status_code=422, detail=exc.errors(include_url=False)) from None
+    try:
+        payload = PromotionEventInput.model_validate_json(await request.body())
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422, detail=exc.errors(include_url=False)
+        ) from None
     channel = _public_channel(db, slug, request)
     traffic_source = "fission" if "/fission/" in request.url.path else "direct"
+    from app.services.device_fingerprints import (
+        fingerprint_metadata,
+        resolve_promotion_visitor,
+    )
+
+    promotion_visitor, device_identity = resolve_promotion_visitor(
+        db,
+        tenant_id=channel.created_by,
+        raw_fingerprint=payload.device_fingerprint,
+    )
     runtime_policy = _runtime_template_policy(db, channel.created_by)
     source_ip = public_request_ip(request)
     try:
@@ -2616,13 +2609,13 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
             runtime_policy.get("eventRateLimitPolicy", {}),
             [
                 PromotionEventRateLimitRequest(
-                    "sessionReports", payload.visitor_id
+                    "sessionReports", promotion_visitor.fingerprint_hash
                 ),
                 PromotionEventRateLimitRequest(
                     "ipReports",
                     source_ip
                     if source_ip != "unknown"
-                    else f"visitor:{payload.visitor_id}",
+                    else f"visitor:{promotion_visitor.fingerprint_hash}",
                 ),
                 PromotionEventRateLimitRequest("channelReports", "all"),
             ],
@@ -2640,70 +2633,24 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
         )
         if limited is not None:
             return limited
-    from app.services.device_fingerprints import (
-        fingerprint_identity,
-        fingerprint_metadata,
-        issue_device_token,
-    )
-
-    fingerprint_payload = payload.device_fingerprint
-    fingerprint = fingerprint_identity(channel.created_by, fingerprint_payload)
-    device_token = (
-        issue_device_token(
-            fingerprint,
-            channel_id=entity_id(channel),
-            tenant_id=channel.created_by,
-            visitor_id=payload.visitor_id,
-        )
-        if fingerprint is not None
-        else None
-    )
-    fingerprint_details = fingerprint_metadata(fingerprint)
-    existing = db.scalar(select(PromotionEvent).where(PromotionEvent.channel_id == channel.id, PromotionEvent.idempotency_key == payload.idempotency_key))
-    if existing:
-        if (
-            fingerprint is not None
-            and fingerprint_details is not None
-            and existing.visitor_fingerprint_hash is None
-            and existing.visitor_id == payload.visitor_id
-        ):
-            existing.visitor_fingerprint_hash = fingerprint.fingerprint_hash
-            existing.fingerprint_version = fingerprint.version
-            existing.fingerprint_quality = fingerprint.quality
-            enriched_metadata = dict(existing.metadata_json or {})
-            enriched_metadata["deviceFingerprint"] = fingerprint_details
-            existing.metadata_json = enriched_metadata
-            db.commit()
-        return JSONResponse(
-            {
-                "data": {
-                    "ok": True,
-                    "duplicate": True,
-                    **({"deviceToken": device_token} if device_token else {}),
-                    "serverTimestamp": iso(existing.created_at),
-                }
-            },
-            headers={"Access-Control-Allow-Origin": "null"},
-        )
-    now = utcnow(); occurred_at = parse_public_datetime(payload.occurred_at)
-    if occurred_at < now - timedelta(minutes=5) or occurred_at > now + timedelta(minutes=5):
+    now = utcnow()
+    occurred_at = parse_public_datetime(payload.occurred_at)
+    if (
+        occurred_at < now - timedelta(minutes=5)
+        or occurred_at > now + timedelta(minutes=5)
+    ):
         raise HTTPException(status_code=422, detail="occurredAt 超出允许的上报时间范围")
     network = resolve_request_network(request)
     metadata = _client_event_metadata(payload.metadata)
     metadata["trafficSource"] = traffic_source
-    if fingerprint_details is not None:
-        metadata["deviceFingerprint"] = fingerprint_details
+    metadata["deviceFingerprint"] = fingerprint_metadata(device_identity)
+    event_id = f"{payload.event_type}:{uuid4().hex}"
     event = PromotionEvent(
         public_id=new_public_id("pevt"),
         channel_id=channel.id,
         event_type=payload.event_type,
-        idempotency_key=payload.idempotency_key,
-        visitor_id=payload.visitor_id,
-        visitor_fingerprint_hash=(
-            fingerprint.fingerprint_hash if fingerprint else None
-        ),
-        fingerprint_version=fingerprint.version if fingerprint else None,
-        fingerprint_quality=fingerprint.quality if fingerprint else None,
+        idempotency_key=event_id,
+        promotion_visitor_id=promotion_visitor.id,
         lead_id=None,
         occurred_at=occurred_at,
         country_code=channel.country_code,
@@ -2725,36 +2672,22 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
         db,
         channel=channel,
         event_key=payload.event_type,
-        event_id=payload.idempotency_key,
+        event_id=event_id,
         event_time=occurred_at,
         request=request,
         phone=None,
-        visitor_id=payload.visitor_id,
+        visitor_key=promotion_visitor.fingerprint_hash,
         custom_data={"trafficSource": metadata["trafficSource"]},
     )
     meta_event = browser_event_descriptor(
-        channel, payload.event_type, payload.idempotency_key
+        channel, payload.event_type, event_id
     )
-    try: db.commit()
-    except IntegrityError:
-        db.rollback()
-        return JSONResponse(
-            {
-                "data": {
-                    "ok": True,
-                    "duplicate": True,
-                    **({"deviceToken": device_token} if device_token else {}),
-                    "serverTimestamp": now.isoformat(),
-                }
-            },
-            headers={"Access-Control-Allow-Origin": "null"},
-        )
+    db.commit()
     return JSONResponse(
         {
             "data": {
                 "ok": True,
                 "duplicate": False,
-                **({"deviceToken": device_token} if device_token else {}),
                 "metaEvent": meta_event,
                 "serverTimestamp": now.isoformat(),
             }
@@ -2873,12 +2806,20 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
         if phone_error:
             try:
                 raw_payload = json.loads(raw_body)
-                if not isinstance(raw_payload, dict):
-                    raise ValueError("invalid pairing payload")
-                visitor_id = str(raw_payload.get("visitorId") or "")
-                if not 8 <= len(visitor_id) <= 80:
-                    raise ValueError("missing trusted pairing context")
+                raw_fingerprint = str(raw_payload.get("deviceFingerprint") or "")
+                if not re.fullmatch(
+                    r"(?:[0-9a-f]{32}|fb_[a-z0-9]+_[0-9]{10,16})",
+                    raw_fingerprint,
+                ):
+                    raise ValueError("missing device fingerprint")
                 channel = _public_channel(db, slug, request)
+                from app.services.device_fingerprints import resolve_promotion_visitor
+
+                invalid_visitor, _ = resolve_promotion_visitor(
+                    db,
+                    tenant_id=channel.created_by,
+                    raw_fingerprint=raw_fingerprint,
+                )
             except (HTTPException, TypeError, ValueError, json.JSONDecodeError):
                 pass
             else:
@@ -2887,7 +2828,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                     channel,
                     network=network,
                     request_context=request_snapshot,
-                    visitor_id=visitor_id,
+                    promotion_visitor=invalid_visitor,
                     traffic_source=traffic_source,
                     code="invalid_phone",
                     message="请输入有效的手机号码",
@@ -2898,39 +2839,22 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             status_code=422, detail=exc.errors(include_url=False)
         ) from None
     channel = _public_channel(db, slug, request)
-    device_identity = None
-    if payload.device_token:
-        from app.services.device_fingerprints import verify_device_token
+    from app.services.device_fingerprints import resolve_promotion_visitor
 
-        try:
-            device_identity = verify_device_token(
-                payload.device_token,
-                channel_id=entity_id(channel),
-                tenant_id=channel.created_by,
-                visitor_id=payload.visitor_id,
-            )
-        except ValueError:
-            return _recorded_pairing_failure_response(
-                db,
-                channel,
-                network=network,
-                request_context=request_snapshot,
-                visitor_id=payload.visitor_id,
-                traffic_source=str(traffic_source),
-                code="device_identity_invalid",
-                message="设备识别凭证已失效，请刷新页面后重试",
-                status_code=403,
-                stage="device_validation",
-            )
+    promotion_visitor, device_identity = resolve_promotion_visitor(
+        db,
+        tenant_id=channel.created_by,
+        raw_fingerprint=payload.device_fingerprint,
+    )
     now = utcnow()
     _persist_server_phone_submit(
         db,
         request,
         channel=channel,
         payload=payload,
+        promotion_visitor=promotion_visitor,
         traffic_source=str(traffic_source),
         occurred_at=now,
-        device_identity=device_identity,
     )
     from app.services.pairing_rate_limits import (
         PairingRateLimitRequest,
@@ -2942,14 +2866,10 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
 
     preflight_protocol = channel_rate_limit_protocol(db, channel)
     source_ip = public_request_ip(request)
-    visitor_limit_keys = (
-        [
-            f"channel:{channel.id}:fingerprint:{limit_key}"
-            for limit_key in device_identity.limit_keys
-        ]
-        if device_identity is not None
-        else [f"channel:{channel.id}:visitor:{payload.visitor_id}"]
-    )
+    visitor_limit_keys = [
+        f"channel:{channel.id}:fingerprint:{limit_key}"
+        for limit_key in device_identity.limit_keys
+    ]
     preflight_limits = [
         PairingRateLimitRequest("visitorCheck", limit_key)
         for limit_key in visitor_limit_keys
@@ -2972,13 +2892,12 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             channel,
             network=network,
             request_context=request_snapshot,
-            visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
             traffic_source=str(traffic_source),
             code="service_temporarily_unavailable",
             message="绑定服务暂时不可用，请稍后再试",
             status_code=503,
             stage="preflight_rate_limit",
-            device_identity=device_identity,
             retryable=True,
             retry_after_seconds=5,
         )
@@ -2989,13 +2908,12 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             channel,
             network=network,
             request_context=request_snapshot,
-            visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
             traffic_source=str(traffic_source),
             code="rate_limited",
             message="绑定请求过于频繁，请稍后再试",
             status_code=429,
             stage="preflight_rate_limit",
-            device_identity=device_identity,
             retryable=True,
             retry_after_seconds=preflight_decision.retry_after_seconds,
             metadata={
@@ -3009,16 +2927,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             channel_id=channel.id,
             event_type="pairing_check",
             idempotency_key=f"pairing_check:{uuid4().hex}",
-            visitor_id=payload.visitor_id,
-            visitor_fingerprint_hash=(
-                device_identity.fingerprint_hash if device_identity else None
-            ),
-            fingerprint_version=(
-                device_identity.version if device_identity else None
-            ),
-            fingerprint_quality=(
-                device_identity.quality if device_identity else None
-            ),
+            promotion_visitor_id=promotion_visitor.id,
             occurred_at=now,
             country_code=channel.country_code,
             source_ip=network.source_ip,
@@ -3056,13 +2965,12 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             channel,
             network=network,
             request_context=request_snapshot,
-            visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
             traffic_source=str(traffic_source),
             code="number_unavailable",
             message="该号码当前不能在这里绑定",
             status_code=409,
             stage="number_check",
-            device_identity=device_identity,
         )
     gateway_requires_reset = item is not None and item.status == "reauth_required"
     active_attempt = None
@@ -3093,18 +3001,17 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-                visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="pairing_in_progress",
                 message="该号码已有正在进行的绑定请求",
                 status_code=409,
                 stage="number_check",
-                device_identity=device_identity,
                 retryable=True,
             )
         if (
             active_attempt is not None
-            and active_attempt.visitor_id != payload.visitor_id
+            and active_attempt.promotion_visitor_id != promotion_visitor.id
         ):
             db.rollback()
             return _recorded_pairing_failure_response(
@@ -3112,13 +3019,12 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-                visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="pairing_in_progress",
                 message="该号码已有正在进行的绑定请求",
                 status_code=409,
                 stage="number_check",
-                device_identity=device_identity,
                 retryable=True,
             )
 
@@ -3172,13 +3078,12 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-                visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="protocol_unavailable",
                 message="该账号所属协议节点当前不可用",
                 status_code=409,
                 stage="protocol_routing",
-                device_identity=device_identity,
                 retryable=True,
             )
         capacity = protocol_capacity(db, protocol)
@@ -3192,13 +3097,12 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-                visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="protocol_capacity_limited",
                 message="该账号所属协议节点当前配对繁忙",
                 status_code=409,
                 stage="protocol_routing",
-                device_identity=device_identity,
                 retryable=True,
             )
     else:
@@ -3211,13 +3115,12 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-                visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="protocol_unavailable",
                 message="当前没有可用的协议节点，请稍后再试",
                 status_code=exc.status_code,
                 stage="protocol_routing",
-                device_identity=device_identity,
                 detail_code="protocol_route_unavailable",
                 retryable=True,
             )
@@ -3230,13 +3133,12 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-                visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="channel_configuration_unavailable",
                 message="当前渠道暂时无法接入账号，请联系管理员",
                 status_code=409,
                 stage="channel_configuration",
-                device_identity=device_identity,
                 detail_code="account_group_missing",
             )
         landing_group = db.scalar(
@@ -3252,13 +3154,12 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-                visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="channel_configuration_unavailable",
                 message="当前渠道暂时无法接入账号，请联系管理员",
                 status_code=409,
                 stage="channel_configuration",
-                device_identity=device_identity,
                 detail_code="account_group_unavailable",
             )
 
@@ -3296,13 +3197,12 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-                visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="number_unavailable",
                 message="该号码当前不能在这里绑定",
                 status_code=409,
                 stage="number_check",
-                device_identity=device_identity,
                 detail_code="concurrent_account_exists",
             )
     else:
@@ -3333,26 +3233,24 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                     channel,
                     network=network,
                     request_context=request_snapshot,
-                    visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
                     traffic_source=str(traffic_source),
                     code="account_already_linked",
                     message="该号码已经绑定并可用，无需重复绑定",
                     status_code=409,
                     stage="number_check",
-                    device_identity=device_identity,
                 )
             return _recorded_pairing_failure_response(
                 db,
                 channel,
                 network=network,
                 request_context=request_snapshot,
-                visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="number_unavailable",
                 message="该号码当前不能在这里绑定",
                 status_code=409,
                 stage="number_check",
-                device_identity=device_identity,
             )
         if retryable_legacy_pairing:
             # Releases before the verified-pairing state contract could leave
@@ -3415,13 +3313,12 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-                visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="service_temporarily_unavailable",
                 message="绑定服务暂时不可用，请稍后再试",
                 status_code=503,
                 stage="attempt_rate_limit",
-                device_identity=device_identity,
                 retryable=True,
                 retry_after_seconds=5,
             )
@@ -3433,13 +3330,12 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-                visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="rate_limited",
                 message="绑定请求过于频繁，请稍后再试",
                 status_code=429,
                 stage="attempt_rate_limit",
-                device_identity=device_identity,
                 retryable=True,
                 retry_after_seconds=attempt_decision.retry_after_seconds,
                 metadata={
@@ -3462,13 +3358,12 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                     channel,
                     network=network,
                     request_context=request_snapshot,
-                    visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
                     traffic_source=str(traffic_source),
                     code="connection_route_unavailable",
                     message="暂时没有可用的账号连接线路，请稍后再试",
                     status_code=409,
                     stage="connection_route",
-                    device_identity=device_identity,
                     retryable=True,
                 )
             _set_binding(db, item.gateway_account_id, entity_id(proxy))
@@ -3488,16 +3383,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 sync_policy_json=normalized_sync_policy(
                     protocol.sync_policy_json
                 ),
-                visitor_id=payload.visitor_id,
-                visitor_fingerprint_hash=(
-                    device_identity.fingerprint_hash if device_identity else None
-                ),
-                fingerprint_version=(
-                    device_identity.version if device_identity else None
-                ),
-                fingerprint_quality=(
-                    device_identity.quality if device_identity else None
-                ),
+                promotion_visitor_id=promotion_visitor.id,
                 source_ip=network.source_ip,
                 visitor_country_code=network.visitor_country_code,
                 network_source=network.network_source,
@@ -3525,13 +3411,12 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             channel,
             network=network,
             request_context=request_snapshot,
-            visitor_id=payload.visitor_id,
+            promotion_visitor=promotion_visitor,
             traffic_source=str(traffic_source),
             code="number_unavailable",
             message="该号码当前不能在这里绑定",
             status_code=409,
             stage="attempt_creation",
-            device_identity=device_identity,
             detail_code="concurrent_pairing_exists",
         )
 
@@ -3598,12 +3483,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel_id=channel.id,
                 event_type="pairing_started",
                 idempotency_key=pairing_started_id,
-                visitor_id=payload.visitor_id,
-                visitor_fingerprint_hash=(
-                    active_attempt.visitor_fingerprint_hash
-                ),
-                fingerprint_version=active_attempt.fingerprint_version,
-                fingerprint_quality=active_attempt.fingerprint_quality,
+                promotion_visitor_id=active_attempt.promotion_visitor_id,
                 occurred_at=now,
                 country_code=channel.country_code,
                 source_ip=active_attempt.source_ip,
@@ -3627,7 +3507,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                     event_time=now,
                     request=request,
                     phone=payload.phone,
-                    visitor_id=payload.visitor_id,
+                    visitor_key=promotion_visitor.fingerprint_hash,
                     custom_data={"trafficSource": traffic_source},
                 )
         db.commit()
@@ -3662,9 +3542,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             retryable=True,
         )
 
-    status_token = _pairing_status_token(
-        channel, item, active_attempt, payload.visitor_id
-    )
+    status_token = _pairing_status_token(channel, item, active_attempt)
     from app.services.meta_conversions import browser_event_descriptor
 
     meta_event = (
@@ -3730,8 +3608,13 @@ def public_pairing_status(
     if attempt is None:
         raise HTTPException(status_code=404, detail="配对任务不存在")
     supplied_token = _pairing_bearer_token(authorization)
-    token_payload = _verify_pairing_status_token(
+    _verify_pairing_status_token(
         channel, item, attempt, supplied_token
+    )
+    promotion_visitor = (
+        db.get(PromotionVisitor, attempt.promotion_visitor_id)
+        if attempt.promotion_visitor_id is not None
+        else None
     )
     from app.services.pairing_rate_limits import (
         PairingRateLimitRequest,
@@ -3813,12 +3696,7 @@ def public_pairing_status(
                     channel_id=channel.id,
                     event_type="pair_success",
                     idempotency_key=f"pair_success:{item.id}",
-                    visitor_id=str(token_payload.get("visitor") or "") or None,
-                    visitor_fingerprint_hash=(
-                        attempt.visitor_fingerprint_hash
-                    ),
-                    fingerprint_version=attempt.fingerprint_version,
-                    fingerprint_quality=attempt.fingerprint_quality,
+                    promotion_visitor_id=attempt.promotion_visitor_id,
                     occurred_at=utcnow(),
                     country_code=channel.country_code,
                     source_ip=attempt.source_ip,
@@ -3845,7 +3723,11 @@ def public_pairing_status(
                     event_time=attempt.verified_at,
                     request=request,
                     phone=item.phone_e164,
-                    visitor_id=str(token_payload.get("visitor") or "") or None,
+                    visitor_key=(
+                        promotion_visitor.fingerprint_hash
+                        if promotion_visitor is not None
+                        else None
+                    ),
                     custom_data={
                         "trafficSource": (
                             "fission"
@@ -4047,22 +3929,39 @@ async def report_internal_success(request: Request, db: DbSession) -> JSONRespon
     now = utcnow()
     if occurred_at < now - timedelta(days=30) or occurred_at > now + timedelta(minutes=5):
         raise HTTPException(status_code=422, detail="成功事件时间超出允许窗口")
-    attempt = db.scalar(
-        select(AccountPairingAttempt)
-        .where(
-            AccountPairingAttempt.channel_id == channel.id,
-            AccountPairingAttempt.visitor_id == payload.visitor_id,
+    attempt = None
+    promotion_visitor = None
+    if payload.pairing_attempt_id:
+        attempt = db.scalar(
+            select(AccountPairingAttempt).where(
+                AccountPairingAttempt.channel_id == channel.id,
+                identifier_filter(
+                    AccountPairingAttempt, payload.pairing_attempt_id
+                ),
+            )
         )
-        .order_by(AccountPairingAttempt.created_at.desc())
-        .limit(1)
-    )
+        if attempt is None:
+            raise HTTPException(status_code=404, detail="推广配对记录不存在")
+    else:
+        promotion_visitor = db.scalar(
+            select(PromotionVisitor).where(
+                PromotionVisitor.tenant_id == channel.created_by,
+                identifier_filter(
+                    PromotionVisitor, payload.promotion_visitor_id or ""
+                ),
+            )
+        )
+        if promotion_visitor is None:
+            raise HTTPException(status_code=404, detail="推广访客不存在")
     db.add(
         PromotionEvent(
             public_id=new_public_id("pevt"),
             channel_id=channel.id,
             event_type=payload.event_type,
             idempotency_key=payload.idempotency_key,
-            visitor_id=payload.visitor_id,
+            promotion_visitor_id=(
+                attempt.promotion_visitor_id if attempt else promotion_visitor.id
+            ),
             occurred_at=occurred_at,
             country_code=channel.country_code,
             source_ip=attempt.source_ip if attempt else None,
@@ -4094,30 +3993,6 @@ def channel_stats(channel_id: str, db: DbSession, current_user: CurrentUser) -> 
         totals[event.event_type] = totals.get(event.event_type, 0) + 1; key = event.occurred_at.date().isoformat(); daily.setdefault(key, {"date": key, "pageView": 0, "phoneSubmit": 0, "visitEnd": 0, "loginSuccess": 0, "pairSuccess": 0}); field = {"page_view":"pageView","phone_submit":"phoneSubmit","visit_end":"visitEnd","login_success":"loginSuccess","pair_success":"pairSuccess"}.get(event.event_type)
         if field: daily[key][field] += 1
     page_views = [event for event in events if event.event_type == "page_view"]
-    browser_visitors = {
-        event.visitor_id or f"legacy:{event.id}" for event in page_views
-    }
-    fingerprinted_page_views = [
-        event
-        for event in page_views
-        if event.visitor_fingerprint_hash
-        and event.fingerprint_quality in {"high", "medium"}
-    ]
-    enhanced_visitors = {
-        (
-            f"fingerprint:{event.visitor_fingerprint_hash}"
-            if event.visitor_fingerprint_hash
-            and event.fingerprint_quality in {"high", "medium"}
-            else f"visitor:{event.visitor_id or event.id}"
-        )
-        for event in page_views
-    }
-    fingerprint_quality = {
-        quality: sum(
-            1 for event in page_views if event.fingerprint_quality == quality
-        )
-        for quality in ("high", "medium", "low")
-    }
     attempts = list(
         db.scalars(
             select(AccountPairingAttempt).where(
@@ -4125,22 +4000,42 @@ def channel_stats(channel_id: str, db: DbSession, current_user: CurrentUser) -> 
             )
         ).all()
     )
+    visitor_ids = {
+        value
+        for value in [
+            *(event.promotion_visitor_id for event in events),
+            *(attempt.promotion_visitor_id for attempt in attempts),
+        ]
+        if value is not None
+    }
+    visitors = {
+        visitor.id: visitor
+        for visitor in db.scalars(
+            select(PromotionVisitor).where(PromotionVisitor.id.in_(visitor_ids))
+        ).all()
+    } if visitor_ids else {}
+    enhanced_visitors = {
+        event.promotion_visitor_id or f"legacy:{event.id}" for event in page_views
+    }
+    browser_visitors = set(enhanced_visitors)
+    fingerprinted_page_views = [
+        event for event in page_views if event.promotion_visitor_id is not None
+    ]
+    fingerprint_quality = {
+        quality: sum(
+            1
+            for event in page_views
+            if event.promotion_visitor_id in visitors
+            and visitors[event.promotion_visitor_id].fingerprint_quality == quality
+        )
+        for quality in ("high", "medium", "low")
+    }
 
     def event_visitor_key(event: PromotionEvent) -> str:
-        if (
-            event.visitor_fingerprint_hash
-            and event.fingerprint_quality in {"high", "medium"}
-        ):
-            return f"fingerprint:{event.visitor_fingerprint_hash}"
-        return f"visitor:{event.visitor_id or event.id}"
+        return f"visitor:{event.promotion_visitor_id or f'legacy:{event.id}'}"
 
     def attempt_visitor_key(attempt: AccountPairingAttempt) -> str:
-        if (
-            attempt.visitor_fingerprint_hash
-            and attempt.fingerprint_quality in {"high", "medium"}
-        ):
-            return f"fingerprint:{attempt.visitor_fingerprint_hash}"
-        return f"visitor:{attempt.visitor_id or attempt.id}"
+        return f"visitor:{attempt.promotion_visitor_id or f'legacy:{attempt.id}'}"
 
     submitted_visitors = {
         event_visitor_key(event)
@@ -4242,7 +4137,7 @@ def channel_stats(channel_id: str, db: DbSession, current_user: CurrentUser) -> 
                 "browserUv": len(browser_visitors),
                 "fingerprintUv": len(
                     {
-                        event.visitor_fingerprint_hash
+                        event.promotion_visitor_id
                         for event in fingerprinted_page_views
                     }
                 ),
@@ -4750,7 +4645,7 @@ def _analytics_data(
         for target in (daily[date_key], group, detail):
             visitor_key = (
                 event.channel_id,
-                event.visitor_id or f"legacy:{event.id}",
+                event.promotion_visitor_id or f"legacy:{event.id}",
             )
             lead_key = (
                 event.channel_id,
@@ -4828,10 +4723,10 @@ def _analytics_data(
         ],
         "rows": rows,
         "definitions": {
-            "uv": "按 (channel, visitorId) 去重；历史无 visitorId 的浏览事件按单次访问计数",
+            "uv": "按 (channel, 服务端访客 ID) 去重；迁移前无指纹的历史浏览事件按单次访问计数",
             "submissions": "phone_submit 原始提交事件数",
             "uniqueLeads": "窗口内 phone_submit 按 (channel, lead) 去重的获号数",
-            "successes": "HMAC 内部成功事件按 (channel, visitorId) 终态去重",
+            "successes": "HMAC 内部成功事件按 (channel, 服务端访客 ID) 终态去重",
             "requestRate": "uniqueLeads / uv，最大为 100%",
             "successRate": "successes / uniqueLeads，最大为 100%",
             "visitorSuccessRate": "successes / uv",

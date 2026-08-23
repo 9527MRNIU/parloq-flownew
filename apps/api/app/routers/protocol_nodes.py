@@ -399,8 +399,16 @@ def protocol_integration_spec(
                 "contentType": "text/plain;charset=UTF-8",
                 "body": {
                     "phone": "15551234567",
-                    "visitorId": "browser-generated-id",
-                    "sessionToken": "runtime-config-session-token",
+                    "deviceFingerprint": "thumbmarkjs-or-fallback-value",
+                    "metadata": {
+                        "clientContext": {
+                            "timeZone": "Europe/Berlin",
+                            "viewport": [390, 844],
+                            "screen": [390, 844],
+                            "pixelRatio": 3,
+                            "touchPoints": 5,
+                        }
+                    },
                 },
                 "responseFields": [
                     "pairingCode",

@@ -952,7 +952,7 @@ def test_promotion_data_center_aggregates_uv_costs_and_successes(
         headers={"Host": "analytics-promotion.example"},
     ).status_code == 200
     assert "sessionToken" not in public
-    common = {"visitorId": "visitor-analytics-0001"}
+    common = {"deviceFingerprint": "4ef8bdbc97de077c45a46358ecc4ba42"}
     events = [
         {"eventType": "page_view", "idempotencyKey": "analytics-page-view-0001"},
         {"eventType": "page_view", "idempotencyKey": "analytics-page-view-0002"},
@@ -963,6 +963,11 @@ def test_promotion_data_center_aggregates_uv_costs_and_successes(
             json={**common, **event},
         )
         assert response.status_code == 200, response.text
+    promotion_visitor_id = admin_client.get(
+        f"/api/promotion/monitoring/records?channelId={channel_data['id']}"
+        "&eventType=page_view"
+    ).json()["data"]["rows"][0]["visitorId"]
+    pairing_attempt_id = None
     for suffix in ("0001", "0002"):
         response = admin_client.post(
             "/api/public/promotion/channels/analytics-channel/pairing/start",
@@ -973,6 +978,8 @@ def test_promotion_data_center_aggregates_uv_costs_and_successes(
             },
         )
         assert response.status_code in {200, 409}, response.text
+        if response.status_code == 200:
+            pairing_attempt_id = response.json()["data"]["pairing"]["attemptId"]
         if response.status_code == 409:
             assert response.json()["error"]["code"] == "connection_route_unavailable"
     public_success = admin_client.post(
@@ -990,7 +997,11 @@ def test_promotion_data_center_aggregates_uv_costs_and_successes(
                 "promotionChannelId": channel_data["id"],
                 "eventType": event_type,
                 "idempotencyKey": f"analytics-internal-{suffix}-0001",
-                "visitorId": common["visitorId"],
+                **(
+                    {"pairingAttemptId": pairing_attempt_id}
+                    if pairing_attempt_id
+                    else {"promotionVisitorId": promotion_visitor_id}
+                ),
             },
             separators=(",", ":"),
         ).encode()
@@ -1283,13 +1294,12 @@ def test_authenticated_backend_preview_bypasses_unready_domain_without_public_by
         headers={"Host": "api:8000"},
         json={
             "eventType": "page_view",
-            "idempotencyKey": "fission-route-event-0001",
-            "visitorId": "fission-route-visitor-0001",
+            "deviceFingerprint": "5ef8bdbc97de077c45a46358ecc4ba42",
         },
     )
     assert fission_event.status_code == 200, fission_event.text
     monitored = admin_client.get(
-        "/api/promotion/monitoring/records?keyword=fission-route-visitor-0001"
+        "/api/promotion/monitoring/records?eventType=page_view&trafficSource=fission"
     )
     assert monitored.status_code == 200, monitored.text
     assert monitored.json()["data"]["rows"][0]["trafficSource"] == "fission"
@@ -1298,12 +1308,12 @@ def test_authenticated_backend_preview_bypasses_unready_domain_without_public_by
         headers={"Host": "api:8000"},
         json={
             "phone": "not-a-phone",
-            "visitorId": "fission-pairing-visitor-0001",
+            "deviceFingerprint": "6ef8bdbc97de077c45a46358ecc4ba42",
         },
     )
     assert fission_pairing.status_code == 422, fission_pairing.text
     pairing_monitor = admin_client.get(
-        "/api/promotion/monitoring/records?keyword=fission-pairing-visitor-0001"
+        "/api/promotion/monitoring/records?eventType=pairing_failed&trafficSource=fission"
     )
     assert pairing_monitor.status_code == 200, pairing_monitor.text
     assert pairing_monitor.json()["data"]["rows"][0]["trafficSource"] == "fission"

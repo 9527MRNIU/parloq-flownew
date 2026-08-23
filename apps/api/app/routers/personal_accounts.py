@@ -1595,7 +1595,11 @@ def list_intake_attempts(
                     if failure_reason
                     else None
                 ),
-                "visitorId": attempt.visitor_id,
+                "visitorId": (
+                    entity_id(attempt.promotion_visitor_id)
+                    if attempt.promotion_visitor_id is not None
+                    else None
+                ),
                 "sourceIp": attempt.source_ip,
                 "visitorCountryCode": attempt.visitor_country_code,
                 "account": {

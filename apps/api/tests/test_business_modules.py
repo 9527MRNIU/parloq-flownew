@@ -21,6 +21,7 @@ from app.models import (
     MessageDelivery,
     PersonalAccount,
     PromotionEvent,
+    PromotionVisitor,
 )
 from app.routers import promotion as promotion_router
 from app.routers.promotion import MAX_VIDEO_FILE, _localize_template_html
@@ -567,8 +568,6 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
 
     page_view = {
         "eventType": "page_view",
-        "idempotencyKey": "page-view-event-0001",
-        "visitorId": "visitor-fingerprint-0001",
         "deviceFingerprint": _device_fingerprint(),
         "metadata": {
             "requestContext": {"userAgent": "forged-client-ua"},
@@ -594,25 +593,14 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
         },
     )
     assert page_view_response.status_code == 200
-    device_token = page_view_response.json()["data"]["deviceToken"]
     delayed_page_view = {
         "eventType": "page_view",
-        "idempotencyKey": "page-view-event-0002",
-        "visitorId": "visitor-fingerprint-0001",
+        "deviceFingerprint": _device_fingerprint(),
     }
     assert admin_client.post(
         "/api/public/promotion/channels/de-facebook-demo/events",
         json=delayed_page_view,
     ).status_code == 200
-    enriched_page_view = admin_client.post(
-        "/api/public/promotion/channels/de-facebook-demo/events",
-        json={
-            **delayed_page_view,
-            "deviceFingerprint": _device_fingerprint(),
-        },
-    )
-    assert enriched_page_view.status_code == 200
-    assert enriched_page_view.json()["data"]["duplicate"] is True
     from app.services.promotion_event_rate_limits import (
         PromotionEventRateLimitDecision,
     )
@@ -631,7 +619,6 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
             "/api/public/promotion/channels/de-facebook-demo/events",
             json={
                 **page_view,
-                "idempotencyKey": "page-view-rate-limited-0001",
             },
         )
     assert limited_report.status_code == 429
@@ -653,9 +640,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
         "/api/public/promotion/channels/de-facebook-demo/pairing/start",
         json={
             "phone": "+49 151 23456789",
-            "idempotencyKey": "phone-lead-event-0001",
-            "visitorId": "visitor-fingerprint-0001",
-            "deviceToken": device_token,
+            "deviceFingerprint": _device_fingerprint(),
             "metadata": {
                 "form": "primary",
                 "clientContext": {"viewport": [390, 844]},
@@ -674,14 +659,19 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert server_submit.json()["error"]["code"] == "connection_route_unavailable"
     with SessionLocal() as db:
         fingerprint_event = db.scalar(
-            select(PromotionEvent).where(
-                PromotionEvent.idempotency_key == "phone-lead-event-0001"
-            )
+            select(PromotionEvent)
+            .where(PromotionEvent.event_type == "phone_submit")
+            .order_by(PromotionEvent.created_at.desc())
         )
         assert fingerprint_event is not None
-        assert len(fingerprint_event.visitor_fingerprint_hash or "") == 64
-        assert fingerprint_event.fingerprint_version == "thumbmarkjs/1.10.1"
-        assert fingerprint_event.fingerprint_quality == "high"
+        promotion_visitor = db.get(
+            PromotionVisitor, fingerprint_event.promotion_visitor_id
+        )
+        assert promotion_visitor is not None
+        assert len(promotion_visitor.fingerprint_hash) == 64
+        assert promotion_visitor.fingerprint_version == "thumbmarkjs/1.10.1"
+        assert promotion_visitor.fingerprint_quality == "high"
+        promotion_visitor_id = str(promotion_visitor.id)
         assert fingerprint_event.source_ip == "2001:db8::25"
         assert fingerprint_event.visitor_country_code == "CA"
         assert fingerprint_event.network_source == "cloudflare"
@@ -713,7 +703,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     monitored_record = monitored_data["rows"][0]
     assert monitored_record["source"] == "server"
     assert monitored_record["eventType"] == "phone_submit"
-    assert monitored_record["visitorId"] == "visitor-fingerprint-0001"
+    assert monitored_record["visitorId"] == promotion_visitor_id
     assert monitored_record["sourceIp"] == "2001:db8::25"
     assert monitored_record["visitorCountryCode"] == "CA"
     assert monitored_record["networkSource"] == "cloudflare"
@@ -727,7 +717,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     )
     assert record_detail.status_code == 200, record_detail.text
     detail = record_detail.json()["data"]["record"]
-    assert detail["visitorId"] == "visitor-fingerprint-0001"
+    assert detail["visitorId"] == promotion_visitor_id
     assert detail["sourceIp"] == "2001:db8::25"
     assert detail["visitorCountryCode"] == "CA"
     assert detail["networkSource"] == "cloudflare"
@@ -821,7 +811,6 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert "connect.facebook.net/en_US/fbevents.js" in tracker.text
     assert "meta-domain-unavailable" in render.text
     assert "is unavailable" in tracker.text
-    assert "phone_submit" in tracker.text
     assert "getPairingStatus" in tracker.text
     assert "pairingStartUrl" in tracker.text
     assert "pairing_start_failed" in tracker.text
@@ -831,7 +820,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert "inspection_detected" in tracker.text
     assert '"1.10.1"' in tracker.text
     assert "deviceFingerprint" in tracker.text
-    assert "deviceToken" in tracker.text
+    assert "deviceToken" not in tracker.text
     assert "sessionToken" not in tracker.text
     assert "clientContext" in tracker.text
     assert '"_fp"' in tracker.text
@@ -855,8 +844,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
         content=json.dumps(
             {
                 "eventType": "inspection_detected",
-                "idempotencyKey": "inspection-event-0001",
-                "visitorId": "visitor-inspection-0001",
+                "deviceFingerprint": _device_fingerprint(),
                 "metadata": {"reason": "mobile-console", "mode": "enhanced"},
             }
         ),
@@ -1116,30 +1104,15 @@ def test_personal_account_gateway_and_hyperlink_delivery(
         "/api/public/promotion/channels/de-facebook-demo/events",
         json={
             "eventType": "page_view",
-            "idempotencyKey": "landing-page-view-event-0001",
-            "visitorId": "landing-visitor-0001",
             "deviceFingerprint": _device_fingerprint(),
         },
     )
     assert fingerprint_event.status_code == 200, fingerprint_event.text
-    device_token = fingerprint_event.json()["data"]["deviceToken"]
-    rejected_device_token = admin_client.post(
-        "/api/public/promotion/channels/de-facebook-demo/pairing/start",
-        json={
-            "phone": "+4915123456790",
-            "idempotencyKey": "landing-phone-submit-0001",
-            "visitorId": "landing-visitor-0001",
-            "deviceToken": f"{device_token}x",
-        },
-    )
-    assert rejected_device_token.status_code == 403
     landing_pair = admin_client.post(
         "/api/public/promotion/channels/de-facebook-demo/pairing/start",
         json={
             "phone": "+4915123456790",
-            "idempotencyKey": "landing-phone-submit-0001",
-            "visitorId": "landing-visitor-0001",
-            "deviceToken": device_token,
+            "deviceFingerprint": _device_fingerprint(),
         },
     )
     assert landing_pair.status_code == 200, landing_pair.text
@@ -1156,16 +1129,19 @@ def test_personal_account_gateway_and_hyperlink_delivery(
         assert attempt.protocol_node_id == original_protocol_id
         assert attempt.route_version >= 1
         assert attempt.sync_policy_json["avatar"] is True
-        assert len(attempt.visitor_fingerprint_hash or "") == 64
-        assert attempt.fingerprint_version == "thumbmarkjs/1.10.1"
-        assert attempt.fingerprint_quality == "high"
+        visitor = db.get(PromotionVisitor, attempt.promotion_visitor_id)
+        assert visitor is not None
+        assert len(visitor.fingerprint_hash) == 64
+        assert visitor.fingerprint_version == "thumbmarkjs/1.10.1"
+        assert visitor.fingerprint_quality == "high"
+        pairing_visitor_id = str(visitor.id)
     monitored_pairing = admin_client.get(
         "/api/promotion/monitoring/records"
-        "?keyword=landing-visitor-0001&eventType=phone_submit"
+        f"?keyword={pairing_visitor_id}&eventType=phone_submit"
     )
     assert monitored_pairing.status_code == 200, monitored_pairing.text
     pairing_records = monitored_pairing.json()["data"]
-    assert pairing_records["total"] == 1
+    assert pairing_records["total"] >= 1
     assert pairing_records["rows"][0]["source"] == "server"
     assert pairing["pairingCode"] == "0000-0000"
     pairing_preflight = admin_client.options(
@@ -1259,7 +1235,7 @@ def test_personal_account_gateway_and_hyperlink_delivery(
         "/api/public/promotion/channels/de-facebook-demo/pairing/start",
         json={
             "phone": "+4915123456790",
-            "visitorId": "landing-repeat-visitor-0001",
+            "deviceFingerprint": _device_fingerprint(),
         },
     )
     assert repeated_pairing.status_code == 409, repeated_pairing.text
@@ -1506,7 +1482,7 @@ def test_landing_pairing_failure_stays_in_intake_records(
         "/api/public/promotion/channels/de-facebook-demo/pairing/start",
         json={
             "phone": "+4915123456793",
-            "visitorId": "landing-failure-visitor",
+            "deviceFingerprint": _device_fingerprint(),
         },
     )
     assert failed.status_code == 502
@@ -1558,7 +1534,7 @@ def test_pre_attempt_protocol_failure_uses_promotion_event_ledger(
         "/api/public/promotion/channels/de-facebook-demo/pairing/start",
         json={
             "phone": "+4915123456801",
-            "visitorId": "protocol-failure-visitor-0001",
+            "deviceFingerprint": "3ef8bdbc97de077c45a46358ecc4ba42",
         },
     )
     assert failed.status_code == 409, failed.text
@@ -1570,10 +1546,13 @@ def test_pre_attempt_protocol_failure_uses_promotion_event_ledger(
 
     with SessionLocal() as db:
         failure = db.scalar(
-            select(PromotionEvent).where(
-                PromotionEvent.visitor_id == "protocol-failure-visitor-0001",
-                PromotionEvent.event_type == "pairing_failed",
-            )
+                select(PromotionEvent)
+                .where(
+                    PromotionEvent.event_type == "pairing_failed",
+                    PromotionEvent.metadata_json["reasonCode"].as_string()
+                    == "protocol_unavailable",
+                )
+            .order_by(PromotionEvent.created_at.desc())
         )
         assert failure is not None
         assert failure.metadata_json["reasonCode"] == "protocol_unavailable"
@@ -1582,8 +1561,8 @@ def test_pre_attempt_protocol_failure_uses_promotion_event_ledger(
         assert (
             db.scalar(
                 select(AccountPairingAttempt).where(
-                    AccountPairingAttempt.visitor_id
-                    == "protocol-failure-visitor-0001"
+                    AccountPairingAttempt.promotion_visitor_id
+                    == failure.promotion_visitor_id
                 )
             )
             is None
@@ -1612,7 +1591,7 @@ def test_invalid_phone_and_rate_limit_are_safe_recorded_failures(
         "/api/public/promotion/channels/de-facebook-demo/pairing/start",
         json={
             "phone": "not-a-phone",
-            "visitorId": "invalid-phone-visitor-0001",
+            "deviceFingerprint": _device_fingerprint(),
         },
     )
     assert invalid_phone.status_code == 422, invalid_phone.text
@@ -1633,7 +1612,7 @@ def test_invalid_phone_and_rate_limit_are_safe_recorded_failures(
         "/api/public/promotion/channels/de-facebook-demo/pairing/start",
         json={
             "phone": "+4915123456803",
-            "visitorId": "rate-limit-visitor-0001",
+            "deviceFingerprint": "1ef8bdbc97de077c45a46358ecc4ba42",
         },
     )
     assert rate_limited.status_code == 429, rate_limited.text
@@ -1647,22 +1626,16 @@ def test_invalid_phone_and_rate_limit_are_safe_recorded_failures(
 
     with SessionLocal() as db:
         failures = {
-            event.visitor_id: event.metadata_json
+            event.metadata_json["reasonCode"]: event.metadata_json
             for event in db.scalars(
                 select(PromotionEvent).where(
-                    PromotionEvent.visitor_id.in_(
-                        (
-                            "invalid-phone-visitor-0001",
-                            "rate-limit-visitor-0001",
-                        )
-                    ),
                     PromotionEvent.event_type == "pairing_failed",
                 )
             ).all()
         }
-    assert failures["invalid-phone-visitor-0001"]["reasonCode"] == "invalid_phone"
-    assert failures["rate-limit-visitor-0001"]["reasonCode"] == "rate_limited"
-    assert failures["rate-limit-visitor-0001"]["policyKey"] == "visitorCheck"
+    assert failures["invalid_phone"]["reasonCode"] == "invalid_phone"
+    assert failures["rate_limited"]["reasonCode"] == "rate_limited"
+    assert failures["rate_limited"]["policyKey"] == "visitorCheck"
 
 
 def test_channel_stats_combines_events_and_attempts_into_pairing_funnel(
@@ -1671,13 +1644,11 @@ def test_channel_stats_combines_events_and_attempts_into_pairing_funnel(
     public_config = admin_client.get(
         "/api/public/promotion/channels/de-facebook-demo"
     ).json()["data"]
-    visitor_id = "pairing-funnel-visitor-0001"
     started = admin_client.post(
         "/api/public/promotion/channels/de-facebook-demo/pairing/start",
         json={
             "phone": "+4915123456802",
-            "idempotencyKey": "pairing-funnel-submit-0001",
-            "visitorId": visitor_id,
+            "deviceFingerprint": _device_fingerprint(),
         },
     )
     assert started.status_code == 200, started.text
@@ -1716,7 +1687,7 @@ def test_legacy_unverified_landing_pairing_can_request_a_fresh_code(
     ).json()["data"]
     payload = {
         "phone": "+4915123456794",
-        "visitorId": "legacy-pairing-retry-visitor",
+        "deviceFingerprint": _device_fingerprint(),
     }
 
     first = admin_client.post(
@@ -1760,7 +1731,7 @@ def test_landing_reauthentication_preserves_account_ownership_and_enqueues_sync(
         "/api/public/promotion/channels/de-facebook-demo/pairing/start",
         json={
             "phone": "+4915123456796",
-            "visitorId": "initial-owner-visitor",
+            "deviceFingerprint": _device_fingerprint(),
         },
     )
     assert initial.status_code == 200, initial.text
@@ -1832,7 +1803,7 @@ def test_landing_reauthentication_preserves_account_ownership_and_enqueues_sync(
         "/api/public/promotion/channels/de-facebook-demo/pairing/start",
         json={
             "phone": "+4915123456796",
-            "visitorId": "reauth-owner-visitor",
+            "deviceFingerprint": "2ef8bdbc97de077c45a46358ecc4ba42",
         },
     )
     assert reauth.status_code == 200, reauth.text
@@ -1914,7 +1885,7 @@ def test_public_pairing_attempt_can_be_cancelled_with_header_token(
         "/api/public/promotion/channels/de-facebook-demo/pairing/start",
         json={
             "phone": "+4915123456798",
-            "visitorId": "pairing-cancel-visitor",
+            "deviceFingerprint": _device_fingerprint(),
         },
     )
     assert started.status_code == 200, started.text

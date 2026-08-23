@@ -259,8 +259,7 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
 
     pairing_payload = {
         "phone": "12025550129",
-        "idempotencyKey": "meta-lead-event-0001",
-        "visitorId": "visitor-meta-ledger-0001",
+        "deviceFingerprint": "7ef8bdbc97de077c45a46358ecc4ba42",
     }
     first = admin_client.post(
         "/api/public/promotion/channels/meta-delivery-test/pairing/start",
@@ -276,10 +275,8 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
     assert duplicate.status_code == first.status_code, duplicate.text
 
     pending = admin_client.get(ledger_url).json()["data"]
-    assert pending["total"] in {1, 2}
-    lead_delivery = next(
-        row for row in pending["rows"] if row["eventId"] == "meta-lead-event-0001"
-    )
+    assert pending["total"] in {1, 2, 3}
+    lead_delivery = next(row for row in pending["rows"] if row["eventName"] == "Lead")
     assert lead_delivery["eventName"] == "Lead"
     assert lead_delivery["status"] == "pending"
     result = process_due_meta_conversions()
@@ -290,8 +287,6 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
         "failed": 0,
     }
     delivered = admin_client.get(ledger_url).json()["data"]
-    delivered_lead = next(
-        row for row in delivered["rows"] if row["eventId"] == "meta-lead-event-0001"
-    )
+    delivered_lead = next(row for row in delivered["rows"] if row["eventName"] == "Lead")
     assert delivered_lead["status"] == "delivered"
     assert delivered_lead["providerTraceId"] == "mock"
