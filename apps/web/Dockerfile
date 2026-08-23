@@ -2,6 +2,7 @@ FROM node:22-alpine AS development
 
 WORKDIR /app
 COPY package*.json ./
+COPY vendor/thumbmarkjs/thumbmarkjs-thumbmarkjs-1.10.1.tgz ./vendor/thumbmarkjs/
 RUN npm ci
 COPY . .
 
