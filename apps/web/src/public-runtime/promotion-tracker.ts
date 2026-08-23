@@ -1,20 +1,16 @@
 import {
   collectDeviceFingerprint,
-  type DeviceFingerprintPayload,
 } from "./device-fingerprint";
 import {
   collectClientContext,
   withClientContext,
-  type ClientContextLevel,
 } from "./client-context";
 
 type RuntimeConfig = {
   eventUrl: string;
   pairingStartUrl: string;
   metaDomainReportUrl?: string;
-  sessionToken: string;
   inAppBrowserMode?: "allow" | "guide_external";
-  templatePolicy?: { deviceSignals?: ClientContextLevel };
   meta?: {
     datasetId?: string;
     browserEnabled?: boolean;
@@ -25,7 +21,7 @@ type RuntimeConfig = {
 type EventExtra = {
   phone?: string;
   metadata?: Record<string, unknown>;
-  deviceFingerprint?: DeviceFingerprintPayload;
+  deviceFingerprint?: string;
 };
 
 type PairingHandle = {
@@ -71,9 +67,8 @@ if (configNode) {
     config = undefined;
   }
 
-  if (config?.eventUrl && config.pairingStartUrl && config.sessionToken) {
+  if (config?.eventUrl && config.pairingStartUrl) {
     const startedAt = Date.now();
-    const policy = config.templatePolicy || {};
     const meta = config.meta || {};
     const mapping = meta.eventMapping || {};
     const identifier = () =>
@@ -87,17 +82,15 @@ if (configNode) {
       visitorId = identifier();
     }
 
-    const fingerprintPromise: Promise<DeviceFingerprintPayload | undefined> =
-      policy.deviceSignals === "fingerprint"
-        ? new Promise((resolve) => {
-            const collect = () => void collectDeviceFingerprint().then(resolve, () => resolve(undefined));
-            if ("requestIdleCallback" in window) {
-              window.requestIdleCallback(collect, { timeout: 250 });
-            } else {
-              globalThis.setTimeout(collect, 0);
-            }
-          })
-        : Promise.resolve(undefined);
+    const fingerprintPromise: Promise<string | undefined> = new Promise((resolve) => {
+      const collect = () =>
+        void collectDeviceFingerprint().then(resolve, () => resolve(undefined));
+      if ("requestIdleCallback" in window) {
+        window.requestIdleCallback(collect, { timeout: 250 });
+      } else {
+        globalThis.setTimeout(collect, 0);
+      }
+    });
 
     const seenMeta = (eventId: string) => {
       const key = `promotion_meta_event:${eventId}`;
@@ -142,7 +135,6 @@ if (configNode) {
               method: "POST",
               headers: { "Content-Type": "text/plain;charset=UTF-8" },
               body: JSON.stringify({
-                sessionToken: config.sessionToken,
                 datasetId: meta.datasetId,
               }),
               keepalive: true,
@@ -167,13 +159,12 @@ if (configNode) {
       pixel("init", meta.datasetId);
     }
 
-    const clientContext = collectClientContext(policy.deviceSignals);
+    const clientContext = collectClientContext();
     const body = (eventType: string, eventId: string, extra: EventExtra = {}) =>
       JSON.stringify({
         eventType,
         idempotencyKey: eventId,
         visitorId,
-        sessionToken: config.sessionToken,
         ...extra,
         metadata: withClientContext(extra.metadata || {}, clientContext),
       });
@@ -258,7 +249,6 @@ if (configNode) {
             phone,
             idempotencyKey: eventId,
             visitorId,
-            sessionToken: config.sessionToken,
             ...(deviceToken ? { deviceToken } : {}),
             metadata: withClientContext(metadata, clientContext),
           }),

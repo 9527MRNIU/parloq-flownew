@@ -176,7 +176,6 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
         public["metaDomainReportUrl"],
         content=json.dumps(
             {
-                "sessionToken": public["sessionToken"],
                 "datasetId": public["meta"]["datasetId"],
             }
         ),
@@ -188,7 +187,6 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
         public["metaDomainReportUrl"],
         content=json.dumps(
             {
-                "sessionToken": public["sessionToken"],
                 "datasetId": public["meta"]["datasetId"],
             }
         ),
@@ -213,7 +211,6 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
             public["metaDomainReportUrl"],
             content=json.dumps(
                 {
-                    "sessionToken": public["sessionToken"],
                     "datasetId": public["meta"]["datasetId"],
                 }
             ),
@@ -253,7 +250,6 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
         public["metaDomainReportUrl"],
         content=json.dumps(
             {
-                "sessionToken": public["sessionToken"],
                 "datasetId": "stale-dataset-id",
             }
         ),
@@ -265,7 +261,6 @@ def test_channel_meta_config_enqueues_deduplicates_and_delivers_capi(
         "phone": "12025550129",
         "idempotencyKey": "meta-lead-event-0001",
         "visitorId": "visitor-meta-ledger-0001",
-        "sessionToken": public["sessionToken"],
     }
     first = admin_client.post(
         "/api/public/promotion/channels/meta-delivery-test/pairing/start",

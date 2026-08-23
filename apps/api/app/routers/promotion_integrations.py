@@ -891,11 +891,6 @@ def public_integration_runtime(
     item, _, channel, template, payload = _public_runtime_context(
         db, integration_id, request, token
     )
-    policy = db.scalar(
-        select(PromotionTemplatePolicy).where(
-            PromotionTemplatePolicy.created_by == item.created_by
-        )
-    )
     _, feedback_events = integration_feedback_contract(item)
     return JSONResponse(
         {
@@ -918,11 +913,6 @@ def public_integration_runtime(
                 "eventUrl": f"/api/public/promotion/integrations/{entity_id(item)}/events",
                 "sessionToken": token,
                 "sessionExpiresAt": int(payload["exp"]),
-                "deviceSignals": policy.device_signals if policy else "fingerprint",
-                "fingerprintEnabled": (
-                    (policy.device_signals if policy else "fingerprint")
-                    == "fingerprint"
-                ),
                 "events": list(feedback_events),
                 "visitorStorageKey": (
                     f"promotion_integration_visitor:{entity_id(item)}:{entity_id(channel)}"
@@ -1037,13 +1027,9 @@ async def report_integration_event(
         fingerprint_metadata,
     )
 
-    fingerprint_payload = (
-        event_input.device_fingerprint
-        if (policy.device_signals if policy else "fingerprint") == "fingerprint"
-        else None
-    )
+    fingerprint_payload = event_input.device_fingerprint
     fingerprint = fingerprint_identity(item.created_by, fingerprint_payload)
-    fingerprint_details = fingerprint_metadata(fingerprint, fingerprint_payload)
+    fingerprint_details = fingerprint_metadata(fingerprint)
     existing = db.scalar(
         select(PromotionIntegrationEvent).where(
             PromotionIntegrationEvent.integration_id == item.id,

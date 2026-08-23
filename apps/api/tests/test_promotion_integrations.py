@@ -498,8 +498,8 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     assert runtime_data["channel"]["id"] == channel["id"]
     assert runtime_data["template"]["id"] == template["id"]
     assert runtime_data["events"] == integration["feedbackEvents"]
-    assert runtime_data["deviceSignals"] == "fingerprint"
-    assert runtime_data["fingerprintEnabled"] is True
+    assert "deviceSignals" not in runtime_data
+    assert "fingerprintEnabled" not in runtime_data
     assert runtime.headers["cache-control"] == "no-store"
 
     event_payload = {

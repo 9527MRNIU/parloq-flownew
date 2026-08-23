@@ -47,7 +47,6 @@ def test_template_policy_defaults_update_validation_and_tenant_isolation(
             "protectionMode": "strict",
             "devtoolsAction": "blank",
             "lockViewportZoom": True,
-            "deviceSignals": "fingerprint",
             "eventRateLimitPolicy": {
                 "sessionReports": {"maxRequests": 60, "windowSeconds": 60},
                 "ipReports": {"maxRequests": 600, "windowSeconds": 60},
@@ -69,7 +68,6 @@ def test_template_policy_defaults_update_validation_and_tenant_isolation(
                 "protectionMode": "basic",
                 "devtoolsAction": "log",
                 "lockViewportZoom": False,
-                "deviceSignals": "standard",
                 "eventRateLimitPolicy": {
                     "sessionReports": {
                         "maxRequests": 80,
@@ -101,7 +99,6 @@ def test_template_policy_defaults_update_validation_and_tenant_isolation(
             "protectionMode": "basic",
             "devtoolsAction": "log",
             "lockViewportZoom": False,
-            "deviceSignals": "standard",
             "eventRateLimitPolicy": {
                 "sessionReports": {"maxRequests": 80, "windowSeconds": 60},
                 "ipReports": {"maxRequests": 800, "windowSeconds": 60},
@@ -133,6 +130,11 @@ def test_template_policy_defaults_update_validation_and_tenant_isolation(
             json={"protectionMode": "aggressive"},
         )
         assert invalid.status_code == 422
+        removed_device_signal_setting = operator.patch(
+            "/api/promotion/template-policy",
+            json={"deviceSignals": "off"},
+        )
+        assert removed_device_signal_setting.status_code == 422
         invalid_rate = operator.patch(
             "/api/promotion/template-policy",
             json={
@@ -161,7 +163,6 @@ def test_template_policy_defaults_update_validation_and_tenant_isolation(
             assert stored.protection_mode == "basic"
             assert stored.devtools_action == "log"
             assert stored.lock_viewport_zoom is False
-            assert stored.device_signals == "standard"
             assert stored.event_rate_limit_policy_json[
                 "metaDomainReports"
             ] == {"maxRequests": 8, "windowSeconds": 600}

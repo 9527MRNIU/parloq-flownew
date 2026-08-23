@@ -4,6 +4,9 @@
 
 机器可读 Schema：[`schemas/promotion-template-v3.schema.json`](schemas/promotion-template-v3.schema.json)。
 
+账号配对的请求顺序、状态响应和异常处理见
+[推广模板账号配对链路](promotion-pairing-flow.md)。
+
 ## 责任边界
 
 v3 ZIP 负责完整的访问者前端，包括 HTML、CSS、本地媒体、多语言资源和已编译的账号关联组件。平台继续负责渠道识别、鉴权、配对、路由、统计持久化、账号存储、沙箱和 CSP。

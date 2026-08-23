@@ -1118,7 +1118,7 @@ def test_device_fingerprint_migration_adds_nullable_audit_fields_and_policy(
         )
     engine.dispose()
 
-    _alembic(database_url, "head")
+    _alembic(database_url, "0042_device_fingerprints")
     engine = sa.create_engine(database_url)
     inspector = sa.inspect(engine)
     for table in ("promotion_events", "account_pairing_attempts"):
@@ -1166,6 +1166,39 @@ def test_device_fingerprint_migration_adds_nullable_audit_fields_and_policy(
             ).scalar_one()
             == "enhanced"
         )
+    engine.dispose()
+
+
+def test_thumbmark_migration_removes_configurable_device_signals(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'thumbmark-fingerprints.db'}"
+    _alembic(database_url, "0059_promotion_request_context")
+    engine = sa.create_engine(database_url)
+    assert "device_signals" in {
+        column["name"]
+        for column in sa.inspect(engine).get_columns("promotion_template_policies")
+    }
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    assert "device_signals" not in {
+        column["name"]
+        for column in sa.inspect(engine).get_columns("promotion_template_policies")
+    }
+    engine.dispose()
+
+    _alembic_downgrade(database_url, "0059_promotion_request_context")
+    engine = sa.create_engine(database_url)
+    policies = sa.Table(
+        "promotion_template_policies", sa.MetaData(), autoload_with=engine
+    )
+    assert "device_signals" in policies.c
+    with engine.connect() as connection:
+        assert set(connection.execute(sa.select(policies.c.device_signals)).scalars()) <= {
+            "fingerprint"
+        }
     engine.dispose()
 
 

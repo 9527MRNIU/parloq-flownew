@@ -951,7 +951,8 @@ def test_promotion_data_center_aggregates_uv_costs_and_successes(
         "/api/public/promotion/channels/analytics-channel",
         headers={"Host": "analytics-promotion.example"},
     ).status_code == 200
-    common = {"sessionToken": public["sessionToken"], "visitorId": "visitor-analytics-0001"}
+    assert "sessionToken" not in public
+    common = {"visitorId": "visitor-analytics-0001"}
     events = [
         {"eventType": "page_view", "idempotencyKey": "analytics-page-view-0001"},
         {"eventType": "page_view", "idempotencyKey": "analytics-page-view-0002"},
@@ -1268,6 +1269,44 @@ def test_authenticated_backend_preview_bypasses_unready_domain_without_public_by
     )
     assert fission_preview.status_code == 200
     assert '"trafficSource": "fission"' in fission_preview.text
+    assert (
+        "/api/public/promotion/channels/backend-preview-security/fission/events"
+        in fission_preview.text
+    )
+    assert (
+        "/api/public/promotion/channels/backend-preview-security/fission/pairing/start"
+        in fission_preview.text
+    )
+    assert "sessionToken" not in fission_preview.text
+    fission_event = admin_client.post(
+        "/api/public/promotion/channels/backend-preview-security/fission/events",
+        headers={"Host": "api:8000"},
+        json={
+            "eventType": "page_view",
+            "idempotencyKey": "fission-route-event-0001",
+            "visitorId": "fission-route-visitor-0001",
+        },
+    )
+    assert fission_event.status_code == 200, fission_event.text
+    monitored = admin_client.get(
+        "/api/promotion/monitoring/records?keyword=fission-route-visitor-0001"
+    )
+    assert monitored.status_code == 200, monitored.text
+    assert monitored.json()["data"]["rows"][0]["trafficSource"] == "fission"
+    fission_pairing = admin_client.post(
+        "/api/public/promotion/channels/backend-preview-security/fission/pairing/start",
+        headers={"Host": "api:8000"},
+        json={
+            "phone": "not-a-phone",
+            "visitorId": "fission-pairing-visitor-0001",
+        },
+    )
+    assert fission_pairing.status_code == 422, fission_pairing.text
+    pairing_monitor = admin_client.get(
+        "/api/promotion/monitoring/records?keyword=fission-pairing-visitor-0001"
+    )
+    assert pairing_monitor.status_code == 200, pairing_monitor.text
+    assert pairing_monitor.json()["data"]["rows"][0]["trafficSource"] == "fission"
 
     # An anonymous visitor cannot turn either the local preview URL or the
     # disabled campaign hostname into a domain-validation bypass.

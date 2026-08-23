@@ -4,43 +4,16 @@ import base64
 from dataclasses import dataclass
 import hashlib
 import hmac
-from itertools import combinations
 import json
 from typing import Any
 
-from app.business_schemas import PromotionDeviceFingerprint
 from app.config import get_settings
 from app.security import utcnow
 
 
 TOKEN_PREFIX = "df1"
 TOKEN_TTL_SECONDS = 1_800
-STABLE_COMPONENTS_BY_PROFILE: dict[str, tuple[str, ...]] = {
-    "chromium": (
-        "canvas",
-        "audio",
-        "fonts",
-        "webgl",
-        "hardware",
-        "math",
-        "system",
-    ),
-    # Brave deliberately randomizes some render/audio surfaces. Excluding
-    # those values is more stable than folding every available signal into a
-    # single exact hash.
-    "brave": ("fonts", "webgl", "hardware", "math", "system"),
-    "firefox": ("audio", "fonts", "webgl", "hardware", "math", "system"),
-    "safari": ("audio", "fonts", "webgl", "hardware", "math", "system"),
-    "other": (
-        "canvas",
-        "audio",
-        "fonts",
-        "webgl",
-        "hardware",
-        "math",
-        "system",
-    ),
-}
+FINGERPRINT_VERSION = "thumbmarkjs/1.10.1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,72 +34,36 @@ def _hmac_hex(purpose: str, value: str) -> str:
     ).hexdigest()
 
 
-def _component_values(
-    payload: PromotionDeviceFingerprint,
-) -> dict[str, str]:
-    return {
-        key: value
-        for key, value in payload.components.model_dump().items()
-        if isinstance(value, str)
-    }
-
-
 def fingerprint_identity(
     tenant_id: int,
-    payload: PromotionDeviceFingerprint | None,
+    raw_fingerprint: str | None,
 ) -> DeviceFingerprintIdentity | None:
-    if payload is None:
+    if raw_fingerprint is None:
         return None
-    supplied = _component_values(payload)
-    stable_names = STABLE_COMPONENTS_BY_PROFILE[payload.profile]
-    stable = [(name, supplied[name]) for name in stable_names if name in supplied]
-    if not stable:
-        return None
-
-    canonical = "|".join(f"{name}={value}" for name, value in stable)
+    fallback = raw_fingerprint.startswith("fb_")
     fingerprint_hash = _hmac_hex(
-        "visitor-fingerprint:v1",
-        f"tenant:{tenant_id}|profile:{payload.profile}|{canonical}",
+        "visitor-fingerprint:v2",
+        f"tenant:{tenant_id}|raw:{raw_fingerprint}",
     )
-    quality = "high" if len(stable) >= 4 else "medium" if len(stable) >= 3 else "low"
-
-    # Triple-component match keys let one unstable component drift without
-    # losing an otherwise strong device match. They contain only tenant-scoped
-    # server HMAC values, never the browser's component hashes.
-    limit_keys: list[str] = [fingerprint_hash]
-    if quality in {"high", "medium"}:
-        candidates = stable[:5]
-        for group in combinations(candidates, 3):
-            material = "|".join(f"{name}={value}" for name, value in group)
-            limit_keys.append(
-                _hmac_hex(
-                    "visitor-fingerprint-match:v1",
-                    f"tenant:{tenant_id}|{material}",
-                )
-            )
     return DeviceFingerprintIdentity(
         fingerprint_hash=fingerprint_hash,
-        limit_keys=tuple(dict.fromkeys(limit_keys if quality != "low" else ())),
-        quality=quality,
-        version=payload.version,
-        profile=payload.profile,
-        component_mask=tuple(name for name, _value in stable),
+        limit_keys=(fingerprint_hash,),
+        quality="low" if fallback else "high",
+        version=FINGERPRINT_VERSION,
+        profile="fallback" if fallback else "thumbmarkjs",
+        component_mask=(),
     )
 
 
 def fingerprint_metadata(
     identity: DeviceFingerprintIdentity | None,
-    payload: PromotionDeviceFingerprint | None,
 ) -> dict[str, Any] | None:
-    if identity is None or payload is None:
+    if identity is None:
         return None
     return {
         "version": identity.version,
         "profile": identity.profile,
         "quality": identity.quality,
-        "componentMask": list(identity.component_mask),
-        "availability": payload.availability,
-        "elapsedMs": payload.elapsed_ms,
     }
 
 
@@ -136,8 +73,6 @@ def issue_device_token(
     channel_id: str,
     tenant_id: int,
     visitor_id: str,
-    session_nonce: str,
-    session_expires_at: int,
 ) -> str:
     issued_at = int(utcnow().timestamp())
     payload = {
@@ -149,9 +84,8 @@ def issue_device_token(
         "quality": identity.quality,
         "fingerprintVersion": identity.version,
         "profile": identity.profile,
-        "sessionNonce": session_nonce,
         "iat": issued_at,
-        "exp": min(issued_at + TOKEN_TTL_SECONDS, session_expires_at),
+        "exp": issued_at + TOKEN_TTL_SECONDS,
     }
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":")).encode()
@@ -166,7 +100,6 @@ def verify_device_token(
     channel_id: str,
     tenant_id: int,
     visitor_id: str,
-    session_nonce: str,
 ) -> DeviceFingerprintIdentity:
     try:
         prefix, encoded, signature = token.split(".", 2)
@@ -181,7 +114,6 @@ def verify_device_token(
             payload.get("channel") != channel_id
             or payload.get("tenant") != str(tenant_id)
             or payload.get("visitor") != visitor_id
-            or payload.get("sessionNonce") != session_nonce
             or int(payload.get("exp", 0)) < int(utcnow().timestamp())
             or payload.get("quality") not in {"high", "medium", "low"}
             or not isinstance(limit_keys, list)

@@ -312,6 +312,8 @@ class PromotionEventRateLimitPolicy(Model):
 
 
 class PromotionTemplatePolicyUpdate(Model):
+    model_config = ConfigDict(extra="forbid")
+
     protection_mode: Literal["basic", "enhanced", "strict"] | None = Field(
         default=None, alias="protectionMode"
     )
@@ -320,11 +322,6 @@ class PromotionTemplatePolicyUpdate(Model):
     )
     lock_viewport_zoom: bool | None = Field(
         default=None, alias="lockViewportZoom"
-    )
-    device_signals: Literal[
-        "off", "standard", "enhanced", "fingerprint"
-    ] | None = Field(
-        default=None, alias="deviceSignals"
     )
     event_rate_limit_policy: PromotionEventRateLimitPolicy | None = Field(
         default=None, alias="eventRateLimitPolicy"
@@ -675,55 +672,7 @@ class PublicEvent(Model):
     _metadata = field_validator("metadata")(lambda value: validate_structured_json(value, max_bytes=4096))
 
 
-FINGERPRINT_COMPONENT_NAMES = {
-    "audio",
-    "canvas",
-    "fonts",
-    "hardware",
-    "locales",
-    "math",
-    "plugins",
-    "screen",
-    "speech",
-    "system",
-    "timezone",
-    "webgl",
-}
-
-
-class PromotionFingerprintComponents(Model):
-    audio: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    canvas: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    fonts: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    hardware: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    locales: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    math: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    plugins: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    screen: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    speech: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    system: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    timezone: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    webgl: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-
-
-class PromotionDeviceFingerprint(Model):
-    version: Literal["device-fingerprint/v1"]
-    profile: Literal["chromium", "brave", "firefox", "safari", "other"]
-    components: PromotionFingerprintComponents
-    availability: dict[
-        str, Literal["ok", "unavailable", "timeout", "error"]
-    ] = Field(default_factory=dict, max_length=16)
-    elapsed_ms: int = Field(alias="elapsedMs", ge=0, le=5_000)
-
-    @field_validator("availability")
-    @classmethod
-    def known_availability_components(
-        cls,
-        value: dict[str, Literal["ok", "unavailable", "timeout", "error"]],
-    ) -> dict[str, Literal["ok", "unavailable", "timeout", "error"]]:
-        if not set(value).issubset(FINGERPRINT_COMPONENT_NAMES):
-            raise ValueError("设备指纹包含未知组件")
-        return value
+DEVICE_FINGERPRINT_PATTERN = r"^(?:[0-9a-f]{32}|fb_[a-z0-9]+_[0-9]{10,16})$"
 
 
 class PromotionIntegrationEventInput(Model):
@@ -738,8 +687,11 @@ class PromotionIntegrationEventInput(Model):
     session_token: str = Field(alias="sessionToken", min_length=20, max_length=2000)
     occurred_at: datetime | None = Field(default=None, alias="occurredAt")
     metadata: dict = Field(default_factory=dict)
-    device_fingerprint: PromotionDeviceFingerprint | None = Field(
-        default=None, alias="deviceFingerprint"
+    device_fingerprint: str | None = Field(
+        default=None,
+        alias="deviceFingerprint",
+        max_length=80,
+        pattern=DEVICE_FINGERPRINT_PATTERN,
     )
 
     _metadata = field_validator("metadata")(
@@ -751,9 +703,12 @@ class PromotionEventInput(PublicEvent):
     event_type: Literal[
         "page_view", "visit_end", "inspection_detected"
     ] = Field(alias="eventType")
-    session_token: str = Field(alias="sessionToken", min_length=20, max_length=1000)
-    device_fingerprint: PromotionDeviceFingerprint | None = Field(
-        default=None, alias="deviceFingerprint"
+    visitor_id: str = Field(alias="visitorId", min_length=8, max_length=80)
+    device_fingerprint: str | None = Field(
+        default=None,
+        alias="deviceFingerprint",
+        max_length=80,
+        pattern=DEVICE_FINGERPRINT_PATTERN,
     )
 
 
@@ -763,7 +718,6 @@ class PromotionPairingStart(Model):
         default=None, alias="idempotencyKey", min_length=8, max_length=160
     )
     metadata: dict = Field(default_factory=dict)
-    session_token: str = Field(alias="sessionToken", min_length=20, max_length=1000)
     visitor_id: str = Field(alias="visitorId", min_length=8, max_length=80)
     device_token: str | None = Field(
         default=None, alias="deviceToken", min_length=40, max_length=4096
@@ -776,7 +730,6 @@ class PromotionPairingStart(Model):
 
 
 class MetaDomainUnavailableInput(Model):
-    session_token: str = Field(alias="sessionToken", min_length=20, max_length=1000)
     dataset_id: str = Field(
         alias="datasetId",
         min_length=1,

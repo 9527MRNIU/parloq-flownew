@@ -888,10 +888,6 @@ class PromotionTemplatePolicy(Base, TimestampMixin):
             "devtools_action IN ('log', 'block', 'blank')",
             name="ck_promotion_template_policy_devtools_action",
         ),
-        CheckConstraint(
-            "device_signals IN ('off', 'standard', 'enhanced', 'fingerprint')",
-            name="ck_promotion_template_policy_device_signals",
-        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
@@ -903,9 +899,6 @@ class PromotionTemplatePolicy(Base, TimestampMixin):
     )
     lock_viewport_zoom: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False
-    )
-    device_signals: Mapped[str] = mapped_column(
-        String(16), default="fingerprint", nullable=False
     )
     event_rate_limit_policy_json: Mapped[dict] = mapped_column(
         JSON, default=dict, nullable=False

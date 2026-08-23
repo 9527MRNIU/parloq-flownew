@@ -165,46 +165,9 @@ DEFAULT_TEMPLATE_POLICY = {
     "protectionMode": "strict",
     "devtoolsAction": "blank",
     "lockViewportZoom": True,
-    "deviceSignals": "fingerprint",
     "eventRateLimitPolicy": DEFAULT_PROMOTION_EVENT_RATE_LIMIT_POLICY,
     "updatedAt": None,
 }
-
-
-def _session_token(
-    channel: PromotionChannel, traffic_source: str = "direct"
-) -> str:
-    if traffic_source not in {"direct", "fission"}:
-        raise ValueError("unsupported promotion traffic source")
-    issued_at = int(utcnow().timestamp())
-    payload = {
-        "channel": entity_id(channel),
-        "trafficSource": traffic_source,
-        "iat": issued_at,
-        "exp": issued_at + 1800,
-        "nonce": secrets.token_hex(8),
-    }
-    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
-    signature = hmac.new(get_settings().app_secret_key.encode(), encoded.encode(), hashlib.sha256).hexdigest()
-    return f"{encoded}.{signature}"
-
-
-def _verify_session_token(channel: PromotionChannel, token: str) -> dict:
-    try:
-        encoded, signature = token.rsplit(".", 1)
-        expected = hmac.new(get_settings().app_secret_key.encode(), encoded.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature, expected): raise ValueError
-        payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
-        if (
-            payload.get("channel") != entity_id(channel)
-            or payload.get("trafficSource", "direct") not in {"direct", "fission"}
-            or int(payload.get("exp", 0)) < int(utcnow().timestamp())
-            or not payload.get("iat")
-        ):
-            raise ValueError
-    except (ValueError, TypeError, json.JSONDecodeError):
-        raise HTTPException(status_code=403, detail="推广会话已失效") from None
-    return payload
 
 
 def _utc_datetime(value: datetime) -> datetime:
@@ -2452,7 +2415,7 @@ def _localize_template_html(
 
 @router.get("/api/public/promotion/channels/{slug}")
 def public_channel(slug: str, request: Request, db: DbSession) -> dict:
-    item = _public_channel(db, slug, request); tpl = db.get(PromotionTemplate, item.template_id); pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None; token = _session_token(item)
+    item = _public_channel(db, slug, request); tpl = db.get(PromotionTemplate, item.template_id); pixel = db.get(MetaPixel, item.pixel_id) if item.pixel_id else None
     if pixel is not None and not pixel.enabled:
         pixel = None
     from app.services.meta_conversions import normalized_meta_event_mapping
@@ -2460,7 +2423,7 @@ def public_channel(slug: str, request: Request, db: DbSession) -> dict:
     resolved, default, supported = _resolved_locale(
         item, tpl, request.headers.get("accept-language")
     )
-    return {"data": {"channel": {"id": entity_id(item), "type": item.channel_type, "name": item.name, "countryCode": item.country_code, "slug": item.slug, "localeMode": "auto"}, "template": {"id": entity_id(tpl), "version": tpl.version, "manifest": tpl.manifest_json}, "templatePolicy": policy, "meta": {"datasetId": pixel.dataset_id if pixel else None, "browserEnabled": bool(pixel and pixel.browser_pixel_enabled), "capiEnabled": bool(pixel and pixel.capi_enabled), "eventMapping": normalized_meta_event_mapping(pixel.event_mapping_json if pixel else None)}, "inAppBrowserMode": item.in_app_browser_mode, "countryCode": item.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "renderUrl": f"/api/public/promotion/channels/{slug}/render", "fissionRenderUrl": f"/api/public/promotion/channels/{slug}/fission/render", "assetBaseUrl": f"/api/public/promotion/channels/{slug}/assets/", "eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "metaDomainReportUrl": f"/api/public/promotion/channels/{slug}/meta-domain-unavailable", "sessionToken": token, "sessionExpiresIn": 1800, "rateLimitPolicy": "reserved", "serverTimestamp": utcnow().isoformat()}}
+    return {"data": {"channel": {"id": entity_id(item), "type": item.channel_type, "name": item.name, "countryCode": item.country_code, "slug": item.slug, "localeMode": "auto"}, "template": {"id": entity_id(tpl), "version": tpl.version, "manifest": tpl.manifest_json}, "templatePolicy": policy, "meta": {"datasetId": pixel.dataset_id if pixel else None, "browserEnabled": bool(pixel and pixel.browser_pixel_enabled), "capiEnabled": bool(pixel and pixel.capi_enabled), "eventMapping": normalized_meta_event_mapping(pixel.event_mapping_json if pixel else None)}, "inAppBrowserMode": item.in_app_browser_mode, "countryCode": item.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "renderUrl": f"/api/public/promotion/channels/{slug}/render", "fissionRenderUrl": f"/api/public/promotion/channels/{slug}/fission/render", "assetBaseUrl": f"/api/public/promotion/channels/{slug}/assets/", "eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "metaDomainReportUrl": f"/api/public/promotion/channels/{slug}/meta-domain-unavailable", "rateLimitPolicy": "reserved", "serverTimestamp": utcnow().isoformat()}}
 
 
 def _render_html(
@@ -2500,7 +2463,8 @@ def _render_html(
     if pixel is not None and not pixel.enabled:
         pixel = None
 
-    config = json.dumps({"eventUrl": f"/api/public/promotion/channels/{slug}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}/pairing/start", "metaDomainReportUrl": f"/api/public/promotion/channels/{slug}/meta-domain-unavailable", "sessionToken": _session_token(channel, traffic_source), "trafficSource": traffic_source, "countryCode": channel.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "localizedCopy": localized_copy, "pixelDatasetId": pixel_dataset_id, "meta": {"datasetId": pixel_dataset_id, "browserEnabled": bool(pixel and pixel.browser_pixel_enabled), "eventMapping": normalized_meta_event_mapping(pixel.event_mapping_json if pixel else None)}, "inAppBrowserMode": channel.in_app_browser_mode, "templatePolicy": template_policy or {}}, ensure_ascii=False).replace("<", "\\u003c")
+    source_path = "/fission" if traffic_source == "fission" else ""
+    config = json.dumps({"eventUrl": f"/api/public/promotion/channels/{slug}{source_path}/events", "pairingStartUrl": f"/api/public/promotion/channels/{slug}{source_path}/pairing/start", "metaDomainReportUrl": f"/api/public/promotion/channels/{slug}/meta-domain-unavailable", "trafficSource": traffic_source, "countryCode": channel.country_code, "defaultLocale": default, "supportedLocales": supported, "resolvedLocale": resolved, "localizedCopy": localized_copy, "pixelDatasetId": pixel_dataset_id, "meta": {"datasetId": pixel_dataset_id, "browserEnabled": bool(pixel and pixel.browser_pixel_enabled), "eventMapping": normalized_meta_event_mapping(pixel.event_mapping_json if pixel else None)}, "inAppBrowserMode": channel.in_app_browser_mode, "templatePolicy": template_policy or {}}, ensure_ascii=False).replace("<", "\\u003c")
     html = _apply_viewport_policy(html, template_policy or {})
     base = f'<base href="/api/public/promotion/channels/{slug}/assets/">'
     runtime = (
@@ -2639,11 +2603,12 @@ def promotion_asset(slug: str, asset_path: str, request: Request, db: DbSession)
 
 
 @router.post("/api/public/promotion/channels/{slug}/events")
+@router.post("/api/public/promotion/channels/{slug}/fission/events")
 async def report_event(slug: str, request: Request, db: DbSession) -> JSONResponse:
     try: payload = PromotionEventInput.model_validate_json(await request.body())
     except ValidationError as exc: raise HTTPException(status_code=422, detail=exc.errors(include_url=False)) from None
     channel = _public_channel(db, slug, request)
-    token_payload = _verify_session_token(channel, payload.session_token)
+    traffic_source = "fission" if "/fission/" in request.url.path else "direct"
     runtime_policy = _runtime_template_policy(db, channel.created_by)
     source_ip = public_request_ip(request)
     try:
@@ -2651,13 +2616,13 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
             runtime_policy.get("eventRateLimitPolicy", {}),
             [
                 PromotionEventRateLimitRequest(
-                    "sessionReports", str(token_payload["nonce"])
+                    "sessionReports", payload.visitor_id
                 ),
                 PromotionEventRateLimitRequest(
                     "ipReports",
                     source_ip
                     if source_ip != "unknown"
-                    else f"session:{token_payload['nonce']}",
+                    else f"visitor:{payload.visitor_id}",
                 ),
                 PromotionEventRateLimitRequest("channelReports", "all"),
             ],
@@ -2681,11 +2646,7 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
         issue_device_token,
     )
 
-    fingerprint_payload = (
-        payload.device_fingerprint
-        if runtime_policy.get("deviceSignals") == "fingerprint"
-        else None
-    )
+    fingerprint_payload = payload.device_fingerprint
     fingerprint = fingerprint_identity(channel.created_by, fingerprint_payload)
     device_token = (
         issue_device_token(
@@ -2693,15 +2654,11 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
             channel_id=entity_id(channel),
             tenant_id=channel.created_by,
             visitor_id=payload.visitor_id,
-            session_nonce=str(token_payload["nonce"]),
-            session_expires_at=int(token_payload["exp"]),
         )
-        if fingerprint is not None and payload.visitor_id
+        if fingerprint is not None
         else None
     )
-    fingerprint_details = fingerprint_metadata(
-        fingerprint, fingerprint_payload
-    )
+    fingerprint_details = fingerprint_metadata(fingerprint)
     existing = db.scalar(select(PromotionEvent).where(PromotionEvent.channel_id == channel.id, PromotionEvent.idempotency_key == payload.idempotency_key))
     if existing:
         if (
@@ -2729,12 +2686,11 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
             headers={"Access-Control-Allow-Origin": "null"},
         )
     now = utcnow(); occurred_at = parse_public_datetime(payload.occurred_at)
-    occurred_ts = int(occurred_at.timestamp())
-    if occurred_ts < int(token_payload["iat"]) - 300 or occurred_ts > int(token_payload["exp"]) + 300 or occurred_at > now + timedelta(minutes=5):
-        raise HTTPException(status_code=422, detail="occurredAt 超出推广会话有效窗口")
+    if occurred_at < now - timedelta(minutes=5) or occurred_at > now + timedelta(minutes=5):
+        raise HTTPException(status_code=422, detail="occurredAt 超出允许的上报时间范围")
     network = resolve_request_network(request)
     metadata = _client_event_metadata(payload.metadata)
-    metadata["trafficSource"] = token_payload.get("trafficSource", "direct")
+    metadata["trafficSource"] = traffic_source
     if fingerprint_details is not None:
         metadata["deviceFingerprint"] = fingerprint_details
     event = PromotionEvent(
@@ -2826,7 +2782,6 @@ async def report_meta_domain_unavailable(
         ) from None
 
     channel = _public_channel(db, slug, request)
-    token_payload = _verify_session_token(channel, payload.session_token)
     runtime_policy = _runtime_template_policy(db, channel.created_by)
     source_ip = public_request_ip(request)
     report_hostname = (request.url.hostname or f"channel-{channel.id}").lower()
@@ -2838,7 +2793,7 @@ async def report_meta_domain_unavailable(
                     "metaDomainReports",
                     source_ip
                     if source_ip != "unknown"
-                    else f"session:{token_payload['nonce']}",
+                    else f"channel:{channel.id}",
                 )
             ],
             partition=f"meta-domain:{report_hostname}",
@@ -2905,7 +2860,9 @@ async def report_meta_domain_unavailable(
 
 
 @router.post("/api/public/promotion/channels/{slug}/pairing/start")
+@router.post("/api/public/promotion/channels/{slug}/fission/pairing/start")
 async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JSONResponse:
+    traffic_source = "fission" if "/fission/" in request.url.path else "direct"
     network = resolve_request_network(request)
     request_snapshot = public_request_context(request, network)
     raw_body = await request.body()
@@ -2919,11 +2876,9 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 if not isinstance(raw_payload, dict):
                     raise ValueError("invalid pairing payload")
                 visitor_id = str(raw_payload.get("visitorId") or "")
-                session_token = str(raw_payload.get("sessionToken") or "")
-                if not 8 <= len(visitor_id) <= 80 or not session_token:
+                if not 8 <= len(visitor_id) <= 80:
                     raise ValueError("missing trusted pairing context")
                 channel = _public_channel(db, slug, request)
-                session_payload = _verify_session_token(channel, session_token)
             except (HTTPException, TypeError, ValueError, json.JSONDecodeError):
                 pass
             else:
@@ -2933,9 +2888,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                     network=network,
                     request_context=request_snapshot,
                     visitor_id=visitor_id,
-                    traffic_source=str(
-                        session_payload.get("trafficSource", "direct")
-                    ),
+                    traffic_source=traffic_source,
                     code="invalid_phone",
                     message="请输入有效的手机号码",
                     status_code=422,
@@ -2945,8 +2898,6 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             status_code=422, detail=exc.errors(include_url=False)
         ) from None
     channel = _public_channel(db, slug, request)
-    session_payload = _verify_session_token(channel, payload.session_token)
-    traffic_source = session_payload.get("trafficSource", "direct")
     device_identity = None
     if payload.device_token:
         from app.services.device_fingerprints import verify_device_token
@@ -2957,7 +2908,6 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel_id=entity_id(channel),
                 tenant_id=channel.created_by,
                 visitor_id=payload.visitor_id,
-                session_nonce=str(session_payload["nonce"]),
             )
         except ValueError:
             return _recorded_pairing_failure_response(

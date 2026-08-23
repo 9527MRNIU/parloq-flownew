@@ -445,7 +445,6 @@ type AdMetric = {
 };
 type TemplateProtectionMode = "basic" | "enhanced" | "strict";
 type TemplateDevtoolsAction = "log" | "block" | "blank";
-type TemplateDeviceSignals = "off" | "standard" | "enhanced" | "fingerprint";
 type EventRateLimitRuleForm = {
   maxRequests: string;
   windowSeconds: string;
@@ -460,7 +459,6 @@ type TemplatePolicy = {
   protectionMode: TemplateProtectionMode;
   devtoolsAction: TemplateDevtoolsAction;
   lockViewportZoom: boolean;
-  deviceSignals: TemplateDeviceSignals;
   eventRateLimitPolicy: EventRateLimitPolicyForm;
 };
 
@@ -468,7 +466,6 @@ const defaultTemplatePolicy: TemplatePolicy = {
   protectionMode: "strict",
   devtoolsAction: "blank",
   lockViewportZoom: true,
-  deviceSignals: "fingerprint",
   eventRateLimitPolicy: {
     sessionReports: { maxRequests: "60", windowSeconds: "60" },
     ipReports: { maxRequests: "600", windowSeconds: "60" },
@@ -482,7 +479,7 @@ const EVENT_RATE_LIMIT_FIELDS: Array<[
   string,
   string,
 ]> = [
-  ["sessionReports", "单会话数据回传", "同一个签名运行会话内，主模板或单个 iframe 集成允许的数据回传请求数。"],
+  ["sessionReports", "单访客/会话回传", "主模板按访客 ID、iframe 集成按签名运行会话限制数据回传请求数。"],
   ["ipReports", "同一 IP 数据回传", "同一渠道下，单个来源 IP 对主模板或单个 iframe 集成发起的数据回传请求数。"],
   ["channelReports", "单渠道回传总量", "单个渠道对主模板或单个 iframe 集成的回传总量；不同集成之间分别计数。"],
   ["metaDomainReports", "Facebook 域名异常回传", "同一落地域名、同一来源 IP 上报 Facebook Pixel 域名异常的请求数。"],
@@ -578,7 +575,6 @@ function templatePolicyRow(input: unknown): TemplatePolicy {
   const row = object(input);
   const protectionMode = field(row, "protectionMode", "protection_mode");
   const devtoolsAction = field(row, "devtoolsAction", "devtools_action");
-  const deviceSignals = field(row, "deviceSignals", "device_signals");
   const eventRateLimitPolicy = object(
     row.eventRateLimitPolicy ?? row.event_rate_limit_policy,
   );
@@ -594,9 +590,6 @@ function templatePolicyRow(input: unknown): TemplatePolicy {
         row.lock_viewport_zoom ??
         defaultTemplatePolicy.lockViewportZoom,
     ),
-    deviceSignals: ["off", "standard", "enhanced", "fingerprint"].includes(deviceSignals)
-      ? (deviceSignals as TemplateDeviceSignals)
-      : defaultTemplatePolicy.deviceSignals,
     eventRateLimitPolicy: {
       sessionReports: eventRateLimitRuleForm(
         eventRateLimitPolicy.sessionReports ?? eventRateLimitPolicy.session_reports,
@@ -2157,32 +2150,8 @@ export function PromotionTemplatesPage() {
                 aria-label="锁定视口缩放"
               />
             </label>
-            <label className="field">
-              <DrawerFieldLabel required>设备环境信号</DrawerFieldLabel>
-              <SelectField
-                value={policy.deviceSignals}
-                disabled={!canManage || policySaving}
-                onValueChange={(value) =>
-                  setPolicy((current) => ({
-                    ...current,
-                    deviceSignals: value as TemplateDeviceSignals,
-                  }))
-                }
-                options={[
-                  { value: "off", label: "关闭" },
-                  { value: "standard", label: "标准" },
-                  { value: "enhanced", label: "增强" },
-                  { value: "fingerprint", label: "复合设备指纹" },
-                ]}
-              />
-              <small>
-                复合设备指纹使用 Canvas、音频、字体、WebGL
-                等匿名哈希增强跨会话访客识别，不采集原始渲染数据、WhatsApp
-                号码或账号凭据。
-              </small>
-            </label>
             <div className="rounded-lg border border-amber-600/20 bg-amber-600/5 p-3 text-sm text-muted-foreground">
-              设备指纹由平台公共运行时统一采集，并在服务端按租户隔离；模板不能自行采集、保存或外传原始指纹信号。
+              设备指纹由平台公共运行时通过 ThumbmarkJS 统一计算并始终启用；浏览器只提交原始指纹，服务端按租户 HMAC 隔离后入库。模板不能自行保存或外传指纹。
             </div>
             {EVENT_RATE_LIMIT_FIELDS.map(([key, label, description]) => (
               <div className="field" key={key}>

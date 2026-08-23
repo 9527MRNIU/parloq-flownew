@@ -34,24 +34,8 @@ from app.services.account_metadata_sync import (
 from app.task_worker import process_task, recover_running_tasks
 
 
-def _device_fingerprint(**overrides: str) -> dict:
-    components = {
-        "canvas": "1" * 64,
-        "audio": "2" * 64,
-        "fonts": "3" * 64,
-        "webgl": "4" * 64,
-        "hardware": "5" * 64,
-        "math": "6" * 64,
-        "system": "7" * 64,
-        **overrides,
-    }
-    return {
-        "version": "device-fingerprint/v1",
-        "profile": "chromium",
-        "components": components,
-        "availability": {key: "ok" for key in components},
-        "elapsedMs": 125,
-    }
+def _device_fingerprint() -> str:
+    return "0ef8bdbc97de077c45a46358ecc4ba42"
 
 
 def _zip(files: dict[str, str | bytes]) -> bytes:
@@ -451,7 +435,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert "promotionPreviewPolls" not in preview.text
     assert "nextPollAfterMs:1000" in preview.text
     assert '"templatePolicy": {' in preview.text
-    assert '"deviceSignals": "fingerprint"' in preview.text
+    assert '"deviceSignals"' not in preview.text
     assert "window.PromotionBridge" in preview.text
     assert 'addEventListener("contextmenu"' in preview.text
     assert 'e.key==="F12"' in preview.text
@@ -570,21 +554,20 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     )
     assert automatic_config.status_code == 200
     assert automatic_config.json()["data"]["resolvedLocale"] == "ar"
-    session_token = config["sessionToken"]
+    assert "sessionToken" not in config
+    assert "sessionExpiresIn" not in config
     invalid = admin_client.post(
         "/api/public/promotion/channels/de-facebook-demo/events",
         json={
             "eventType": "page_view",
-            "idempotencyKey": "invalid-token-event",
-            "sessionToken": "invalid-token-payload.invalid-signature",
+            "idempotencyKey": "missing-visitor-event",
         },
     )
-    assert invalid.status_code == 403
+    assert invalid.status_code == 422
 
     page_view = {
         "eventType": "page_view",
         "idempotencyKey": "page-view-event-0001",
-        "sessionToken": session_token,
         "visitorId": "visitor-fingerprint-0001",
         "deviceFingerprint": _device_fingerprint(),
         "metadata": {
@@ -615,7 +598,6 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     delayed_page_view = {
         "eventType": "page_view",
         "idempotencyKey": "page-view-event-0002",
-        "sessionToken": session_token,
         "visitorId": "visitor-fingerprint-0001",
     }
     assert admin_client.post(
@@ -658,7 +640,6 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     client_phone_submit = {
         "eventType": "phone_submit",
         "idempotencyKey": "phone-lead-event-0001",
-        "sessionToken": session_token,
         "visitorId": "visitor-fingerprint-0001",
         "phone": "+49 151 23456789",
         "deviceFingerprint": _device_fingerprint(),
@@ -673,7 +654,6 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
         json={
             "phone": "+49 151 23456789",
             "idempotencyKey": "phone-lead-event-0001",
-            "sessionToken": session_token,
             "visitorId": "visitor-fingerprint-0001",
             "deviceToken": device_token,
             "metadata": {
@@ -700,7 +680,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
         )
         assert fingerprint_event is not None
         assert len(fingerprint_event.visitor_fingerprint_hash or "") == 64
-        assert fingerprint_event.fingerprint_version == "device-fingerprint/v1"
+        assert fingerprint_event.fingerprint_version == "thumbmarkjs/1.10.1"
         assert fingerprint_event.fingerprint_quality == "high"
         assert fingerprint_event.source_ip == "2001:db8::25"
         assert fingerprint_event.visitor_country_code == "CA"
@@ -763,7 +743,6 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
             "protectionMode": "strict",
             "devtoolsAction": "blank",
             "lockViewportZoom": True,
-            "deviceSignals": "enhanced",
         },
     )
     assert policy.status_code == 200, policy.text
@@ -781,7 +760,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert '"templatePolicy": {' in render.text
     assert '"protectionMode": "strict"' in render.text
     assert '"devtoolsAction": "blank"' in render.text
-    assert '"deviceSignals": "enhanced"' in render.text
+    assert '"deviceSignals"' not in render.text
     assert render.headers["content-language"] == "de"
     assert '<html lang="de" dir="ltr">' in render.text
     assert "<title>Hallo</title>" in render.text
@@ -850,12 +829,14 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert "parloq" not in tracker.text.lower()
     assert "page_view" in tracker.text
     assert "inspection_detected" in tracker.text
-    assert "device-fingerprint/v1" in tracker.text
+    assert '"1.10.1"' in tracker.text
     assert "deviceFingerprint" in tracker.text
     assert "deviceToken" in tracker.text
+    assert "sessionToken" not in tracker.text
     assert "clientContext" in tracker.text
+    assert '"_fp"' in tracker.text
     assert "OfflineAudioContext" in tracker.text
-    assert "Random Text WMwmil10Oo" in tracker.text
+    assert "device-fingerprint/v1" not in tracker.text
     assert tracker.headers["x-content-type-options"] == "nosniff"
     guard = admin_client.get("/api/public/promotion/guard.js")
     assert guard.status_code == 200
@@ -876,7 +857,6 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
                 "eventType": "inspection_detected",
                 "idempotencyKey": "inspection-event-0001",
                 "visitorId": "visitor-inspection-0001",
-                "sessionToken": config["sessionToken"],
                 "metadata": {"reason": "mobile-console", "mode": "enhanced"},
             }
         ),
@@ -888,7 +868,6 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
             "protectionMode": "basic",
             "devtoolsAction": "log",
             "lockViewportZoom": False,
-            "deviceSignals": "standard",
         },
     )
     assert reset_policy.status_code == 200, reset_policy.text
@@ -1133,18 +1112,12 @@ def test_personal_account_gateway_and_hyperlink_delivery(
     public_config = admin_client.get(
         "/api/public/promotion/channels/de-facebook-demo"
     ).json()["data"]
-    enabled_fingerprint = admin_client.patch(
-        "/api/promotion/template-policy",
-        json={"deviceSignals": "fingerprint"},
-    )
-    assert enabled_fingerprint.status_code == 200, enabled_fingerprint.text
     fingerprint_event = admin_client.post(
         "/api/public/promotion/channels/de-facebook-demo/events",
         json={
             "eventType": "page_view",
             "idempotencyKey": "landing-page-view-event-0001",
             "visitorId": "landing-visitor-0001",
-            "sessionToken": public_config["sessionToken"],
             "deviceFingerprint": _device_fingerprint(),
         },
     )
@@ -1156,7 +1129,6 @@ def test_personal_account_gateway_and_hyperlink_delivery(
             "phone": "+4915123456790",
             "idempotencyKey": "landing-phone-submit-0001",
             "visitorId": "landing-visitor-0001",
-            "sessionToken": public_config["sessionToken"],
             "deviceToken": f"{device_token}x",
         },
     )
@@ -1167,7 +1139,6 @@ def test_personal_account_gateway_and_hyperlink_delivery(
             "phone": "+4915123456790",
             "idempotencyKey": "landing-phone-submit-0001",
             "visitorId": "landing-visitor-0001",
-            "sessionToken": public_config["sessionToken"],
             "deviceToken": device_token,
         },
     )
@@ -1186,7 +1157,7 @@ def test_personal_account_gateway_and_hyperlink_delivery(
         assert attempt.route_version >= 1
         assert attempt.sync_policy_json["avatar"] is True
         assert len(attempt.visitor_fingerprint_hash or "") == 64
-        assert attempt.fingerprint_version == "device-fingerprint/v1"
+        assert attempt.fingerprint_version == "thumbmarkjs/1.10.1"
         assert attempt.fingerprint_quality == "high"
     monitored_pairing = admin_client.get(
         "/api/promotion/monitoring/records"
@@ -1289,7 +1260,6 @@ def test_personal_account_gateway_and_hyperlink_delivery(
         json={
             "phone": "+4915123456790",
             "visitorId": "landing-repeat-visitor-0001",
-            "sessionToken": public_config["sessionToken"],
         },
     )
     assert repeated_pairing.status_code == 409, repeated_pairing.text
@@ -1537,7 +1507,6 @@ def test_landing_pairing_failure_stays_in_intake_records(
         json={
             "phone": "+4915123456793",
             "visitorId": "landing-failure-visitor",
-            "sessionToken": public_config["sessionToken"],
         },
     )
     assert failed.status_code == 502
@@ -1590,7 +1559,6 @@ def test_pre_attempt_protocol_failure_uses_promotion_event_ledger(
         json={
             "phone": "+4915123456801",
             "visitorId": "protocol-failure-visitor-0001",
-            "sessionToken": public_config["sessionToken"],
         },
     )
     assert failed.status_code == 409, failed.text
@@ -1645,7 +1613,6 @@ def test_invalid_phone_and_rate_limit_are_safe_recorded_failures(
         json={
             "phone": "not-a-phone",
             "visitorId": "invalid-phone-visitor-0001",
-            "sessionToken": public_config["sessionToken"],
         },
     )
     assert invalid_phone.status_code == 422, invalid_phone.text
@@ -1667,7 +1634,6 @@ def test_invalid_phone_and_rate_limit_are_safe_recorded_failures(
         json={
             "phone": "+4915123456803",
             "visitorId": "rate-limit-visitor-0001",
-            "sessionToken": public_config["sessionToken"],
         },
     )
     assert rate_limited.status_code == 429, rate_limited.text
@@ -1712,7 +1678,6 @@ def test_channel_stats_combines_events_and_attempts_into_pairing_funnel(
             "phone": "+4915123456802",
             "idempotencyKey": "pairing-funnel-submit-0001",
             "visitorId": visitor_id,
-            "sessionToken": public_config["sessionToken"],
         },
     )
     assert started.status_code == 200, started.text
@@ -1752,7 +1717,6 @@ def test_legacy_unverified_landing_pairing_can_request_a_fresh_code(
     payload = {
         "phone": "+4915123456794",
         "visitorId": "legacy-pairing-retry-visitor",
-        "sessionToken": public_config["sessionToken"],
     }
 
     first = admin_client.post(
@@ -1797,7 +1761,6 @@ def test_landing_reauthentication_preserves_account_ownership_and_enqueues_sync(
         json={
             "phone": "+4915123456796",
             "visitorId": "initial-owner-visitor",
-            "sessionToken": public_config["sessionToken"],
         },
     )
     assert initial.status_code == 200, initial.text
@@ -1870,7 +1833,6 @@ def test_landing_reauthentication_preserves_account_ownership_and_enqueues_sync(
         json={
             "phone": "+4915123456796",
             "visitorId": "reauth-owner-visitor",
-            "sessionToken": current_config["sessionToken"],
         },
     )
     assert reauth.status_code == 200, reauth.text
@@ -1953,7 +1915,6 @@ def test_public_pairing_attempt_can_be_cancelled_with_header_token(
         json={
             "phone": "+4915123456798",
             "visitorId": "pairing-cancel-visitor",
-            "sessionToken": public_config["sessionToken"],
         },
     )
     assert started.status_code == 200, started.text

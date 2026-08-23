@@ -56,7 +56,6 @@ def template_policy_row(item: PromotionTemplatePolicy) -> dict:
         "protectionMode": item.protection_mode,
         "devtoolsAction": item.devtools_action,
         "lockViewportZoom": item.lock_viewport_zoom,
-        "deviceSignals": item.device_signals,
         "eventRateLimitPolicy": normalized_promotion_event_rate_limit_policy(
             item.event_rate_limit_policy_json
         ),
@@ -85,8 +84,6 @@ def update_template_policy(
         item.devtools_action = payload.devtools_action
     if payload.lock_viewport_zoom is not None:
         item.lock_viewport_zoom = payload.lock_viewport_zoom
-    if payload.device_signals is not None:
-        item.device_signals = payload.device_signals
     if payload.event_rate_limit_policy is not None:
         item.event_rate_limit_policy_json = (
             payload.event_rate_limit_policy.model_dump(by_alias=True)

@@ -1,6 +1,5 @@
 import {
   collectDeviceFingerprint,
-  type DeviceFingerprintPayload,
 } from "./device-fingerprint";
 import { collectClientContext, withClientContext } from "./client-context";
 
@@ -16,8 +15,6 @@ type IntegrationRuntimeConfig = {
   eventUrl: string;
   sessionToken: string;
   sessionExpiresAt: number;
-  deviceSignals: "off" | "standard" | "enhanced" | "fingerprint";
-  fingerprintEnabled: boolean;
   events: string[];
   visitorStorageKey: string;
 };
@@ -53,9 +50,9 @@ if (integrationId && embedToken) {
   let resolvedConfig: IntegrationRuntimeConfig | undefined;
   let resolvedClientContext: Record<string, unknown> | undefined;
   let clientContextResolved = false;
-  const clientContext = (config: IntegrationRuntimeConfig) => {
+  const clientContext = () => {
     if (!clientContextResolved) {
-      resolvedClientContext = collectClientContext(config.deviceSignals);
+      resolvedClientContext = collectClientContext();
       clientContextResolved = true;
     }
     return resolvedClientContext;
@@ -97,20 +94,16 @@ if (integrationId && embedToken) {
       return generated;
     }));
 
-  let fingerprintPromise: Promise<DeviceFingerprintPayload | undefined> | undefined;
+  let fingerprintPromise: Promise<string | undefined> | undefined;
   const fingerprint = () =>
-    (fingerprintPromise ||= configPromise.then((config) =>
-      config.fingerprintEnabled
-        ? collectDeviceFingerprint().catch(() => undefined)
-        : undefined,
-    ));
+    (fingerprintPromise ||= collectDeviceFingerprint().catch(() => undefined));
 
   const eventBody = async (
     config: IntegrationRuntimeConfig,
     eventType: string,
     idempotencyKey: string,
     metadata: Record<string, unknown>,
-    deviceFingerprint?: DeviceFingerprintPayload,
+    deviceFingerprint?: string,
   ) =>
     JSON.stringify({
       eventType,
@@ -118,7 +111,7 @@ if (integrationId && embedToken) {
       visitorId: await visitorId(),
       sessionToken: config.sessionToken,
       occurredAt: new Date().toISOString(),
-      metadata: withClientContext(metadata, clientContext(config)),
+      metadata: withClientContext(metadata, clientContext()),
       ...(deviceFingerprint ? { deviceFingerprint } : {}),
     });
 
@@ -126,7 +119,7 @@ if (integrationId && embedToken) {
     eventType: string,
     metadata: Record<string, unknown> = {},
     idempotencyKey = identifier(),
-    deviceFingerprint?: DeviceFingerprintPayload,
+    deviceFingerprint?: string,
   ) => {
     const config = await configPromise;
     if (!config.events.includes(eventType)) {
@@ -196,7 +189,7 @@ if (integrationId && embedToken) {
             occurredAt: new Date().toISOString(),
             metadata: withClientContext(
               { durationMs: Math.max(0, Date.now() - startedAt) },
-              clientContext(resolvedConfig),
+              clientContext(),
             ),
           }),
         ],
