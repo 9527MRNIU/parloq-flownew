@@ -1066,6 +1066,9 @@ class PromotionIntegrationEvent(Base, TimestampMixin):
     source_ip: Mapped[str | None] = mapped_column(String(45), index=True)
     visitor_country_code: Mapped[str | None] = mapped_column(String(2), index=True)
     network_source: Mapped[str | None] = mapped_column(String(16))
+    request_context_json: Mapped[dict] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
 
 
@@ -1243,6 +1246,9 @@ class AccountPairingAttempt(Base, TimestampMixin):
     source_ip: Mapped[str | None] = mapped_column(String(45), index=True)
     visitor_country_code: Mapped[str | None] = mapped_column(String(2), index=True)
     network_source: Mapped[str | None] = mapped_column(String(16))
+    request_context_json: Mapped[dict] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
     status: Mapped[str] = mapped_column(
         String(24), default="code_issued", nullable=False, index=True
     )
@@ -1373,6 +1379,9 @@ class PromotionEvent(Base, TimestampMixin):
     source_ip: Mapped[str | None] = mapped_column(String(45), index=True)
     visitor_country_code: Mapped[str | None] = mapped_column(String(2), index=True)
     network_source: Mapped[str | None] = mapped_column(String(16))
+    request_context_json: Mapped[dict] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
 
 

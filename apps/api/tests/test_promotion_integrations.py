@@ -498,6 +498,7 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     assert runtime_data["channel"]["id"] == channel["id"]
     assert runtime_data["template"]["id"] == template["id"]
     assert runtime_data["events"] == integration["feedbackEvents"]
+    assert runtime_data["deviceSignals"] == "fingerprint"
     assert runtime_data["fingerprintEnabled"] is True
     assert runtime.headers["cache-control"] == "no-store"
 
@@ -510,7 +511,11 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     }
     event = admin_client.post(
         f"/api/public/promotion/integrations/{integration['id']}/events",
-        headers={"host": "integration-feedback.test"},
+        headers={
+            "host": "integration-feedback.test",
+            "user-agent": "Mozilla/5.0 Chrome/151.0.0.0 Safari/537.36",
+            "accept-language": "ja-JP,ja;q=0.9",
+        },
         json=event_payload,
     )
     assert event.status_code == 201, event.text
@@ -643,6 +648,8 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     assert monitored_record["sourceIp"] == "198.51.100.42"
     assert monitored_record["visitorCountryCode"] == "JP"
     assert monitored_record["networkSource"] == "cloudflare"
+    assert monitored_record["device"]["browser"] == "Chrome"
+    assert monitored_record["device"]["browserVersion"] == "151.0.0.0"
     monitored_detail = admin_client.get(
         f"/api/promotion/monitoring/records/integration/{event_id}"
     )
@@ -651,6 +658,10 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     assert monitoring_detail["metadata"] == {"result": "ok", "count": 2}
     assert monitoring_detail["sourceIp"] == "198.51.100.42"
     assert monitoring_detail["visitorCountryCode"] == "JP"
+    assert monitoring_detail["requestContext"]["language"] == "ja-JP"
+    assert monitoring_detail["requestContext"]["userAgent"].endswith(
+        "Chrome/151.0.0.0 Safari/537.36"
+    )
 
     refreshed = admin_client.get(
         f"/api/promotion/integrations/{integration['id']}"

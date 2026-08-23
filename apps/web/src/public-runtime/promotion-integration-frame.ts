@@ -2,6 +2,7 @@ import {
   collectDeviceFingerprint,
   type DeviceFingerprintPayload,
 } from "./device-fingerprint";
+import { collectClientContext, withClientContext } from "./client-context";
 
 type IntegrationRuntimeConfig = {
   integration: { id: string; key: string; version: string };
@@ -15,6 +16,7 @@ type IntegrationRuntimeConfig = {
   eventUrl: string;
   sessionToken: string;
   sessionExpiresAt: number;
+  deviceSignals: "off" | "standard" | "enhanced" | "fingerprint";
   fingerprintEnabled: boolean;
   events: string[];
   visitorStorageKey: string;
@@ -46,9 +48,18 @@ if (integrationId && embedToken) {
 
   const identifier = () =>
     crypto.randomUUID?.() ||
-    `${Date.now().toString(36)}-${crypto.getRandomValues(new Uint32Array(2)).join("-")}`;
+      `${Date.now().toString(36)}-${crypto.getRandomValues(new Uint32Array(2)).join("-")}`;
 
   let resolvedConfig: IntegrationRuntimeConfig | undefined;
+  let resolvedClientContext: Record<string, unknown> | undefined;
+  let clientContextResolved = false;
+  const clientContext = (config: IntegrationRuntimeConfig) => {
+    if (!clientContextResolved) {
+      resolvedClientContext = collectClientContext(config.deviceSignals);
+      clientContextResolved = true;
+    }
+    return resolvedClientContext;
+  };
   const configPromise = fetch(
     `/api/public/promotion/integrations/${encodeURIComponent(integrationId)}/runtime`,
     {
@@ -107,7 +118,7 @@ if (integrationId && embedToken) {
       visitorId: await visitorId(),
       sessionToken: config.sessionToken,
       occurredAt: new Date().toISOString(),
-      metadata,
+      metadata: withClientContext(metadata, clientContext(config)),
       ...(deviceFingerprint ? { deviceFingerprint } : {}),
     });
 
@@ -151,14 +162,7 @@ if (integrationId && embedToken) {
   void configPromise
     .then(async () => {
       const pageEventId = identifier();
-      const metadata = {
-        language: navigator.language,
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        viewport: [innerWidth, innerHeight],
-        screen: [screen.width, screen.height],
-        pixelRatio: devicePixelRatio,
-        userAgent: navigator.userAgent,
-      };
+      const metadata = {};
       await send("page_view", metadata, pageEventId).catch(() => undefined);
       const deviceFingerprint = await fingerprint();
       if (deviceFingerprint) {
@@ -190,7 +194,10 @@ if (integrationId && embedToken) {
             visitorId: resolvedVisitorId,
             sessionToken: resolvedConfig.sessionToken,
             occurredAt: new Date().toISOString(),
-            metadata: { durationMs: Math.max(0, Date.now() - startedAt) },
+            metadata: withClientContext(
+              { durationMs: Math.max(0, Date.now() - startedAt) },
+              clientContext(resolvedConfig),
+            ),
           }),
         ],
         { type: "text/plain;charset=UTF-8" },

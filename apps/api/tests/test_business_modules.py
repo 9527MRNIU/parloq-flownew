@@ -65,14 +65,14 @@ def _zip(files: dict[str, str | bytes]) -> bytes:
 def test_promotion_monitoring_device_summary_includes_readable_versions() -> None:
     ios = _device_summary(
         {
-            "deviceSignals": {
+            "requestContext": {
                 "userAgent": (
                     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) "
                     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 "
                     "Mobile/15E148 Safari/604.1"
                 ),
-                "viewport": [390, 844],
-            }
+            },
+            "clientContext": {"viewport": [390, 844]},
         }
     )
     assert ios["browser"] == "Safari"
@@ -83,7 +83,7 @@ def test_promotion_monitoring_device_summary_includes_readable_versions() -> Non
 
     macos = _device_summary(
         {
-            "deviceSignals": {
+            "requestContext": {
                 "userAgent": (
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -587,9 +587,28 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
         "sessionToken": session_token,
         "visitorId": "visitor-fingerprint-0001",
         "deviceFingerprint": _device_fingerprint(),
+        "metadata": {
+            "requestContext": {"userAgent": "forged-client-ua"},
+            "clientContext": {
+                "timeZone": "America/Toronto",
+                "viewport": [390, 844],
+                "screen": [390, 844],
+                "pixelRatio": 3,
+                "touchPoints": 5,
+            }
+        },
     }
     page_view_response = admin_client.post(
-        "/api/public/promotion/channels/de-facebook-demo/events", json=page_view
+        "/api/public/promotion/channels/de-facebook-demo/events",
+        json=page_view,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 "
+                "Mobile/15E148 Safari/604.1"
+            ),
+            "Accept-Language": "en-CA,en;q=0.9",
+        },
     )
     assert page_view_response.status_code == 200
     device_token = page_view_response.json()["data"]["deviceToken"]
@@ -657,7 +676,18 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
             "sessionToken": session_token,
             "visitorId": "visitor-fingerprint-0001",
             "deviceToken": device_token,
-            "metadata": {"form": "primary"},
+            "metadata": {
+                "form": "primary",
+                "clientContext": {"viewport": [390, 844]},
+            },
+        },
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 "
+                "Mobile/15E148 Safari/604.1"
+            ),
+            "Accept-Language": "en-CA,en;q=0.9",
         },
     )
     assert server_submit.status_code == 409, server_submit.text
@@ -677,6 +707,11 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
         assert fingerprint_event.network_source == "cloudflare"
         assert fingerprint_event.metadata_json["submissionSource"] == "pairing_start"
         assert fingerprint_event.metadata_json["form"] == "primary"
+        assert fingerprint_event.request_context_json["userAgent"].endswith(
+            "Mobile/15E148 Safari/604.1"
+        )
+        assert fingerprint_event.request_context_json["language"] == "en-CA"
+        assert "requestContext" not in fingerprint_event.metadata_json
     leads = admin_client.get(f"/api/promotion/channels/{channel_id}/leads").json()["data"]
     assert leads["total"] == 1
     assert leads["rows"][0]["phone"] == "+4915123456789"
@@ -702,6 +737,9 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert monitored_record["sourceIp"] == "2001:db8::25"
     assert monitored_record["visitorCountryCode"] == "CA"
     assert monitored_record["networkSource"] == "cloudflare"
+    assert monitored_record["device"]["browser"] == "Safari"
+    assert monitored_record["device"]["browserVersion"] == "18.6"
+    assert monitored_record["device"]["viewport"] == [390, 844]
     assert monitored_record["id"].isdigit()
     record_detail = admin_client.get(
         "/api/promotion/monitoring/records/server/"
@@ -713,6 +751,8 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert detail["sourceIp"] == "2001:db8::25"
     assert detail["visitorCountryCode"] == "CA"
     assert detail["networkSource"] == "cloudflare"
+    assert detail["requestContext"]["language"] == "en-CA"
+    assert detail["clientContext"]["viewport"] == [390, 844]
     assert detail["metadata"]["submissionSource"] == "pairing_start"
     monitoring_options = admin_client.get("/api/promotion/monitoring/options")
     assert monitoring_options.status_code == 200
@@ -813,6 +853,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert "device-fingerprint/v1" in tracker.text
     assert "deviceFingerprint" in tracker.text
     assert "deviceToken" in tracker.text
+    assert "clientContext" in tracker.text
     assert "OfflineAudioContext" in tracker.text
     assert "Random Text WMwmil10Oo" in tracker.text
     assert tracker.headers["x-content-type-options"] == "nosniff"

@@ -221,6 +221,33 @@ def test_promotion_network_context_migration_is_reversible(tmp_path: Path) -> No
     engine.dispose()
 
 
+def test_promotion_request_context_migration_is_reversible(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'promotion-request-context.db'}"
+    _alembic(database_url, "0058_promotion_network_context")
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    for table in (
+        "promotion_events",
+        "promotion_integration_events",
+        "account_pairing_attempts",
+    ):
+        columns = {column["name"] for column in inspector.get_columns(table)}
+        assert "request_context_json" in columns
+    engine.dispose()
+
+    _alembic_downgrade(database_url, "0058_promotion_network_context")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    for table in (
+        "promotion_events",
+        "promotion_integration_events",
+        "account_pairing_attempts",
+    ):
+        columns = {column["name"] for column in inspector.get_columns(table)}
+        assert "request_context_json" not in columns
+    engine.dispose()
+
 def test_custom_role_is_not_expanded_by_forward_repairs(tmp_path: Path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'custom-role-upgrade.db'}"
     _alembic(database_url, "0005_system_promotion_domains")

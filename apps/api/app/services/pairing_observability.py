@@ -85,6 +85,7 @@ def persist_pairing_failure_event(
     source_ip: str | None = None,
     visitor_country_code: str | None = None,
     network_source: str | None = None,
+    request_context: dict[str, Any] | None = None,
     detail_code: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> PromotionEvent:
@@ -133,6 +134,7 @@ def persist_pairing_failure_event(
         source_ip=source_ip,
         visitor_country_code=visitor_country_code,
         network_source=network_source,
+        request_context_json=dict(request_context or {}),
         metadata_json=metadata,
     )
     db.add(event)

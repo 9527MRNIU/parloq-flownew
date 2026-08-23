@@ -88,6 +88,7 @@ from app.services.promotion_event_rate_limits import (
     consume_promotion_event_rate_limits,
 )
 from app.services.public_rate_limits import public_request_ip
+from app.services.request_context import public_request_context
 from app.services.request_network import RequestNetwork, resolve_request_network
 from app.services.github_repository import (
     GitHubRemoteArtifact,
@@ -113,6 +114,14 @@ from app.validation import parse_public_datetime, validate_structured_json
 
 router = APIRouter(tags=["promotion"])
 logger = logging.getLogger(__name__)
+
+
+def _client_event_metadata(metadata: dict | None) -> dict:
+    result = dict(metadata or {})
+    result.pop("requestContext", None)
+    return result
+
+
 REPORT_TIMEZONE = ZoneInfo("Asia/Shanghai")
 MIB = 1024 * 1024
 MAX_ZIP = 64 * MIB
@@ -366,6 +375,7 @@ def _recorded_pairing_failure_response(
     channel: PromotionChannel,
     *,
     network: RequestNetwork,
+    request_context: dict | None = None,
     visitor_id: str,
     traffic_source: str,
     code: str,
@@ -394,6 +404,7 @@ def _recorded_pairing_failure_response(
         source_ip=network.source_ip,
         visitor_country_code=network.visitor_country_code,
         network_source=network.network_source,
+        request_context=request_context,
         extra=metadata,
     )
     return _public_pairing_error(
@@ -419,6 +430,7 @@ def _persist_server_phone_submit(
 
     idempotency_key = payload.idempotency_key or f"phone_submit:{uuid4().hex}"
     network = resolve_request_network(request)
+    request_context = public_request_context(request, network, received_at=occurred_at)
     existing = db.scalar(
         select(PromotionEvent).where(
             PromotionEvent.channel_id == channel.id,
@@ -468,8 +480,9 @@ def _persist_server_phone_submit(
         source_ip=network.source_ip,
         visitor_country_code=network.visitor_country_code,
         network_source=network.network_source,
+        request_context_json=request_context,
         metadata_json={
-            **payload.metadata,
+            **_client_event_metadata(payload.metadata),
             "trafficSource": traffic_source,
             "submissionSource": "pairing_start",
         },
@@ -2719,11 +2732,11 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
     occurred_ts = int(occurred_at.timestamp())
     if occurred_ts < int(token_payload["iat"]) - 300 or occurred_ts > int(token_payload["exp"]) + 300 or occurred_at > now + timedelta(minutes=5):
         raise HTTPException(status_code=422, detail="occurredAt 超出推广会话有效窗口")
-    metadata = dict(payload.metadata)
+    network = resolve_request_network(request)
+    metadata = _client_event_metadata(payload.metadata)
     metadata["trafficSource"] = token_payload.get("trafficSource", "direct")
     if fingerprint_details is not None:
         metadata["deviceFingerprint"] = fingerprint_details
-    network = resolve_request_network(request)
     event = PromotionEvent(
         public_id=new_public_id("pevt"),
         channel_id=channel.id,
@@ -2741,6 +2754,9 @@ async def report_event(slug: str, request: Request, db: DbSession) -> JSONRespon
         source_ip=network.source_ip,
         visitor_country_code=network.visitor_country_code,
         network_source=network.network_source,
+        request_context_json=public_request_context(
+            request, network, received_at=now
+        ),
         metadata_json=metadata,
     )
     db.add(event)
@@ -2891,6 +2907,7 @@ async def report_meta_domain_unavailable(
 @router.post("/api/public/promotion/channels/{slug}/pairing/start")
 async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JSONResponse:
     network = resolve_request_network(request)
+    request_snapshot = public_request_context(request, network)
     raw_body = await request.body()
     try:
         payload = PromotionPairingStart.model_validate_json(raw_body)
@@ -2914,6 +2931,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                     db,
                     channel,
                     network=network,
+                    request_context=request_snapshot,
                     visitor_id=visitor_id,
                     traffic_source=str(
                         session_payload.get("trafficSource", "direct")
@@ -2946,6 +2964,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 db,
                 channel,
                 network=network,
+                request_context=request_snapshot,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="device_identity_invalid",
@@ -3002,6 +3021,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             db,
             channel,
             network=network,
+            request_context=request_snapshot,
             visitor_id=payload.visitor_id,
             traffic_source=str(traffic_source),
             code="service_temporarily_unavailable",
@@ -3018,6 +3038,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             db,
             channel,
             network=network,
+            request_context=request_snapshot,
             visitor_id=payload.visitor_id,
             traffic_source=str(traffic_source),
             code="rate_limited",
@@ -3053,7 +3074,11 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             source_ip=network.source_ip,
             visitor_country_code=network.visitor_country_code,
             network_source=network.network_source,
-            metadata_json={"trafficSource": traffic_source},
+            request_context_json=request_snapshot,
+            metadata_json={
+                **_client_event_metadata(payload.metadata),
+                "trafficSource": traffic_source,
+            },
         )
     )
     # Persist the bounded lookup before checking whether the number exists, so
@@ -3080,6 +3105,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             db,
             channel,
             network=network,
+            request_context=request_snapshot,
             visitor_id=payload.visitor_id,
             traffic_source=str(traffic_source),
             code="number_unavailable",
@@ -3116,6 +3142,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 db,
                 channel,
                 network=network,
+                request_context=request_snapshot,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="pairing_in_progress",
@@ -3134,6 +3161,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 db,
                 channel,
                 network=network,
+                request_context=request_snapshot,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="pairing_in_progress",
@@ -3193,6 +3221,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 db,
                 channel,
                 network=network,
+                request_context=request_snapshot,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="protocol_unavailable",
@@ -3212,6 +3241,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 db,
                 channel,
                 network=network,
+                request_context=request_snapshot,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="protocol_capacity_limited",
@@ -3230,6 +3260,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 db,
                 channel,
                 network=network,
+                request_context=request_snapshot,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="protocol_unavailable",
@@ -3248,6 +3279,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 db,
                 channel,
                 network=network,
+                request_context=request_snapshot,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="channel_configuration_unavailable",
@@ -3269,6 +3301,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 db,
                 channel,
                 network=network,
+                request_context=request_snapshot,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="channel_configuration_unavailable",
@@ -3312,6 +3345,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 db,
                 channel,
                 network=network,
+                request_context=request_snapshot,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="number_unavailable",
@@ -3348,6 +3382,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                     db,
                     channel,
                     network=network,
+                    request_context=request_snapshot,
                     visitor_id=payload.visitor_id,
                     traffic_source=str(traffic_source),
                     code="account_already_linked",
@@ -3360,6 +3395,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 db,
                 channel,
                 network=network,
+                request_context=request_snapshot,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="number_unavailable",
@@ -3428,6 +3464,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 db,
                 channel,
                 network=network,
+                request_context=request_snapshot,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="service_temporarily_unavailable",
@@ -3445,6 +3482,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 db,
                 channel,
                 network=network,
+                request_context=request_snapshot,
                 visitor_id=payload.visitor_id,
                 traffic_source=str(traffic_source),
                 code="rate_limited",
@@ -3473,6 +3511,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                     db,
                     channel,
                     network=network,
+                    request_context=request_snapshot,
                     visitor_id=payload.visitor_id,
                     traffic_source=str(traffic_source),
                     code="connection_route_unavailable",
@@ -3512,6 +3551,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 source_ip=network.source_ip,
                 visitor_country_code=network.visitor_country_code,
                 network_source=network.network_source,
+                request_context_json=request_snapshot,
                 status="code_issued",
                 expires_at=now + timedelta(minutes=3),
             )
@@ -3534,6 +3574,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             db,
             channel,
             network=network,
+            request_context=request_snapshot,
             visitor_id=payload.visitor_id,
             traffic_source=str(traffic_source),
             code="number_unavailable",
@@ -3618,6 +3659,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 source_ip=active_attempt.source_ip,
                 visitor_country_code=active_attempt.visitor_country_code,
                 network_source=active_attempt.network_source,
+                request_context_json=active_attempt.request_context_json,
                 metadata_json={
                     "accountId": str(item.id),
                     "trafficSource": traffic_source,
@@ -3832,6 +3874,7 @@ def public_pairing_status(
                     source_ip=attempt.source_ip,
                     visitor_country_code=attempt.visitor_country_code,
                     network_source=attempt.network_source,
+                    request_context_json=attempt.request_context_json,
                     metadata_json={
                         "accountId": str(item.id),
                         "trafficSource": (
@@ -4077,7 +4120,8 @@ async def report_internal_success(request: Request, db: DbSession) -> JSONRespon
                 attempt.visitor_country_code if attempt else None
             ),
             network_source=attempt.network_source if attempt else None,
-            metadata_json=payload.metadata,
+            request_context_json=(attempt.request_context_json if attempt else {}),
+            metadata_json=_client_event_metadata(payload.metadata),
         )
     )
     try:

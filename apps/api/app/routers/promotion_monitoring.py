@@ -120,10 +120,13 @@ def _normalized_viewport(value: Any) -> list[int] | None:
 
 
 def _device_summary(metadata: dict | None) -> dict[str, Any]:
-    signals = (metadata or {}).get("deviceSignals")
-    if not isinstance(signals, dict):
-        signals = metadata if isinstance(metadata, dict) else {}
-    user_agent = str(signals.get("userAgent") or "")
+    request_context = (metadata or {}).get("requestContext")
+    client_context = (metadata or {}).get("clientContext")
+    if not isinstance(request_context, dict):
+        request_context = {}
+    if not isinstance(client_context, dict):
+        client_context = {}
+    user_agent = str(request_context.get("userAgent") or "")
     browser = "未知浏览器"
     browser_version = None
     for browser_name, signature in BROWSER_SIGNATURES:
@@ -160,7 +163,7 @@ def _device_summary(metadata: dict | None) -> dict[str, Any]:
         "browserVersion": browser_version,
         "system": system,
         "systemVersion": system_version,
-        "viewport": _normalized_viewport(signals.get("viewport")),
+        "viewport": _normalized_viewport(client_context.get("viewport")),
         "userAgent": user_agent or None,
     }
 
@@ -181,7 +184,9 @@ def _json_value(column, *path: str):
 
 def _monitoring_sources(channel_ids: list[int], start: datetime, end: datetime):
     landing_metadata = PromotionEvent.metadata_json
+    landing_request_context = PromotionEvent.request_context_json
     integration_metadata = PromotionIntegrationEvent.metadata_json
+    integration_request_context = PromotionIntegrationEvent.request_context_json
     landing = select(
         literal("promotion").label("storage_source"),
         case(
@@ -206,15 +211,9 @@ def _monitoring_sources(channel_ids: list[int], start: datetime, end: datetime):
             _json_text(landing_metadata, "trafficSource"), literal("direct")
         ).label("traffic_source"),
         PromotionEvent.occurred_at.label("occurred_at"),
-        func.coalesce(
-            _json_text(landing_metadata, "deviceSignals", "userAgent"),
-            _json_text(landing_metadata, "userAgent"),
-        ).label("user_agent"),
+        _json_text(landing_request_context, "userAgent").label("user_agent"),
         cast(
-            func.coalesce(
-                _json_value(landing_metadata, "deviceSignals", "viewport"),
-                _json_value(landing_metadata, "viewport"),
-            ),
+            _json_value(landing_metadata, "clientContext", "viewport"),
             String,
         ).label("viewport_json"),
         PromotionEvent.lead_id.label("lead_id"),
@@ -242,15 +241,9 @@ def _monitoring_sources(channel_ids: list[int], start: datetime, end: datetime):
         PromotionIntegrationEvent.network_source.label("network_source"),
         PromotionIntegrationEvent.traffic_source.label("traffic_source"),
         PromotionIntegrationEvent.occurred_at.label("occurred_at"),
-        func.coalesce(
-            _json_text(integration_metadata, "deviceSignals", "userAgent"),
-            _json_text(integration_metadata, "userAgent"),
-        ).label("user_agent"),
+        _json_text(integration_request_context, "userAgent").label("user_agent"),
         cast(
-            func.coalesce(
-                _json_value(integration_metadata, "deviceSignals", "viewport"),
-                _json_value(integration_metadata, "viewport"),
-            ),
+            _json_value(integration_metadata, "clientContext", "viewport"),
             String,
         ).label("viewport_json"),
         cast(literal(None), BigInteger).label("lead_id"),
@@ -265,8 +258,10 @@ def _monitoring_sources(channel_ids: list[int], start: datetime, end: datetime):
 def _record_device(mapping) -> dict[str, Any]:
     return _device_summary(
         {
-            "userAgent": mapping["user_agent"],
-            "viewport": _normalized_viewport(mapping["viewport_json"]),
+            "requestContext": {"userAgent": mapping["user_agent"]},
+            "clientContext": {
+                "viewport": _normalized_viewport(mapping["viewport_json"])
+            },
         }
     )
 
@@ -347,7 +342,14 @@ def _detail_common(
         "visitorId": event.visitor_id,
         "fingerprintVersion": event.fingerprint_version,
         "fingerprintQuality": event.fingerprint_quality,
-        "device": _device_summary(metadata),
+        "device": _device_summary(
+            {
+                "requestContext": event.request_context_json,
+                "clientContext": metadata.get("clientContext"),
+            }
+        ),
+        "requestContext": event.request_context_json,
+        "clientContext": metadata.get("clientContext") or {},
         "countryCode": event.country_code,
         "sourceIp": event.source_ip,
         "visitorCountryCode": event.visitor_country_code,

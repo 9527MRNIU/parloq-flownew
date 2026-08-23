@@ -2,6 +2,11 @@ import {
   collectDeviceFingerprint,
   type DeviceFingerprintPayload,
 } from "./device-fingerprint";
+import {
+  collectClientContext,
+  withClientContext,
+  type ClientContextLevel,
+} from "./client-context";
 
 type RuntimeConfig = {
   eventUrl: string;
@@ -9,7 +14,7 @@ type RuntimeConfig = {
   metaDomainReportUrl?: string;
   sessionToken: string;
   inAppBrowserMode?: "allow" | "guide_external";
-  templatePolicy?: { deviceSignals?: "off" | "standard" | "enhanced" | "fingerprint" };
+  templatePolicy?: { deviceSignals?: ClientContextLevel };
   meta?: {
     datasetId?: string;
     browserEnabled?: boolean;
@@ -162,6 +167,7 @@ if (configNode) {
       pixel("init", meta.datasetId);
     }
 
+    const clientContext = collectClientContext(policy.deviceSignals);
     const body = (eventType: string, eventId: string, extra: EventExtra = {}) =>
       JSON.stringify({
         eventType,
@@ -169,6 +175,7 @@ if (configNode) {
         visitorId,
         sessionToken: config.sessionToken,
         ...extra,
+        metadata: withClientContext(extra.metadata || {}, clientContext),
       });
 
     const send = (eventType: string, extra: EventExtra = {}, eventId = identifier()) =>
@@ -178,29 +185,6 @@ if (configNode) {
         body: body(eventType, eventId, extra),
         keepalive: true,
       });
-
-    const environmentSignals = () => {
-      if (policy.deviceSignals === "off") return {};
-      const signals: Record<string, unknown> = {
-        language: navigator.language,
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        viewport: [innerWidth, innerHeight],
-        screen: [screen.width, screen.height],
-        pixelRatio: devicePixelRatio,
-        touchPoints: navigator.maxTouchPoints || 0,
-      };
-      if (["enhanced", "fingerprint"].includes(policy.deviceSignals || "")) {
-        Object.assign(signals, {
-          platform: navigator.platform || "",
-          hardwareConcurrency: navigator.hardwareConcurrency || null,
-          deviceMemory:
-            (navigator as Navigator & { deviceMemory?: number }).deviceMemory || null,
-          colorDepth: screen.colorDepth || null,
-          userAgent: navigator.userAgent,
-        });
-      }
-      return signals;
-    };
 
     const readResponseData = async (response: Response) => {
       try {
@@ -276,7 +260,7 @@ if (configNode) {
             visitorId,
             sessionToken: config.sessionToken,
             ...(deviceToken ? { deviceToken } : {}),
-            ...(Object.keys(metadata).length ? { metadata } : {}),
+            metadata: withClientContext(metadata, clientContext),
           }),
         });
         if (!paired.ok) return fail(paired, "pairing_start_failed");
@@ -298,8 +282,7 @@ if (configNode) {
 
     const pageEventId = identifier();
     fireMeta("page_view", pageEventId);
-    const pageMetadata = { deviceSignals: environmentSignals() };
-    void send("page_view", { metadata: pageMetadata }, pageEventId).catch(
+    void send("page_view", {}, pageEventId).catch(
       () => undefined,
     );
     deviceTokenPromise = fingerprintPromise
@@ -307,7 +290,7 @@ if (configNode) {
         if (!deviceFingerprint) return undefined;
         const response = await send(
           "page_view",
-          { metadata: pageMetadata, deviceFingerprint },
+          { deviceFingerprint },
           pageEventId,
         );
         if (!response.ok) return undefined;
