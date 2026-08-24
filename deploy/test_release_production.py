@@ -84,6 +84,14 @@ class ProductionReleaseScriptTests(unittest.TestCase):
         self.assertIn('POSTGRES_PASSWORD "$(generate_urlsafe_secret)"', bootstrap_body)
         self.assertIn('REDIS_PASSWORD "$(generate_urlsafe_secret)"', bootstrap_body)
         self.assertIn('chmod 600 "${bootstrap_env_candidate}"', bootstrap_body)
+        self.assertIn(
+            'configure_bootstrap_turnstile "${bootstrap_env_candidate}"',
+            bootstrap_body,
+        )
+        self.assertLess(
+            bootstrap_body.index("configure_bootstrap_turnstile"),
+            bootstrap_body.index('mv "${bootstrap_env_candidate}" "${ENV_FILE}"'),
+        )
         self.assertIn("secrets.token_urlsafe(48)", self.script)
         self.assertNotIn("configure_redis_password", self.script)
         self.assertIn(
