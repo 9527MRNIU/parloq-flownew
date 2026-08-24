@@ -204,7 +204,7 @@ def test_namesilo_purchase_timeout_is_marked_unknown_for_reconciliation() -> Non
     assert caught.value.outcome_unknown is True
 
 
-def test_namesilo_purchase_requires_credit_card_payment_id() -> None:
+def test_namesilo_purchase_uses_account_balance_without_payment_id() -> None:
     captured: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -218,16 +218,16 @@ def test_namesilo_purchase_requires_credit_card_payment_id() -> None:
         "secret-key",
         client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
-    with pytest.raises(PlatformClientError) as raised:
-        client.register_domain(
-            "example.com",
-            1,
-            private=True,
-            auto_renew=False,
-        )
+    amount = client.register_domain(
+        "example.com",
+        1,
+        private=True,
+        auto_renew=False,
+    )
 
-    assert str(raised.value) == "NameSilo 尚未配置信用卡 Payment ID"
-    assert captured == []
+    assert amount == Decimal("12.00")
+    assert len(captured) == 1
+    assert "payment_id" not in captured[0].url.params
 
 
 def test_namesilo_connection_test_is_read_only() -> None:
@@ -310,6 +310,25 @@ def test_namesilo_mit_payment_rejection_has_actionable_message() -> None:
 
     assert "缺少自动扣款授权" in str(raised.value)
     assert "更新 Payment ID" in str(raised.value)
+    assert raised.value.code == "280"
+
+
+def test_namesilo_invalid_billing_profile_has_actionable_message() -> None:
+    class RejectingClient:
+        def register_domain(self, *args, **kwargs):
+            raise PlatformClientError(
+                "The provided billing profile either does not exist, or is not associated with your account.",
+                code="280",
+            )
+
+    registrar = NameSiloDomainRegistrar.__new__(NameSiloDomainRegistrar)
+    registrar._client = RejectingClient()
+
+    with pytest.raises(DomainRegistrarError) as raised:
+        registrar.register("example.com", 1)
+
+    assert "Payment ID" in str(raised.value)
+    assert "改用账户余额" in str(raised.value)
     assert raised.value.code == "280"
 
 

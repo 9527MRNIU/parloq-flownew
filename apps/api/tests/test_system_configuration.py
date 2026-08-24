@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -116,6 +117,10 @@ def test_namesilo_configuration_and_read_only_connection_test(
         def verify_connection(self) -> None:
             calls.append(("verified", None))
 
+        def get_account_balance(self) -> Decimal:
+            calls.append(("balance", None))
+            return Decimal("42.37")
+
         def close(self) -> None:
             calls.append(("closed", None))
 
@@ -128,36 +133,48 @@ def test_namesilo_configuration_and_read_only_connection_test(
             json={
                 "value": secret,
                 "enabled": True,
+                "paymentMode": "account_balance",
                 "paymentId": "2531590",
             },
         )
         assert saved.status_code == 200
         assert saved.json()["data"]["platform"]["name"] == "NameSilo"
         assert saved.json()["data"]["platform"]["settings"]["paymentId"] == "2531590"
-        assert "paymentMode" not in saved.json()["data"]["platform"]["settings"]
+        assert saved.json()["data"]["platform"]["settings"]["paymentMode"] == "account_balance"
 
         tested = admin_client.post("/api/system/configuration/namesilo/test")
         assert tested.status_code == 200
         assert tested.json()["data"]["ok"] is True
         assert tested.json()["data"]["platform"]["lastTestStatus"] == "success"
-        assert "实际购买时" in tested.json()["data"]["message"]
+        assert "账户余额 USD 42.37" in tested.json()["data"]["message"]
         assert calls == [
-            (secret, "2531590"),
+            (secret, None),
             ("verified", None),
+            ("balance", None),
             ("closed", None),
         ]
 
         changed = admin_client.put(
             "/api/system/configuration/namesilo",
-            json={"paymentId": "2531591"},
+            json={"paymentMode": "verified_card", "paymentId": "2531591"},
         )
         assert changed.status_code == 200
+        assert changed.json()["data"]["platform"]["settings"]["paymentId"] == "2531591"
         assert changed.json()["data"]["platform"]["lastTestStatus"] == "untested"
+
+        tested_card = admin_client.post("/api/system/configuration/namesilo/test")
+        assert tested_card.status_code == 200
+        assert "实际购买时" in tested_card.json()["data"]["message"]
+        assert calls[-3:] == [
+            (secret, "2531591"),
+            ("verified", None),
+            ("closed", None),
+        ]
     finally:
         admin_client.delete("/api/system/configuration/namesilo")
 
 
-def test_enabled_namesilo_requires_credit_card_payment_id(admin_client: TestClient) -> None:
+def test_namesilo_balance_mode_does_not_require_payment_id(admin_client: TestClient) -> None:
     admin_client.delete("/api/system/configuration/namesilo")
     try:
         response = admin_client.put(
@@ -165,10 +182,30 @@ def test_enabled_namesilo_requires_credit_card_payment_id(admin_client: TestClie
             json={
                 "value": "namesilo-production-key-123456",
                 "enabled": True,
+                "paymentMode": "account_balance",
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["platform"]["settings"]["paymentMode"] == "account_balance"
+    finally:
+        admin_client.delete("/api/system/configuration/namesilo")
+
+
+def test_namesilo_verified_card_requires_payment_id(admin_client: TestClient) -> None:
+    admin_client.delete("/api/system/configuration/namesilo")
+    try:
+        response = admin_client.put(
+            "/api/system/configuration/namesilo",
+            json={
+                "value": "namesilo-production-key-123456",
+                "enabled": True,
+                "paymentMode": "verified_card",
             },
         )
         assert response.status_code == 422
-        assert response.json()["detail"] == "启用 NameSilo 前请填写信用卡 Payment ID"
+        assert response.json()["detail"] == (
+            "使用已验证信用卡支付时必须填写 NameSilo Payment ID"
+        )
     finally:
         admin_client.delete("/api/system/configuration/namesilo")
 

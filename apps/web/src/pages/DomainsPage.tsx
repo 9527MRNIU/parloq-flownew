@@ -718,8 +718,13 @@ export function DomainsPage() {
     if (!row.id) return;
     if (action === "provision" && row.provider === "namesilo" && !(await confirmAction({
       title: `确认通过 NameSilo 购买 ${row.hostname}？`,
-      description: `确认后将立即向 NameSilo 提交 ${row.years} 年购买请求，预计金额 ${row.currency} ${row.amount.toFixed(2)}。将使用系统配置中已明确选择的 NameSilo 支付方式。`,
+      description: `系统会先核对 NameSilo 账户是否已经持有该域名；只有确认未持有时，才会按系统配置的支付方式提交 ${row.years} 年购买请求，预计金额 ${row.currency} ${row.amount.toFixed(2)}。`,
       confirmText: "确认购买",
+    }))) return;
+    if (action === "reconcile" && !(await confirmAction({
+      title: `同步 ${row.hostname} 的 NameSilo 购买结果？`,
+      description: "系统只会读取 NameSilo 持有状态。确认已持有后会完成本地订单、关闭同域名的重复失败订单，并继续自动接入；不会再次购买该域名。",
+      confirmText: "确认同步",
     }))) return;
     if (action === "cancel" && !(await confirmAction({
       title: `取消域名订单 ${row.hostname}？`,
@@ -1191,7 +1196,10 @@ export function DomainsPage() {
                     itemOrder && Object.values(itemOrder.allowedActions).some(Boolean),
                   );
                   const showsOrderActions = canPurchase && hasActions;
-                  const showsImport = row.providerOwned && !row.systemDomainId && canManage;
+                  const showsImport = row.providerOwned
+                    && !row.systemDomainId
+                    && canManage
+                    && !itemOrder?.allowedActions.reconcile;
                   const currentSystemDomain = isCurrentSystemDomain(
                     row.hostname,
                     currentSystemHostname,
@@ -1241,14 +1249,14 @@ export function DomainsPage() {
                               {busy ? <Spinner /> : null}确认支付并开通
                             </Button>
                           ) : null}
-                          {canPurchase && itemOrder?.allowedActions.provision ? (
+                          {canPurchase && itemOrder?.allowedActions.provision && !row.providerOwned ? (
                             <Button size="sm" disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "provision")}>
-                              {busy ? <Spinner /> : null}确认购买
+                              {busy ? <Spinner /> : null}{itemOrder.status === "failed" ? "重试购买" : "确认购买"}
                             </Button>
                           ) : null}
                           {canPurchase && itemOrder?.allowedActions.reconcile ? (
                             <Button size="sm" variant="outline" disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "reconcile")}>
-                              {busy ? <Spinner /> : null}订单对账
+                              {busy ? <Spinner /> : null}{row.providerOwned ? "同步购买结果" : "订单对账"}
                             </Button>
                           ) : null}
                           {canPurchase && itemOrder?.allowedActions.cancel ? (

@@ -72,6 +72,12 @@ class DomainRegistrar:
     ) -> RegistrationResult:
         raise NotImplementedError
 
+    def find_existing_registration(self, hostname: str) -> RegistrationResult | None:
+        """Return an existing provider registration without creating an order."""
+
+        del hostname
+        return None
+
     def reconcile(self, provider_order_ref: str | None, hostname: str) -> RegistrationResult:
         raise NotImplementedError
 
@@ -206,11 +212,20 @@ class NameSiloDomainRegistrar(DomainRegistrar):
             if exc.outcome_unknown:
                 raise DomainRegistrarUnknownError(str(exc), reference) from exc
             message = str(exc)
-            if "mit charge requires mitidentifier" in message.lower():
+            normalized_message = message.lower()
+            if "mit charge requires mitidentifier" in normalized_message:
                 message = (
                     "NameSilo 已拒绝当前信用卡支付资料（缺少自动扣款授权）。"
                     "请在 NameSilo 重新配置可用于 API 自动扣款的已验证信用卡，"
                     "并在系统配置中更新 Payment ID。"
+                )
+            elif (
+                "billing profile either does not exist" in normalized_message
+                or "not associated with your account" in normalized_message
+            ):
+                message = (
+                    "NameSilo 已拒绝当前 Payment ID：对应信用卡资料不存在或不属于当前 API 账户。"
+                    "请在系统配置中改用账户余额，或填写该账户下的已验证信用卡 Payment ID。"
                 )
             raise DomainRegistrarError(
                 message,
@@ -218,6 +233,15 @@ class NameSiloDomainRegistrar(DomainRegistrar):
                 retryable=exc.retryable,
             ) from exc
         return RegistrationResult(provider_order_ref=reference, amount=amount)
+
+    def find_existing_registration(self, hostname: str) -> RegistrationResult | None:
+        try:
+            owned = self._client.owns_domain(hostname)
+        except PlatformClientError as exc:
+            raise DomainRegistrarError(str(exc)) from exc
+        if not owned:
+            return None
+        return RegistrationResult(provider_order_ref=f"namesilo:{hostname}")
 
     def reconcile(
         self,
@@ -227,10 +251,7 @@ class NameSiloDomainRegistrar(DomainRegistrar):
         expected = f"namesilo:{hostname}"
         if provider_order_ref and provider_order_ref != expected:
             raise DomainRegistrarError("NameSilo 订单域名不匹配")
-        try:
-            owned = self._client.owns_domain(hostname)
-        except PlatformClientError as exc:
-            raise DomainRegistrarError(str(exc)) from exc
-        if not owned:
+        result = self.find_existing_registration(hostname)
+        if result is None:
             raise DomainRegistrarError("NameSilo 账户中尚未找到该域名")
-        return RegistrationResult(provider_order_ref=expected)
+        return result

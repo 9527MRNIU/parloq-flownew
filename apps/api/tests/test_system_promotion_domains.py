@@ -16,7 +16,11 @@ from app.main import app
 from app.models import DomainOrder, DomainQuote, DomainRecord, UserAccount
 from app.routers import domains as domains_router
 from app.security import utcnow
-from app.services.domain_registrar import DomainRegistrarError, MockDomainRegistrar
+from app.services.domain_registrar import (
+    DomainRegistrarError,
+    MockDomainRegistrar,
+    RegistrationResult,
+)
 from app.snowflake import new_public_id
 
 
@@ -580,6 +584,142 @@ def test_definitive_provider_rejection_can_be_safely_retried_once(
     duplicate = admin_client.post(f"/api/domain-orders/{order['id']}/provision")
     assert duplicate.status_code == 409
     assert registrar.attempts == 2
+
+
+def test_failed_namesilo_order_reconciles_manual_purchase_and_closes_duplicates(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
+    hostname = "manual-namesilo-purchase.example"
+    with SessionLocal() as db:
+        admin = db.scalar(select(UserAccount).where(UserAccount.username == "admin"))
+        assert admin is not None
+        orders: list[DomainOrder] = []
+        for index in range(2):
+            quote = DomainQuote(
+                public_id=new_public_id("dquote"),
+                hostname=hostname,
+                years=1,
+                amount=12,
+                currency="USD",
+                provider="namesilo",
+                expires_at=utcnow() + timedelta(minutes=15),
+                consumed_at=utcnow(),
+                created_by=admin.id,
+            )
+            db.add(quote)
+            db.flush()
+            order = DomainOrder(
+                public_id=new_public_id("dord"),
+                quote_id=quote.id,
+                hostname=hostname,
+                years=1,
+                amount=12,
+                currency="USD",
+                status="failed",
+                provider="namesilo",
+                failure_reason=f"failed attempt {index + 1}",
+                created_by=admin.id,
+            )
+            db.add(order)
+            orders.append(order)
+        db.commit()
+        newest_order_id = str(orders[-1].id)
+        older_order_id = orders[0].id
+
+    class ExistingRegistrationRegistrar(MockDomainRegistrar):
+        def find_existing_registration(self, checked_hostname: str):
+            assert checked_hostname == hostname
+            return RegistrationResult(provider_order_ref=f"namesilo:{checked_hostname}")
+
+        def reconcile(self, provider_order_ref: str | None, checked_hostname: str):
+            assert provider_order_ref is None
+            return self.find_existing_registration(checked_hostname)
+
+        def register(self, *args, **kwargs):
+            raise AssertionError("an owned domain must never be purchased again")
+
+    registrar = ExistingRegistrationRegistrar()
+    monkeypatch.setattr(domains_router, "_registrar", lambda _db, provider=None: registrar)
+
+    failed_row = next(
+        row
+        for row in admin_client.get("/api/domain-orders").json()["data"]["rows"]
+        if row["id"] == newest_order_id
+    )
+    assert failed_row["allowedActions"]["reconcile"] is True
+
+    reconciled = admin_client.post(
+        f"/api/domain-orders/{newest_order_id}/reconcile"
+    )
+    assert reconciled.status_code == 200, reconciled.text
+    assert reconciled.json()["data"]["order"]["status"] == "completed"
+    assert reconciled.json()["data"]["domain"]["hostname"] == hostname
+
+    with SessionLocal() as db:
+        older = db.get(DomainOrder, older_order_id)
+        assert older is not None
+        assert older.status == "cancelled"
+        assert "重复失败订单" in (older.failure_reason or "")
+
+
+def test_namesilo_provision_checks_existing_registration_before_purchase(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
+    hostname = "already-owned-before-provision.example"
+    with SessionLocal() as db:
+        admin = db.scalar(select(UserAccount).where(UserAccount.username == "admin"))
+        assert admin is not None
+        quote = DomainQuote(
+            public_id=new_public_id("dquote"),
+            hostname=hostname,
+            years=1,
+            amount=12,
+            currency="USD",
+            provider="namesilo",
+            expires_at=utcnow() + timedelta(minutes=15),
+            consumed_at=utcnow(),
+            created_by=admin.id,
+        )
+        db.add(quote)
+        db.flush()
+        order = DomainOrder(
+            public_id=new_public_id("dord"),
+            quote_id=quote.id,
+            hostname=hostname,
+            years=1,
+            amount=12,
+            currency="USD",
+            status="purchase_ready",
+            provider="namesilo",
+            created_by=admin.id,
+        )
+        db.add(order)
+        db.commit()
+        order_id = str(order.id)
+
+    class ExistingRegistrationRegistrar(MockDomainRegistrar):
+        def find_existing_registration(self, checked_hostname: str):
+            assert checked_hostname == hostname
+            return RegistrationResult(provider_order_ref=f"namesilo:{checked_hostname}")
+
+        def quote(self, *args, **kwargs):
+            raise AssertionError("an owned domain must not be quoted for repurchase")
+
+        def register(self, *args, **kwargs):
+            raise AssertionError("an owned domain must never be purchased again")
+
+    monkeypatch.setattr(
+        domains_router,
+        "_registrar",
+        lambda _db, provider=None: ExistingRegistrationRegistrar(),
+    )
+
+    completed = admin_client.post(f"/api/domain-orders/{order_id}/provision")
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["data"]["order"]["status"] == "completed"
+    assert completed.json()["data"]["domain"]["hostname"] == hostname
 
 
 def test_real_registrar_quote_creates_purchase_ready_order(

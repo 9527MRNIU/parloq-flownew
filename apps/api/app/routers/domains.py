@@ -51,8 +51,10 @@ from app.services.domain_registrar import (
 )
 from app.services.platform_clients import (
     CloudflareClient,
+    NAMESILO_PAYMENT_VERIFIED_CARD,
     NameSiloClient,
     PlatformClientError,
+    namesilo_payment_mode,
 )
 router = APIRouter(prefix="/api/domains", tags=["domains"])
 order_router = APIRouter(prefix="/api/domain-orders", tags=["domain-orders"])
@@ -312,11 +314,16 @@ def _registrar(
     except ValueError as exc:
         raise HTTPException(status_code=503, detail="NameSilo 凭据无法读取，请重新配置") from exc
     settings = dict(config.settings_json or {})
-    payment_id = str(settings.get("paymentId") or "").strip() or None
-    if payment_id is None:
+    payment_mode = namesilo_payment_mode(settings.get("paymentMode"))
+    payment_id = (
+        str(settings.get("paymentId") or "").strip() or None
+        if payment_mode == NAMESILO_PAYMENT_VERIFIED_CARD
+        else None
+    )
+    if payment_mode == NAMESILO_PAYMENT_VERIFIED_CARD and payment_id is None:
         raise HTTPException(
             status_code=503,
-            detail="NameSilo 尚未配置信用卡 Payment ID",
+            detail="NameSilo 已选择信用卡支付，但尚未配置 Payment ID",
         )
     return NameSiloDomainRegistrar(api_key, payment_id=payment_id)
 
@@ -449,6 +456,10 @@ def _order_row(db: DbSession, item: DomainOrder) -> dict:
     can_reconcile = item.status == "unknown" or (
         item.status == "provisioning"
         and updated_at <= utcnow() - timedelta(minutes=5)
+    ) or (
+        item.status == "failed"
+        and item.provider == "namesilo"
+        and item.provider_order_ref is None
     )
     return {
         "id": entity_id(item),
@@ -1216,31 +1227,58 @@ def mock_pay_domain_order(
 
 def _complete_order(db: DbSession, item: DomainOrder, provider_order_ref: str) -> DomainRecord:
     now = utcnow()
-    domain = DomainRecord(
-        public_id=new_public_id("dom"),
-        hostname=item.hostname,
-        acquisition_type="purchased",
-        management_mode="platform",
-        registrar_provider=item.provider,
-        registration_status="active",
-        expires_at=now + timedelta(days=365 * item.years),
-        auto_renew=item.auto_renew,
-        hosting_provider="cloudflare",
-        hosting_status="pending",
-        verification_token=secrets.token_urlsafe(24),
-        enabled=True,
-        dns_status="untested",
-        ssl_status="untested",
-        created_by=item.created_by,
+    domain = db.scalar(
+        select(DomainRecord).where(DomainRecord.hostname == item.hostname)
     )
-    db.add(domain)
-    db.flush()
+    if domain is None:
+        domain = DomainRecord(
+            public_id=new_public_id("dom"),
+            hostname=item.hostname,
+            acquisition_type="purchased",
+            management_mode="platform",
+            registrar_provider=item.provider,
+            registration_status="active",
+            expires_at=now + timedelta(days=365 * item.years),
+            auto_renew=item.auto_renew,
+            hosting_provider="cloudflare",
+            hosting_status="pending",
+            verification_token=secrets.token_urlsafe(24),
+            enabled=True,
+            dns_status="untested",
+            ssl_status="untested",
+            created_by=item.created_by,
+        )
+        db.add(domain)
+        db.flush()
+    else:
+        domain.acquisition_type = "purchased"
+        domain.management_mode = "platform"
+        domain.registrar_provider = item.provider
+        domain.registration_status = "active"
+        domain.auto_renew = item.auto_renew
     item.provider_order_ref = provider_order_ref
     item.domain_id = domain.id
     item.status = "completed"
+    item.failure_reason = None
     if item.paid_at is None:
         item.paid_at = now
     item.completed_at = now
+    db.execute(
+        update(DomainOrder)
+        .where(
+            DomainOrder.id != item.id,
+            DomainOrder.hostname == item.hostname,
+            DomainOrder.provider == item.provider,
+            DomainOrder.status == "failed",
+            DomainOrder.provider_order_ref.is_(None),
+        )
+        .values(
+            status="cancelled",
+            failure_reason="同域名已由另一订单完成购买，本重复失败订单已自动关闭",
+            updated_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    )
     return domain
 
 
@@ -1274,6 +1312,21 @@ def provision_domain_order(
     db.refresh(item)
     provider_order_ref: str | None = None
     try:
+        existing_registration = registrar.find_existing_registration(item.hostname)
+        if existing_registration is not None:
+            domain = _complete_order(
+                db,
+                item,
+                existing_registration.provider_order_ref,
+            )
+            db.commit()
+            db.refresh(item)
+            return {
+                "data": {
+                    "order": _order_row(db, item),
+                    "domain": domain_row(db, domain),
+                }
+            }
         current_quote = registrar.quote(item.hostname, item.years)
         if not current_quote.available:
             raise DomainRegistrarError("域名已不可购买")
@@ -1338,8 +1391,17 @@ def reconcile_domain_order(
     stale_before = utcnow() - timedelta(minutes=5)
     updated_at = item.updated_at.replace(tzinfo=item.updated_at.tzinfo or UTC)
     stale_provisioning = item.status == "provisioning" and updated_at <= stale_before
-    if item.status != "unknown" and not stale_provisioning:
-        raise HTTPException(status_code=409, detail="只有结果未知或开通租约超时的订单需要对账")
+    failed_namesilo = (
+        item.status == "failed"
+        and item.provider == "namesilo"
+        and item.provider_order_ref is None
+    )
+    if item.status != "unknown" and not stale_provisioning and not failed_namesilo:
+        raise HTTPException(
+            status_code=409,
+            detail="只有结果未知、NameSilo 失败订单或开通租约超时的订单需要对账",
+        )
+    previous_failure_reason = item.failure_reason
     registrar = _registrar(db, provider=item.provider)
     transitioned = db.execute(
         update(DomainOrder)
@@ -1347,6 +1409,11 @@ def reconcile_domain_order(
             DomainOrder.id == item.id,
             or_(
                 DomainOrder.status == "unknown",
+                and_(
+                    DomainOrder.status == "failed",
+                    DomainOrder.provider == "namesilo",
+                    DomainOrder.provider_order_ref.is_(None),
+                ),
                 and_(
                     DomainOrder.status == "provisioning",
                     DomainOrder.updated_at <= stale_before,
@@ -1368,10 +1435,18 @@ def reconcile_domain_order(
         db.commit()
     except (DomainRegistrarError, IntegrityError) as exc:
         db.rollback()
-        unknown = _order(db, order_id, current_user)
-        unknown.status = "unknown"
-        unknown.failure_reason = "注册商对账未完成，禁止重新购买"
-        unknown.last_reconciled_at = utcnow()
+        unresolved = _order(db, order_id, current_user)
+        unresolved.last_reconciled_at = utcnow()
+        if failed_namesilo and isinstance(exc, DomainRegistrarError):
+            unresolved.status = "failed"
+            unresolved.failure_reason = previous_failure_reason
+            db.commit()
+            raise HTTPException(
+                status_code=409,
+                detail="NameSilo 当前账户中尚未找到该域名，失败订单保持不变",
+            ) from exc
+        unresolved.status = "unknown"
+        unresolved.failure_reason = "注册商对账未完成，禁止重新购买"
         db.commit()
         raise HTTPException(status_code=502, detail="注册商对账失败，订单仍保持未知状态") from exc
     finally:

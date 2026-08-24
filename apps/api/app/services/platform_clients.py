@@ -27,6 +27,25 @@ class PlatformClientError(RuntimeError):
         self.retryable = retryable
 
 
+NAMESILO_PAYMENT_ACCOUNT_BALANCE = "account_balance"
+NAMESILO_PAYMENT_VERIFIED_CARD = "verified_card"
+
+
+def namesilo_payment_mode(value: object) -> str:
+    """Normalize persisted NameSilo payment settings.
+
+    Legacy configurations did not persist an explicit mode. Default them to
+    account balance so an old or unrelated card profile is never charged
+    implicitly after this option is introduced.
+    """
+
+    return (
+        NAMESILO_PAYMENT_VERIFIED_CARD
+        if str(value or "").strip() == NAMESILO_PAYMENT_VERIFIED_CARD
+        else NAMESILO_PAYMENT_ACCOUNT_BALANCE
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class NameSiloDomainOption:
     domain: str
@@ -286,6 +305,14 @@ class NameSiloClient:
     def verify_connection(self) -> None:
         self._request("listDomains", page=1, pageSize=1)
 
+    def get_account_balance(self) -> Decimal:
+        reply = self._request("getAccountBalance")
+        for key in ("balance", "account_balance", "accountBalance"):
+            amount = _decimal(reply.get(key))
+            if amount is not None:
+                return amount
+        raise PlatformClientError("NameSilo 未返回有效账户余额")
+
     def list_domains(self) -> list[dict[str, str]]:
         """Return every domain visible to the configured NameSilo account."""
 
@@ -373,15 +400,14 @@ class NameSiloClient:
         private: bool,
         auto_renew: bool,
     ) -> Decimal:
-        if self._payment_id is None:
-            raise PlatformClientError("NameSilo 尚未配置信用卡 Payment ID")
         params: dict[str, object] = {
             "domain": domain,
             "years": years,
             "private": "1" if private else "0",
             "auto_renew": "1" if auto_renew else "0",
-            "payment_id": self._payment_id,
         }
+        if self._payment_id is not None:
+            params["payment_id"] = self._payment_id
         reply = self._request(
             "registerDomain",
             success_codes=frozenset({"300", "301", "302"}),

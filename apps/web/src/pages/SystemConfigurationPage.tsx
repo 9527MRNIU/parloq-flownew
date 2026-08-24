@@ -31,6 +31,7 @@ import {
 import { StandardListPage } from "../components/list-page";
 
 type PlatformSettings = {
+  paymentMode?: "account_balance" | "verified_card";
   paymentId?: string;
   accountId?: string;
   baseUrl?: string;
@@ -83,6 +84,7 @@ function platformRows(payload: unknown): PlatformConfiguration[] {
       maskedValue: String(row.maskedValue || ""),
       enabled: Boolean(row.enabled),
       settings: {
+        paymentMode: settings.paymentMode === "verified_card" ? "verified_card" : "account_balance",
         paymentId: String(settings.paymentId || ""),
         accountId: String(settings.accountId || ""),
         baseUrl: String(settings.baseUrl || ""),
@@ -106,6 +108,7 @@ function draftsFromRows(rows: PlatformConfiguration[]): Record<string, PlatformD
       {
         value: "",
         enabled: row.enabled,
+        paymentMode: row.settings.paymentMode || "account_balance",
         paymentId: row.settings.paymentId || "",
         accountId: row.settings.accountId || "",
         baseUrl: row.settings.baseUrl || "",
@@ -169,8 +172,13 @@ export function SystemConfigurationPage() {
       toast.error("NameSilo 支付 ID 只能包含数字");
       return;
     }
-    if (row.key === "namesilo" && draft.enabled && !draft.paymentId?.trim()) {
-      toast.error("启用 NameSilo 前必须填写信用卡 Payment ID");
+    if (
+      row.key === "namesilo"
+      && draft.enabled
+      && draft.paymentMode === "verified_card"
+      && !draft.paymentId?.trim()
+    ) {
+      toast.error("使用已验证信用卡支付时必须填写 NameSilo Payment ID");
       return;
     }
     if (row.key === "baota" && draft.enabled && !draft.baseUrl?.trim()) {
@@ -188,7 +196,12 @@ export function SystemConfigurationPage() {
         body: JSON.stringify({
           ...(credential ? { value: credential } : {}),
           enabled: draft.enabled,
-          ...(row.key === "namesilo" ? { paymentId: draft.paymentId?.trim() || "" } : {}),
+          ...(row.key === "namesilo"
+            ? {
+                paymentMode: draft.paymentMode || "account_balance",
+                paymentId: draft.paymentId?.trim() || "",
+              }
+            : {}),
           ...(row.key === "cloudflare" ? { accountId: draft.accountId?.trim() || "" } : {}),
           ...(row.key === "baota" ? { baseUrl: draft.baseUrl?.trim() || "" } : {}),
           ...(row.key === "github"
@@ -399,22 +412,43 @@ export function SystemConfigurationPage() {
                   </DrawerFormField>
 
                   {row.key === "namesilo" ? (
-                    <DrawerFormField
-                      label="Payment ID"
-                      htmlFor="system-namesilo-payment-id"
-                      hint="NameSilo 中已验证、可用于 API 自动扣款的信用卡 ID。"
-                    >
-                      <Input
-                        id="system-namesilo-payment-id"
-                        inputMode="numeric"
-                        autoComplete="off"
-                        value={draft.paymentId || ""}
-                        disabled={busy}
-                        onChange={(event) => updateDraft(row.key, { paymentId: event.target.value })}
-                        placeholder="输入 NameSilo Payment ID"
-                        className="max-w-2xl"
-                      />
-                    </DrawerFormField>
+                    <>
+                      <DrawerFormField label="支付方式" htmlFor="system-namesilo-payment-mode">
+                        <Select
+                          value={draft.paymentMode || "account_balance"}
+                          disabled={busy}
+                          onValueChange={(paymentMode) => updateDraft(row.key, {
+                            paymentMode: paymentMode as PlatformSettings["paymentMode"],
+                          })}
+                        >
+                          <SelectTrigger id="system-namesilo-payment-mode" className="w-full max-w-2xl">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="account_balance">NameSilo 账户余额</SelectItem>
+                            <SelectItem value="verified_card">已验证信用卡</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </DrawerFormField>
+                      <DrawerFormField
+                        label="Payment ID"
+                        htmlFor="system-namesilo-payment-id"
+                        hint={draft.paymentMode === "verified_card"
+                          ? "当前购买将使用这个已验证信用卡 ID。"
+                          : "保留信用卡 ID 便于随时切换；余额模式不会向 NameSilo 传递该值。"}
+                      >
+                        <Input
+                          id="system-namesilo-payment-id"
+                          inputMode="numeric"
+                          autoComplete="off"
+                          value={draft.paymentId || ""}
+                          disabled={busy}
+                          onChange={(event) => updateDraft(row.key, { paymentId: event.target.value })}
+                          placeholder="输入 NameSilo Payment ID"
+                          className="max-w-2xl"
+                        />
+                      </DrawerFormField>
+                    </>
                   ) : null}
 
                   {row.key === "cloudflare" ? (
