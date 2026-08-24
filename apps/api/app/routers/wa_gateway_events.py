@@ -19,9 +19,13 @@ from app.models import (
     HyperlinkTaskDelivery,
     MessageDelivery,
     PersonalAccount,
+    PromotionChannel,
 )
 from app.routers.personal_accounts import delivery_row
 from app.security import utcnow
+from app.services.pairing_observability import (
+    persist_pairing_attempt_failure_event,
+)
 
 
 router = APIRouter(prefix="/api/internal/wa-gateway", tags=["internal-wa-gateway"])
@@ -238,20 +242,40 @@ def _account_state_event(payload: dict) -> dict:
                         sync_policy=attempt.sync_policy_json,
                         sync_policy_version=attempt.sync_policy_version,
                     )
-                elif to_state == "unpaired" and reason in {
-                    "pairing_expired",
-                    "pairing_cancelled",
-                    "pairing_failed",
-                    "pairing_connection_lost",
-                }:
+                elif (
+                    to_state == "unpaired"
+                    and reason
+                    in {
+                        "pairing_expired",
+                        "pairing_cancelled",
+                        "pairing_failed",
+                        "pairing_connection_lost",
+                        "pairing_interrupted",
+                        "logged_out",
+                        "manual_logout",
+                    }
+                ) or to_state in {"reauth_required", "restricted"}:
+                    terminal_reason = reason or to_state
                     attempt.status = {
                         "pairing_expired": "expired",
                         "pairing_cancelled": "cancelled",
-                    }.get(reason, "failed")
-                    attempt.terminal_reason = reason
+                    }.get(terminal_reason, "failed")
+                    attempt.terminal_reason = terminal_reason
                     attempt.provider_code = provider_code
                     if attempt.attempt_type == "initial":
                         account.admission_status = "abandoned"
+                    channel = db.get(PromotionChannel, attempt.channel_id)
+                    if channel is not None:
+                        persist_pairing_attempt_failure_event(
+                            db,
+                            channel=channel,
+                            attempt=attempt,
+                            account=account,
+                            reason_code=terminal_reason,
+                            stage="gateway_state",
+                            provider_code=provider_code,
+                            occurred_at=occurred_at,
+                        )
         db.commit()
         if wakeup_group_id is not None:
             from app.services.account_group_wakeups import (

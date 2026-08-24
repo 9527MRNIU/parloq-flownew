@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models import PromotionChannel, PromotionEvent, PromotionVisitor
+from app.models import (
+    AccountPairingAttempt,
+    PersonalAccount,
+    PromotionChannel,
+    PromotionEvent,
+    PromotionLead,
+    PromotionVisitor,
+)
 from app.security import utcnow
 from app.snowflake import new_public_id
 
@@ -43,6 +52,7 @@ PAIRING_FAILURE_ALIASES = {
     "gateway_failed": "gateway_failed",
     "pairing_start_failed": "gateway_failed",
     "pairing_failed": "gateway_failed",
+    "pairing_interrupted": "gateway_failed",
     "pairing_connection_lost": "gateway_failed",
     "connection_lost": "gateway_failed",
     "protocol_disconnect": "gateway_failed",
@@ -74,7 +84,7 @@ def persist_pairing_failure_event(
     db: Session,
     *,
     channel: PromotionChannel,
-    promotion_visitor: PromotionVisitor,
+    promotion_visitor: PromotionVisitor | None,
     reason_code: str,
     stage: str,
     traffic_source: str,
@@ -85,7 +95,7 @@ def persist_pairing_failure_event(
     detail_code: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> PromotionEvent:
-    """Persist one pre-attempt loss per visitor, reason and UTC day.
+    """Persist one pre-attempt loss per identifiable source, reason and UTC day.
 
     Pairing attempts remain authoritative after an attempt row exists. This
     event covers only failures that happen before that row can be created.
@@ -93,9 +103,16 @@ def persist_pairing_failure_event(
 
     canonical = canonical_pairing_failure_reason(reason_code)
     occurred_at = utcnow()
+    if promotion_visitor is not None:
+        subject = f"visitor:{promotion_visitor.id}"
+    else:
+        user_agent = str((request_context or {}).get("userAgent") or "")[:512]
+        anonymous_source = f"{source_ip or 'unknown'}\n{user_agent}"
+        subject = "anonymous:" + hashlib.sha256(
+            anonymous_source.encode("utf-8")
+        ).hexdigest()[:24]
     idempotency_key = (
-        f"pairing_failed:{occurred_at.date().isoformat()}:{canonical}:"
-        f"{promotion_visitor.id}"
+        f"pairing_failed:{occurred_at.date().isoformat()}:{canonical}:{subject}"
     )
     existing = db.scalar(
         select(PromotionEvent).where(
@@ -119,7 +136,9 @@ def persist_pairing_failure_event(
         channel_id=channel.id,
         event_type="pairing_failed",
         idempotency_key=idempotency_key,
-        promotion_visitor_id=promotion_visitor.id,
+        promotion_visitor_id=(
+            promotion_visitor.id if promotion_visitor is not None else None
+        ),
         occurred_at=occurred_at,
         country_code=channel.country_code,
         source_ip=source_ip,
@@ -139,4 +158,86 @@ def persist_pairing_failure_event(
                 PromotionEvent.idempotency_key == idempotency_key,
             )
         )
+    return event
+
+
+def persist_pairing_attempt_failure_event(
+    db: Session,
+    *,
+    channel: PromotionChannel,
+    attempt: AccountPairingAttempt,
+    account: PersonalAccount,
+    reason_code: str,
+    stage: str,
+    provider_code: str | None = None,
+    occurred_at: datetime | None = None,
+) -> PromotionEvent:
+    """Project one terminal pairing-attempt failure into promotion monitoring."""
+
+    idempotency_key = f"pairing_failed:attempt:{attempt.id}"
+    existing = db.scalar(
+        select(PromotionEvent).where(
+            PromotionEvent.channel_id == channel.id,
+            PromotionEvent.idempotency_key == idempotency_key,
+        )
+    )
+    if existing is not None:
+        return existing
+
+    canonical = canonical_pairing_failure_reason(reason_code)
+    traffic_source = (
+        "fission"
+        if account.source_ref_type == "promotion_channel_fission"
+        else "direct"
+    )
+    lead = db.scalar(
+        select(PromotionLead)
+        .where(
+            PromotionLead.channel_id == channel.id,
+            PromotionLead.phone_e164 == account.phone_e164,
+        )
+        .order_by(PromotionLead.last_seen_at.desc())
+        .limit(1)
+    )
+    metadata: dict[str, Any] = {
+        "reasonCode": canonical,
+        "reasonLabel": PAIRING_FAILURE_LABELS[canonical],
+        "detailCode": reason_code,
+        "stage": stage,
+        "trafficSource": traffic_source,
+        "attemptId": str(attempt.id),
+        "accountId": str(account.id),
+        "attemptType": attempt.attempt_type,
+    }
+    if provider_code:
+        metadata["providerCode"] = provider_code
+    event = PromotionEvent(
+        public_id=new_public_id("pevt"),
+        channel_id=channel.id,
+        event_type="pairing_failed",
+        idempotency_key=idempotency_key,
+        promotion_visitor_id=attempt.promotion_visitor_id,
+        lead_id=lead.id if lead is not None else None,
+        occurred_at=occurred_at or utcnow(),
+        country_code=channel.country_code,
+        source_ip=attempt.source_ip,
+        visitor_country_code=attempt.visitor_country_code,
+        network_source=attempt.network_source,
+        request_context_json=dict(attempt.request_context_json or {}),
+        metadata_json=metadata,
+    )
+    try:
+        with db.begin_nested():
+            db.add(event)
+            db.flush()
+    except IntegrityError:
+        duplicate = db.scalar(
+            select(PromotionEvent).where(
+                PromotionEvent.channel_id == channel.id,
+                PromotionEvent.idempotency_key == idempotency_key,
+            )
+        )
+        if duplicate is None:
+            raise
+        return duplicate
     return event

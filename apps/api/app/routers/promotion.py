@@ -32,6 +32,7 @@ from app.business_schemas import (
     AdMetricImport,
     AdMetricInput,
     AdMetricUpdate,
+    DEVICE_FINGERPRINT_PATTERN,
     MetaDomainUnavailableInput,
     PromotionChannelCreate,
     PromotionChannelUpdate,
@@ -73,6 +74,7 @@ from app.serializers import iso
 from app.services.pairing_observability import (
     PAIRING_FAILURE_LABELS,
     canonical_pairing_failure_reason,
+    persist_pairing_attempt_failure_event,
     persist_pairing_failure_event,
 )
 from app.services.promotion_integrations import (
@@ -337,7 +339,7 @@ def _recorded_pairing_failure_response(
     *,
     network: RequestNetwork,
     request_context: dict | None = None,
-    promotion_visitor: PromotionVisitor,
+    promotion_visitor: PromotionVisitor | None,
     traffic_source: str,
     code: str,
     message: str,
@@ -2802,42 +2804,73 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
     try:
         payload = PromotionPairingStart.model_validate_json(raw_body)
     except ValidationError as exc:
-        phone_error = any("phone" in error.get("loc", ()) for error in exc.errors())
-        if phone_error:
-            try:
-                raw_payload = json.loads(raw_body)
-                raw_fingerprint = str(raw_payload.get("deviceFingerprint") or "")
-                if not re.fullmatch(
-                    r"(?:[0-9a-f]{32}|fb_[a-z0-9]+_[0-9]{10,16})",
-                    raw_fingerprint,
-                ):
-                    raise ValueError("missing device fingerprint")
-                channel = _public_channel(db, slug, request)
-                from app.services.device_fingerprints import resolve_promotion_visitor
+        errors = exc.errors(include_url=False)
+        validation_fields = sorted(
+            {
+                str(error.get("loc", ("body",))[0])
+                if error.get("loc")
+                else "body"
+                for error in errors
+            }
+        )
+        validation_types = sorted(
+            {str(error.get("type") or "invalid")[:64] for error in errors}
+        )
+        phone_only = validation_fields == ["phone"]
+        detail_code = (
+            "invalid_phone"
+            if phone_only
+            else "device_identity_invalid"
+            if validation_fields == ["deviceFingerprint"]
+            else "invalid_metadata"
+            if validation_fields == ["metadata"]
+            else "malformed_request_body"
+            if validation_fields == ["body"]
+            else "invalid_request"
+        )
+        try:
+            channel = _public_channel(db, slug, request)
+        except HTTPException:
+            raise HTTPException(status_code=422, detail=errors) from None
 
-                invalid_visitor, _ = resolve_promotion_visitor(
-                    db,
-                    tenant_id=channel.created_by,
-                    raw_fingerprint=raw_fingerprint,
-                )
-            except (HTTPException, TypeError, ValueError, json.JSONDecodeError):
-                pass
-            else:
-                return _recorded_pairing_failure_response(
-                    db,
-                    channel,
-                    network=network,
-                    request_context=request_snapshot,
-                    promotion_visitor=invalid_visitor,
-                    traffic_source=traffic_source,
-                    code="invalid_phone",
-                    message="请输入有效的手机号码",
-                    status_code=422,
-                    stage="request_validation",
-                )
-        raise HTTPException(
-            status_code=422, detail=exc.errors(include_url=False)
-        ) from None
+        raw_payload: dict = {}
+        try:
+            decoded = json.loads(raw_body)
+            if isinstance(decoded, dict):
+                raw_payload = decoded
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+        raw_fingerprint = str(raw_payload.get("deviceFingerprint") or "")
+        invalid_visitor = None
+        if re.fullmatch(DEVICE_FINGERPRINT_PATTERN, raw_fingerprint):
+            from app.services.device_fingerprints import resolve_promotion_visitor
+
+            invalid_visitor, _ = resolve_promotion_visitor(
+                db,
+                tenant_id=channel.created_by,
+                raw_fingerprint=raw_fingerprint,
+            )
+        return _recorded_pairing_failure_response(
+            db,
+            channel,
+            network=network,
+            request_context=request_snapshot,
+            promotion_visitor=invalid_visitor,
+            traffic_source=traffic_source,
+            code="invalid_phone" if phone_only else "invalid_request",
+            message=(
+                "请输入有效的手机号码"
+                if phone_only
+                else "请求信息无效，请刷新页面后重试"
+            ),
+            status_code=422,
+            stage="request_validation",
+            detail_code=detail_code,
+            metadata={
+                "validationFields": validation_fields,
+                "validationTypes": validation_types,
+            },
+        )
     channel = _public_channel(db, slug, request)
     from app.services.device_fingerprints import resolve_promotion_visitor
 
@@ -2993,6 +3026,19 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             active_attempt.terminal_reason = "pairing_expired"
             if active_attempt.attempt_type == "initial":
                 item.admission_status = "abandoned"
+            attempt_channel = db.get(
+                PromotionChannel, active_attempt.channel_id
+            )
+            if attempt_channel is not None:
+                persist_pairing_attempt_failure_event(
+                    db,
+                    channel=attempt_channel,
+                    attempt=active_attempt,
+                    account=item,
+                    reason_code="pairing_expired",
+                    stage="pairing_status",
+                    occurred_at=now,
+                )
             active_attempt = None
         if active_attempt is not None and active_attempt.channel_id != channel.id:
             db.rollback()
@@ -3001,7 +3047,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-            promotion_visitor=promotion_visitor,
+                promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="pairing_in_progress",
                 message="该号码已有正在进行的绑定请求",
@@ -3019,7 +3065,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-            promotion_visitor=promotion_visitor,
+                promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="pairing_in_progress",
                 message="该号码已有正在进行的绑定请求",
@@ -3052,6 +3098,15 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             active_attempt.terminal_reason = "protocol_unavailable"
             if active_attempt.attempt_type == "initial":
                 item.admission_status = "abandoned"
+            persist_pairing_attempt_failure_event(
+                db,
+                channel=channel,
+                attempt=active_attempt,
+                account=item,
+                reason_code="protocol_unavailable",
+                stage="protocol_routing",
+                occurred_at=now,
+            )
             db.commit()
             return _public_pairing_error(
                 409,
@@ -3078,7 +3133,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-            promotion_visitor=promotion_visitor,
+                promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="protocol_unavailable",
                 message="该账号所属协议节点当前不可用",
@@ -3097,7 +3152,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-            promotion_visitor=promotion_visitor,
+                promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="protocol_capacity_limited",
                 message="该账号所属协议节点当前配对繁忙",
@@ -3115,7 +3170,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-            promotion_visitor=promotion_visitor,
+                promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="protocol_unavailable",
                 message="当前没有可用的协议节点，请稍后再试",
@@ -3133,7 +3188,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-            promotion_visitor=promotion_visitor,
+                promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="channel_configuration_unavailable",
                 message="当前渠道暂时无法接入账号，请联系管理员",
@@ -3154,7 +3209,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-            promotion_visitor=promotion_visitor,
+                promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="channel_configuration_unavailable",
                 message="当前渠道暂时无法接入账号，请联系管理员",
@@ -3197,7 +3252,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-            promotion_visitor=promotion_visitor,
+                promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="number_unavailable",
                 message="该号码当前不能在这里绑定",
@@ -3233,7 +3288,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                     channel,
                     network=network,
                     request_context=request_snapshot,
-            promotion_visitor=promotion_visitor,
+                    promotion_visitor=promotion_visitor,
                     traffic_source=str(traffic_source),
                     code="account_already_linked",
                     message="该号码已经绑定并可用，无需重复绑定",
@@ -3245,7 +3300,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-            promotion_visitor=promotion_visitor,
+                promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="number_unavailable",
                 message="该号码当前不能在这里绑定",
@@ -3313,7 +3368,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-            promotion_visitor=promotion_visitor,
+                promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="service_temporarily_unavailable",
                 message="绑定服务暂时不可用，请稍后再试",
@@ -3358,7 +3413,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                     channel,
                     network=network,
                     request_context=request_snapshot,
-            promotion_visitor=promotion_visitor,
+                    promotion_visitor=promotion_visitor,
                     traffic_source=str(traffic_source),
                     code="connection_route_unavailable",
                     message="暂时没有可用的账号连接线路，请稍后再试",
@@ -3534,6 +3589,14 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 failed_attempt.terminal_reason = "pairing_start_failed"
                 if failed_attempt.attempt_type == "initial":
                     failed.admission_status = "abandoned"
+                persist_pairing_attempt_failure_event(
+                    db,
+                    channel=channel,
+                    attempt=failed_attempt,
+                    account=failed,
+                    reason_code="pairing_start_failed",
+                    stage="pairing_start",
+                )
             db.commit()
         return _public_pairing_error(
             502,
@@ -3774,6 +3837,15 @@ def public_pairing_status(
             if attempt.attempt_type == "initial":
                 item.admission_status = "abandoned"
                 item.validation_status = "failed"
+            persist_pairing_attempt_failure_event(
+                db,
+                channel=channel,
+                attempt=attempt,
+                account=item,
+                reason_code=attempt.terminal_reason,
+                stage="pairing_status",
+                provider_code=attempt.provider_code,
+            )
     db.commit()
     if wakeup_group_id is not None:
         from app.services.account_group_wakeups import (
@@ -3889,6 +3961,14 @@ def cancel_public_pairing(
         item.last_error = "配对已取消"
         if attempt.attempt_type == "initial":
             item.admission_status = "abandoned"
+        persist_pairing_attempt_failure_event(
+            db,
+            channel=channel,
+            attempt=attempt,
+            account=item,
+            reason_code="pairing_cancelled",
+            stage="pairing_cancel",
+        )
         db.commit()
     return JSONResponse(
         {"data": {"pairingStatus": attempt.status, "cancelled": True}},

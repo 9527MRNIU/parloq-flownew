@@ -126,6 +126,34 @@ function networkSourceLabel(value?: string | null) {
   }[value || ""] || "未采集";
 }
 
+function pairingFailureStageLabel(value: unknown) {
+  return {
+    request_validation: "请求校验",
+    preflight_rate_limit: "请求限速",
+    number_check: "号码检查",
+    protocol_routing: "协议路由",
+    channel_configuration: "渠道配置",
+    attempt_rate_limit: "任务限速",
+    connection_route: "连接线路",
+    attempt_creation: "任务创建",
+    pairing_start: "启动配对",
+    pairing_status: "配对状态",
+    pairing_cancel: "取消配对",
+    gateway_state: "网关状态",
+  }[String(value || "")] || String(value || "未记录");
+}
+
+function validationFieldsLabel(value: unknown) {
+  if (!Array.isArray(value) || !value.length) return "-";
+  const labels: Record<string, string> = {
+    body: "请求体",
+    phone: "号码",
+    deviceFingerprint: "设备指纹",
+    metadata: "附加信息",
+  };
+  return value.map((field) => labels[String(field)] || String(field)).join("、");
+}
+
 function SourceBadge({ source }: { source: RecordSource }) {
   const value = sourcePresentation[source];
   return <Badge tone={value.tone}>{value.label}</Badge>;
@@ -178,6 +206,7 @@ function RecordDetail({
   onCopyLanding: (value: string) => void;
 }) {
   const metadata = item.metadata || {};
+  const pairingFailure = item.eventType === "pairing_failed";
   return (
     <div className="flex flex-col gap-5">
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -201,6 +230,45 @@ function RecordDetail({
           </strong>
         </div>
       </div>
+
+      {pairingFailure ? (
+        <div className="rounded-lg border p-4">
+          <div className="mb-3 flex items-center gap-2">
+            <Badge tone="danger">配对失败</Badge>
+            <strong>{String(metadata.reasonLabel || "其他失败")}</strong>
+          </div>
+          <dl className="grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
+            <DefinitionRow
+              label="发生阶段"
+              value={pairingFailureStageLabel(metadata.stage)}
+            />
+            <DefinitionRow
+              label="校验字段"
+              value={validationFieldsLabel(metadata.validationFields)}
+            />
+            <DefinitionRow
+              label="失败代码"
+              value={String(metadata.reasonCode || "unknown")}
+            />
+            <DefinitionRow
+              label="详细代码"
+              value={String(metadata.detailCode || "-")}
+            />
+            {metadata.attemptId ? (
+              <DefinitionRow
+                label="接入任务 ID"
+                value={String(metadata.attemptId)}
+              />
+            ) : null}
+            {metadata.providerCode ? (
+              <DefinitionRow
+                label="网关代码"
+                value={String(metadata.providerCode)}
+              />
+            ) : null}
+          </dl>
+        </div>
+      ) : null}
 
       <div className="grid gap-3 lg:grid-cols-2">
         <div className="rounded-lg border p-4">

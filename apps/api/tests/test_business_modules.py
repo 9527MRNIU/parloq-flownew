@@ -1513,6 +1513,27 @@ def test_landing_pairing_failure_stays_in_intake_records(
     assert attempt["template"]["id"].isdigit()
     assert attempt["template"]["name"]
     assert attempt["template"]["version"]
+    with SessionLocal() as db:
+        failure_event = db.scalar(
+            select(PromotionEvent).where(
+                PromotionEvent.idempotency_key
+                == f"pairing_failed:attempt:{attempt['id']}"
+            )
+        )
+        assert failure_event is not None
+        assert failure_event.lead_id is not None
+        assert failure_event.metadata_json["reasonCode"] == "gateway_failed"
+        assert failure_event.metadata_json["detailCode"] == "pairing_start_failed"
+        assert failure_event.metadata_json["stage"] == "pairing_start"
+        assert failure_event.metadata_json["attemptId"] == attempt["id"]
+
+    detail = admin_client.get(
+        f"/api/promotion/monitoring/records/server/{failure_event.id}"
+    )
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["data"]["record"]["metadata"]["attemptId"] == (
+        attempt["id"]
+    )
 
 
 def test_pre_attempt_protocol_failure_uses_promotion_event_ledger(
@@ -1636,6 +1657,82 @@ def test_invalid_phone_and_rate_limit_are_safe_recorded_failures(
     assert failures["invalid_phone"]["reasonCode"] == "invalid_phone"
     assert failures["rate_limited"]["reasonCode"] == "rate_limited"
     assert failures["rate_limited"]["policyKey"] == "visitorCheck"
+
+
+def test_invalid_fingerprint_is_visible_only_in_promotion_monitoring(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        promotion_router,
+        "resolve_request_network",
+        lambda _request: RequestNetwork("203.0.113.26", "DE", "cloudflare"),
+    )
+    failed = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/pairing/start",
+        json={
+            "phone": "+4915123456804",
+            "deviceFingerprint": "invalid-fingerprint",
+            "metadata": {"componentKit": "account-link-elements/v1"},
+        },
+        headers={"user-agent": "Validation Failure Browser/1.0"},
+    )
+    assert failed.status_code == 422, failed.text
+    assert failed.json()["error"] == {
+        "code": "invalid_request",
+        "message": "请求信息无效，请刷新页面后重试",
+        "retryable": False,
+    }
+
+    with SessionLocal() as db:
+        failure = db.scalar(
+            select(PromotionEvent)
+            .where(
+                PromotionEvent.event_type == "pairing_failed",
+                PromotionEvent.metadata_json["detailCode"].as_string()
+                == "device_identity_invalid",
+            )
+            .order_by(PromotionEvent.created_at.desc())
+        )
+        assert failure is not None
+        assert failure.promotion_visitor_id is None
+        assert failure.source_ip == "203.0.113.26"
+        assert failure.visitor_country_code == "DE"
+        assert failure.request_context_json["userAgent"] == (
+            "Validation Failure Browser/1.0"
+        )
+        assert failure.metadata_json["reasonCode"] == "invalid_request"
+        assert failure.metadata_json["stage"] == "request_validation"
+        assert failure.metadata_json["validationFields"] == [
+            "deviceFingerprint"
+        ]
+        failure_id = str(failure.id)
+        assert db.scalar(
+            select(PersonalAccount).where(
+                PersonalAccount.phone_e164 == "+4915123456804"
+            )
+        ) is None
+
+    monitoring = admin_client.get(
+        "/api/promotion/monitoring/records"
+        "?eventType=pairing_failed&pageSize=100"
+    )
+    assert monitoring.status_code == 200, monitoring.text
+    row = next(
+        item
+        for item in monitoring.json()["data"]["rows"]
+        if item["id"] == failure_id
+    )
+    assert row["source"] == "server"
+    assert row["eventType"] == "pairing_failed"
+    assert row["visitorId"] is None
+    assert row["sourceIp"] == "203.0.113.26"
+
+    intake = admin_client.get(
+        "/api/personal-accounts/intake/attempts?keyword=4915123456804"
+    )
+    assert intake.status_code == 200, intake.text
+    assert intake.json()["data"]["total"] == 0
 
 
 def test_channel_stats_combines_events_and_attempts_into_pairing_funnel(
@@ -1918,10 +2015,71 @@ def test_public_pairing_attempt_can_be_cancelled_with_header_token(
     assert status.status_code == 200, status.text
     assert status.json()["data"]["pairingStatus"] == "cancelled"
     assert status.json()["data"]["verified"] is False
+    with SessionLocal() as db:
+        projected = list(
+            db.scalars(
+                select(PromotionEvent).where(
+                    PromotionEvent.idempotency_key
+                    == f"pairing_failed:attempt:{pairing['attemptId']}"
+                )
+            ).all()
+        )
+        assert len(projected) == 1
+        assert projected[0].metadata_json["detailCode"] == "pairing_cancelled"
+        assert projected[0].metadata_json["stage"] == "pairing_cancel"
     assert admin_client.patch(
         f"/api/promotion/channels/{public_config['channel']['id']}",
         json={"status": "active"},
     ).status_code == 200
+
+
+def test_pairing_gateway_failure_is_projected_once_to_monitoring(
+    admin_client: TestClient,
+) -> None:
+    started = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/pairing/start",
+        json={
+            "phone": "+4915123456805",
+            "deviceFingerprint": "4ef8bdbc97de077c45a46358ecc4ba42",
+        },
+    )
+    assert started.status_code == 200, started.text
+    pairing = started.json()["data"]["pairing"]
+    account_id = pairing["statusUrl"].split("/")[-2]
+
+    interrupted = _gateway_account_event(
+        admin_client,
+        event_id="ast_landing_pairing_interrupted_test",
+        account_id=account_id,
+        from_state="pairing",
+        to_state="unpaired",
+        reason="pairing_connection_lost",
+        occurred_at=utcnow(),
+    )
+    assert interrupted.status_code == 200, interrupted.text
+
+    intake = admin_client.get(
+        "/api/personal-accounts/intake/attempts?keyword=4915123456805"
+    ).json()["data"]
+    assert intake["total"] == 1
+    assert intake["rows"][0]["status"] == "failed"
+    assert intake["rows"][0]["terminalReason"] == "pairing_connection_lost"
+
+    with SessionLocal() as db:
+        projected = list(
+            db.scalars(
+                select(PromotionEvent).where(
+                    PromotionEvent.idempotency_key
+                    == f"pairing_failed:attempt:{pairing['attemptId']}"
+                )
+            ).all()
+        )
+        assert len(projected) == 1
+        assert projected[0].metadata_json["reasonCode"] == "gateway_failed"
+        assert projected[0].metadata_json["detailCode"] == (
+            "pairing_connection_lost"
+        )
+        assert projected[0].metadata_json["stage"] == "gateway_state"
 
 
 def test_personal_account_create_rollback_and_bulk_state_sync(
