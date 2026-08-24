@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
+import pty
 import subprocess
 import tempfile
 import textwrap
@@ -69,7 +71,7 @@ class PublicDataAccessScriptTests(unittest.TestCase):
         self.assertIn(second, range(24100, 24111))
         self.assertNotEqual(first, second)
 
-    def test_connection_output_never_prints_production_passwords(self) -> None:
+    def test_noninteractive_connection_output_hides_production_passwords(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             env_file = Path(temporary_directory) / ".env"
             postgres_password = "postgres-secret-that-must-not-be-printed"
@@ -101,6 +103,73 @@ class PublicDataAccessScriptTests(unittest.TestCase):
         self.assertIn("216.106.185.81:24123", shown.stdout)
         self.assertIn("216.106.185.81:28765", shown.stdout)
         self.assertIn("0.0.0.0/0", shown.stdout)
+
+    def test_interactive_connection_output_prints_passwords_and_complete_urls(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            env_file = Path(temporary_directory) / ".env"
+            postgres_password = "postgres p@ss:/?#[]"
+            redis_password = "redis+secret@/"
+            env_file.write_text(
+                textwrap.dedent(
+                    f"""\
+                    POSTGRES_DB=parloq_flow
+                    POSTGRES_USER=parloq_flow
+                    POSTGRES_PASSWORD={postgres_password}
+                    REDIS_PASSWORD={redis_password}
+                    """
+                ),
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "PARLOQ_ENV_FILE": str(env_file),
+                    "PARLOQ_PUBLIC_HOST": "216.106.185.81",
+                }
+            )
+            master_fd, slave_fd = pty.openpty()
+            process = subprocess.Popen(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; show_connection_info 24123 28765',
+                    "bash",
+                    str(SCRIPT),
+                ],
+                stdout=slave_fd,
+                stderr=slave_fd,
+                env=environment,
+            )
+            os.close(slave_fd)
+            output_chunks: list[bytes] = []
+            try:
+                while True:
+                    try:
+                        chunk = os.read(master_fd, 4096)
+                    except OSError as error:
+                        if error.errno == errno.EIO:
+                            break
+                        raise
+                    if not chunk:
+                        break
+                    output_chunks.append(chunk)
+            finally:
+                os.close(master_fd)
+            return_code = process.wait(timeout=10)
+            output = b"".join(output_chunks).decode("utf-8")
+
+        self.assertEqual(return_code, 0, output)
+        self.assertIn(f"PostgreSQL Password: {postgres_password}", output)
+        self.assertIn(f"Redis Password: {redis_password}", output)
+        self.assertIn(
+            "postgresql://parloq_flow:postgres%20p%40ss%3A%2F%3F%23%5B%5D@"
+            "216.106.185.81:24123/parloq_flow",
+            output,
+        )
+        self.assertIn(
+            "redis://:redis%2Bsecret%40%2F@216.106.185.81:28765/0",
+            output,
+        )
 
     def test_connection_host_is_detected_per_server(self) -> None:
         self.assertIn('PUBLIC_HOST="${PARLOQ_PUBLIC_HOST:-}"', self.script)

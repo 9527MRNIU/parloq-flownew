@@ -35,6 +35,10 @@ read_env_value() {
   awk -v wanted="${key}" 'index($0, wanted "=") == 1 { sub("^[^=]*=", ""); print; exit }' "${PARLOQ_ENV_FILE}"
 }
 
+urlencode_secret() {
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""), end="")'
+}
+
 resolve_public_host() {
   if [[ -n "${PUBLIC_HOST}" ]]; then
     printf '%s' "${PUBLIC_HOST}"
@@ -284,16 +288,36 @@ show_connection_info() {
   if [[ -z "${POSTGRES_PORT}" || -z "${REDIS_PORT}" ]]; then
     load_state
   fi
-  local postgres_db postgres_user
+  local postgres_db postgres_user postgres_password redis_password
+  local postgres_password_encoded redis_password_encoded
   postgres_db="$(read_env_value POSTGRES_DB)"
   postgres_user="$(read_env_value POSTGRES_USER)"
   postgres_db="${postgres_db:-parloq_flow}"
   postgres_user="${postgres_user:-parloq_flow}"
-  printf '\n连接信息（密码不会显示）：\n'
-  printf 'PostgreSQL: %s:%s / 数据库 %s / 用户 %s\n' "${PUBLIC_HOST}" "${POSTGRES_PORT}" "${postgres_db}" "${postgres_user}"
-  printf 'PostgreSQL URL: postgresql://%s:<POSTGRES_PASSWORD>@%s:%s/%s\n' "${postgres_user}" "${PUBLIC_HOST}" "${POSTGRES_PORT}" "${postgres_db}"
-  printf 'Redis: %s:%s\n' "${PUBLIC_HOST}" "${REDIS_PORT}"
-  printf 'Redis URL: redis://:<REDIS_PASSWORD>@%s:%s/0\n' "${PUBLIC_HOST}" "${REDIS_PORT}"
+
+  if [[ -t 1 ]]; then
+    postgres_password="$(read_env_value POSTGRES_PASSWORD)"
+    redis_password="$(read_env_value REDIS_PASSWORD)"
+    [[ -n "${postgres_password}" ]] || { printf '生产环境尚未配置 POSTGRES_PASSWORD。\n' >&2; return 1; }
+    [[ -n "${redis_password}" ]] || { printf '生产环境尚未配置 REDIS_PASSWORD。\n' >&2; return 1; }
+    postgres_password_encoded="$(printf '%s' "${postgres_password}" | urlencode_secret)"
+    redis_password_encoded="$(printf '%s' "${redis_password}" | urlencode_secret)"
+
+    printf '\n连接信息（包含生产密码，请勿发送到公开位置）：\n'
+    printf 'PostgreSQL: %s:%s / 数据库 %s / 用户 %s\n' "${PUBLIC_HOST}" "${POSTGRES_PORT}" "${postgres_db}" "${postgres_user}"
+    printf 'PostgreSQL Password: %s\n' "${postgres_password}"
+    printf 'PostgreSQL URL: postgresql://%s:%s@%s:%s/%s\n' "${postgres_user}" "${postgres_password_encoded}" "${PUBLIC_HOST}" "${POSTGRES_PORT}" "${postgres_db}"
+    printf 'Redis: %s:%s\n' "${PUBLIC_HOST}" "${REDIS_PORT}"
+    printf 'Redis Password: %s\n' "${redis_password}"
+    printf 'Redis URL: redis://:%s@%s:%s/0\n' "${redis_password_encoded}" "${PUBLIC_HOST}" "${REDIS_PORT}"
+    unset postgres_password redis_password postgres_password_encoded redis_password_encoded
+  else
+    printf '\n连接信息（非交互执行，不显示密码）：\n'
+    printf 'PostgreSQL: %s:%s / 数据库 %s / 用户 %s\n' "${PUBLIC_HOST}" "${POSTGRES_PORT}" "${postgres_db}" "${postgres_user}"
+    printf 'PostgreSQL URL: postgresql://%s:<POSTGRES_PASSWORD>@%s:%s/%s\n' "${postgres_user}" "${PUBLIC_HOST}" "${POSTGRES_PORT}" "${postgres_db}"
+    printf 'Redis: %s:%s\n' "${PUBLIC_HOST}" "${REDIS_PORT}"
+    printf 'Redis URL: redis://:<REDIS_PASSWORD>@%s:%s/0\n' "${PUBLIC_HOST}" "${REDIS_PORT}"
+  fi
   printf '来源范围：0.0.0.0/0（不限制来源 IP）\n'
 }
 
