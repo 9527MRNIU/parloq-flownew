@@ -90,7 +90,6 @@ type DomainOrderRow = {
   allowedActions: {
     mockPayment: boolean;
     provision: boolean;
-    reconcile: boolean;
     cancel: boolean;
     delete: boolean;
   };
@@ -201,7 +200,6 @@ function normalizeOrder(input: unknown): DomainOrderRow {
     allowedActions: {
       mockPayment: Boolean(allowed.mockPayment ?? allowed.mock_payment),
       provision: Boolean(allowed.provision),
-      reconcile: Boolean(allowed.reconcile),
       cancel: Boolean(allowed.cancel),
       delete: Boolean(allowed.delete),
     },
@@ -459,7 +457,7 @@ export function DomainsPage() {
     const [systemResult, cloudflareResult, nameSiloResult] = await Promise.allSettled([
       apiRequest("/api/domains?pageSize=100"),
       apiRequest("/api/domains/cloudflare"),
-      apiRequest("/api/domains/namesilo"),
+      apiRequest("/api/domains/namesilo/sync", { method: "POST" }),
     ]);
     const errors: Record<string, string> = {};
     if (systemResult.status === "fulfilled") {
@@ -484,6 +482,22 @@ export function DomainsPage() {
       setNameSiloDomains(
         unwrapList<unknown>(nameSiloResult.value).rows.map(normalizeNameSiloDomain),
       );
+      const recoveredValues = (nameSiloResult.value as {
+        data?: { recoveredDomains?: unknown[] };
+      }).data?.recoveredDomains;
+      if (Array.isArray(recoveredValues) && recoveredValues.length) {
+        const recoveredDomains = recoveredValues.map(normalize);
+        const recoveredHostnames = new Set(
+          recoveredDomains.map((domain) => domain.hostname),
+        );
+        setRows((current) => [
+          ...recoveredDomains,
+          ...current.filter((domain) => !recoveredHostnames.has(domain.hostname)),
+        ]);
+        toast.success(
+          `${recoveredDomains.length} 个 NameSilo 异常订单已自动确认并开始接入`,
+        );
+      }
     } else {
       setNameSiloDomains([]);
       errors.namesilo = nameSiloResult.reason instanceof Error
@@ -714,17 +728,12 @@ export function DomainsPage() {
       setTesting("");
     }
   }
-  async function runOrderAction(row: DomainOrderRow, action: "mock-payment" | "provision" | "reconcile" | "cancel") {
+  async function runOrderAction(row: DomainOrderRow, action: "mock-payment" | "provision" | "cancel") {
     if (!row.id) return;
     if (action === "provision" && row.provider === "namesilo" && !(await confirmAction({
       title: `确认通过 NameSilo 购买 ${row.hostname}？`,
       description: `系统会先核对 NameSilo 账户是否已经持有该域名；只有确认未持有时，才会按系统配置的支付方式提交 ${row.years} 年购买请求，预计金额 ${row.currency} ${row.amount.toFixed(2)}。`,
       confirmText: "确认购买",
-    }))) return;
-    if (action === "reconcile" && !(await confirmAction({
-      title: `同步 ${row.hostname} 的 NameSilo 购买结果？`,
-      description: "系统只会读取 NameSilo 持有状态。确认已持有后会完成本地订单、关闭同域名的重复失败订单，并继续自动接入；不会再次购买该域名。",
-      confirmText: "确认同步",
     }))) return;
     if (action === "cancel" && !(await confirmAction({
       title: `取消域名订单 ${row.hostname}？`,
@@ -751,7 +760,7 @@ export function DomainsPage() {
           : updated.status === "completed"
             ? "域名已开通，正在启动自动接入"
             : updated.status === "unknown"
-              ? "注册结果待确认，请执行订单对账"
+              ? "注册结果待确认，刷新 NameSilo 域名列表后系统会自动同步"
               : "订单状态已更新",
       );
       if (updated.status === "completed" && provisionedDomain) {
@@ -1192,14 +1201,16 @@ export function DomainsPage() {
                   const itemOrder = row.order;
                   const busy = Boolean(itemOrder?.id)
                     && orderPending.startsWith(`${itemOrder?.id}:`);
-                  const hasActions = Boolean(
-                    itemOrder && Object.values(itemOrder.allowedActions).some(Boolean),
-                  );
-                  const showsOrderActions = canPurchase && hasActions;
+                  const showsOrderActions = canPurchase && Boolean(itemOrder && (
+                    itemOrder.allowedActions.mockPayment
+                    || (itemOrder.allowedActions.provision && !row.providerOwned)
+                    || itemOrder.allowedActions.cancel
+                    || (itemOrder.allowedActions.delete && !row.providerOwned)
+                  ));
                   const showsImport = row.providerOwned
                     && !row.systemDomainId
                     && canManage
-                    && !itemOrder?.allowedActions.reconcile;
+                    && !itemOrder;
                   const currentSystemDomain = isCurrentSystemDomain(
                     row.hostname,
                     currentSystemHostname,
@@ -1254,17 +1265,12 @@ export function DomainsPage() {
                               {busy ? <Spinner /> : null}{itemOrder.status === "failed" ? "重试购买" : "确认购买"}
                             </Button>
                           ) : null}
-                          {canPurchase && itemOrder?.allowedActions.reconcile ? (
-                            <Button size="sm" variant="outline" disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "reconcile")}>
-                              {busy ? <Spinner /> : null}{row.providerOwned ? "同步购买结果" : "订单对账"}
-                            </Button>
-                          ) : null}
                           {canPurchase && itemOrder?.allowedActions.cancel ? (
                             <Button size="sm" variant="outline" className="text-destructive" disabled={!itemOrder.id || busy} onClick={() => void runOrderAction(itemOrder, "cancel")}>
                               取消
                             </Button>
                           ) : null}
-                          {canPurchase && itemOrder?.allowedActions.delete ? (
+                          {canPurchase && itemOrder?.allowedActions.delete && !row.providerOwned ? (
                             <Button
                               variant="destructive"
                               size="sm"
@@ -1450,10 +1456,6 @@ export function DomainsPage() {
             ) : order?.allowedActions.provision ? (
               <Button disabled={Boolean(orderPending)} onClick={() => void runOrderAction(order, "provision")}>
                 {orderPending ? <Spinner /> : null}{order.provider === "namesilo" ? "确认购买并开通" : "立即开通"}
-              </Button>
-            ) : order?.allowedActions.reconcile ? (
-              <Button disabled={Boolean(orderPending)} onClick={() => void runOrderAction(order, "reconcile")}>
-                {orderPending ? <Spinner /> : null}订单对账
               </Button>
             ) : order ? null : (
               <Button

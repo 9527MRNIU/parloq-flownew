@@ -64,6 +64,7 @@ DOMAIN_SEARCH_TTL_SECONDS = 15 * 60
 CURRENT_SYSTEM_DOMAIN_IMPORT_ERROR = (
     "当前管理后台正在使用该域名或其子域名，不能作为落地页域名接入"
 )
+NAMESILO_AUTO_RECOVER_STATUSES = frozenset({"failed", "unknown", "provisioning"})
 
 
 def _dev_provider_domain_fixtures_enabled() -> bool:
@@ -440,6 +441,47 @@ def domain_row(db: DbSession, item: DomainRecord) -> dict:
     }
 
 
+def _continue_domain_onboarding_once(
+    db: DbSession,
+    item: DomainRecord,
+    *,
+    raise_on_active: bool,
+) -> DomainRecord:
+    if item.onboarding_status == "completed":
+        return item
+    stale_before = utcnow() - timedelta(minutes=5)
+    claimed = db.execute(
+        update(DomainRecord)
+        .where(
+            DomainRecord.id == item.id,
+            or_(
+                DomainRecord.onboarding_status != "running",
+                DomainRecord.onboarding_attempted_at.is_(None),
+                DomainRecord.onboarding_attempted_at <= stale_before,
+            ),
+        )
+        .values(
+            onboarding_status="running",
+            onboarding_attempted_at=utcnow(),
+            onboarding_message="正在核对平台配置",
+            updated_at=utcnow(),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.rowcount != 1:
+        db.rollback()
+        if raise_on_active:
+            raise HTTPException(
+                status_code=409,
+                detail="域名接入流程正在执行，请勿重复提交",
+            )
+        db.refresh(item)
+        return item
+    db.commit()
+    db.refresh(item)
+    return continue_domain_onboarding(db, item)
+
+
 def _order(db: DbSession, identifier: str, user) -> DomainOrder:
     statement = select(DomainOrder).where(identifier_filter(DomainOrder, identifier))
     if user.role != "admin":
@@ -721,8 +763,69 @@ def list_cloudflare_domains(db: DbSession, current_user: CurrentUser) -> dict:
     return {"data": {"rows": rows, "total": len(rows)}}
 
 
-@router.get("/namesilo")
-def list_namesilo_domains(db: DbSession, current_user: CurrentUser) -> dict:
+def _recover_owned_namesilo_orders(
+    db: DbSession,
+    provider_hostnames: set[str],
+    orders_by_hostname: dict[str, list[DomainOrder]],
+) -> list[DomainRecord]:
+    recovered_domains: list[DomainRecord] = []
+    for hostname in sorted(provider_hostnames):
+        hostname_orders = orders_by_hostname.get(hostname, [])
+        if not hostname_orders:
+            continue
+        latest_order = hostname_orders[0]
+        previous_status = latest_order.status
+        if previous_status not in NAMESILO_AUTO_RECOVER_STATUSES:
+            continue
+        transitioned = db.execute(
+            update(DomainOrder)
+            .where(
+                DomainOrder.id == latest_order.id,
+                DomainOrder.provider == "namesilo",
+                DomainOrder.status == previous_status,
+                DomainOrder.domain_id.is_(None),
+            )
+            .values(status="provisioning", updated_at=utcnow())
+            .execution_options(synchronize_session=False)
+        )
+        if transitioned.rowcount != 1:
+            db.rollback()
+            continue
+        db.refresh(latest_order)
+        try:
+            domain = _complete_order(
+                db,
+                latest_order,
+                latest_order.provider_order_ref or f"namesilo:{hostname}",
+            )
+            db.commit()
+            db.refresh(domain)
+        except IntegrityError:
+            db.rollback()
+            logger.exception("自动恢复 NameSilo 失败订单时本地提交失败: %s", hostname)
+            continue
+        try:
+            domain = _continue_domain_onboarding_once(
+                db,
+                domain,
+                raise_on_active=False,
+            )
+        except Exception:
+            db.rollback()
+            logger.exception("NameSilo 订单恢复后自动接入启动失败: %s", hostname)
+            persisted = db.get(DomainRecord, domain.id)
+            if persisted is not None:
+                domain = persisted
+        recovered_domains.append(domain)
+    return recovered_domains
+
+
+def _namesilo_domain_inventory(
+    db: DbSession,
+    current_user,
+    *,
+    recover_owned_orders: bool,
+) -> dict:
     fixture_mode = _dev_provider_domain_fixtures_enabled()
     provider_domains: list[dict[str, object]] = []
     try:
@@ -744,12 +847,22 @@ def list_namesilo_domains(db: DbSession, current_user: CurrentUser) -> dict:
             ) from exc
         logger.warning("读取 NameSilo 域名失败，开发环境仅展示模拟域名：%s", exc)
 
+    provider_hostnames = {
+        str(provider_domain.get("domain") or "").strip().lower()
+        for provider_domain in provider_domains
+        if str(provider_domain.get("domain") or "").strip()
+    }
     order_statement = select(DomainOrder).where(DomainOrder.provider == "namesilo")
     domain_statement = select(DomainRecord)
     if current_user.role != "admin":
         order_statement = order_statement.where(DomainOrder.created_by == current_user.id)
         domain_statement = domain_statement.where(DomainRecord.created_by == current_user.id)
-    orders = db.scalars(order_statement.order_by(DomainOrder.created_at.desc())).all()
+    orders = db.scalars(
+        order_statement.order_by(
+            DomainOrder.created_at.desc(),
+            DomainOrder.id.desc(),
+        )
+    ).all()
     local_domains = db.scalars(domain_statement).all()
     domains_by_hostname = {item.hostname.lower(): item for item in local_domains}
 
@@ -757,11 +870,31 @@ def list_namesilo_domains(db: DbSession, current_user: CurrentUser) -> dict:
     for order in orders:
         orders_by_hostname.setdefault(order.hostname.lower(), []).append(order)
 
+    recovered_domains: list[DomainRecord] = []
+    if recover_owned_orders and provider_hostnames:
+        recovered_domains = _recover_owned_namesilo_orders(
+            db,
+            provider_hostnames,
+            orders_by_hostname,
+        )
+        if recovered_domains:
+            orders = db.scalars(
+                order_statement.order_by(
+                    DomainOrder.created_at.desc(),
+                    DomainOrder.id.desc(),
+                )
+            ).all()
+            local_domains = db.scalars(domain_statement).all()
+            domains_by_hostname = {
+                item.hostname.lower(): item for item in local_domains
+            }
+            orders_by_hostname = {}
+            for order in orders:
+                orders_by_hostname.setdefault(order.hostname.lower(), []).append(order)
+
     rows: list[dict[str, object]] = []
-    provider_hostnames: set[str] = set()
     for provider_domain in provider_domains:
         hostname = provider_domain["domain"].lower()
-        provider_hostnames.add(hostname)
         hostname_orders = orders_by_hostname.get(hostname, [])
         latest_order = hostname_orders[0] if hostname_orders else None
         purchase_order = next(
@@ -812,7 +945,33 @@ def list_namesilo_domains(db: DbSession, current_user: CurrentUser) -> dict:
             if str(row["hostname"]).lower() not in existing_hostnames
         )
     rows.sort(key=lambda row: str(row["hostname"]))
-    return {"data": {"rows": rows, "total": len(rows)}}
+    return {
+        "data": {
+            "rows": rows,
+            "total": len(rows),
+            "recoveredDomains": [
+                domain_row(db, domain) for domain in recovered_domains
+            ],
+        }
+    }
+
+
+@router.get("/namesilo")
+def list_namesilo_domains(db: DbSession, current_user: CurrentUser) -> dict:
+    return _namesilo_domain_inventory(
+        db,
+        current_user,
+        recover_owned_orders=False,
+    )
+
+
+@router.post("/namesilo/sync")
+def sync_namesilo_domains(db: DbSession, current_user: CurrentUser) -> dict:
+    return _namesilo_domain_inventory(
+        db,
+        current_user,
+        recover_owned_orders=True,
+    )
 
 
 @router.post("/provider-import", status_code=status.HTTP_201_CREATED)
@@ -1348,7 +1507,7 @@ def provision_domain_order(
         unknown = _order(db, order_id, current_user)
         unknown.status = "unknown"
         unknown.provider_order_ref = exc.provider_order_ref
-        unknown.failure_reason = "注册商返回结果未知，必须先对账，禁止重复购买"
+        unknown.failure_reason = "注册商返回结果未知，等待系统自动同步，禁止重复购买"
         db.commit()
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
@@ -1359,7 +1518,7 @@ def provision_domain_order(
         unknown = _order(db, order_id, current_user)
         unknown.status = "unknown"
         unknown.provider_order_ref = provider_order_ref
-        unknown.failure_reason = "注册商可能已完成购买，但本地提交失败；必须先对账"
+        unknown.failure_reason = "注册商可能已完成购买，但本地提交失败；等待系统自动同步"
         db.commit()
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
@@ -1528,33 +1687,7 @@ def continue_onboarding(
     current_user: CurrentUser,
 ) -> dict:
     item = _domain(db, domain_id, current_user)
-    if item.onboarding_status == "completed":
-        return {"data": {"domain": domain_row(db, item)}}
-    stale_before = utcnow() - timedelta(minutes=5)
-    claimed = db.execute(
-        update(DomainRecord)
-        .where(
-            DomainRecord.id == item.id,
-            or_(
-                DomainRecord.onboarding_status != "running",
-                DomainRecord.onboarding_attempted_at.is_(None),
-                DomainRecord.onboarding_attempted_at <= stale_before,
-            ),
-        )
-        .values(
-            onboarding_status="running",
-            onboarding_attempted_at=utcnow(),
-            onboarding_message="正在核对平台配置",
-            updated_at=utcnow(),
-        )
-        .execution_options(synchronize_session=False)
-    )
-    if claimed.rowcount != 1:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="域名接入流程正在执行，请勿重复提交")
-    db.commit()
-    db.refresh(item)
-    item = continue_domain_onboarding(db, item)
+    item = _continue_domain_onboarding_once(db, item, raise_on_active=True)
     return {"data": {"domain": domain_row(db, item)}}
 
 

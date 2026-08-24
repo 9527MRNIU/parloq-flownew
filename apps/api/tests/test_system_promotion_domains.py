@@ -663,6 +663,187 @@ def test_failed_namesilo_order_reconciles_manual_purchase_and_closes_duplicates(
         assert "重复失败订单" in (older.failure_reason or "")
 
 
+def test_namesilo_sync_auto_recovers_failed_order_and_starts_onboarding(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
+    hostname = "auto-recovered-namesilo.example"
+    account_existing_hostname = "account-existing-auto-sync.example"
+
+    class FakeNameSiloClient:
+        def __init__(self, _key: str) -> None:
+            pass
+
+        def list_domains(self) -> list[dict[str, str]]:
+            return [
+                {
+                    "domain": hostname,
+                    "created": "2026-08-01",
+                    "expires": "2027-08-01",
+                },
+                {
+                    "domain": account_existing_hostname,
+                    "created": "2026-07-01",
+                    "expires": "2027-07-01",
+                },
+            ]
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(domains_router, "NameSiloClient", FakeNameSiloClient)
+    onboarding_calls: list[str] = []
+
+    def complete_onboarding(db, item: DomainRecord) -> DomainRecord:
+        onboarding_calls.append(item.hostname)
+        assert item.onboarding_status == "running"
+        item.onboarding_status = "completed"
+        item.onboarding_stage = "completed"
+        item.onboarding_message = "域名已自动接入"
+        item.onboarding_completed_at = utcnow()
+        item.dns_status = "verified"
+        item.ssl_status = "verified"
+        item.hosting_status = "active"
+        db.commit()
+        db.refresh(item)
+        return item
+
+    monkeypatch.setattr(
+        domains_router,
+        "continue_domain_onboarding",
+        complete_onboarding,
+    )
+
+    admin_client.delete("/api/system/configuration/namesilo")
+    try:
+        configured = admin_client.put(
+            "/api/system/configuration/namesilo",
+            json={
+                "value": "namesilo-api-key-123456",
+                "enabled": True,
+                "paymentId": "2531590",
+            },
+        )
+        assert configured.status_code == 200, configured.text
+
+        now = utcnow()
+        with SessionLocal() as db:
+            admin = db.scalar(
+                select(UserAccount).where(UserAccount.username == "admin")
+            )
+            assert admin is not None
+            orders: list[DomainOrder] = []
+            for index in range(2):
+                quote = DomainQuote(
+                    public_id=new_public_id("dquote"),
+                    hostname=hostname,
+                    years=1,
+                    amount=12,
+                    currency="USD",
+                    provider="namesilo",
+                    expires_at=now + timedelta(minutes=15),
+                    consumed_at=now,
+                    created_by=admin.id,
+                )
+                db.add(quote)
+                db.flush()
+                order = DomainOrder(
+                    public_id=new_public_id("dord"),
+                    quote_id=quote.id,
+                    hostname=hostname,
+                    years=1,
+                    amount=12,
+                    currency="USD",
+                    status="failed",
+                    provider="namesilo",
+                    failure_reason=f"failed attempt {index + 1}",
+                    created_by=admin.id,
+                    created_at=now + timedelta(seconds=index),
+                    updated_at=now + timedelta(seconds=index),
+                )
+                db.add(order)
+                orders.append(order)
+            db.commit()
+            newest_order_id = orders[-1].id
+            older_order_id = orders[0].id
+
+        read_only = admin_client.get("/api/domains/namesilo")
+        assert read_only.status_code == 200, read_only.text
+        read_only_rows = {
+            row["hostname"]: row for row in read_only.json()["data"]["rows"]
+        }
+        assert read_only_rows[hostname]["order"]["status"] == "failed"
+        assert read_only.json()["data"]["recoveredDomains"] == []
+        assert onboarding_calls == []
+
+        synced = admin_client.post("/api/domains/namesilo/sync")
+        assert synced.status_code == 200, synced.text
+        data = synced.json()["data"]
+        assert [row["hostname"] for row in data["recoveredDomains"]] == [hostname]
+        assert data["recoveredDomains"][0]["onboarding"]["status"] == "completed"
+
+        rows = {row["hostname"]: row for row in data["rows"]}
+        recovered_row = rows[hostname]
+        assert recovered_row["source"] == "system_purchase"
+        assert recovered_row["providerOwned"] is True
+        assert recovered_row["systemDomainId"] is not None
+        assert recovered_row["order"]["status"] == "completed"
+
+        account_existing_row = rows[account_existing_hostname]
+        assert account_existing_row["source"] == "account_existing"
+        assert account_existing_row["systemDomainId"] is None
+        assert account_existing_row["order"] is None
+        assert onboarding_calls == [hostname]
+
+        with SessionLocal() as db:
+            newest = db.get(DomainOrder, newest_order_id)
+            older = db.get(DomainOrder, older_order_id)
+            domain = db.scalar(
+                select(DomainRecord).where(DomainRecord.hostname == hostname)
+            )
+            unrelated_domain = db.scalar(
+                select(DomainRecord).where(
+                    DomainRecord.hostname == account_existing_hostname
+                )
+            )
+            assert newest is not None
+            assert newest.status == "completed"
+            assert newest.provider_order_ref == f"namesilo:{hostname}"
+            assert domain is not None
+            assert newest.domain_id == domain.id
+            assert domain.acquisition_type == "purchased"
+            assert older is not None
+            assert older.status == "cancelled"
+            assert "重复失败订单" in (older.failure_reason or "")
+            assert unrelated_domain is None
+
+        repeated = admin_client.post("/api/domains/namesilo/sync")
+        assert repeated.status_code == 200, repeated.text
+        assert repeated.json()["data"]["recoveredDomains"] == []
+        assert onboarding_calls == [hostname]
+    finally:
+        admin_client.delete("/api/system/configuration/namesilo")
+        with SessionLocal() as db:
+            orders = db.scalars(
+                select(DomainOrder).where(DomainOrder.hostname == hostname)
+            ).all()
+            domains = db.scalars(
+                select(DomainRecord).where(
+                    DomainRecord.hostname.in_((hostname, account_existing_hostname))
+                )
+            ).all()
+            quotes = db.scalars(
+                select(DomainQuote).where(DomainQuote.hostname == hostname)
+            ).all()
+            for order in orders:
+                db.delete(order)
+            for domain in domains:
+                db.delete(domain)
+            for quote in quotes:
+                db.delete(quote)
+            db.commit()
+
+
 def test_namesilo_provision_checks_existing_registration_before_purchase(
     admin_client: TestClient,
     monkeypatch,
