@@ -71,6 +71,9 @@ export class GatewayService {
         pairingExpiresAt: null,
       }, 'pairing_interrupted')
     }
+    for (const account of accounts.filter((item) => item.connectionPolicy === 'on_demand' && ['online_idle', 'sending'].includes(item.state))) {
+      await this.transitionAccount(account.id, 'linked_offline', { autoConnect: false }, 'gateway_restart')
+    }
     for (const account of accounts.filter((item) => item.connectionPolicy === 'always_on' && item.autoConnect && item.deviceJid)) {
       void this.connect(account.id).catch((error: unknown) => this.logger.warn({ accountId: account.id, error: safeError(error) }, 'account_restore_failed'))
     }

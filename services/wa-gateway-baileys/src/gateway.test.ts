@@ -255,6 +255,42 @@ describe('Baileys gateway HTTP contract', () => {
     }
   })
 
+  it.each(['online_idle', 'sending'] as const)('marks an on-demand %s account offline after a gateway restart', async (staleState) => {
+    const isolatedStore = new MemoryStore()
+    await isolatedStore.createAccount({
+      id: `wa_restart_${staleState}`,
+      phoneE164: staleState === 'online_idle' ? '+14155550140' : '+14155550141',
+      proxyUrl: 'socks5://proxy.example:1080',
+      state: staleState,
+    })
+    await isolatedStore.updateAccount(`wa_restart_${staleState}`, {
+      deviceJid: `1415555014${staleState === 'online_idle' ? '0' : '1'}:1@s.whatsapp.net`,
+      autoConnect: true,
+      sessionStatus: 'verified',
+    })
+    await isolatedStore.setCreds(`wa_restart_${staleState}`, { persisted: true })
+
+    const logger = pino({ level: 'silent' })
+    const isolatedService = new GatewayService(
+      isolatedStore,
+      new MockEngine(),
+      new WebhookClient('', '', 0, logger),
+      logger,
+    )
+    await isolatedService.start()
+    try {
+      expect(await isolatedStore.getAccount(`wa_restart_${staleState}`)).toMatchObject({
+        state: 'linked_offline',
+        autoConnect: false,
+        sessionStatus: 'verified',
+        reasonCategory: 'gateway_restart',
+      })
+      expect(await isolatedStore.getCreds(`wa_restart_${staleState}`)).toEqual({ persisted: true })
+    } finally {
+      await isolatedService.close()
+    }
+  })
+
   it('recovers legacy interrupted pairing credentials before issuing a fresh code', async () => {
     await store.createAccount({ id: 'wa_legacy_pairing', phoneE164: '+14155550133', proxyUrl: 'socks5://proxy.example:1080', state: 'linked_offline' })
     await store.setCreds('wa_legacy_pairing', { temporary: true })
