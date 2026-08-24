@@ -479,9 +479,9 @@ const EVENT_RATE_LIMIT_FIELDS: Array<[
   string,
   string,
 ]> = [
-  ["sessionReports", "单访客/会话回传", "主模板按访客 ID、iframe 集成按签名运行会话限制数据回传请求数。"],
-  ["ipReports", "同一 IP 数据回传", "同一渠道下，单个来源 IP 对主模板或单个 iframe 集成发起的数据回传请求数。"],
-  ["channelReports", "单渠道回传总量", "单个渠道对主模板或单个 iframe 集成的回传总量；不同集成之间分别计数。"],
+  ["sessionReports", "指纹回传限速", "同一设备指纹对主模板或单个 iframe 集成发起的数据回传请求数。"],
+  ["ipReports", "IP 回传限速", "同一来源 IP 对主模板或单个 iframe 集成发起的数据回传请求数。"],
+  ["channelReports", "渠道回传限速", "单个渠道对主模板或单个 iframe 集成的数据回传总量；不同集成分别计数。"],
   ["metaDomainReports", "Facebook 域名异常回传", "同一落地域名、同一来源 IP 上报 Facebook Pixel 域名异常的请求数。"],
 ];
 
