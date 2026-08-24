@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1161,6 +1162,60 @@ def test_protocol_pairing_rate_limit_policy_migration_is_reversible(
         for column in sa.inspect(engine).get_columns("protocol_nodes")
     }
     engine.dispose()
+
+
+def test_unused_metadata_sync_policy_fields_are_pruned(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'sync-policy-pruning.db'}"
+    _alembic(database_url, "0068_proxy_health_cooldown")
+    engine = sa.create_engine(database_url)
+    legacy_policy = {
+        "avatar": True,
+        "profileStatus": False,
+        "businessProfile": True,
+        "groupSummary": True,
+        "groupDetails": False,
+        "contacts": False,
+        "chats": False,
+        "messageHistory": False,
+        "privacySettings": True,
+        "blocklist": True,
+    }
+    with engine.begin() as connection:
+        protocol_id = connection.execute(
+            sa.text("SELECT id FROM protocol_nodes ORDER BY id LIMIT 1")
+        ).scalar_one()
+        connection.execute(
+            sa.text(
+                "UPDATE protocol_nodes SET sync_policy_json=:policy "
+                "WHERE id=:protocol_id"
+            ),
+            {
+                "policy": json.dumps(legacy_policy),
+                "protocol_id": protocol_id,
+            },
+        )
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        policy = connection.execute(
+            sa.text(
+                "SELECT sync_policy_json FROM protocol_nodes "
+                "WHERE id=:protocol_id"
+            ),
+            {"protocol_id": protocol_id},
+        ).scalar_one()
+    engine.dispose()
+    decoded = json.loads(policy) if isinstance(policy, str) else policy
+    assert set(decoded).isdisjoint(
+        {
+            "profileStatus",
+            "businessProfile",
+            "privacySettings",
+            "blocklist",
+        }
+    )
 
 
 def test_sticky_delivery_schema_repair_fills_columns_after_stamped_drift(

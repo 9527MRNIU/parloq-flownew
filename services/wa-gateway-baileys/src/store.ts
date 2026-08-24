@@ -84,6 +84,29 @@ ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS post_verify_gra
 ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS sync_policy JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb;
 UPDATE wa_gateway_baileys.accounts
+  SET sync_policy = sync_policy
+      - 'profileStatus' - 'profile_status'
+      - 'businessProfile' - 'business_profile'
+      - 'privacySettings' - 'privacy_settings'
+      - 'blocklist',
+      metadata_json = metadata_json
+      - 'profileStatus' - 'profileStatusError'
+      - 'businessProfile' - 'businessProfileError'
+      - 'privacySettings' - 'privacySettingsError'
+      - 'blocklist' - 'blocklistError'
+  WHERE sync_policy ?| ARRAY[
+          'profileStatus', 'profile_status',
+          'businessProfile', 'business_profile',
+          'privacySettings', 'privacy_settings',
+          'blocklist'
+        ]
+     OR metadata_json ?| ARRAY[
+          'profileStatus', 'profileStatusError',
+          'businessProfile', 'businessProfileError',
+          'privacySettings', 'privacySettingsError',
+          'blocklist', 'blocklistError'
+        ];
+UPDATE wa_gateway_baileys.accounts
   SET invalidated_at=COALESCE(invalidated_at,state_changed_at), reason_category='restricted'
   WHERE state='restricted' AND invalidated_at IS NULL;
 CREATE TABLE IF NOT EXISTS wa_gateway_baileys.messages (

@@ -23,15 +23,11 @@ from app.snowflake import new_public_id
 
 DEFAULT_SYNC_POLICY: dict[str, bool] = {
     "avatar": True,
-    "profileStatus": True,
-    "businessProfile": True,
     "groupSummary": True,
     "groupDetails": False,
     "contacts": False,
     "chats": False,
     "messageHistory": False,
-    "privacySettings": False,
-    "blocklist": False,
 }
 
 DEFAULT_RATE_LIMIT_POLICY: dict[str, dict[str, int | None]] = {
@@ -80,12 +76,9 @@ def normalized_sync_policy(value: dict | None) -> dict[str, bool]:
     source = value if isinstance(value, dict) else {}
     result = dict(DEFAULT_SYNC_POLICY)
     snake_aliases = {
-        "profileStatus": "profile_status",
-        "businessProfile": "business_profile",
         "groupSummary": "group_summary",
         "groupDetails": "group_details",
         "messageHistory": "message_history",
-        "privacySettings": "privacy_settings",
     }
     for key in result:
         raw = source.get(key, source.get(snake_aliases.get(key, "")))

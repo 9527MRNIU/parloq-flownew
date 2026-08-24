@@ -107,15 +107,11 @@ def test_protocol_node_create_pool_and_template_contract(
             "postVerifyGraceSeconds": 120,
             "syncPolicy": {
                 "avatar": True,
-                "profileStatus": True,
-                "businessProfile": True,
                 "groupSummary": True,
                 "groupDetails": False,
                 "contacts": False,
                 "chats": False,
                 "messageHistory": False,
-                "privacySettings": False,
-                "blocklist": False,
             },
             "rateLimitPolicy": {
                 "visitorCheck": {"maxRequests": 7, "windowSeconds": 600},
@@ -130,8 +126,14 @@ def test_protocol_node_create_pool_and_template_contract(
     assert node["maxAccountCount"] is None
     assert node["maxOnlineAccounts"] == 1000
     assert node["connectionPolicy"] == "on_demand"
-    assert node["syncPolicy"]["avatar"] is True
-    assert node["syncPolicy"]["messageHistory"] is False
+    assert node["syncPolicy"] == {
+        "avatar": True,
+        "groupSummary": True,
+        "groupDetails": False,
+        "contacts": False,
+        "chats": False,
+        "messageHistory": False,
+    }
     assert node["rateLimitPolicy"]["visitorCheck"] == {
         "maxRequests": 7,
         "windowSeconds": 600,

@@ -104,15 +104,11 @@ class AccountGroupUpdate(Model):
 
 class ProtocolSyncPolicy(Model):
     avatar: bool = True
-    profile_status: bool = Field(default=True, alias="profileStatus")
-    business_profile: bool = Field(default=True, alias="businessProfile")
     group_summary: bool = Field(default=True, alias="groupSummary")
     group_details: bool = Field(default=False, alias="groupDetails")
     contacts: bool = False
     chats: bool = False
     message_history: bool = Field(default=False, alias="messageHistory")
-    privacy_settings: bool = Field(default=False, alias="privacySettings")
-    blocklist: bool = False
 
     @model_validator(mode="after")
     def group_details_include_summary(self):

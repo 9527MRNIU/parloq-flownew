@@ -94,15 +94,11 @@ type ProtocolDefinitionRef = {
 
 type SyncPolicy = {
   avatar: boolean;
-  profileStatus: boolean;
-  businessProfile: boolean;
   groupSummary: boolean;
   groupDetails: boolean;
   contacts: boolean;
   chats: boolean;
   messageHistory: boolean;
-  privacySettings: boolean;
-  blocklist: boolean;
 };
 
 type RateLimitRule = {
@@ -129,15 +125,11 @@ type RateLimitPolicyForm = {
 
 const DEFAULT_SYNC_POLICY: SyncPolicy = {
   avatar: true,
-  profileStatus: true,
-  businessProfile: true,
   groupSummary: true,
   groupDetails: false,
   contacts: false,
   chats: false,
   messageHistory: false,
-  privacySettings: false,
-  blocklist: false,
 };
 
 const DEFAULT_RATE_LIMIT_POLICY: RateLimitPolicy = {
@@ -686,15 +678,11 @@ export function ProtocolManagementPage({
           <DrawerFormSection title="绑定后同步范围" description="账号基础身份始终同步；以下选项会在创建配对任务时快照，之后修改不改变进行中的配对。">
             {([
               ["avatar", "头像", "读取账号头像是否存在"],
-              ["profileStatus", "资料状态", "读取 About / 状态文字"],
-              ["businessProfile", "商业资料", "读取可用的 Business Profile"],
               ["groupSummary", "群组概览", "同步参与群数量"],
               ["groupDetails", "群组详情", "读取群组元数据；开启时自动包含群组概览"],
               ["contacts", "联系人", "监听并同步联系人更新"],
               ["chats", "聊天列表", "接收聊天列表同步"],
               ["messageHistory", "消息历史", "接收历史消息同步，资源开销较高"],
-              ["privacySettings", "隐私设置", "读取账号隐私配置"],
-              ["blocklist", "黑名单", "读取已屏蔽号码列表"],
             ] as Array<[keyof SyncPolicy, string, string]>).map(([key, label, description]) => (
               <DrawerFormField key={key} label={label} hint={description}>
                 <Switch checked={form.syncPolicy[key]} onCheckedChange={(checked) => setForm((current) => ({ ...current, syncPolicy: { ...current.syncPolicy, [key]: checked, ...(key === "groupDetails" && checked ? { groupSummary: true } : {}) } }))} aria-label={`同步${label}`} />

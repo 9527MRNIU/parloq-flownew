@@ -1,5 +1,9 @@
 import { EventEmitter } from 'node:events'
-import type { ConnectionState } from '@whiskeysockets/baileys'
+import {
+  BufferJSON,
+  initAuthCreds,
+  type ConnectionState,
+} from '@whiskeysockets/baileys'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   BaileysEngine,
@@ -117,6 +121,72 @@ describe('Baileys pairing socket readiness', () => {
     ev.emit('connection.update', { qr: 'pair-device-ref' })
     await expect(pending)
       .resolves.toBe('1234-5678')
+  })
+})
+
+describe('Baileys intentional disconnect handling', () => {
+  it('does not classify a gateway shutdown as a bad session', async () => {
+    const emitter = new EventEmitter()
+    const socket = {
+      ev: {
+        on: (event: string, listener: (...args: unknown[]) => void) => emitter.on(event, listener),
+        off: (event: string, listener: (...args: unknown[]) => void) => emitter.off(event, listener),
+      },
+      user: { id: '14155550123:1@s.whatsapp.net' },
+      end: vi.fn((error: Error) => {
+        emitter.emit('connection.update', {
+          connection: 'close',
+          lastDisconnect: { error },
+        })
+      }),
+    }
+    const storedCreds = JSON.parse(JSON.stringify({
+      ...initAuthCreds(),
+      registered: true,
+      me: { id: socket.user.id, name: 'Test' },
+    }, BufferJSON.replacer)) as unknown
+    const store = {
+      getCreds: vi.fn(async () => storedCreds),
+      setCreds: vi.fn(async () => undefined),
+      getKeys: vi.fn(async () => ({})),
+      setKeys: vi.fn(async () => undefined),
+      clearAuth: vi.fn(async () => undefined),
+    } as unknown as Store
+    const baileys = {
+      ...(await import('@whiskeysockets/baileys')),
+      default: vi.fn(() => {
+        queueMicrotask(() => emitter.emit('connection.update', { connection: 'open' }))
+        return socket
+      }),
+      fetchLatestWaWebVersion: vi.fn(async () => ({
+        version: [2, 3000, 1023],
+        isLatest: true,
+      })),
+    }
+    const engine = new BaileysEngine(store, undefined, 'http://api:8000', baileys as never)
+    const events: string[] = []
+    engine.setEventHandler((event) => { events.push(event.kind) })
+    await engine.start()
+    await engine.connect({
+      accountId: 'wa_shutdown',
+      protocolDefinitionId: '0',
+      protocolVersion: '6.7.24',
+      phoneE164: '+14155550123',
+      proxyUrl: '',
+      syncPolicy: {
+        avatar: true,
+        groupSummary: true,
+        groupDetails: false,
+        contacts: false,
+        chats: false,
+        messageHistory: false,
+      },
+    })
+
+    await engine.close()
+
+    expect(socket.end).toHaveBeenCalledWith(expect.objectContaining({ message: 'gateway disconnect' }))
+    expect(events).toEqual(['connected'])
   })
 })
 

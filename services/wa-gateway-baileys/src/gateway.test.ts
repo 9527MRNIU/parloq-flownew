@@ -22,7 +22,7 @@ class MemoryStore implements Store {
       throw new GatewayError('conflict', 'duplicate')
     }
     const now = new Date()
-    const account: Account = { ...input, protocolDefinitionId: input.protocolDefinitionId ?? '0', protocolVersion: input.protocolVersion ?? '6.7.24', deviceJid: '', autoConnect: false, connectionPolicy: 'on_demand', idleDisconnectSeconds: 600, postVerifyGraceSeconds: 120, syncPolicy: { avatar: true, profileStatus: true, businessProfile: true, groupSummary: true, groupDetails: false, contacts: false, chats: false, messageHistory: false, privacySettings: false, blocklist: false }, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'idle', pairingExpiresAt: null, metadataSyncStatus: 'pending', hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {}, stateChangedAt: now, invalidatedAt: null, reasonCategory: 'created', providerCode: null, createdAt: now, updatedAt: now }
+    const account: Account = { ...input, protocolDefinitionId: input.protocolDefinitionId ?? '0', protocolVersion: input.protocolVersion ?? '6.7.24', deviceJid: '', autoConnect: false, connectionPolicy: 'on_demand', idleDisconnectSeconds: 600, postVerifyGraceSeconds: 120, syncPolicy: { avatar: true, groupSummary: true, groupDetails: false, contacts: false, chats: false, messageHistory: false }, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'idle', pairingExpiresAt: null, metadataSyncStatus: 'pending', hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {}, stateChangedAt: now, invalidatedAt: null, reasonCategory: 'created', providerCode: null, createdAt: now, updatedAt: now }
     this.accounts.set(account.id, account)
     return account
   }
@@ -43,7 +43,7 @@ class MemoryStore implements Store {
       connectionPolicy: 'on_demand',
       idleDisconnectSeconds: 600,
       postVerifyGraceSeconds: 120,
-      syncPolicy: { avatar: true, profileStatus: true, businessProfile: true, groupSummary: true, groupDetails: false, contacts: false, chats: false, messageHistory: false, privacySettings: false, blocklist: false },
+      syncPolicy: { avatar: true, groupSummary: true, groupDetails: false, contacts: false, chats: false, messageHistory: false },
       pairingStatus: 'idle',
       pairingExpiresAt: null,
       metadataSyncStatus: 'pending',

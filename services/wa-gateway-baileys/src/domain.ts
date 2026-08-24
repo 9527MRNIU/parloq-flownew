@@ -17,28 +17,20 @@ export type MessageStatus = 'queued' | 'sent' | 'delivered' | 'failed'
 
 export interface SyncPolicy {
   avatar: boolean
-  profileStatus: boolean
-  businessProfile: boolean
   groupSummary: boolean
   groupDetails: boolean
   contacts: boolean
   chats: boolean
   messageHistory: boolean
-  privacySettings: boolean
-  blocklist: boolean
 }
 
 export const defaultSyncPolicy: SyncPolicy = {
   avatar: true,
-  profileStatus: true,
-  businessProfile: true,
   groupSummary: true,
   groupDetails: false,
   contacts: false,
   chats: false,
   messageHistory: false,
-  privacySettings: false,
-  blocklist: false,
 }
 
 export function normalizeSyncPolicy(value: unknown): SyncPolicy {

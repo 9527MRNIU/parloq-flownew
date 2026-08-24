@@ -45,15 +45,11 @@ class RecordingRuntime implements ProtocolEngine {
 
 const policy: SyncPolicy = {
   avatar: true,
-  profileStatus: true,
-  businessProfile: true,
   groupSummary: true,
   groupDetails: false,
   contacts: false,
   chats: false,
   messageHistory: false,
-  privacySettings: false,
-  blocklist: false,
 }
 
 function account(accountId: string, definitionId: string, version: string): EngineAccount {

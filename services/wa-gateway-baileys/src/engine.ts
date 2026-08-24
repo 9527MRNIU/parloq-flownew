@@ -67,6 +67,7 @@ export interface ProtocolEngine {
 interface ActiveSocket {
   socket: WASocket
   online: boolean
+  intentionalClose?: boolean
   proxyAgent?: ProxyAgent
   proxyFailureReported?: boolean
 }
@@ -288,6 +289,7 @@ export class BaileysEngine implements ProtocolEngine {
     this.blockedReconnect.add(accountId)
     const active = this.sockets.get(accountId)
     if (!active) return
+    active.intentionalClose = true
     this.sockets.delete(accountId)
     active.socket.end(new Error('gateway disconnect'))
     active.proxyAgent?.destroy()
@@ -473,18 +475,6 @@ export class BaileysEngine implements ProtocolEngine {
         groupCount = null
       }
     }
-    if (ownJid && policy.profileStatus) {
-      try { metadata.profileStatus = await active.socket.fetchStatus(ownJid) } catch { metadata.profileStatusError = 'unavailable' }
-    }
-    if (ownJid && policy.businessProfile) {
-      try { metadata.businessProfile = await active.socket.getBusinessProfile(ownJid) } catch { metadata.businessProfileError = 'unavailable' }
-    }
-    if (policy.privacySettings) {
-      try { metadata.privacySettings = await active.socket.fetchPrivacySettings() } catch { metadata.privacySettingsError = 'unavailable' }
-    }
-    if (policy.blocklist) {
-      try { metadata.blocklist = await active.socket.fetchBlocklist() } catch { metadata.blocklistError = 'unavailable' }
-    }
     // Baileys does not expose a stable, privacy-safe definition for “friends”
     // or “mutual contacts” without syncing chat/contact history. Keep them
     // unknown instead of manufacturing zeroes.
@@ -552,6 +542,7 @@ export class BaileysEngine implements ProtocolEngine {
         active.online = false
         if (this.sockets.get(account.accountId) === active) this.sockets.delete(account.accountId)
         proxyAgent?.destroy()
+        if (active.intentionalClose) return
         const disconnectError = update.lastDisconnect?.error
         this.reportProxyFailure(account, active, disconnectError)
         const statusCode = disconnectError instanceof Boom
