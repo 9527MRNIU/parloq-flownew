@@ -3,6 +3,7 @@ FROM node:22-alpine AS development
 WORKDIR /app
 COPY package*.json ./
 COPY vendor/thumbmarkjs/thumbmarkjs-thumbmarkjs-1.10.1.tgz ./vendor/thumbmarkjs/
+COPY vendor/country-flag-icons/country-flag-icons-1.6.20.tgz ./vendor/country-flag-icons/
 RUN npm ci
 COPY . .
 

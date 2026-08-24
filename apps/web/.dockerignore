@@ -6,3 +6,9 @@ dist
 .env
 .env.*
 .DS_Store
+vendor/thumbmarkjs/1.10.1
+vendor/thumbmarkjs/SHA256SUMS
+vendor/thumbmarkjs/UPSTREAM.md
+vendor/country-flag-icons/1.6.20
+vendor/country-flag-icons/SHA256SUMS
+vendor/country-flag-icons/UPSTREAM.md

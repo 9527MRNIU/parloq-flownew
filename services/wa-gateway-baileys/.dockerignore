@@ -5,3 +5,9 @@ coverage
 .env
 .env.*
 .DS_Store
+vendor/baileys/6.7.24
+vendor/baileys/SHA256SUMS
+vendor/baileys/UPSTREAM.md
+vendor/libsignal/6.0.0
+vendor/libsignal/SHA256SUMS
+vendor/libsignal/UPSTREAM.md

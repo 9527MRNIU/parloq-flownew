@@ -16,8 +16,9 @@
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",
-    "@whiskeysockets/baileys": "6.7.24",
+    "@whiskeysockets/baileys": "file:vendor/baileys/whiskeysockets-baileys-6.7.24.tgz",
     "fastify": "^5.5.0",
+    "libsignal": "file:vendor/libsignal/libsignal-6.0.0.tgz",
     "pg": "^8.16.3",
     "pino": "^9.9.0",
     "proxy-agent": "^6.5.0"
@@ -28,5 +29,10 @@
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
+  },
+  "overrides": {
+    "@whiskeysockets/baileys": {
+      "libsignal": "$libsignal"
+    }
   }
 }
