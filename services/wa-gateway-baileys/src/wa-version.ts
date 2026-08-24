@@ -84,7 +84,13 @@ export class WaWebVersionResolver {
       }
     }
     if (requireLatest) {
-      throw new Error('unable to resolve the current WhatsApp Web client revision')
+      const cause = result.error instanceof Error
+        ? result.error
+        : new Error(error)
+      throw new Error(
+        'unable to resolve the current WhatsApp Web client revision',
+        { cause },
+      )
     }
     this.logger.warn(
       { error },

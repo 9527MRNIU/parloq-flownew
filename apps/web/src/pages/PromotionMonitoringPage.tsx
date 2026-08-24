@@ -15,6 +15,12 @@ import {
 } from "../components/country-display";
 import { MonitoringLandingCell } from "../components/monitoring-landing-cell";
 import {
+  RecordDataSection,
+  RecordDetailField,
+  RecordDetailSummaryCard,
+  RecordDetailSummaryGrid,
+} from "../components/record-detail";
+import {
   ListPagination,
   ListTableCard,
   ListToolbar,
@@ -46,6 +52,7 @@ type MonitoringRecord = {
   sourceLabel: string;
   eventType: string;
   eventLabel: string;
+  failureLabel?: string | null;
   idempotencyKey?: string;
   trafficSource: string;
   occurredAt?: string;
@@ -140,6 +147,10 @@ function pairingFailureStageLabel(value: unknown) {
     pairing_status: "配对状态",
     pairing_cancel: "取消配对",
     gateway_state: "网关状态",
+    prepare_pairing: "准备配对通道",
+    resolve_wa_version: "获取 WhatsApp 版本",
+    wait_pair_success: "等待手机确认",
+    connection: "协议连接",
   }[String(value || "")] || String(value || "未记录");
 }
 
@@ -189,15 +200,6 @@ function DateRangeFilters({
   );
 }
 
-function DefinitionRow({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <>
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 break-all">{value || "-"}</dd>
-    </>
-  );
-}
-
 function RecordDetail({
   item,
   onCopyLanding,
@@ -207,64 +209,79 @@ function RecordDetail({
 }) {
   const metadata = item.metadata || {};
   const pairingFailure = item.eventType === "pairing_failed";
+  const failureDetail = record(metadata.failureDetail);
+  const failureTitle = String(
+    failureDetail.title || metadata.reasonLabel || "其他失败",
+  );
   return (
     <div className="flex flex-col gap-5">
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <div className="rounded-lg border bg-card p-3">
-          <span className="text-xs text-muted-foreground">事件</span>
+      <RecordDetailSummaryGrid>
+        <RecordDetailSummaryCard label="事件">
           <strong className="mt-1 block text-lg">{item.eventLabel}</strong>
           <span className="text-xs text-muted-foreground">{item.eventType}</span>
-        </div>
-        <div className="rounded-lg border bg-card p-3">
-          <span className="text-xs text-muted-foreground">记录来源</span>
+        </RecordDetailSummaryCard>
+        <RecordDetailSummaryCard label="记录来源">
           <div className="mt-2"><SourceBadge source={item.source} /></div>
-        </div>
-        <div className="rounded-lg border bg-card p-3">
-          <span className="text-xs text-muted-foreground">发生时间</span>
+        </RecordDetailSummaryCard>
+        <RecordDetailSummaryCard label="发生时间">
           <strong className="mt-1 block text-base">{formatDateTime(item.occurredAt)}</strong>
-        </div>
-        <div className="rounded-lg border bg-card p-3">
-          <span className="text-xs text-muted-foreground">流量来源</span>
+        </RecordDetailSummaryCard>
+        <RecordDetailSummaryCard label="流量来源">
           <strong className="mt-1 block text-lg">
             {item.trafficSource === "fission" ? "裂变" : "直接"}
           </strong>
-        </div>
-      </div>
+        </RecordDetailSummaryCard>
+      </RecordDetailSummaryGrid>
 
       {pairingFailure ? (
         <div className="rounded-lg border p-4">
           <div className="mb-3 flex items-center gap-2">
             <Badge tone="danger">配对失败</Badge>
-            <strong>{String(metadata.reasonLabel || "其他失败")}</strong>
+            <strong>{failureTitle}</strong>
           </div>
+          {failureDetail.message ? (
+            <p className="mb-2 text-sm text-muted-foreground">
+              {String(failureDetail.message)}
+            </p>
+          ) : null}
+          {failureDetail.suggestion ? (
+            <p className="mb-3 text-sm">
+              <span className="font-medium">处理建议：</span>
+              {String(failureDetail.suggestion)}
+            </p>
+          ) : null}
           <dl className="grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
-            <DefinitionRow
-              label="发生阶段"
-              value={pairingFailureStageLabel(metadata.stage)}
-            />
-            <DefinitionRow
-              label="校验字段"
-              value={validationFieldsLabel(metadata.validationFields)}
-            />
-            <DefinitionRow
-              label="失败代码"
-              value={String(metadata.reasonCode || "unknown")}
-            />
-            <DefinitionRow
-              label="详细代码"
-              value={String(metadata.detailCode || "-")}
-            />
+            <RecordDetailField label="发生阶段">
+              {pairingFailureStageLabel(metadata.stage)}
+            </RecordDetailField>
+            <RecordDetailField label="校验字段">
+              {validationFieldsLabel(metadata.validationFields)}
+            </RecordDetailField>
+            <RecordDetailField label="失败代码">
+              {String(metadata.reasonCode || "unknown")}
+            </RecordDetailField>
+            <RecordDetailField label="详细代码">
+              {String(metadata.detailCode || "-")}
+            </RecordDetailField>
             {metadata.attemptId ? (
-              <DefinitionRow
-                label="接入任务 ID"
-                value={String(metadata.attemptId)}
-              />
+              <RecordDetailField label="接入任务 ID">
+                {String(metadata.attemptId)}
+              </RecordDetailField>
             ) : null}
             {metadata.providerCode ? (
-              <DefinitionRow
-                label="网关代码"
-                value={String(metadata.providerCode)}
-              />
+              <RecordDetailField label="网关代码">
+                {String(metadata.providerCode)}
+              </RecordDetailField>
+            ) : null}
+            {failureDetail.code ? (
+              <RecordDetailField label="诊断代码">
+                {String(failureDetail.code)}
+              </RecordDetailField>
+            ) : null}
+            {failureDetail.technicalMessage ? (
+              <RecordDetailField label="技术错误">
+                {String(failureDetail.technicalMessage)}
+              </RecordDetailField>
             ) : null}
           </dl>
         </div>
@@ -277,20 +294,16 @@ function RecordDetail({
             <strong>推广信息</strong>
           </div>
           <dl className="grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
-            <DefinitionRow label="落地页" value={item.landing.hostname || "内部访问地址"} />
-            <DefinitionRow label="渠道" value={item.channel.name} />
-            <DefinitionRow
-              label="模板"
-              value={`${item.template.name || "模板已删除"} · v${item.template.version || "-"}`}
-            />
-            <DefinitionRow
-              label="集成"
-              value={
-                item.integration
-                  ? `${item.integration.name} · v${item.integration.version || "-"}`
-                  : "未关联"
-              }
-            />
+            <RecordDetailField label="落地页">{item.landing.hostname || "内部访问地址"}</RecordDetailField>
+            <RecordDetailField label="渠道">{item.channel.name}</RecordDetailField>
+            <RecordDetailField label="模板">
+              {`${item.template.name || "模板已删除"} · v${item.template.version || "-"}`}
+            </RecordDetailField>
+            <RecordDetailField label="集成">
+              {item.integration
+                ? `${item.integration.name} · v${item.integration.version || "-"}`
+                : "未关联"}
+            </RecordDetailField>
           </dl>
         </div>
         <div className="rounded-lg border p-4">
@@ -299,16 +312,14 @@ function RecordDetail({
             <strong>设备信息</strong>
           </div>
           <dl className="grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
-            <DefinitionRow
-              label="浏览器"
-              value={versionedName(item.device.browser, item.device.browserVersion)}
-            />
-            <DefinitionRow
-              label="系统"
-              value={versionedName(item.device.system, item.device.systemVersion)}
-            />
-            <DefinitionRow label="视口" value={viewportLabel(item.device.viewport)} />
-            <DefinitionRow label="指纹质量" value={item.fingerprintQuality || "未采集"} />
+            <RecordDetailField label="浏览器">
+              {versionedName(item.device.browser, item.device.browserVersion)}
+            </RecordDetailField>
+            <RecordDetailField label="系统">
+              {versionedName(item.device.system, item.device.systemVersion)}
+            </RecordDetailField>
+            <RecordDetailField label="视口">{viewportLabel(item.device.viewport)}</RecordDetailField>
+            <RecordDetailField label="指纹质量">{item.fingerprintQuality || "未采集"}</RecordDetailField>
           </dl>
         </div>
         <div className="rounded-lg border p-4 lg:col-span-2">
@@ -317,22 +328,18 @@ function RecordDetail({
             <strong>网络信息</strong>
           </div>
           <dl className="grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
-            <DefinitionRow label="访问 IP" value={item.sourceIp || "未采集"} />
-            <DefinitionRow
-              label="访问国家"
-              value={
-                item.visitorCountryCode ? (
-                  <CountryDisplay
-                    code={item.visitorCountryCode}
-                    className="justify-start"
-                  />
-                ) : "未采集"
-              }
-            />
-            <DefinitionRow
-              label="采集来源"
-              value={networkSourceLabel(item.networkSource)}
-            />
+            <RecordDetailField label="访问 IP">{item.sourceIp || "未采集"}</RecordDetailField>
+            <RecordDetailField label="访问国家">
+              {item.visitorCountryCode ? (
+                <CountryDisplay
+                  code={item.visitorCountryCode}
+                  className="justify-start"
+                />
+              ) : "未采集"}
+            </RecordDetailField>
+            <RecordDetailField label="采集来源">
+              {networkSourceLabel(item.networkSource)}
+            </RecordDetailField>
           </dl>
         </div>
       </div>
@@ -340,11 +347,11 @@ function RecordDetail({
       <div className="rounded-lg border p-4">
         <strong>记录信息</strong>
         <dl className="mt-3 grid grid-cols-[110px_1fr] gap-x-3 gap-y-2 text-sm">
-          <DefinitionRow label="记录 ID" value={item.id} />
-          <DefinitionRow label="访客 ID" value={item.visitorId || "未提供"} />
-          <DefinitionRow label="幂等标识" value={item.idempotencyKey || "-"} />
-          <DefinitionRow label="线索 ID" value={item.leadId || "未关联"} />
-          <DefinitionRow label="内部公开标识" value={item.publicId || "-"} />
+          <RecordDetailField label="记录 ID">{item.id}</RecordDetailField>
+          <RecordDetailField label="访客 ID">{item.visitorId || "未提供"}</RecordDetailField>
+          <RecordDetailField label="幂等标识">{item.idempotencyKey || "-"}</RecordDetailField>
+          <RecordDetailField label="线索 ID">{item.leadId || "未关联"}</RecordDetailField>
+          <RecordDetailField label="内部公开标识">{item.publicId || "-"}</RecordDetailField>
         </dl>
       </div>
 
@@ -360,24 +367,11 @@ function RecordDetail({
         </Button>
       </div>
 
-      <section>
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <div>
-            <strong>记录数据</strong>
-            <p className="mt-1 text-xs text-muted-foreground">
-              当前只展示这一条监控记录携带的数据，不再拼接访问时间线。
-            </p>
-          </div>
-          <Badge tone="neutral">{(item.metadataBytes || 0).toLocaleString()} 字节</Badge>
-        </div>
-        {Object.keys(metadata).length ? (
-          <pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-4 text-xs">
-            {JSON.stringify(metadata, null, 2)}
-          </pre>
-        ) : (
-          <EmptyState title="暂无附加数据" description="这条记录没有携带额外数据。" />
-        )}
-      </section>
+      <RecordDataSection
+        data={metadata}
+        description="当前只展示这一条监控记录携带的数据，不再拼接访问时间线。"
+        bytes={item.metadataBytes || 0}
+      />
     </div>
   );
 }
@@ -669,7 +663,7 @@ export default function PromotionMonitoringPage() {
           <Table layout="list">
             <TableHeader>
               <TableRow>
-                <TableHead className="text-center">记录 / 访客</TableHead>
+                <TableHead className="text-center">访问ID/访客ID</TableHead>
                 <TableHead className="text-center">访问国家</TableHead>
                 <TableHead className="text-center">访问 IP</TableHead>
                 <TableHead className="text-center">事件</TableHead>
@@ -708,7 +702,7 @@ export default function PromotionMonitoringPage() {
                   <TableCell className="text-center align-middle">
                     <div className="cell-main mx-auto min-w-[140px] justify-items-center text-center">
                       <strong>{row.eventLabel}</strong>
-                      <span>{row.eventType}</span>
+                      <span>{row.failureLabel || row.eventType}</span>
                     </div>
                   </TableCell>
                   <TableCell className="text-center align-middle">

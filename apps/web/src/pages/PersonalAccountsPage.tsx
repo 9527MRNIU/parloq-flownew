@@ -102,7 +102,7 @@ function AccountAvatar({
   const label = account.phone || account.name || "账号";
   return (
     <div
-      className={`${large ? "size-16" : "size-10"} flex shrink-0 items-center justify-center overflow-hidden rounded-full border bg-muted text-muted-foreground`}
+      className={`${large ? "size-16" : "size-10"} flex shrink-0 items-center justify-center overflow-hidden rounded-lg border bg-muted text-muted-foreground`}
       title={account.avatarUrl ? `${label}的 WhatsApp 头像` : `${label}暂无已拉取头像`}
     >
       {account.avatarUrl ? (
@@ -1020,10 +1020,11 @@ export function PersonalAccountsPage() {
                   />
                 </TableHead>
                 <TableHead adaptive>账号</TableHead>
-                <TableHead>来源</TableHead>
+                <TableHead className="text-center">头像</TableHead>
+                <TableHead className="text-center">来源</TableHead>
                 <TableHead>分组</TableHead>
                 <TableHead>代理</TableHead>
-                <TableHead>账号数据</TableHead>
+                <TableHead className="text-center">账号数据</TableHead>
                 <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
@@ -1046,8 +1047,7 @@ export function PersonalAccountsPage() {
                     />
                   </TableCell>
                   <TableCell primary>
-                    <div className="flex min-w-[230px] items-start gap-3">
-                      <AccountAvatar account={row} />
+                    <div className="flex min-w-[190px] items-center gap-3">
                       <AccountStatusIndicator
                         status={row.status}
                         connected={row.connected}
@@ -1067,8 +1067,13 @@ export function PersonalAccountsPage() {
                       </div>
                     </div>
                   </TableCell>
-                  <TableCell>
-                    <div className="cell-main min-w-[120px] items-start">
+                  <TableCell className="text-center align-middle">
+                    <div className="flex justify-center">
+                      <AccountAvatar account={row} />
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-center align-middle">
+                    <div className="cell-main mx-auto min-w-[120px] items-center text-center">
                       {sourceBadge(row)}
                       {row.importFormat || row.sourceRefType ? (
                         <span
@@ -1143,8 +1148,8 @@ export function PersonalAccountsPage() {
                       </div>
                     )}
                   </TableCell>
-                  <TableCell>
-                    <div className="cell-main min-w-[210px] max-w-[240px]">
+                  <TableCell className="text-center align-middle">
+                    <div className="cell-main mx-auto min-w-[210px] max-w-[240px] items-center text-center">
                       <div className="tick-stats">
                         <span><CheckCheckIcon size={14} />单勾 {row.accepted == null ? "-" : row.accepted}</span>
                         <span><CheckCheckIcon size={14} />双勾 {row.delivered == null ? "-" : row.delivered}</span>

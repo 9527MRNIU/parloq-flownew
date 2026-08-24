@@ -184,6 +184,8 @@ def _gateway_account_event(
     to_state: str,
     reason: str,
     occurred_at,
+    provider_code: str | None = None,
+    failure: dict | None = None,
 ):
     if account_id.isdigit():
         with SessionLocal() as db:
@@ -198,7 +200,12 @@ def _gateway_account_event(
             "fromState": from_state,
             "toState": to_state,
             "reasonCategory": reason,
-            "providerCode": "403" if to_state == "restricted" else None,
+            "providerCode": (
+                provider_code
+                if provider_code is not None
+                else "403" if to_state == "restricted" else None
+            ),
+            "failure": failure,
             "occurredAt": occurred_at.isoformat(),
         },
         separators=(",", ":"),
@@ -1501,8 +1508,21 @@ def test_landing_pairing_failure_stays_in_intake_records(
         "/api/public/promotion/channels/de-facebook-demo"
     ).json()["data"]
 
+    failure_detail = {
+        "code": "proxy_authentication_failed",
+        "title": "代理认证失败",
+        "message": "账号连接线路拒绝了当前认证信息。",
+        "suggestion": "请检查或更换绑定代理后重新获取配对码。",
+        "stage": "connection_route",
+        "retryable": True,
+        "technicalMessage": "Socks5 Authentication failed",
+    }
+
     def fail_pair(*_args, **_kwargs):
-        raise GatewayError("WhatsApp 网关请求失败（502）")
+        raise GatewayError(
+            "WhatsApp 网关请求失败（502）",
+            failure_detail=failure_detail,
+        )
 
     monkeypatch.setattr(
         promotion_router,
@@ -1518,6 +1538,13 @@ def test_landing_pairing_failure_stays_in_intake_records(
         },
     )
     assert failed.status_code == 502
+    assert failed.json() == {
+        "error": {
+            "code": "gateway_failed",
+            "message": "暂时无法连接账号服务，请稍后重试",
+            "retryable": True,
+        }
+    }
 
     rows = admin_client.get(
         "/api/personal-accounts?keyword=4915123456793"
@@ -1535,11 +1562,22 @@ def test_landing_pairing_failure_stays_in_intake_records(
         "detailCode": "pairing_start_failed",
         "providerCode": None,
     }
+    assert attempt["failureDetail"] == failure_detail
     assert attempt["account"]["admissionStatus"] == "abandoned"
     assert attempt["account"]["validationStatus"] == "failed"
     assert attempt["account"]["countryCode"] == "DE"
     assert attempt["visitorCountryCode"] == "DE"
     assert attempt["sourceIp"] == "203.0.113.25"
+    assert attempt["networkSource"] == "cloudflare"
+    assert attempt["publicId"]
+    assert attempt["requestContext"]["requestMethod"] == "POST"
+    assert attempt["requestContext"]["requestPath"].endswith(
+        "/de-facebook-demo/pairing/start"
+    )
+    assert attempt["requestContext"]["sourceIp"] == "203.0.113.25"
+    assert "authorization" not in {
+        key.lower() for key in attempt["requestContext"]
+    }
     assert attempt["channel"]["slug"] == "de-facebook-demo"
     assert attempt["landing"]["url"].endswith("/de-facebook-demo")
     assert attempt["template"]["id"].isdigit()
@@ -1757,6 +1795,7 @@ def test_invalid_fingerprint_is_visible_only_in_promotion_monitoring(
     )
     assert row["source"] == "server"
     assert row["eventType"] == "pairing_failed"
+    assert row["failureLabel"] == "请求信息无效"
     assert row["visitorId"] is None
     assert row["sourceIp"] == "203.0.113.26"
 
@@ -2138,6 +2177,17 @@ def test_pairing_gateway_failure_is_projected_once_to_monitoring(
         to_state="unpaired",
         reason="pairing_connection_lost",
         occurred_at=utcnow(),
+        provider_code="408",
+        failure={
+            "code": "pairing_confirmation_timeout",
+            "title": "配对确认超时",
+            "message": "手机未在配对会话有效期内完成绑定。",
+            "suggestion": "请重新获取配对码，并及时在手机端完成确认。",
+            "stage": "wait_pair_success",
+            "retryable": True,
+            "protocolCode": "408",
+            "technicalMessage": "QR refs attempts ended",
+        },
     )
     assert interrupted.status_code == 200, interrupted.text
 
@@ -2147,6 +2197,16 @@ def test_pairing_gateway_failure_is_projected_once_to_monitoring(
     assert intake["total"] == 1
     assert intake["rows"][0]["status"] == "failed"
     assert intake["rows"][0]["terminalReason"] == "pairing_connection_lost"
+    assert intake["rows"][0]["failureDetail"] == {
+        "code": "pairing_confirmation_timeout",
+        "title": "配对确认超时",
+        "message": "手机未在配对会话有效期内完成绑定。",
+        "suggestion": "请重新获取配对码，并及时在手机端完成确认。",
+        "stage": "wait_pair_success",
+        "retryable": True,
+        "protocolCode": "408",
+        "technicalMessage": "QR refs attempts ended",
+    }
 
     with SessionLocal() as db:
         projected = list(
@@ -2163,6 +2223,9 @@ def test_pairing_gateway_failure_is_projected_once_to_monitoring(
             "pairing_connection_lost"
         )
         assert projected[0].metadata_json["stage"] == "gateway_state"
+        assert projected[0].metadata_json["failureDetail"]["code"] == (
+            "pairing_confirmation_timeout"
+        )
 
 
 def test_personal_account_create_rollback_and_bulk_state_sync(

@@ -8,6 +8,8 @@ import { newPublicId } from './snowflake.js'
 import { WebhookClient } from './webhook.js'
 import { normalizeOutboundMessage, type OutboundMessage, type SendMessageRequest } from './message-content.js'
 import { engineAccount } from './versioned-engine.js'
+import { diagnosePairingFailure } from './failure-diagnosis.js'
+import type { FailureDiagnosis } from './domain.js'
 
 export interface CreateAccountRequest { id?: string; protocolDefinitionId?: string; protocolVersion?: string; phoneE164: string; proxyUrl?: string; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: SyncPolicy }
 export interface UpdateAccountRequest { phoneE164?: string; proxyUrl?: string; autoConnect?: boolean; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: SyncPolicy }
@@ -212,12 +214,24 @@ export class GatewayService {
       result.expiresAt = expiresAt
       return result
     } catch (error) {
+      const failure = diagnosePairingFailure(error, { stage: 'pairing_start' })
       this.clearPairingExpiry(id)
       await this.engine.disconnect(id)
       await this.store.clearAuth(id)
-      await this.transitionAccount(id, 'unpaired', { pairingStatus: 'failed', pairingExpiresAt: null }, 'pairing_failed')
+      await this.transitionAccount(
+        id,
+        'unpaired',
+        { pairingStatus: 'failed', pairingExpiresAt: null },
+        'pairing_failed',
+        failure.protocolCode,
+        failure,
+      )
       this.logger.warn({ accountId: id, error: safeError(error) }, 'pairing_code_failed')
-      throw new GatewayError('protocol_error', 'unable to request a pairing code; verify the phone number, proxy and network')
+      throw new GatewayError(
+        'protocol_error',
+        'unable to request a pairing code; verify the phone number, proxy and network',
+        failure,
+      )
     }
   }
 
@@ -477,6 +491,7 @@ export class GatewayService {
     changes: Partial<Pick<Account, 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'pairingStatus' | 'pairingExpiresAt' | 'metadataSyncStatus'>>,
     reasonCategory: string,
     providerCode?: string,
+    failure?: FailureDiagnosis,
   ): Promise<Account> {
     const result = await this.store.transitionAccount(id, state, changes, reasonCategory, providerCode)
     if (result.changed) {
@@ -489,6 +504,7 @@ export class GatewayService {
         toState: state,
         reasonCategory,
         ...(providerCode ? { providerCode } : {}),
+        ...(failure ? { failure } : {}),
         occurredAt,
       })
     }
@@ -675,7 +691,7 @@ export class GatewayService {
             sessionCompleteness: 'none',
             pairingStatus: 'failed',
             pairingExpiresAt: null,
-          }, 'pairing_connection_lost', event.providerCode)
+          }, 'pairing_connection_lost', event.providerCode, event.failure)
           return
         }
         if (current.state === 'pairing' && ['waiting_phone', 'reconnecting'].includes(current.pairingStatus)) {
@@ -696,18 +712,19 @@ export class GatewayService {
             { deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'failed', pairingExpiresAt: null },
             'pairing_connection_lost',
             event.providerCode,
+            event.failure,
           )
         }
       } else if (event.kind === 'logged_out') {
         this.clearPairingExpiry(event.accountId)
         await this.store.clearAuth(event.accountId)
-        await this.transitionAccount(event.accountId, 'unpaired', { deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'failed', pairingExpiresAt: null }, event.reasonCategory, event.providerCode)
+        await this.transitionAccount(event.accountId, 'unpaired', { deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'failed', pairingExpiresAt: null }, event.reasonCategory, event.providerCode, event.failure)
       } else if (event.kind === 'reauth_required') {
         this.clearPairingExpiry(event.accountId)
-        await this.transitionAccount(event.accountId, 'reauth_required', { autoConnect: false }, event.reasonCategory, event.providerCode)
+        await this.transitionAccount(event.accountId, 'reauth_required', { autoConnect: false }, event.reasonCategory, event.providerCode, event.failure)
       } else if (event.kind === 'restricted') {
         this.clearPairingExpiry(event.accountId)
-        await this.transitionAccount(event.accountId, 'restricted', { autoConnect: false }, event.reasonCategory, event.providerCode)
+        await this.transitionAccount(event.accountId, 'restricted', { autoConnect: false }, event.reasonCategory, event.providerCode, event.failure)
       } else if (event.kind === 'delivered') {
         const message = await this.store.markDeliveredByProvider(event.accountId, event.providerMessageId)
         if (message) this.webhook.deliver(message)

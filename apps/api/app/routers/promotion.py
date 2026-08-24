@@ -74,6 +74,7 @@ from app.serializers import iso
 from app.services.pairing_observability import (
     PAIRING_FAILURE_LABELS,
     canonical_pairing_failure_reason,
+    normalize_pairing_failure_detail,
     persist_pairing_attempt_failure_event,
     persist_pairing_failure_event,
 )
@@ -3610,6 +3611,9 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             if failed_attempt is not None:
                 failed_attempt.status = "failed"
                 failed_attempt.terminal_reason = "pairing_start_failed"
+                failed_attempt.failure_detail_json = (
+                    normalize_pairing_failure_detail(exc.failure_detail)
+                )
                 if failed_attempt.attempt_type == "initial":
                     failed.admission_status = "abandoned"
                 persist_pairing_attempt_failure_event(

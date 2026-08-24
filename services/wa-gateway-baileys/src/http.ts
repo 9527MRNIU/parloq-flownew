@@ -90,7 +90,13 @@ export function buildServer(options: ServerOptions) {
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof GatewayError) {
       const statuses: Record<GatewayError['code'], number> = { not_found: 404, invalid_argument: 400, conflict: 409, account_offline: 409, protocol_error: 502, queue_full: 429 }
-      return reply.status(statuses[error.code]).send({ error: { code: error.code, message: error.message } })
+      return reply.status(statuses[error.code]).send({
+        error: {
+          code: error.code,
+          message: error.message,
+          ...(error.failure ? { failure: error.failure } : {}),
+        },
+      })
     }
     if ((error as { code?: string }).code === 'FST_ERR_CTP_INVALID_JSON_BODY') {
       return reply.status(400).send({ error: { code: 'invalid_json', message: 'Invalid JSON request.' } })

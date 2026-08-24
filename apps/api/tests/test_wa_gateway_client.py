@@ -42,6 +42,47 @@ def test_gateway_error_preserves_response_status(monkeypatch) -> None:
     assert str(caught.value) == "WhatsApp 网关请求失败（404）"
 
 
+def test_gateway_error_preserves_sanitized_failure_detail(monkeypatch) -> None:
+    response = _Response({})
+    response.is_success = False
+    response.status_code = 502
+    response.json = lambda: {
+        "error": {
+            "code": "protocol_error",
+            "message": "pairing failed",
+            "failure": {
+                "code": "proxy_authentication_failed",
+                "title": "代理认证失败",
+                "message": "账号连接线路拒绝了当前认证信息。",
+                "suggestion": "请更换代理后重试。",
+                "stage": "connection_route",
+                "retryable": True,
+                "technicalMessage": (
+                    "connect socks5://user:secret@proxy.example failed"
+                ),
+            },
+        }
+    }
+    monkeypatch.setattr(
+        wa_gateway._HTTP_CLIENT,
+        "request",
+        lambda *_args, **_kwargs: response,
+    )
+    client = wa_gateway.WaGatewayClient()
+    client.settings = replace(
+        get_settings(),
+        wa_gateway_mock=False,
+        wa_gateway_url="http://gateway.test",
+    )
+
+    with pytest.raises(wa_gateway.GatewayError) as caught:
+        client.update_proxy("wa_failure", None)
+
+    assert caught.value.failure_detail["code"] == "proxy_authentication_failed"
+    assert "user:secret" not in caught.value.failure_detail["technicalMessage"]
+    assert "[REDACTED]" in caught.value.failure_detail["technicalMessage"]
+
+
 def test_gateway_client_uses_canonical_contract_and_bearer(monkeypatch) -> None:
     calls = []
 

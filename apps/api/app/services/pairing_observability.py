@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime
 from typing import Any
 
@@ -69,6 +70,42 @@ PAIRING_FAILURE_ALIASES = {
     "service_temporarily_unavailable": "service_unavailable",
     "service_unavailable": "service_unavailable",
 }
+
+_CREDENTIAL_URL_RE = re.compile(
+    r"((?:https?|socks5h?|socks)://)[^@\s/]+@",
+    re.IGNORECASE,
+)
+
+
+def normalize_pairing_failure_detail(value: Any) -> dict[str, Any]:
+    """Keep the internal diagnosis useful without persisting credentials."""
+
+    if not isinstance(value, dict):
+        return {}
+
+    def text(key: str, limit: int) -> str:
+        raw = str(value.get(key) or "").strip()
+        return _CREDENTIAL_URL_RE.sub(r"\1[REDACTED]@", raw)[:limit]
+
+    code = text("code", 64)
+    title = text("title", 120)
+    if not code or not title:
+        return {}
+    detail: dict[str, Any] = {
+        "code": code,
+        "title": title,
+        "message": text("message", 500),
+        "suggestion": text("suggestion", 500),
+        "stage": text("stage", 64),
+        "retryable": bool(value.get("retryable")),
+    }
+    protocol_code = text("protocolCode", 64)
+    technical_message = text("technicalMessage", 500)
+    if protocol_code:
+        detail["protocolCode"] = protocol_code
+    if technical_message:
+        detail["technicalMessage"] = technical_message
+    return detail
 
 
 def canonical_pairing_failure_reason(value: str | None) -> str:
@@ -211,6 +248,11 @@ def persist_pairing_attempt_failure_event(
     }
     if provider_code:
         metadata["providerCode"] = provider_code
+    failure_detail = normalize_pairing_failure_detail(
+        attempt.failure_detail_json
+    )
+    if failure_detail:
+        metadata["failureDetail"] = failure_detail
     event = PromotionEvent(
         public_id=new_public_id("pevt"),
         channel_id=channel.id,

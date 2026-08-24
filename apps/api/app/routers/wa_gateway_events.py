@@ -28,6 +28,7 @@ from app.models import (
 from app.routers.personal_accounts import delivery_row
 from app.security import utcnow
 from app.services.pairing_observability import (
+    normalize_pairing_failure_detail,
     persist_pairing_attempt_failure_event,
 )
 from app.services.proxy_health import (
@@ -87,6 +88,7 @@ def _account_state_event(payload: dict) -> dict:
     to_state = str(payload.get("toState") or "").strip().lower()
     reason = str(payload.get("reasonCategory") or "").strip().lower()
     provider_code = str(payload.get("providerCode") or "").strip() or None
+    failure_detail = normalize_pairing_failure_detail(payload.get("failure"))
 
     if not EVENT_ID_RE.fullmatch(event_id):
         raise HTTPException(status_code=422, detail="eventId 无效")
@@ -279,6 +281,7 @@ def _account_state_event(payload: dict) -> dict:
                     }.get(terminal_reason, "failed")
                     attempt.terminal_reason = terminal_reason
                     attempt.provider_code = provider_code
+                    attempt.failure_detail_json = failure_detail
                     if attempt.attempt_type == "initial":
                         account.admission_status = "abandoned"
                     channel = db.get(PromotionChannel, attempt.channel_id)

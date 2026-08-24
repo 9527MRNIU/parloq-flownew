@@ -1,7 +1,7 @@
 import { fork, type ChildProcess } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import type { Logger } from 'pino'
-import type { Account, SyncPolicy } from './domain.js'
+import { GatewayError, type Account, type FailureDiagnosis, type SyncPolicy } from './domain.js'
 import type {
   AccountQuality,
   EngineAccount,
@@ -29,7 +29,7 @@ type RuntimeMessage =
   | { kind: 'ready'; definitionId: string; version: string }
   | { kind: 'startup-error'; error: string }
   | { kind: 'event'; event: EngineEvent }
-  | { kind: 'response'; id: number; ok: boolean; result?: unknown; error?: string }
+  | { kind: 'response'; id: number; ok: boolean; result?: unknown; error?: string; failure?: FailureDiagnosis }
 
 export class ProtocolRuntimeProcess implements ProtocolEngine {
   readonly name = 'baileys'
@@ -128,7 +128,13 @@ export class ProtocolRuntimeProcess implements ProtocolEngine {
     this.pending.delete(message.id)
     clearTimeout(pending.timer)
     if (message.ok) pending.resolve(message.result)
-    else pending.reject(new Error(message.error || 'protocol runtime request failed'))
+    else if (message.failure) {
+      pending.reject(new GatewayError(
+        'protocol_error',
+        message.error || 'protocol runtime request failed',
+        message.failure,
+      ))
+    } else pending.reject(new Error(message.error || 'protocol runtime request failed'))
   }
 
   private async request<T>(method: string, args: unknown[], timeoutMs = 90_000): Promise<T> {

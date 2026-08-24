@@ -3,6 +3,7 @@ import pino from 'pino'
 import type { BaileysRuntimeModule } from './auth-store.js'
 import type { EngineAccount, ProtocolVersionInfo } from './engine.js'
 import { BaileysEngine } from './engine.js'
+import { diagnosePairingFailure } from './failure-diagnosis.js'
 import type { OutboundMessage } from './message-content.js'
 import { BUILTIN_BAILEYS_VERSION, readProtocolArtifact } from './protocol-artifacts.js'
 import { PostgresStore } from './store.js'
@@ -121,11 +122,15 @@ async function main(): Promise<void> {
         send({ kind: 'response', id: command.id, ok: true, result })
       }
     })().catch((error: unknown) => {
+      const failure = command.method === 'pair'
+        ? diagnosePairingFailure(error, { stage: 'pairing_start' })
+        : undefined
       send({
         kind: 'response',
         id: command.id,
         ok: false,
         error: error instanceof Error ? error.message : String(error),
+        ...(failure ? { failure } : {}),
       })
     })
   })

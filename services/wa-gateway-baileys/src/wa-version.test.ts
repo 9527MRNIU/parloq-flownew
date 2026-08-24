@@ -29,8 +29,11 @@ describe('WA Web version resolution', () => {
     }))
     const resolver = new WaWebVersionResolver(pino({ level: 'silent' }), fetchVersion)
 
-    await expect(resolver.current(undefined, true)).rejects.toThrow(
+    const error = await resolver.current(undefined, true).catch((caught) => caught)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toBe(
       'unable to resolve the current WhatsApp Web client revision',
     )
+    expect(error.cause).toMatchObject({ message: 'network unavailable' })
   })
 })

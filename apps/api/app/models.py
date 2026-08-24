@@ -1441,6 +1441,9 @@ class AccountPairingAttempt(Base, TimestampMixin):
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     terminal_reason: Mapped[str | None] = mapped_column(String(64))
     provider_code: Mapped[str | None] = mapped_column(String(64))
+    failure_detail_json: Mapped[dict] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
 
 
 class AccountMetadataSyncJob(Base, TimestampMixin):

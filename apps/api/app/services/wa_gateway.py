@@ -21,9 +21,16 @@ _HTTP_CLIENT = httpx.Client(
 
 
 class GatewayError(Exception):
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        failure_detail: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.failure_detail = dict(failure_detail or {})
 
 
 class WaGatewayClient:
@@ -54,9 +61,27 @@ class WaGatewayClient:
         except httpx.HTTPError as exc:
             raise GatewayError("WhatsApp 网关不可用") from exc
         if not response.is_success:
+            failure_detail: dict[str, Any] = {}
+            try:
+                response_value = response.json()
+            except (ValueError, TypeError):
+                response_value = {}
+            if isinstance(response_value, dict):
+                error_value = response_value.get("error")
+                if isinstance(error_value, dict) and isinstance(
+                    error_value.get("failure"), dict
+                ):
+                    from app.services.pairing_observability import (
+                        normalize_pairing_failure_detail,
+                    )
+
+                    failure_detail = normalize_pairing_failure_detail(
+                        error_value["failure"]
+                    )
             raise GatewayError(
                 f"WhatsApp 网关请求失败（{response.status_code}）",
                 status_code=response.status_code,
+                failure_detail=failure_detail,
             )
         try:
             value = response.json()

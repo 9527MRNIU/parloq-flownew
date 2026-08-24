@@ -65,6 +65,7 @@ from app.services.protocol_session_imports import (
 from app.services.account_lifecycle import record_initial_account_state
 from app.services.pairing_observability import (
     canonical_pairing_failure_reason,
+    normalize_pairing_failure_detail,
     pairing_failure_label,
 )
 from app.validation import phone_country_code
@@ -1650,6 +1651,10 @@ def list_intake_attempts(
                 "status": attempt.status,
                 "terminalReason": attempt.terminal_reason,
                 "providerCode": attempt.provider_code,
+                "failureDetail": (
+                    normalize_pairing_failure_detail(attempt.failure_detail_json)
+                    or None
+                ),
                 "failureReason": (
                     {
                         "code": failure_reason,
@@ -1665,8 +1670,11 @@ def list_intake_attempts(
                     if attempt.promotion_visitor_id is not None
                     else None
                 ),
+                "publicId": attempt.public_id,
                 "sourceIp": attempt.source_ip,
                 "visitorCountryCode": attempt.visitor_country_code,
+                "networkSource": attempt.network_source,
+                "requestContext": dict(attempt.request_context_json or {}),
                 "account": {
                     "id": str(account.id),
                     "name": account.name,

@@ -15,12 +15,14 @@ import { WaWebVersionResolver } from './wa-version.js'
 import type { ManagedMediaReference, MessageButton, OutboundMessage } from './message-content.js'
 import type { AccountAvatar, SyncPolicy } from './domain.js'
 import { classifyProxyFailure, proxyFingerprint } from './proxy-health.js'
+import { diagnosePairingFailure } from './failure-diagnosis.js'
+import type { FailureDiagnosis } from './domain.js'
 
 export type EngineEvent =
   | { kind: 'connected'; accountId: string; deviceJid: string }
   | { kind: 'proxy_result'; accountId: string; outcome: 'success' | 'failure'; reasonCategory: string; proxyFingerprint: string }
-  | { kind: 'pairing_restarting'; accountId: string; reasonCategory: string; providerCode?: string }
-  | { kind: 'disconnected' | 'logged_out' | 'reauth_required' | 'restricted'; accountId: string; reasonCategory: string; providerCode?: string }
+  | { kind: 'pairing_restarting'; accountId: string; reasonCategory: string; providerCode?: string; failure?: FailureDiagnosis }
+  | { kind: 'disconnected' | 'logged_out' | 'reauth_required' | 'restricted'; accountId: string; reasonCategory: string; providerCode?: string; failure?: FailureDiagnosis }
   | { kind: 'delivered'; accountId: string; providerMessageId: string }
 
 export interface PairResult { accountId: string; code: string; expiresAt: Date; deviceJid?: string }
@@ -672,17 +674,22 @@ export class BaileysEngine implements ProtocolEngine {
           ? disconnectError.output.statusCode
           : new Boom(disconnectError).output.statusCode
         const providerCode = String(statusCode)
+        const failure = diagnosePairingFailure(disconnectError, {
+          stage: createAuth ? 'wait_pair_success' : 'connection',
+          protocolCode: providerCode,
+        })
         if (statusCode === this.baileys.DisconnectReason.loggedOut) {
           void this.store.clearAuth(account.accountId)
-          this.handler({ kind: 'logged_out', accountId: account.accountId, reasonCategory: 'logged_out', providerCode })
+          this.handler({ kind: 'logged_out', accountId: account.accountId, reasonCategory: 'logged_out', providerCode, failure })
         } else if (statusCode === this.baileys.DisconnectReason.forbidden) {
-          this.handler({ kind: 'restricted', accountId: account.accountId, reasonCategory: 'restricted', providerCode })
+          this.handler({ kind: 'restricted', accountId: account.accountId, reasonCategory: 'restricted', providerCode, failure })
         } else if ([this.baileys.DisconnectReason.badSession, this.baileys.DisconnectReason.multideviceMismatch].includes(statusCode)) {
           this.handler({
             kind: 'reauth_required',
             accountId: account.accountId,
             reasonCategory: statusCode === this.baileys.DisconnectReason.badSession ? 'bad_session' : 'multidevice_mismatch',
             providerCode,
+            failure,
           })
         } else {
           const transient = [
@@ -710,6 +717,7 @@ export class BaileysEngine implements ProtocolEngine {
               accountId: account.accountId,
               reasonCategory: 'pairing_restart_required',
               providerCode,
+              failure,
             })
           } else if (!this.blockedReconnect.has(account.accountId)) {
             this.handler({
@@ -717,6 +725,7 @@ export class BaileysEngine implements ProtocolEngine {
               accountId: account.accountId,
               reasonCategory: transient ? 'connection_lost' : 'protocol_disconnect',
               providerCode,
+              failure,
             })
           }
           // Temporary code-only auth is not reconnectable: reopening it does

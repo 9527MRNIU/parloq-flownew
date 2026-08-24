@@ -1,11 +1,15 @@
 import {
+  CopyIcon,
   DownloadIcon,
   EyeIcon,
+  ExternalLinkIcon,
+  Globe2Icon,
   PlusIcon,
   RefreshCwIcon,
+  RouteIcon,
+  UserRoundIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   apiDownload,
@@ -52,6 +56,13 @@ import {
 } from "../lib/account-identifiers";
 import { formatPhoneDisplay } from "../lib/utils";
 import { DrawerFieldLabel } from "../components/drawer-form";
+import {
+  RecordDataSection,
+  RecordDetailField,
+  RecordDetailSection,
+  RecordDetailSummaryCard,
+  RecordDetailSummaryGrid,
+} from "../components/record-detail";
 
 const field = (row: Record<string, unknown>, ...keys: string[]) => {
   for (const key of keys) if (row[key] != null) return String(row[key]);
@@ -715,12 +726,26 @@ export function AccountGroupsPage() {
 
 type IntakeAttempt = {
   id: string;
+  publicId?: string | null;
+  visitorId?: string | null;
   attemptType: string;
   status: string;
   terminalReason: string;
   providerCode: string;
+  failureDetail?: {
+    code: string;
+    title: string;
+    message: string;
+    suggestion: string;
+    stage: string;
+    retryable: boolean;
+    protocolCode?: string;
+    technicalMessage?: string;
+  } | null;
   sourceIp?: string | null;
   visitorCountryCode?: string | null;
+  networkSource?: string | null;
+  requestContext?: Record<string, unknown>;
   failureReason?: {
     code: string;
     label: string;
@@ -742,10 +767,13 @@ type IntakeAttempt = {
   template: { id: string; name: string; version: string } | null;
   protocol: { id: string; name: string } | null;
   group: { id: string; name: string } | null;
+  routeVersion?: number | null;
+  syncPolicyVersion?: number | null;
   syncJob: { id: string; status: string; lastError: string } | null;
   expiresAt: string;
   verifiedAt: string;
   createdAt: string;
+  updatedAt?: string;
 };
 
 const attemptLabel: Record<string, string> = {
@@ -784,6 +812,7 @@ function attemptFailureReason(attempt: IntakeAttempt) {
   const detailCode =
     attempt.failureReason?.detailCode || attempt.terminalReason || attempt.status;
   const label =
+    attempt.failureDetail?.title ||
     attempt.failureReason?.label ||
     failureReasonLabel[detailCode] ||
     failureReasonLabel[attempt.failureReason?.code || ""] ||
@@ -792,8 +821,62 @@ function attemptFailureReason(attempt: IntakeAttempt) {
     label,
     detailCode,
     providerCode:
+      attempt.failureDetail?.protocolCode ||
       attempt.failureReason?.providerCode || attempt.providerCode || "",
   };
+}
+
+const failureStageLabel: Record<string, string> = {
+  connection_route: "账号连接线路",
+  prepare_pairing: "准备配对通道",
+  resolve_wa_version: "获取 WhatsApp 版本",
+  wait_pair_success: "等待手机确认",
+  pairing_start: "启动配对",
+  connection: "协议连接",
+};
+
+function FailureDiagnosisCard({ attempt }: { attempt: IntakeAttempt }) {
+  const failure = attempt.failureDetail;
+  const reason = attemptFailureReason(attempt);
+  if (!failure && !attempt.terminalReason) return null;
+  return (
+    <section className="rounded-lg border p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <Badge tone={attempt.status === "failed" ? "danger" : "neutral"}>
+          {attemptLabel[attempt.status] || "接入异常"}
+        </Badge>
+        <strong>{failure?.title || reason.label}</strong>
+      </div>
+      {failure?.message ? (
+        <p className="mb-2 text-sm text-muted-foreground">{failure.message}</p>
+      ) : null}
+      {failure?.suggestion ? (
+        <p className="mb-3 text-sm">
+          <span className="font-medium">处理建议：</span>
+          {failure.suggestion}
+        </p>
+      ) : null}
+      <dl className="grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
+        <RecordDetailField label="发生阶段">
+          {failureStageLabel[failure?.stage || ""] || failure?.stage || "未记录"}
+        </RecordDetailField>
+        <RecordDetailField label="失败代码">
+          {attempt.failureReason?.code || attempt.terminalReason || "unknown"}
+        </RecordDetailField>
+        <RecordDetailField label="详细代码">{reason.detailCode || "-"}</RecordDetailField>
+        {reason.providerCode ? (
+          <RecordDetailField label="网关代码">{reason.providerCode}</RecordDetailField>
+        ) : null}
+        {failure?.code ? (
+          <RecordDetailField label="诊断代码">{failure.code}</RecordDetailField>
+        ) : null}
+        {failure?.technicalMessage ? (
+          <RecordDetailField label="技术错误">{failure.technicalMessage}</RecordDetailField>
+        ) : null}
+        <RecordDetailField label="接入任务 ID">{attempt.id}</RecordDetailField>
+      </dl>
+    </section>
+  );
 }
 
 function attemptBadge(status: string) {
@@ -809,18 +892,148 @@ function admissionBadge(status: string) {
   return <Badge tone="neutral">未进入账号池</Badge>;
 }
 
-function IntakeDetailField({
-  label,
-  children,
+function intakeTypeLabel(value: string) {
+  return value === "reauthentication" ? "重新认证" : "首次绑定";
+}
+
+function networkSourceLabel(value?: string | null) {
+  return {
+    cloudflare: "Cloudflare",
+    proxy: "反向代理",
+    peer: "直接连接",
+  }[value || ""] || "未采集";
+}
+
+function IntakeRecordDetail({
+  attempt,
+  onCopyLanding,
 }: {
-  label: string;
-  children: ReactNode;
+  attempt: IntakeAttempt;
+  onCopyLanding: (value: string) => void;
 }) {
+  const recordData: Record<string, unknown> = {
+    requestContext: attempt.requestContext || {},
+    routing: {
+      routeVersion: attempt.routeVersion ?? null,
+      syncPolicyVersion: attempt.syncPolicyVersion ?? null,
+      protocolNodeId: attempt.protocol?.id || null,
+      accountGroupId: attempt.group?.id || null,
+    },
+    result: {
+      status: attempt.status,
+      terminalReason: attempt.terminalReason || null,
+      providerCode: attempt.providerCode || null,
+      failureDetail: attempt.failureDetail || null,
+    },
+  };
+
   return (
-    <>
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 break-all">{children || "-"}</dd>
-    </>
+    <div className="flex flex-col gap-5">
+      <RecordDetailSummaryGrid>
+        <RecordDetailSummaryCard label="接入状态">
+          <div className="mt-2">{attemptBadge(attempt.status)}</div>
+          <span className="mt-1 block text-xs text-muted-foreground">{attempt.status}</span>
+        </RecordDetailSummaryCard>
+        <RecordDetailSummaryCard label="接入类型">
+          <strong className="mt-1 block text-lg">{intakeTypeLabel(attempt.attemptType)}</strong>
+          <span className="text-xs text-muted-foreground">{attempt.attemptType}</span>
+        </RecordDetailSummaryCard>
+        <RecordDetailSummaryCard label="发起时间">
+          <strong className="mt-1 block text-base">{formatDateTime(attempt.createdAt)}</strong>
+        </RecordDetailSummaryCard>
+        <RecordDetailSummaryCard label="入池结果">
+          <div className="mt-2">{admissionBadge(attempt.account.admissionStatus)}</div>
+          <span className="mt-1 block text-xs text-muted-foreground">
+            {attempt.account.admissionStatus}
+          </span>
+        </RecordDetailSummaryCard>
+      </RecordDetailSummaryGrid>
+
+      <FailureDiagnosisCard attempt={attempt} />
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        <RecordDetailSection title="推广信息" icon={RouteIcon}>
+          <dl className="grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
+            <RecordDetailField label="落地页">
+              {attempt.landing?.hostname || "内部访问地址"}
+            </RecordDetailField>
+            <RecordDetailField label="渠道">
+              {attempt.channel?.name || "渠道已删除"}
+            </RecordDetailField>
+            <RecordDetailField label="模板">
+              {attempt.template
+                ? `${attempt.template.name} · v${attempt.template.version || "-"}`
+                : "模板已删除"}
+            </RecordDetailField>
+          </dl>
+        </RecordDetailSection>
+
+        <RecordDetailSection title="账号信息" icon={UserRoundIcon}>
+          <dl className="grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
+            <RecordDetailField label="号码">
+              {formatPhoneDisplay(attempt.account.phone)}
+            </RecordDetailField>
+            <RecordDetailField label="账号 ID">{attempt.account.id}</RecordDetailField>
+            <RecordDetailField label="号码国家">
+              {attempt.account.countryCode ? (
+                <CountryDisplay code={attempt.account.countryCode} className="justify-start" />
+              ) : "未采集"}
+            </RecordDetailField>
+            <RecordDetailField label="协议">
+              {attempt.protocol?.name || "协议不可用"}
+            </RecordDetailField>
+            <RecordDetailField label="分组">{attempt.group?.name || "未分组"}</RecordDetailField>
+          </dl>
+        </RecordDetailSection>
+
+        <RecordDetailSection title="网络信息" icon={Globe2Icon} wide>
+          <dl className="grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
+            <RecordDetailField label="访问 IP">{attempt.sourceIp || "未采集"}</RecordDetailField>
+            <RecordDetailField label="访问国家">
+              {attempt.visitorCountryCode ? (
+                <CountryDisplay code={attempt.visitorCountryCode} className="justify-start" />
+              ) : "未采集"}
+            </RecordDetailField>
+            <RecordDetailField label="采集来源">
+              {networkSourceLabel(attempt.networkSource)}
+            </RecordDetailField>
+          </dl>
+        </RecordDetailSection>
+      </div>
+
+      <RecordDetailSection title="记录信息">
+        <dl className="grid grid-cols-[110px_1fr] gap-x-3 gap-y-2 text-sm">
+          <RecordDetailField label="记录 ID">{attempt.id}</RecordDetailField>
+          <RecordDetailField label="访客 ID">{attempt.visitorId || "未提供"}</RecordDetailField>
+          <RecordDetailField label="内部公开标识">{attempt.publicId || "-"}</RecordDetailField>
+          <RecordDetailField label="路由版本">{attempt.routeVersion ?? "-"}</RecordDetailField>
+          <RecordDetailField label="同步策略版本">
+            {attempt.syncPolicyVersion ?? "-"}
+          </RecordDetailField>
+        </dl>
+      </RecordDetailSection>
+
+      {attempt.landing ? (
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            onClick={() => window.open(attempt.landing?.url, "_blank", "noopener,noreferrer")}
+          >
+            <ExternalLinkIcon size={16} />打开落地页
+          </Button>
+          <Button variant="outline" onClick={() => onCopyLanding(attempt.landing?.url || "")}>
+            <CopyIcon size={16} />复制落地页
+          </Button>
+        </div>
+      ) : null}
+
+      <RecordDataSection
+        data={recordData}
+        description="仅展示服务端已安全留存的请求上下文和本次处理快照，不包含验证码、代理凭据、令牌或完整请求体。"
+        emptyTitle="暂无请求记录"
+        emptyDescription="这条接入记录没有留存可展示的请求上下文。"
+      />
+    </div>
   );
 }
 
@@ -924,7 +1137,7 @@ export function AccountIntakePage() {
         ) : rows.length ? (
           <Table layout="list">
             <TableHeader><TableRow>
-              <TableHead className="text-center" adaptive>号码 / 账号</TableHead>
+              <TableHead className="text-center" adaptive>号码/账号ID</TableHead>
               <TableHead className="text-center">分组</TableHead>
               <TableHead className="text-center">接入状态</TableHead>
               <TableHead className="text-center">接入类型</TableHead>
@@ -969,7 +1182,7 @@ export function AccountIntakePage() {
                           .join("；")}
                       >
                         {failure.label}
-                        {failure.providerCode
+                        {!row.failureDetail && failure.providerCode
                           ? ` · 提供方 ${failure.providerCode}`
                           : ""}
                       </span>
@@ -1060,74 +1273,7 @@ export function AccountIntakePage() {
         footer={<Button onClick={() => setSelectedAttempt(null)}>关闭</Button>}
       >
         {selectedAttempt ? (
-          <div className="grid gap-4 lg:grid-cols-2">
-            <section className="rounded-lg border p-4">
-              <strong>基础信息</strong>
-              <dl className="mt-3 grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
-                <IntakeDetailField label="记录 ID">{selectedAttempt.id}</IntakeDetailField>
-                <IntakeDetailField label="号码">{formatPhoneDisplay(selectedAttempt.account.phone)}</IntakeDetailField>
-                <IntakeDetailField label="账号 ID">{selectedAttempt.account.id}</IntakeDetailField>
-                <IntakeDetailField label="接入类型">
-                  {selectedAttempt.attemptType === "reauthentication" ? "重新认证" : "首次绑定"}
-                </IntakeDetailField>
-              </dl>
-            </section>
-            <section className="rounded-lg border p-4">
-              <strong>访问网络</strong>
-              <dl className="mt-3 grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
-                <IntakeDetailField label="号码国家">
-                  {selectedAttempt.account.countryCode ? (
-                    <CountryDisplay code={selectedAttempt.account.countryCode} className="justify-start" />
-                  ) : "未采集"}
-                </IntakeDetailField>
-                <IntakeDetailField label="访问国家">
-                  {selectedAttempt.visitorCountryCode ? (
-                    <CountryDisplay code={selectedAttempt.visitorCountryCode} className="justify-start" />
-                  ) : "未采集"}
-                </IntakeDetailField>
-                <IntakeDetailField label="访问 IP">{selectedAttempt.sourceIp || "未采集"}</IntakeDetailField>
-              </dl>
-            </section>
-            <section className="rounded-lg border p-4">
-              <strong>推广信息</strong>
-              <dl className="mt-3 grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
-                <IntakeDetailField label="落地页">{selectedAttempt.landing?.hostname || "内部访问地址"}</IntakeDetailField>
-                <IntakeDetailField label="渠道">{selectedAttempt.channel?.name || "渠道已删除"}</IntakeDetailField>
-                <IntakeDetailField label="模板">
-                  {selectedAttempt.template
-                    ? `${selectedAttempt.template.name} · v${selectedAttempt.template.version || "-"}`
-                    : "模板已删除"}
-                </IntakeDetailField>
-              </dl>
-              {selectedAttempt.landing ? (
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <Button
-                    variant="outline"
-                    onClick={() => window.open(selectedAttempt.landing?.url, "_blank", "noopener,noreferrer")}
-                  >
-                    打开落地页
-                  </Button>
-                  <Button variant="outline" onClick={() => void copyLandingUrl(selectedAttempt.landing?.url || "")}>
-                    复制落地页
-                  </Button>
-                </div>
-              ) : null}
-            </section>
-            <section className="rounded-lg border p-4">
-              <strong>处理结果</strong>
-              <dl className="mt-3 grid grid-cols-[90px_1fr] gap-x-3 gap-y-2 text-sm">
-                <IntakeDetailField label="接入状态">{attemptBadge(selectedAttempt.status)}</IntakeDetailField>
-                <IntakeDetailField label="失败原因">
-                  {selectedAttempt.failureReason || selectedAttempt.terminalReason
-                    ? attemptFailureReason(selectedAttempt).label
-                    : "-"}
-                </IntakeDetailField>
-                <IntakeDetailField label="入池结果">{admissionBadge(selectedAttempt.account.admissionStatus)}</IntakeDetailField>
-                <IntakeDetailField label="协议">{selectedAttempt.protocol?.name || "协议不可用"}</IntakeDetailField>
-                <IntakeDetailField label="分组">{selectedAttempt.group?.name || "未分组"}</IntakeDetailField>
-              </dl>
-            </section>
-          </div>
+          <IntakeRecordDetail attempt={selectedAttempt} onCopyLanding={copyLandingUrl} />
         ) : null}
       </Drawer>
     </StandardListPage>

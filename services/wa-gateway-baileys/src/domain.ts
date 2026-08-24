@@ -98,7 +98,19 @@ export interface AccountStateWebhookEvent {
   toState: AccountState
   reasonCategory: string
   providerCode?: string
+  failure?: FailureDiagnosis
   occurredAt: Date
+}
+
+export interface FailureDiagnosis {
+  code: string
+  title: string
+  message: string
+  suggestion: string
+  stage: string
+  retryable: boolean
+  protocolCode?: string
+  technicalMessage?: string
 }
 
 export interface ProxyHealthWebhookEvent {
@@ -159,6 +171,7 @@ export class GatewayError extends Error {
       | 'protocol_error'
       | 'queue_full',
     message: string,
+    public readonly failure?: FailureDiagnosis,
   ) {
     super(message)
     this.name = 'GatewayError'
