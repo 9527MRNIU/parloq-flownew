@@ -427,6 +427,10 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
         "completed",
         "failed",
     ]
+    assert re.search(
+        r"\?runtimeVersion=[0-9a-f]{12}$",
+        integration["sourceUrls"][0],
+    )
 
     entry_path = integration["sourceUrls"][0].removeprefix(
         "https://integration-feedback.test"
@@ -436,8 +440,26 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
         headers={"host": "integration-feedback.test"},
     )
     assert entry.status_code == 200, entry.text
-    assert "/api/public/promotion/integrations/runtime.js" in entry.text
+    runtime_url_match = re.search(
+        r'src="(?P<url>/api/public/promotion/integrations/runtime\.js'
+        r'\?v=[0-9a-f]{12})"',
+        entry.text,
+    )
+    assert runtime_url_match is not None
     assert f'data-integration-id="{integration["id"]}"' in entry.text
+    unversioned_runtime = admin_client.get(
+        "/api/public/promotion/integrations/runtime.js"
+    )
+    assert unversioned_runtime.status_code == 200
+    assert unversioned_runtime.headers["cache-control"] == "no-store"
+    versioned_runtime = admin_client.get(runtime_url_match.group("url"))
+    assert versioned_runtime.content == unversioned_runtime.content
+    assert runtime_url_match.group("url").endswith(
+        hashlib.sha256(unversioned_runtime.content).hexdigest()[:12]
+    )
+    assert versioned_runtime.headers["cache-control"] == (
+        "public, max-age=31536000, immutable"
+    )
 
     imported = admin_client.post(
         "/api/promotion/templates",

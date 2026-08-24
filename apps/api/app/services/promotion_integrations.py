@@ -25,6 +25,7 @@ from app.models import (
     PromotionIntegrationAsset,
     PromotionTemplateIntegration,
 )
+from app.services.public_runtime_assets import INTEGRATION_FRAME_RUNTIME
 
 
 MAX_INTEGRATION_ZIP = 20 * 1024 * 1024
@@ -131,11 +132,17 @@ def integration_asset_url(
     )
     version = quote(item.version, safe="-._~")
     asset_path = quote(path, safe="/-._~")
-    return (
+    source_url = (
         f"{settings.promotion_integration_public_scheme}://{domain.hostname}{port}"
         "/api/public/promotion/integrations/"
         f"{entity_id(item)}/{version}/{asset_path}"
     )
+    feedback_enabled, _ = integration_feedback_contract(item)
+    if item.integration_type == "iframe" and feedback_enabled:
+        return (
+            f"{source_url}?runtimeVersion={INTEGRATION_FRAME_RUNTIME.version}"
+        )
+    return source_url
 
 
 def integration_source_urls(

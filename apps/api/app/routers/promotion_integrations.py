@@ -5,7 +5,6 @@ import json
 import logging
 import re
 from datetime import timedelta
-from pathlib import Path
 from pathlib import PurePosixPath
 
 from fastapi import (
@@ -60,6 +59,7 @@ from app.services.promotion_event_rate_limits import (
     normalized_promotion_event_rate_limit_policy,
 )
 from app.services.public_rate_limits import public_request_ip
+from app.services.public_runtime_assets import INTEGRATION_FRAME_RUNTIME
 from app.services.request_context import public_request_context
 from app.services.request_network import resolve_request_network
 from app.services.github_repository import (
@@ -86,7 +86,9 @@ public_router = APIRouter(
     prefix="/api/public/promotion/integrations",
     tags=["public-promotion-integrations"],
 )
-PUBLIC_RUNTIME_DIR = Path(__file__).resolve().parents[1] / "public"
+INTEGRATION_FRAME_RUNTIME_URL = INTEGRATION_FRAME_RUNTIME.versioned_url(
+    "/api/public/promotion/integrations/runtime.js"
+)
 logger = logging.getLogger(__name__)
 
 
@@ -860,12 +862,12 @@ def _public_event_context(
 
 
 @public_router.get("/runtime.js")
-def integration_runtime_script() -> Response:
+def integration_runtime_script(v: str | None = Query(default=None)) -> Response:
     return Response(
-        (PUBLIC_RUNTIME_DIR / "promotion-integration-frame.js").read_bytes(),
+        INTEGRATION_FRAME_RUNTIME.content,
         media_type="application/javascript",
         headers={
-            "Cache-Control": "public, max-age=300",
+            "Cache-Control": INTEGRATION_FRAME_RUNTIME.cache_control(v),
             "Access-Control-Allow-Origin": "*",
             "X-Content-Type-Options": "nosniff",
         },
@@ -1068,7 +1070,8 @@ def public_integration_asset(
                 detail="iframe 入口不是 UTF-8 HTML",
             ) from None
         runtime = (
-            '<script src="/api/public/promotion/integrations/runtime.js" '
+            '<script src="'
+            f'{INTEGRATION_FRAME_RUNTIME_URL}" '
             f'data-integration-id="{entity_id(item)}"></script>'
         )
         head = re.search(r"<head\b[^>]*>", document, re.I)

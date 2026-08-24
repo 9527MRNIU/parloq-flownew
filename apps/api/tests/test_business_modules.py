@@ -743,7 +743,16 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     )
     assert "promotion-runtime-config" in render.text
     assert "parloq" not in render.text.lower()
-    assert 'src="/api/public/promotion/guard.js"' in render.text
+    tracker_url_match = re.search(
+        r'src="(?P<url>/api/public/promotion/tracker\.js\?v=[0-9a-f]{12})"',
+        render.text,
+    )
+    guard_url_match = re.search(
+        r'src="(?P<url>/api/public/promotion/guard\.js\?v=[0-9a-f]{12})"',
+        render.text,
+    )
+    assert tracker_url_match is not None
+    assert guard_url_match is not None
     assert '<base href="/api/public/promotion/channels/de-facebook-demo/assets/">' in render.text
     assert render.text.index("<base ") < render.text.index("<link ")
     assert render.text.index("<base ") < render.text.index('src="assets/app.js"')
@@ -809,6 +818,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert locale_asset.status_code == 200
     assert locale_asset.json()["title"] == "Hallo"
     tracker = admin_client.get("/api/public/promotion/tracker.js")
+    assert tracker.headers["cache-control"] == "no-store"
     assert "connect.facebook.net/en_US/fbevents.js" in tracker.text
     assert "meta-domain-unavailable" in render.text
     assert "is unavailable" in tracker.text
@@ -828,8 +838,21 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert "OfflineAudioContext" in tracker.text
     assert "device-fingerprint/v1" not in tracker.text
     assert tracker.headers["x-content-type-options"] == "nosniff"
+    versioned_tracker = admin_client.get(tracker_url_match.group("url"))
+    assert versioned_tracker.content == tracker.content
+    assert tracker_url_match.group("url").endswith(
+        hashlib.sha256(tracker.content).hexdigest()[:12]
+    )
+    assert versioned_tracker.headers["cache-control"] == (
+        "public, max-age=31536000, immutable"
+    )
+    stale_tracker = admin_client.get(
+        "/api/public/promotion/tracker.js?v=000000000000"
+    )
+    assert stale_tracker.headers["cache-control"] == "no-store"
     guard = admin_client.get("/api/public/promotion/guard.js")
     assert guard.status_code == 200
+    assert guard.headers["cache-control"] == "no-store"
     assert 'addEventListener("contextmenu"' in guard.text
     assert 'e.key==="F12"' in guard.text
     assert 'input[type="tel"]' in guard.text
@@ -839,6 +862,14 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert "outerHeight" not in guard.text
     assert 'debugger-delay' in guard.text
     assert "parloq" not in guard.text.lower()
+    versioned_guard = admin_client.get(guard_url_match.group("url"))
+    assert versioned_guard.content == guard.content
+    assert guard_url_match.group("url").endswith(
+        hashlib.sha256(guard.content).hexdigest()[:12]
+    )
+    assert versioned_guard.headers["cache-control"] == (
+        "public, max-age=31536000, immutable"
+    )
 
     inspection = admin_client.post(
         "/api/public/promotion/channels/de-facebook-demo/events",

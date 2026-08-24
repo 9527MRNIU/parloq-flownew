@@ -16,7 +16,7 @@ import zipfile
 from collections import Counter
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Literal
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -90,6 +90,10 @@ from app.services.promotion_event_rate_limits import (
     consume_promotion_event_rate_limits,
 )
 from app.services.public_rate_limits import public_request_ip
+from app.services.public_runtime_assets import (
+    PROMOTION_TRACKER_RUNTIME,
+    PublicRuntimeAsset,
+)
 from app.services.request_context import public_request_context
 from app.services.request_network import RequestNetwork, resolve_request_network
 from app.services.github_repository import (
@@ -157,15 +161,18 @@ MAX_LOCALIZED_COPY_ITEMS = 256
 ACTIVE_PAIRING_STATUSES = {"code_issued", "waiting_phone", "reconnecting"}
 TERMINAL_PAIRING_STATUSES = {"verified", "expired", "cancelled", "failed"}
 MAX_LOCALIZED_COPY_VALUE = 8_000
-PUBLIC_RUNTIME_DIR = Path(__file__).resolve().parents[1] / "public"
-
-
-
-
 # Conversion-page display rules and interaction hardening are platform-owned so
 # imported templates behave consistently. Phone inputs never render a leading
 # plus, while protocol normalization remains a server-side concern.
 LANDING_GUARD_JS = r'''(()=>{const phoneSelector='input[type="tel"],input[name*="phone" i]',cleanPhone=input=>{if(!input?.matches?.(phoneSelector))return;input.value=String(input.value||"").replace(/\+/g,"")},preparePhones=()=>document.querySelectorAll(phoneSelector).forEach(input=>{cleanPhone(input);const parent=input.parentElement;if(parent)Array.from(parent.children).forEach(child=>{if(child!==input&&String(child.textContent||"").trim()==="+")child.hidden=true})});document.readyState==="loading"?addEventListener("DOMContentLoaded",preparePhones,{once:true}):preparePhones();addEventListener("input",event=>cleanPhone(event.target),true);const node=document.getElementById("promotion-runtime-config");let config={};try{config=JSON.parse(node?.textContent||"{}")}catch{}const policy=config.templatePolicy||{},mode=policy.protectionMode||"strict",preview=Boolean(config.previewMode),stop=e=>{e.preventDefault();e.stopImmediatePropagation()};addEventListener("contextmenu",e=>{if(e.pointerType!=="touch")stop(e)},true);addEventListener("keydown",e=>{const k=String(e.key||"").toLowerCase(),primary=e.ctrlKey||e.metaKey,inspect=e.key==="F12"||(primary&&e.shiftKey&&["i","j","c"].includes(k))||(primary&&["u","s"].includes(k));if(inspect)stop(e)},true);if(mode==="basic"||preview)return;let handled=false;const detected=reason=>{if(handled)return;handled=true;dispatchEvent(new CustomEvent("promotion:inspection-detected",{detail:{reason,mode}}));const action=policy.devtoolsAction||"blank";if(action==="block")window.__promotionInspectionBlocked=true;if(action==="blank"){document.documentElement.innerHTML="";document.title=""}};const inspect=()=>{if(window.eruda||window.vConsole||document.querySelector(".eruda-container,#__vconsole"))return detected("mobile-console");let consoleProbe=false;const probe=new Image;Object.defineProperty(probe,"id",{get(){consoleProbe=true;return""}});console.debug(probe);if(consoleProbe)return detected("console-probe");if(mode==="strict"){const before=performance.now();debugger;if(performance.now()-before>220)return detected("debugger-delay")}};setInterval(inspect,mode==="strict"?900:1600);inspect()})();'''
+
+LANDING_GUARD_RUNTIME = PublicRuntimeAsset.from_text(LANDING_GUARD_JS)
+PROMOTION_TRACKER_RUNTIME_URL = PROMOTION_TRACKER_RUNTIME.versioned_url(
+    "/api/public/promotion/tracker.js"
+)
+LANDING_GUARD_RUNTIME_URL = LANDING_GUARD_RUNTIME.versioned_url(
+    "/api/public/promotion/guard.js"
+)
 
 DEFAULT_TEMPLATE_POLICY = {
     "protectionMode": "strict",
@@ -2451,8 +2458,8 @@ def _render_html(
     base = f'<base href="/api/public/promotion/channels/{slug}/assets/">'
     runtime = (
         f'<script type="application/json" id="promotion-runtime-config">{config}</script>'
-        '<script src="/api/public/promotion/tracker.js" defer></script>'
-        '<script src="/api/public/promotion/guard.js" defer></script>'
+        f'<script src="{PROMOTION_TRACKER_RUNTIME_URL}" defer></script>'
+        f'<script src="{LANDING_GUARD_RUNTIME_URL}" defer></script>'
     )
     html = re.sub(r'(["\'])/assets/', rf'\1/api/public/promotion/channels/{slug}/assets/assets/', html)
     if re.search(r"<head\b[^>]*>", html, re.I):
@@ -2546,12 +2553,12 @@ def render_fission_channel(
 
 
 @router.get("/api/public/promotion/tracker.js")
-def tracker_script() -> Response:
+def tracker_script(v: str | None = Query(default=None)) -> Response:
     return Response(
-        (PUBLIC_RUNTIME_DIR / "promotion-tracker.js").read_bytes(),
+        PROMOTION_TRACKER_RUNTIME.content,
         media_type="application/javascript",
         headers={
-            "Cache-Control": "public, max-age=300",
+            "Cache-Control": PROMOTION_TRACKER_RUNTIME.cache_control(v),
             "Access-Control-Allow-Origin": "*",
             "X-Content-Type-Options": "nosniff",
         },
@@ -2559,12 +2566,12 @@ def tracker_script() -> Response:
 
 
 @router.get("/api/public/promotion/guard.js")
-def landing_guard_script() -> Response:
+def landing_guard_script(v: str | None = Query(default=None)) -> Response:
     return Response(
-        LANDING_GUARD_JS,
+        LANDING_GUARD_RUNTIME.content,
         media_type="application/javascript",
         headers={
-            "Cache-Control": "public, max-age=300",
+            "Cache-Control": LANDING_GUARD_RUNTIME.cache_control(v),
             "Access-Control-Allow-Origin": "*",
             "X-Content-Type-Options": "nosniff",
         },
