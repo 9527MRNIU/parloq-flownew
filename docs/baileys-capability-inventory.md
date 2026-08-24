@@ -13,7 +13,7 @@
 | 连接与会话 | 保存登录凭证 | `creds.update` | 已接入 | 持久化凭证和 Signal 密钥 |
 | 连接与会话 | 恢复登录会话 | `auth`、保存的凭证 | 已接入 | 无需重新配对即可恢复连接 |
 | 连接与会话 | 连接状态与断线原因 | `connection.update` | 已接入 | 驱动账号状态机、断线重连和管理端在线/离线显示 |
-| 连接与会话 | 连接后向 WhatsApp 显示在线 | `markOnlineOnConnect` | 已配置为关闭 | 当前显式设置为 `false`；Socket 连接成功后不会把本账号持续标记为在线，不影响 Parloq 管理端判断连接状态 |
+| 连接与会话 | 连接后向 WhatsApp 显示在线 | `markOnlineOnConnect` | 已接入，可配置 | 协议节点提供“关闭在线”开关且默认开启；开启时传 `false`，关闭该开关时传 `true`，不影响 Parloq 管理端判断连接状态 |
 | 连接与会话 | 主动发布在线、离线或输入状态 | `sendPresenceUpdate()` | 未直接接入 | Baileys 支持 `available`、`unavailable`、`composing`、`recording`、`paused` 等 Presence 状态 |
 | 连接与会话 | 主动登出 | `logout()` | 已接入 | 删除登录会话，需要重新配对 |
 | 连接与会话 | 关闭连接 | `end()` | 已接入 | 关闭 Socket，不等同于登出 |
@@ -60,7 +60,7 @@
 | 聊天 | 聊天新增/更新/删除事件 | `chats.upsert/update/delete` | 未接入 | Baileys 支持 |
 | 聊天 | 归档、静音、已读、置顶等 | `chatModify()` | 未接入 | Baileys 支持 |
 | 账号查询 | 判断号码是否存在 | `onWhatsApp()` | 未作为通用能力接入 | 必须通过另一个已登录账号查询 |
-| 账号查询 | 查询头像 | `profilePictureUrl(jid)` | 已接入 | 只查询当前登录账号自己的头像是否存在 |
+| 账号查询 | 拉取头像 | `profilePictureUrl(jid)` | 已接入 | 查询当前登录账号自己的头像链接，经固定代理下载并缓存到账号资料中 |
 | 账号查询 | 查询 About/资料状态 | `fetchStatus(jid)` | 已删除 | 不再属于 Parloq 资料同步项 |
 | 账号查询 | 查询商业资料 | `getBusinessProfile(jid)` | 已删除 | 不再属于 Parloq 资料同步项 |
 | 账号查询 | 查询消失消息期限 | `fetchDisappearingDuration()` | 未接入 | Baileys 支持 |

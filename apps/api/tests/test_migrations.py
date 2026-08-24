@@ -1725,3 +1725,36 @@ def test_bitly_pool_analytics_columns_are_reversible(tmp_path: Path) -> None:
         column["name"] for column in inspector.get_columns("direct_short_links")
     }
     engine.dispose()
+
+
+def test_account_avatar_cache_columns_are_reversible(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'account-avatar-cache.db'}"
+    avatar_columns = {
+        "avatar_source_url",
+        "avatar_content_type",
+        "avatar_size",
+        "avatar_sha256",
+        "avatar_content",
+        "avatar_fetched_at",
+    }
+    _alembic(database_url, "0069_prune_sync_policy")
+    engine = sa.create_engine(database_url)
+    assert avatar_columns.isdisjoint(
+        {column["name"] for column in sa.inspect(engine).get_columns("personal_accounts")}
+    )
+    engine.dispose()
+
+    _alembic(database_url, "0070_account_avatar_cache")
+    engine = sa.create_engine(database_url)
+    assert avatar_columns <= {
+        column["name"]
+        for column in sa.inspect(engine).get_columns("personal_accounts")
+    }
+    engine.dispose()
+
+    _alembic_downgrade(database_url, "0069_prune_sync_policy")
+    engine = sa.create_engine(database_url)
+    assert avatar_columns.isdisjoint(
+        {column["name"] for column in sa.inspect(engine).get_columns("personal_accounts")}
+    )
+    engine.dispose()

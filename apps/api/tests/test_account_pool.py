@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
+from datetime import UTC, datetime
 from zipfile import ZipFile
 
 from fastapi.testclient import TestClient
@@ -18,6 +20,7 @@ from app.services.baileys_credentials import (
     validate_baileys_credentials,
     validate_baileys_session,
 )
+from app.services.account_avatars import apply_gateway_avatar
 from app.services.wa_gateway import WaGatewayClient
 
 
@@ -182,6 +185,41 @@ def test_offline_import_is_not_ready_until_gateway_verifies_session() -> None:
     assert item.validation_status == "ready"
 
 
+def test_gateway_avatar_payload_is_validated_cached_and_clearable() -> None:
+    item = PersonalAccount(
+        public_id="wa_avatar",
+        name="Avatar account",
+        phone_e164="+12025550997",
+        status="linked_offline",
+        validation_status="ready",
+        metadata_sync_status="ready",
+        enabled=True,
+        created_by=1,
+    )
+    content = b"\x89PNG\r\n\x1a\ncache"
+    digest = hashlib.sha256(content).hexdigest()
+
+    assert apply_gateway_avatar(
+        item,
+        {
+            "avatar": {
+                "sourceUrl": "https://pps.whatsapp.net/avatar.png",
+                "contentType": "image/png",
+                "size": len(content),
+                "sha256": digest,
+                "dataBase64": base64.b64encode(content).decode(),
+            }
+        },
+    )
+    assert item.avatar_content == content
+    assert item.avatar_sha256 == digest
+    assert item.avatar_fetched_at is not None
+
+    assert apply_gateway_avatar(item, {"avatar": None})
+    assert item.avatar_source_url is None
+    assert item.avatar_content is None
+
+
 def test_import_group_statistics_and_export(
     admin_client: TestClient, monkeypatch
 ) -> None:
@@ -259,6 +297,13 @@ def test_import_group_statistics_and_export(
         stored.metadata_sync_status = "ready"
         stored.status = "linked_offline"
         stored.has_avatar = True
+        avatar_content = b"\xff\xd8\xff\xe0"
+        stored.avatar_source_url = "https://pps.whatsapp.net/avatar.jpg"
+        stored.avatar_content_type = "image/jpeg"
+        stored.avatar_size = len(avatar_content)
+        stored.avatar_sha256 = hashlib.sha256(avatar_content).hexdigest()
+        stored.avatar_content = avatar_content
+        stored.avatar_fetched_at = datetime.now(UTC)
         stored.group_count = 3
         stored.friend_count = 12
         stored.mutual_contact_count = 4
@@ -280,6 +325,16 @@ def test_import_group_statistics_and_export(
     assert filtered_data["total"] == 1
     assert filtered_data["rows"][0]["id"] == account["id"]
     assert filtered_data["rows"][0]["quality"]["groupCount"] == 3
+    assert filtered_data["rows"][0]["quality"]["avatarUrl"].startswith(
+        f"/api/personal-accounts/{account['id']}/avatar?v="
+    )
+
+    avatar = admin_client.get(f"/api/personal-accounts/{account['id']}/avatar")
+    assert avatar.status_code == 200, avatar.text
+    assert avatar.content == b"\xff\xd8\xff\xe0"
+    assert avatar.headers["content-type"] == "image/jpeg"
+    assert avatar.headers["cache-control"] == "private, max-age=300"
+    assert avatar.headers["x-content-type-options"] == "nosniff"
 
     invalid_filter = admin_client.get(
         "/api/personal-accounts", params={"status": "not-a-status"}

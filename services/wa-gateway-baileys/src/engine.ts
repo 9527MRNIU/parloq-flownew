@@ -5,7 +5,7 @@ import type {
   ConnectionState,
   WASocket,
 } from '@whiskeysockets/baileys'
-import type { Agent } from 'node:https'
+import { get as httpsGet, type Agent } from 'node:https'
 import { createHash } from 'node:crypto'
 import pino, { type Logger } from 'pino'
 import { ProxyAgent } from 'proxy-agent'
@@ -13,7 +13,7 @@ import { loadAuthState, mergeCreds, type BaileysRuntimeModule } from './auth-sto
 import type { Store } from './store.js'
 import { WaWebVersionResolver } from './wa-version.js'
 import type { ManagedMediaReference, MessageButton, OutboundMessage } from './message-content.js'
-import type { SyncPolicy } from './domain.js'
+import type { AccountAvatar, SyncPolicy } from './domain.js'
 import { classifyProxyFailure, proxyFingerprint } from './proxy-health.js'
 
 export type EngineEvent =
@@ -34,10 +34,106 @@ export interface EngineAccount {
 }
 export interface AccountQuality {
   hasAvatar: boolean | null
+  avatar?: AccountAvatar | null
   groupCount: number | null
   friendCount: number | null
   mutualContactCount: number | null
   metadata: Record<string, unknown>
+}
+
+const MAX_PROFILE_AVATAR_BYTES = 2 * 1024 * 1024
+const PROFILE_AVATAR_TIMEOUT_MS = 15_000
+const MAX_PROFILE_AVATAR_REDIRECTS = 3
+
+function detectedAvatarContentType(content: Buffer): string | null {
+  if (content.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return 'image/jpeg'
+  if (content.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png'
+  if (content.length >= 12 && content.subarray(0, 4).toString() === 'RIFF' && content.subarray(8, 12).toString() === 'WEBP') return 'image/webp'
+  if (content.length >= 12 && content.subarray(4, 8).toString() === 'ftyp' && ['avif', 'avis'].includes(content.subarray(8, 12).toString())) return 'image/avif'
+  return null
+}
+
+export interface DownloadedProfileAvatar {
+  contentType: string
+  size: number
+  sha256: string
+  dataBase64: string
+}
+
+export type ProfileAvatarDownloader = (
+  url: string,
+  agent?: Agent,
+) => Promise<DownloadedProfileAvatar>
+
+export async function downloadProfileAvatar(
+  url: string,
+  agent?: Agent,
+  redirects = 0,
+): Promise<DownloadedProfileAvatar> {
+  const target = new URL(url)
+  if (target.protocol !== 'https:' || !target.hostname || target.href.length > 4096) {
+    throw new Error('profile avatar URL is invalid')
+  }
+  return new Promise((resolve, reject) => {
+    const request = httpsGet(target, { agent }, (response) => {
+      const status = response.statusCode ?? 0
+      const location = response.headers.location
+      if (status >= 300 && status < 400 && location) {
+        response.resume()
+        if (redirects >= MAX_PROFILE_AVATAR_REDIRECTS) {
+          reject(new Error('profile avatar redirected too many times'))
+          return
+        }
+        void downloadProfileAvatar(new URL(location, target).toString(), agent, redirects + 1)
+          .then(resolve, reject)
+        return
+      }
+      if (status !== 200) {
+        response.resume()
+        reject(new Error(`profile avatar download failed (${status})`))
+        return
+      }
+      const declaredLength = Number(response.headers['content-length'] || 0)
+      if (declaredLength > MAX_PROFILE_AVATAR_BYTES) {
+        response.resume()
+        reject(new Error('profile avatar is too large'))
+        return
+      }
+      const chunks: Buffer[] = []
+      let size = 0
+      response.on('data', (chunk: Buffer) => {
+        size += chunk.length
+        if (size > MAX_PROFILE_AVATAR_BYTES) {
+          response.destroy(new Error('profile avatar is too large'))
+          return
+        }
+        chunks.push(chunk)
+      })
+      response.on('error', reject)
+      response.on('end', () => {
+        const content = Buffer.concat(chunks)
+        const contentType = detectedAvatarContentType(content)
+        const declaredType = (String(response.headers['content-type'] || '')
+          .split(';', 1)[0] ?? '')
+          .trim()
+          .toLowerCase()
+        if (!content.length || !contentType || (declaredType && declaredType !== contentType)) {
+          reject(new Error('profile avatar content is not a supported image'))
+          return
+        }
+        resolve({
+          contentType,
+          size: content.length,
+          sha256: createHash('sha256').update(content).digest('hex'),
+          dataBase64: content.toString('base64'),
+        })
+      })
+    })
+    request.setTimeout(PROFILE_AVATAR_TIMEOUT_MS, () => {
+      request.destroy(new Error('profile avatar download timed out'))
+    })
+    request.on('error', reject)
+  })
 }
 
 export interface ProtocolVersionInfo {
@@ -201,6 +297,7 @@ export class BaileysEngine implements ProtocolEngine {
     logger?: Logger,
     private readonly materialBaseUrl = 'http://api:8000',
     private readonly baileys: BaileysRuntimeModule = BuiltinBaileys,
+    private readonly avatarDownloader: ProfileAvatarDownloader = downloadProfileAvatar,
   ) {
     this.protocolLogger = (logger ?? pino({ level: 'warn' })).child({ component: 'baileys' })
     this.versionResolver = new WaWebVersionResolver(
@@ -450,12 +547,31 @@ export class BaileysEngine implements ProtocolEngine {
     if (!active?.online) throw new Error('account is offline')
     const ownJid = active.socket.user?.id
     let hasAvatar: boolean | null = null
+    let avatar: AccountAvatar | null | undefined
     if (policy.avatar && ownJid) {
       try {
-        hasAvatar = Boolean(await active.socket.profilePictureUrl(ownJid, 'preview'))
+        const sourceUrl = await active.socket.profilePictureUrl(ownJid, 'image')
+        hasAvatar = Boolean(sourceUrl)
+        avatar = sourceUrl ? { sourceUrl } : null
+        if (sourceUrl) {
+          try {
+            avatar = {
+              sourceUrl,
+              ...await this.avatarDownloader(sourceUrl, active.proxyAgent),
+            }
+          } catch (error) {
+            this.protocolLogger.warn(
+              { accountId, error: error instanceof Error ? error.message : String(error) },
+              'profile_avatar_download_failed',
+            )
+          }
+        }
       } catch (error) {
         const statusCode = new Boom(error instanceof Error ? error : String(error)).output.statusCode
-        if (statusCode === 404) hasAvatar = false
+        if (statusCode === 404) {
+          hasAvatar = false
+          avatar = null
+        }
       }
     }
     let groupCount: number | null = null
@@ -478,7 +594,14 @@ export class BaileysEngine implements ProtocolEngine {
     // Baileys does not expose a stable, privacy-safe definition for “friends”
     // or “mutual contacts” without syncing chat/contact history. Keep them
     // unknown instead of manufacturing zeroes.
-    return { hasAvatar, groupCount, friendCount: null, mutualContactCount: null, metadata }
+    return {
+      hasAvatar,
+      ...(avatar !== undefined ? { avatar } : {}),
+      groupCount,
+      friendCount: null,
+      mutualContactCount: null,
+      metadata,
+    }
   }
 
   private async openSocket(account: EngineAccount, createAuth: boolean): Promise<ActiveSocket> {
@@ -503,7 +626,7 @@ export class BaileysEngine implements ProtocolEngine {
       browser: this.baileys.Browsers.macOS('Chrome'),
       version,
       logger: this.protocolLogger,
-      markOnlineOnConnect: false,
+      markOnlineOnConnect: !account.syncPolicy.closeOnline,
       syncFullHistory: account.syncPolicy.contacts || account.syncPolicy.chats || account.syncPolicy.messageHistory,
       shouldSyncHistoryMessage: () => account.syncPolicy.messageHistory,
       ...(proxyAgent ? { agent: proxyAgent as Agent, fetchAgent: proxyAgent as Agent } : {}),

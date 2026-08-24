@@ -44,6 +44,7 @@ class RecordingRuntime implements ProtocolEngine {
 }
 
 const policy: SyncPolicy = {
+  closeOnline: true,
   avatar: true,
   groupSummary: true,
   groupDetails: false,

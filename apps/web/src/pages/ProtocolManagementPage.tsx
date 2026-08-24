@@ -93,6 +93,7 @@ type ProtocolDefinitionRef = {
 };
 
 type SyncPolicy = {
+  closeOnline: boolean;
   avatar: boolean;
   groupSummary: boolean;
   groupDetails: boolean;
@@ -124,6 +125,7 @@ type RateLimitPolicyForm = {
 };
 
 const DEFAULT_SYNC_POLICY: SyncPolicy = {
+  closeOnline: true,
   avatar: true,
   groupSummary: true,
   groupDetails: false,
@@ -677,7 +679,8 @@ export function ProtocolManagementPage({
 
           <DrawerFormSection title="绑定后同步范围" description="账号基础身份始终同步；以下选项会在创建配对任务时快照，之后修改不改变进行中的配对。">
             {([
-              ["avatar", "头像", "读取账号头像是否存在"],
+              ["closeOnline", "关闭在线", "连接后不向 WhatsApp 发布在线状态"],
+              ["avatar", "拉取头像", "获取当前账号头像链接并下载缓存"],
               ["groupSummary", "群组概览", "同步参与群数量"],
               ["groupDetails", "群组详情", "读取群组元数据；开启时自动包含群组概览"],
               ["contacts", "联系人", "监听并同步联系人更新"],
@@ -685,7 +688,7 @@ export function ProtocolManagementPage({
               ["messageHistory", "消息历史", "接收历史消息同步，资源开销较高"],
             ] as Array<[keyof SyncPolicy, string, string]>).map(([key, label, description]) => (
               <DrawerFormField key={key} label={label} hint={description}>
-                <Switch checked={form.syncPolicy[key]} onCheckedChange={(checked) => setForm((current) => ({ ...current, syncPolicy: { ...current.syncPolicy, [key]: checked, ...(key === "groupDetails" && checked ? { groupSummary: true } : {}) } }))} aria-label={`同步${label}`} />
+                <Switch checked={form.syncPolicy[key]} onCheckedChange={(checked) => setForm((current) => ({ ...current, syncPolicy: { ...current.syncPolicy, [key]: checked, ...(key === "groupDetails" && checked ? { groupSummary: true } : {}) } }))} aria-label={key === "closeOnline" || key === "avatar" ? label : `同步${label}`} />
               </DrawerFormField>
             ))}
           </DrawerFormSection>

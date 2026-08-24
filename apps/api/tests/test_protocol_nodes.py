@@ -127,6 +127,7 @@ def test_protocol_node_create_pool_and_template_contract(
     assert node["maxOnlineAccounts"] == 1000
     assert node["connectionPolicy"] == "on_demand"
     assert node["syncPolicy"] == {
+        "closeOnline": True,
         "avatar": True,
         "groupSummary": True,
         "groupDetails": False,
@@ -153,10 +154,17 @@ def test_protocol_node_create_pool_and_template_contract(
 
     updated = admin_client.patch(
         f"/api/protocol-nodes/{node['id']}",
-        json={"syncPolicy": {**node["syncPolicy"], "contacts": True}},
+        json={
+            "syncPolicy": {
+                **node["syncPolicy"],
+                "closeOnline": False,
+                "contacts": True,
+            }
+        },
     )
     assert updated.status_code == 200, updated.text
     assert updated.json()["data"]["protocol"]["syncPolicyVersion"] == 2
+    assert updated.json()["data"]["protocol"]["syncPolicy"]["closeOnline"] is False
 
     rate_updated = admin_client.patch(
         f"/api/protocol-nodes/{node['id']}",

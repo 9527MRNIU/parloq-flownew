@@ -16,6 +16,7 @@ export type PairingStatus = 'idle' | 'waiting_phone' | 'reconnecting' | 'verifie
 export type MessageStatus = 'queued' | 'sent' | 'delivered' | 'failed'
 
 export interface SyncPolicy {
+  closeOnline: boolean
   avatar: boolean
   groupSummary: boolean
   groupDetails: boolean
@@ -25,12 +26,21 @@ export interface SyncPolicy {
 }
 
 export const defaultSyncPolicy: SyncPolicy = {
+  closeOnline: true,
   avatar: true,
   groupSummary: true,
   groupDetails: false,
   contacts: false,
   chats: false,
   messageHistory: false,
+}
+
+export interface AccountAvatar {
+  sourceUrl: string
+  contentType?: string
+  size?: number
+  sha256?: string
+  dataBase64?: string
 }
 
 export function normalizeSyncPolicy(value: unknown): SyncPolicy {
@@ -109,6 +119,10 @@ export interface PublicAccount extends Omit<Account, 'proxyUrl'> {
     friendCount: number | null
     mutualContactCount: number | null
   }
+}
+
+export type MetadataSyncResponse = PublicAccount & {
+  avatar?: AccountAvatar | null
 }
 
 export interface Message {

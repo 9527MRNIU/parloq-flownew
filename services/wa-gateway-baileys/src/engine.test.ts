@@ -7,6 +7,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   BaileysEngine,
+  downloadProfileAvatar,
   hasReconnectableIdentity,
   isRequiredPairingRestart,
   requestStablePairingCode,
@@ -125,7 +126,10 @@ describe('Baileys pairing socket readiness', () => {
 })
 
 describe('Baileys intentional disconnect handling', () => {
-  it('does not classify a gateway shutdown as a bad session', async () => {
+  it.each([
+    { closeOnline: true, markOnlineOnConnect: false },
+    { closeOnline: false, markOnlineOnConnect: true },
+  ])('maps closeOnline=$closeOnline and does not classify shutdown as a bad session', async ({ closeOnline, markOnlineOnConnect }) => {
     const emitter = new EventEmitter()
     const socket = {
       ev: {
@@ -133,6 +137,7 @@ describe('Baileys intentional disconnect handling', () => {
         off: (event: string, listener: (...args: unknown[]) => void) => emitter.off(event, listener),
       },
       user: { id: '14155550123:1@s.whatsapp.net' },
+      profilePictureUrl: vi.fn(async () => 'https://pps.whatsapp.net/avatar.jpg'),
       end: vi.fn((error: Error) => {
         emitter.emit('connection.update', {
           connection: 'close',
@@ -163,7 +168,13 @@ describe('Baileys intentional disconnect handling', () => {
         isLatest: true,
       })),
     }
-    const engine = new BaileysEngine(store, undefined, 'http://api:8000', baileys as never)
+    const avatarDownloader = vi.fn(async () => ({
+      contentType: 'image/jpeg',
+      size: 4,
+      sha256: 'avatar-sha256',
+      dataBase64: '/9j/4A==',
+    }))
+    const engine = new BaileysEngine(store, undefined, 'http://api:8000', baileys as never, avatarDownloader)
     const events: string[] = []
     engine.setEventHandler((event) => { events.push(event.kind) })
     await engine.start()
@@ -174,6 +185,7 @@ describe('Baileys intentional disconnect handling', () => {
       phoneE164: '+14155550123',
       proxyUrl: '',
       syncPolicy: {
+        closeOnline,
         avatar: true,
         groupSummary: true,
         groupDetails: false,
@@ -183,10 +195,36 @@ describe('Baileys intentional disconnect handling', () => {
       },
     })
 
+    expect(baileys.default).toHaveBeenCalledWith(expect.objectContaining({
+      markOnlineOnConnect,
+    }))
+    await expect(engine.getQuality('wa_shutdown', {
+      closeOnline,
+      avatar: true,
+      groupSummary: false,
+      groupDetails: false,
+      contacts: false,
+      chats: false,
+      messageHistory: false,
+    })).resolves.toMatchObject({
+      hasAvatar: true,
+      avatar: {
+        sourceUrl: 'https://pps.whatsapp.net/avatar.jpg',
+        contentType: 'image/jpeg',
+        dataBase64: '/9j/4A==',
+      },
+    })
+    expect(socket.profilePictureUrl).toHaveBeenCalledWith(socket.user.id, 'image')
+    expect(avatarDownloader).toHaveBeenCalledWith('https://pps.whatsapp.net/avatar.jpg', undefined)
     await engine.close()
 
     expect(socket.end).toHaveBeenCalledWith(expect.objectContaining({ message: 'gateway disconnect' }))
     expect(events).toEqual(['connected'])
+  })
+
+  it('rejects non-HTTPS profile avatar URLs before making a request', async () => {
+    await expect(downloadProfileAvatar('http://127.0.0.1/avatar.jpg'))
+      .rejects.toThrow('profile avatar URL is invalid')
   })
 })
 

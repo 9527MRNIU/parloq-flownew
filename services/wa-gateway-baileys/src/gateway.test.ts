@@ -22,7 +22,7 @@ class MemoryStore implements Store {
       throw new GatewayError('conflict', 'duplicate')
     }
     const now = new Date()
-    const account: Account = { ...input, protocolDefinitionId: input.protocolDefinitionId ?? '0', protocolVersion: input.protocolVersion ?? '6.7.24', deviceJid: '', autoConnect: false, connectionPolicy: 'on_demand', idleDisconnectSeconds: 600, postVerifyGraceSeconds: 120, syncPolicy: { avatar: true, groupSummary: true, groupDetails: false, contacts: false, chats: false, messageHistory: false }, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'idle', pairingExpiresAt: null, metadataSyncStatus: 'pending', hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {}, stateChangedAt: now, invalidatedAt: null, reasonCategory: 'created', providerCode: null, createdAt: now, updatedAt: now }
+    const account: Account = { ...input, protocolDefinitionId: input.protocolDefinitionId ?? '0', protocolVersion: input.protocolVersion ?? '6.7.24', deviceJid: '', autoConnect: false, connectionPolicy: 'on_demand', idleDisconnectSeconds: 600, postVerifyGraceSeconds: 120, syncPolicy: { closeOnline: true, avatar: true, groupSummary: true, groupDetails: false, contacts: false, chats: false, messageHistory: false }, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'idle', pairingExpiresAt: null, metadataSyncStatus: 'pending', hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {}, stateChangedAt: now, invalidatedAt: null, reasonCategory: 'created', providerCode: null, createdAt: now, updatedAt: now }
     this.accounts.set(account.id, account)
     return account
   }
@@ -43,7 +43,7 @@ class MemoryStore implements Store {
       connectionPolicy: 'on_demand',
       idleDisconnectSeconds: 600,
       postVerifyGraceSeconds: 120,
-      syncPolicy: { avatar: true, groupSummary: true, groupDetails: false, contacts: false, chats: false, messageHistory: false },
+      syncPolicy: { closeOnline: true, avatar: true, groupSummary: true, groupDetails: false, contacts: false, chats: false, messageHistory: false },
       pairingStatus: 'idle',
       pairingExpiresAt: null,
       metadataSyncStatus: 'pending',
@@ -402,6 +402,41 @@ describe('Baileys gateway HTTP contract', () => {
     expect(synced.statusCode).toBe(200)
     expect(synced.json().data.metadataSyncStatus).toBe('ready')
     expect((await store.getAccount('wa_metadata')).metadataSyncStatus).toBe('ready')
+  })
+
+  it('returns downloaded avatars transiently without storing Base64 in the gateway account', async () => {
+    const headers = { authorization: `Bearer ${token}` }
+    vi.spyOn(engine, 'getQuality').mockResolvedValue({
+      hasAvatar: true,
+      avatar: {
+        sourceUrl: 'https://pps.whatsapp.net/avatar.jpg',
+        contentType: 'image/jpeg',
+        size: 4,
+        sha256: 'avatar-sha256',
+        dataBase64: '/9j/4A==',
+      },
+      groupCount: null,
+      friendCount: null,
+      mutualContactCount: null,
+      metadata: {},
+    })
+    await app.inject({ method: 'POST', url: '/v1/accounts', headers, payload: { id: 'wa_avatar', phoneE164: '+14155550138' } })
+    await app.inject({ method: 'POST', url: '/v1/accounts/wa_avatar/pairing-code', headers, payload: {} })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    const synced = await app.inject({
+      method: 'POST',
+      url: '/v1/accounts/wa_avatar/metadata-sync',
+      headers,
+      payload: { syncPolicy: { avatar: true } },
+    })
+
+    expect(synced.statusCode).toBe(200)
+    expect(synced.json().data.avatar).toMatchObject({
+      sourceUrl: 'https://pps.whatsapp.net/avatar.jpg',
+      dataBase64: '/9j/4A==',
+    })
+    expect('avatar' in await store.getAccount('wa_avatar')).toBe(false)
   })
 
   it('imports legacy Baileys creds as pending and exports a complete versioned bundle', async () => {

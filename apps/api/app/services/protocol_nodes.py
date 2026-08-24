@@ -22,6 +22,7 @@ from app.snowflake import new_public_id
 
 
 DEFAULT_SYNC_POLICY: dict[str, bool] = {
+    "closeOnline": True,
     "avatar": True,
     "groupSummary": True,
     "groupDetails": False,
@@ -76,6 +77,7 @@ def normalized_sync_policy(value: dict | None) -> dict[str, bool]:
     source = value if isinstance(value, dict) else {}
     result = dict(DEFAULT_SYNC_POLICY)
     snake_aliases = {
+        "closeOnline": "close_online",
         "groupSummary": "group_summary",
         "groupDetails": "group_details",
         "messageHistory": "message_history",

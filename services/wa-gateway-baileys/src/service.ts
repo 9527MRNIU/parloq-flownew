@@ -1,6 +1,6 @@
 import type { Logger } from 'pino'
 import type { Account, AccountState, Message, PublicAccount } from './domain.js'
-import { GatewayError, defaultSyncPolicy, normalizeE164, normalizeSyncPolicy, publicAccount, safeError, validateProxy, type SyncPolicy } from './domain.js'
+import { GatewayError, defaultSyncPolicy, normalizeE164, normalizeSyncPolicy, publicAccount, safeError, validateProxy, type AccountAvatar, type MetadataSyncResponse, type SyncPolicy } from './domain.js'
 import type { EngineEvent, PairResult, ProtocolEngine } from './engine.js'
 import { BAILEYS_VERSION, exportSession, parseImportedSession, phoneFromDeviceJid } from './session.js'
 import type { Store } from './store.js'
@@ -382,7 +382,7 @@ export class GatewayService {
     return { session: exportSession({ creds, keys }, current.protocolVersion), format: 'parloq-baileys-session/v1', status: 'ready' }
   }
 
-  async syncAccountMetadata(id: string, request: MetadataSyncRequest = {}): Promise<PublicAccount> {
+  async syncAccountMetadata(id: string, request: MetadataSyncRequest = {}): Promise<MetadataSyncResponse> {
     let current = await this.store.getAccount(id)
     if (request.syncPolicy !== undefined) {
       current = await this.store.updateAccount(id, {
@@ -398,15 +398,21 @@ export class GatewayService {
       current = await this.store.getAccount(id)
     }
     await this.store.updateAccount(id, { metadataSyncStatus: 'syncing' })
+    let avatar: AccountAvatar | null | undefined
+    let avatarIncluded = false
     try {
-      await this.syncMetadata(await this.store.getAccount(id))
+      const synced = await this.syncMetadata(await this.store.getAccount(id))
+      avatar = synced.avatar
+      avatarIncluded = synced.avatarIncluded
     } finally {
       const latest = await this.store.getAccount(id)
       if (!wasOnline && latest.connectionPolicy === 'on_demand' && this.engine.isOnline(id)) {
         await this.disconnect(id)
       }
     }
-    return publicAccount(await this.store.getAccount(id))
+    const response = publicAccount(await this.store.getAccount(id))
+    if (!avatarIncluded) return response
+    return { ...response, avatar: avatar ?? null }
   }
 
   async sendMessage(id: string, request: SendMessageRequest): Promise<Message> {
@@ -526,14 +532,24 @@ export class GatewayService {
     await this.transitionAccount(id, 'linked_offline', { autoConnect: false }, 'idle_disconnect')
   }
 
-  private async syncMetadata(account: Account): Promise<Account> {
+  private async syncMetadata(account: Account): Promise<{
+    account: Account
+    avatar?: AccountAvatar | null
+    avatarIncluded: boolean
+  }> {
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         const quality = await this.engine.getQuality(account.id, account.syncPolicy)
-        return await this.store.updateAccount(account.id, {
+        const { avatar, ...persistentQuality } = quality
+        const updated = await this.store.updateAccount(account.id, {
           metadataSyncStatus: 'ready',
-          ...quality,
+          ...persistentQuality,
         })
+        return {
+          account: updated,
+          ...(avatar !== undefined ? { avatar } : {}),
+          avatarIncluded: avatar !== undefined,
+        }
       } catch (error) {
         if (attempt === 3 || !this.engine.isOnline(account.id)) {
           await this.store.updateAccount(account.id, { metadataSyncStatus: 'failed' })

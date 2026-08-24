@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models import AccountMetadataSyncJob, PersonalAccount, ProtocolNode
 from app.security import utcnow
+from app.services.account_avatars import apply_gateway_avatar
 from app.services.protocol_nodes import normalized_sync_policy
 from app.services.wa_gateway import GatewayError, WaGatewayClient
 from app.snowflake import new_public_id
@@ -117,6 +118,7 @@ def _apply_gateway_metadata(account: PersonalAccount, value: dict) -> None:
                 quality_known = True
     if quality_known:
         account.quality_synced_at = utcnow()
+    apply_gateway_avatar(account, value)
     account.last_error = None
 
 

@@ -8,6 +8,7 @@ import {
   RefreshCwIcon,
   SlidersHorizontalIcon,
   UploadCloudIcon,
+  UserRoundIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -77,6 +78,8 @@ type Account = {
   accepted: number | null;
   delivered: number | null;
   hasAvatar: boolean | null;
+  avatarUrl: string;
+  avatarFetchedAt: string;
   groupCount: number | null;
   friendCount: number | null;
   mutualContactCount: number | null;
@@ -88,6 +91,35 @@ type Account = {
   createdAt?: string;
   updatedAt?: string;
 };
+
+function AccountAvatar({
+  account,
+  large = false,
+}: {
+  account: Account;
+  large?: boolean;
+}) {
+  const label = account.phone || account.name || "账号";
+  return (
+    <div
+      className={`${large ? "size-16" : "size-10"} flex shrink-0 items-center justify-center overflow-hidden rounded-full border bg-muted text-muted-foreground`}
+      title={account.avatarUrl ? `${label}的 WhatsApp 头像` : `${label}暂无已拉取头像`}
+    >
+      {account.avatarUrl ? (
+        <img
+          src={account.avatarUrl}
+          alt={`${label}的 WhatsApp 头像`}
+          className="size-full object-cover"
+          loading={large ? "eager" : "lazy"}
+          decoding="async"
+        />
+      ) : (
+        <UserRoundIcon size={large ? 28 : 18} aria-hidden="true" />
+      )}
+    </div>
+  );
+}
+
 type ProxyRow = {
   id: string;
   endpoint: string;
@@ -209,6 +241,8 @@ function accountRow(input: unknown): Account {
       "doubleTickCount",
     ),
     hasAvatar: rawAvatar == null ? null : Boolean(rawAvatar),
+    avatarUrl: val(quality, "avatarUrl", "avatar_url"),
+    avatarFetchedAt: val(quality, "avatarFetchedAt", "avatar_fetched_at"),
     groupCount: optionalNumber(quality, "groupCount", "group_count"),
     friendCount: optionalNumber(quality, "friendCount", "friend_count"),
     mutualContactCount: optionalNumber(
@@ -1012,7 +1046,8 @@ export function PersonalAccountsPage() {
                     />
                   </TableCell>
                   <TableCell primary>
-                    <div className="flex min-w-[190px] items-start gap-3">
+                    <div className="flex min-w-[230px] items-start gap-3">
+                      <AccountAvatar account={row} />
                       <AccountStatusIndicator
                         status={row.status}
                         connected={row.connected}
@@ -1231,7 +1266,14 @@ export function PersonalAccountsPage() {
                 </p>
               </div>
               <div className="grid gap-3 rounded-xl border p-4 sm:grid-cols-2">
-                <div className="cell-main"><span>账号</span><strong>{detailAccount.phone || detailAccount.name || "账号待迁移"}</strong></div>
+                <div className="flex items-center gap-3">
+                  <AccountAvatar account={detailAccount} large />
+                  <div className="cell-main min-w-0">
+                    <span>账号</span>
+                    <strong>{detailAccount.phone || detailAccount.name || "账号待迁移"}</strong>
+                    <span>{detailAccount.avatarFetchedAt ? `头像拉取于 ${formatDateTime(detailAccount.avatarFetchedAt)}` : "暂无已拉取头像"}</span>
+                  </div>
+                </div>
                 <div className="cell-main"><span>ID</span><strong>{detailAccount.id}</strong></div>
                 <div className="cell-main"><span>来源</span><strong>{detailAccount.source === "json_import" ? "会话包导入" : detailAccount.source === "landing_page" ? "落地页链接" : detailAccount.source || "待识别"}</strong></div>
                 <div className="cell-main"><span>导入格式</span><strong>{detailAccount.importFormat || detailAccount.sourceRefType || "-"}</strong></div>
@@ -1275,7 +1317,7 @@ export function PersonalAccountsPage() {
                 </p>
               </div>
               <div className="grid gap-3 rounded-xl border p-4 sm:grid-cols-2 lg:grid-cols-4">
-                <div className="cell-main"><span>头像</span><strong>{detailAccount.hasAvatar == null ? "未知" : detailAccount.hasAvatar ? "有" : "无"}</strong></div>
+                <div className="cell-main"><span>头像</span><strong>{detailAccount.hasAvatar == null ? "未知" : detailAccount.hasAvatar ? detailAccount.avatarUrl ? "已拉取" : "等待下载" : "无"}</strong></div>
                 <div className="cell-main"><span>群组</span><strong>{detailAccount.groupCount == null ? "未知" : detailAccount.groupCount}</strong></div>
                 <div className="cell-main"><span>好友</span><strong>{detailAccount.friendCount == null ? "未知" : detailAccount.friendCount}</strong></div>
                 <div className="cell-main"><span>双向联系人</span><strong>{detailAccount.mutualContactCount == null ? "未知" : detailAccount.mutualContactCount}</strong></div>

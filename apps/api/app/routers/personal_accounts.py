@@ -457,6 +457,12 @@ def _account_payload(
         ),
         "quality": {
             "hasAvatar": item.has_avatar,
+            "avatarUrl": (
+                f"/api/personal-accounts/{item.id}/avatar?v={item.avatar_sha256[:12]}"
+                if item.avatar_sha256 and item.avatar_size
+                else None
+            ),
+            "avatarFetchedAt": iso(item.avatar_fetched_at),
             "groupCount": item.group_count,
             "friendCount": item.friend_count,
             "mutualContactCount": item.mutual_contact_count,
@@ -1343,6 +1349,33 @@ def get_account(account_id: str, db: DbSession, current_user: CurrentUser) -> di
     item = _account(db, account_id, current_user)
     _sync_gateway_account(db, item, strict=False)
     return {"data": {"account": account_row(db, item)}}
+
+
+@router.get("/{account_id}/avatar")
+def get_account_avatar(
+    account_id: str,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> Response:
+    item = _account(db, account_id, current_user)
+    content = item.avatar_content
+    if (
+        not content
+        or not item.avatar_content_type
+        or not item.avatar_sha256
+        or item.avatar_size != len(content)
+    ):
+        raise HTTPException(status_code=404, detail="账号头像尚未拉取")
+    return Response(
+        content=content,
+        media_type=item.avatar_content_type,
+        headers={
+            "Cache-Control": "private, max-age=300",
+            "Content-Disposition": 'inline; filename="account-avatar"',
+            "ETag": f'"{item.avatar_sha256}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("/{account_id}/lifecycle")

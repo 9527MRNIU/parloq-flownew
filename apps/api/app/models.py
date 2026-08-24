@@ -792,6 +792,12 @@ class PersonalAccount(Base, TimestampMixin):
         ForeignKey("protocol_nodes.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     has_avatar: Mapped[bool | None] = mapped_column(Boolean)
+    avatar_source_url: Mapped[str | None] = mapped_column(Text)
+    avatar_content_type: Mapped[str | None] = mapped_column(String(64))
+    avatar_size: Mapped[int | None] = mapped_column(Integer)
+    avatar_sha256: Mapped[str | None] = mapped_column(String(64))
+    avatar_content: Mapped[bytes | None] = mapped_column(LargeBinary, deferred=True)
+    avatar_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     group_count: Mapped[int | None] = mapped_column(Integer)
     friend_count: Mapped[int | None] = mapped_column(Integer)
     mutual_contact_count: Mapped[int | None] = mapped_column(Integer)

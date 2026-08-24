@@ -103,6 +103,7 @@ class AccountGroupUpdate(Model):
 
 
 class ProtocolSyncPolicy(Model):
+    close_online: bool = Field(default=True, alias="closeOnline")
     avatar: bool = True
     group_summary: bool = Field(default=True, alias="groupSummary")
     group_details: bool = Field(default=False, alias="groupDetails")
