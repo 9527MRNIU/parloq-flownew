@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_NAME="${PARLOQ_COMPOSE_PROJECT:-parloq-flow}"
-PUBLIC_HOST="${PARLOQ_PUBLIC_HOST:-216.106.185.81}"
+PUBLIC_HOST="${PARLOQ_PUBLIC_HOST:-}"
 COMPOSE_DIR="${PARLOQ_COMPOSE_DIR:-/www/server/panel/data/compose/parloq-flow}"
 PARLOQ_ENV_FILE="${PARLOQ_ENV_FILE:-${COMPOSE_DIR}/.env}"
 STATE_DIR="${PARLOQ_PUBLIC_STATE_DIR:-${COMPOSE_DIR}/.public-data-access}"
@@ -33,6 +33,21 @@ read_env_value() {
   local key="$1"
   [[ -f "${PARLOQ_ENV_FILE}" ]] || return 0
   awk -v wanted="${key}" 'index($0, wanted "=") == 1 { sub("^[^=]*=", ""); print; exit }' "${PARLOQ_ENV_FILE}"
+}
+
+resolve_public_host() {
+  if [[ -n "${PUBLIC_HOST}" ]]; then
+    printf '%s' "${PUBLIC_HOST}"
+    return 0
+  fi
+  PUBLIC_HOST="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '
+    { for (index = 1; index <= NF; index++) if ($index == "src") { print $(index + 1); exit } }
+  ')"
+  if [[ ! "${PUBLIC_HOST}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    printf '无法自动识别公网主机地址，请设置 PARLOQ_PUBLIC_HOST。\n' >&2
+    return 1
+  fi
+  printf '%s' "${PUBLIC_HOST}"
 }
 
 container_id_for_service() {
@@ -251,6 +266,7 @@ load_state() {
 
 show_connection_info() {
   local POSTGRES_PORT="${1:-}" REDIS_PORT="${2:-}"
+  resolve_public_host >/dev/null || return 1
   if [[ -z "${POSTGRES_PORT}" || -z "${REDIS_PORT}" ]]; then
     load_state
   fi
@@ -312,6 +328,9 @@ open_access() {
   for command_name in docker python3 seq; do
     require_command "${command_name}"
   done
+  if [[ -z "${PUBLIC_HOST}" ]]; then
+    require_command ip || return 1
+  fi
   [[ -x "${BT_PYTHON}" ]] || { printf '找不到宝塔 Python：%s\n' "${BT_PYTHON}" >&2; return 1; }
   [[ -d "${BT_PANEL_ROOT}/class" ]] || { printf '找不到宝塔面板目录。\n' >&2; return 1; }
   [[ -f "${PARLOQ_ENV_FILE}" ]] || { printf '找不到生产环境文件。\n' >&2; return 1; }

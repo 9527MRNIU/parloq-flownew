@@ -380,6 +380,7 @@ bash deploy/public-data-access.sh
 到 Parloq Flow 的 PostgreSQL 与 Redis 容器并打印连接地址。关闭时先从宝塔安全删除
 这两条带有 Parloq Flow 专属备注的规则，再停止临时转发进程；不会重启数据库、
 Redis，也不会接触任何 WABA 服务。每次关闭后重新打开都会重新选择端口。
+连接主机默认从当前服务器的默认路由自动识别，也可以用 `PARLOQ_PUBLIC_HOST` 显式指定。
 
 如果公网访问打开期间 PostgreSQL 或 Redis 容器被重新创建，选择“状态”会提示状态
 异常；先选择“关闭”，再选择“打开”即可用新的随机端口和容器地址重建访问。
