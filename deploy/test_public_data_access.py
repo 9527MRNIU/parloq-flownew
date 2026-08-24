@@ -41,6 +41,8 @@ class PublicDataAccessScriptTests(unittest.TestCase):
         self.assertIn("/usr/bin/btpython", self.script)
         self.assertIn("AddAcceptPort", self.script)
         self.assertIn("DelAcceptPort", self.script)
+        self.assertIn("refusing to delete the BaoTa panel port", self.script)
+        self.assertIn("public.GetHost = lambda", self.script)
         self.assertIn("BaoTa Security rule", self.script)
         self.assertNotIn("iptables", self.script)
         self.assertNotIn("ufw", self.script.lower())

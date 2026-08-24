@@ -117,6 +117,7 @@ baota_firewall() {
 import contextlib
 import io
 import os
+from pathlib import Path
 import sys
 
 action, port, remark, panel_root = sys.argv[1:]
@@ -162,10 +163,23 @@ if action == "delete":
         raise SystemExit(0)
     if row.get("ps") != remark:
         raise RuntimeError("refusing to delete a foreign BaoTa Security rule")
+    panel_port_file = Path(panel_root) / "data" / "port.pl"
+    panel_port = panel_port_file.read_text(encoding="utf-8").strip()
+    if port == panel_port:
+        raise RuntimeError("refusing to delete the BaoTa panel port")
     request = public.dict_obj()
     request.id = str(row["id"])
     request.port = port
-    invoke(firewalls.firewalls().DelAcceptPort, request)
+    original_get_host = public.GetHost
+    try:
+        # BaoTa's legacy DelAcceptPort calls GetHost(True), which requires a
+        # Flask request context even when invoked by a root-side BaoTa task.
+        # The owned-rule check and explicit panel-port guard above preserve
+        # the same safety boundary without bypassing BaoTa's delete method.
+        public.GetHost = lambda *_args, **_kwargs: ""
+        invoke(firewalls.firewalls().DelAcceptPort, request)
+    finally:
+        public.GetHost = original_get_host
     if find():
         raise RuntimeError("BaoTa did not remove the Security rule")
     raise SystemExit(0)
