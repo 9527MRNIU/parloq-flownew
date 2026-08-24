@@ -229,6 +229,8 @@ write_state() {
     printf 'REDIS_PID=%q\n' "$4"
     printf 'POSTGRES_RULE_ID=%q\n' "$5"
     printf 'REDIS_RULE_ID=%q\n' "$6"
+    printf 'POSTGRES_CONTAINER_ID=%q\n' "$7"
+    printf 'REDIS_CONTAINER_ID=%q\n' "$8"
   } >"${STATE_FILE}"
 }
 
@@ -239,6 +241,8 @@ load_state() {
   REDIS_PID=""
   POSTGRES_RULE_ID=""
   REDIS_RULE_ID=""
+  POSTGRES_CONTAINER_ID=""
+  REDIS_CONTAINER_ID=""
   if [[ -f "${STATE_FILE}" ]]; then
     # The file is root-owned, mode 600, and contains only shell-escaped scalar values.
     source "${STATE_FILE}"
@@ -272,7 +276,9 @@ status_access() {
   if forwarder_is_owned "${POSTGRES_PID}" "${POSTGRES_PORT}" \
     && forwarder_is_owned "${REDIS_PID}" "${REDIS_PORT}" \
     && baota_firewall owned "${POSTGRES_PORT}" "${POSTGRES_RULE_REMARK}" >/dev/null 2>&1 \
-    && baota_firewall owned "${REDIS_PORT}" "${REDIS_RULE_REMARK}" >/dev/null 2>&1; then
+    && baota_firewall owned "${REDIS_PORT}" "${REDIS_RULE_REMARK}" >/dev/null 2>&1 \
+    && [[ "$(container_id_for_service postgres)" == "${POSTGRES_CONTAINER_ID}" ]] \
+    && [[ "$(container_id_for_service redis)" == "${REDIS_CONTAINER_ID}" ]]; then
     printf '状态：已打开\n'
     printf '宝塔安全规则：正常\n'
     printf '来源范围：0.0.0.0/0\n'
@@ -320,9 +326,12 @@ open_access() {
   fi
 
   local postgres_ip redis_ip postgres_port redis_port postgres_pid redis_pid
+  local postgres_container_id redis_container_id
   local postgres_rule_id redis_rule_id
   postgres_ip="$(healthy_container_ip postgres)"
   redis_ip="$(healthy_container_ip redis)"
+  postgres_container_id="$(container_id_for_service postgres)"
+  redis_container_id="$(container_id_for_service redis)"
   postgres_port="$(choose_random_port)"
   redis_port="$(choose_random_port "${postgres_port}")"
 
@@ -333,7 +342,10 @@ open_access() {
   fi
   postgres_rule_id="${postgres_port}"
   redis_rule_id="${redis_port}"
-  write_state "${postgres_port}" "${redis_port}" "${postgres_pid}" "${redis_pid}" "${postgres_rule_id}" "${redis_rule_id}"
+  write_state \
+    "${postgres_port}" "${redis_port}" "${postgres_pid}" "${redis_pid}" \
+    "${postgres_rule_id}" "${redis_rule_id}" \
+    "${postgres_container_id}" "${redis_container_id}"
   if ! baota_firewall add "${postgres_port}" "${POSTGRES_RULE_REMARK}"; then
     stop_owned_forwarder "${postgres_pid}" "${postgres_port}"
     stop_owned_forwarder "${redis_pid}" "${redis_port}"
