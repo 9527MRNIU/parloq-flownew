@@ -31,6 +31,7 @@ from app.material_files import BINARY_MATERIAL_TYPES
 from app.security import utcnow
 from app.serializers import iso
 from app.task_queue import enqueue_hyperlink_task
+from app.validation import phone_country_code
 
 
 router = APIRouter(prefix="/api/hyperlink", tags=["hyperlink"])
@@ -401,14 +402,14 @@ def _add_recipients(db, package, values, *, bump_revision: bool = True):
                     public_id=new_public_id("hrcp"),
                     data_package_id=package.id,
                     phone_e164=value.phone,
-                    country_code=value.country_code,
+                    country_code=phone_country_code(value.phone),
                     variables_json=value.variables,
                     package_revision=target_revision,
                     removed_revision=None,
                 )
             )
         else:
-            current.country_code = value.country_code
+            current.country_code = phone_country_code(value.phone)
             current.variables_json = value.variables
             current.package_revision = target_revision
             current.removed_revision = None

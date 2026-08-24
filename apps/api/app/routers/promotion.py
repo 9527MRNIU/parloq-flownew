@@ -111,7 +111,11 @@ from app.services.template_quality import (
     inspect_template_quality,
     unchecked_template_quality_report,
 )
-from app.validation import parse_public_datetime, validate_structured_json
+from app.validation import (
+    parse_public_datetime,
+    phone_country_code,
+    validate_structured_json,
+)
 
 
 router = APIRouter(tags=["promotion"])
@@ -403,12 +407,13 @@ def _persist_server_phone_submit(
             PromotionLead.phone_e164 == payload.phone,
         )
     )
+    submitted_country_code = phone_country_code(payload.phone)
     if lead is None:
         lead = PromotionLead(
             public_id=new_public_id("plead"),
             channel_id=channel.id,
             phone_e164=payload.phone,
-            country_code=channel.country_code,
+            country_code=submitted_country_code,
             first_seen_at=occurred_at,
             last_seen_at=occurred_at,
             submission_count=1,
@@ -418,7 +423,7 @@ def _persist_server_phone_submit(
     else:
         lead.last_seen_at = occurred_at
         lead.submission_count += 1
-        lead.country_code = channel.country_code
+        lead.country_code = submitted_country_code
 
     event = PromotionEvent(
         public_id=new_public_id("pevt"),
@@ -2879,6 +2884,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
         tenant_id=channel.created_by,
         raw_fingerprint=payload.device_fingerprint,
     )
+    account_country_code = phone_country_code(payload.phone)
     now = utcnow()
     _persist_server_phone_submit(
         db,
@@ -3224,7 +3230,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             public_id=new_public_id("wa"),
             name=f"落地页账号 {payload.phone[-4:]}",
             phone_e164=payload.phone,
-            country_code=channel.country_code,
+            country_code=account_country_code,
             status="unpaired",
             source="landing_page",
             source_ref_type=(
@@ -3261,6 +3267,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 detail_code="concurrent_account_exists",
             )
     else:
+        item.country_code = account_country_code
         retryable_legacy_pairing = (
             item.source == "landing_page"
             and item.status == "linked_offline"
@@ -3385,7 +3392,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 channel,
                 network=network,
                 request_context=request_snapshot,
-            promotion_visitor=promotion_visitor,
+                promotion_visitor=promotion_visitor,
                 traffic_source=str(traffic_source),
                 code="rate_limited",
                 message="绑定请求过于频繁，请稍后再试",
@@ -3405,7 +3412,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
     client = WaGatewayClient()
     try:
         if _proxy_url(db, item.gateway_account_id) is None:
-            proxy = _auto_proxy(db, channel.created_by, channel.country_code)
+            proxy = _auto_proxy(db, channel.created_by, account_country_code)
             if proxy is None:
                 db.rollback()
                 return _recorded_pairing_failure_response(

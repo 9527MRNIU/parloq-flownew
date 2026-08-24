@@ -230,6 +230,7 @@ def test_import_group_statistics_and_export(
     assert "gatewayAccountId" not in account
     assert account["source"] == "json_import"
     assert account["importFormat"] == "baileys_creds_json"
+    assert account["countryCode"] == "US"
     assert account["validationStatus"] == "validating"
     assert account["metadataSyncStatus"] == "pending"
     assert account["group"]["id"] == group_id
@@ -388,6 +389,7 @@ def test_native_bundle_import_export_round_trip(
     assert imported.status_code == 201, imported.text
     account = imported.json()["data"]["account"]
     assert account["phone"] == "+12025550995"
+    assert account["countryCode"] == "US"
     assert account["importFormat"] == "parloq_baileys_session_v1"
     assert account["group"]["id"] == group_id
     assert account["protocol"]["id"] == protocol_id

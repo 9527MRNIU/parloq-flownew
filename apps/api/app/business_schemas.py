@@ -32,7 +32,6 @@ class Model(BaseModel):
 class PersonalAccountCreate(Model):
     name: str = Field(min_length=1, max_length=120)
     phone: str | None = None
-    country_code: str | None = Field(default=None, alias="countryCode")
     enabled: bool = True
     marketing_eligible: bool = Field(default=True, alias="marketingEligible")
     proxy_id: str | None = Field(
@@ -49,7 +48,6 @@ class PersonalAccountCreate(Model):
     )
 
     _phone = field_validator("phone")(lambda value: normalize_phone(value) if value else None)
-    _country = field_validator("country_code")(normalize_country)
     _group_id = field_validator("group_id")(
         lambda value: str(parse_snowflake_id(value)) if value else None
     )
@@ -61,7 +59,6 @@ class PersonalAccountCreate(Model):
 class PersonalAccountUpdate(Model):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     phone: str | None = None
-    country_code: str | None = Field(default=None, alias="countryCode")
     enabled: bool | None = None
     marketing_eligible: bool | None = Field(
         default=None, alias="marketingEligible"
@@ -75,7 +72,6 @@ class PersonalAccountUpdate(Model):
     group_id: str | None = Field(default=None, alias="groupId", max_length=20)
 
     _phone = field_validator("phone")(lambda value: normalize_phone(value) if value else None)
-    _country = field_validator("country_code")(normalize_country)
     _group_id = field_validator("group_id")(
         lambda value: str(parse_snowflake_id(value)) if value else None
     )
@@ -852,10 +848,8 @@ class StrategyUpdate(Model):
 
 class RecipientInput(Model):
     phone: str
-    country_code: str | None = Field(default=None, alias="countryCode")
     variables: dict = Field(default_factory=dict)
     _phone = field_validator("phone")(normalize_phone)
-    _country = field_validator("country_code")(normalize_country)
     _variables = field_validator("variables")(lambda value: validate_structured_json(value, max_bytes=8192))
 
 

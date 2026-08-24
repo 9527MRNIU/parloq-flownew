@@ -12,12 +12,16 @@ dependencies = [
   "cryptography>=44,<46",
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
+  "phonenumberslite==9.0.34",
   "psycopg[binary]>=3.2,<4",
   "python-multipart>=0.0.20,<1",
   "redis>=5.2,<7",
   "sqlalchemy>=2.0.36,<3",
   "uvicorn[standard]>=0.34,<1",
 ]
+
+[tool.uv.sources]
+phonenumberslite = { path = "vendor/phonenumberslite/phonenumberslite-9.0.34-py2.py3-none-any.whl" }
 
 [project.optional-dependencies]
 dev = [

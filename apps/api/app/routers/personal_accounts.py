@@ -65,6 +65,7 @@ from app.services.pairing_observability import (
     canonical_pairing_failure_reason,
     pairing_failure_label,
 )
+from app.validation import phone_country_code
 
 
 router = APIRouter(prefix="/api/personal-accounts", tags=["personal-accounts"])
@@ -613,6 +614,7 @@ def _apply_gateway_account(item: PersonalAccount, value: dict) -> None:
     phone = value.get("phoneE164")
     if isinstance(phone, str) and phone:
         item.phone_e164 = phone
+        item.country_code = phone_country_code(phone)
     validation_status = value.get("validationStatus")
     if validation_status in {"pending", "validating", "ready", "failed"}:
         item.validation_status = validation_status
@@ -987,9 +989,10 @@ def account_filter_options(db: DbSession, current_user: CurrentUser) -> dict:
 def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: CurrentUser) -> dict:
     if payload.proxy_id and current_user.role != "admin":
         raise HTTPException(status_code=403, detail="固定代理由管理员分配")
+    account_country_code = phone_country_code(payload.phone)
     proxy_id = payload.proxy_id
     if not proxy_id:
-        proxy = _auto_proxy(db, current_user.id, payload.country_code)
+        proxy = _auto_proxy(db, current_user.id, account_country_code)
         if proxy is not None:
             proxy_id = str(proxy.id)
         elif not WaGatewayClient().settings.wa_gateway_mock:
@@ -1004,7 +1007,7 @@ def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: 
         public_id=new_public_id("wa"),
         name=payload.name,
         phone_e164=payload.phone,
-        country_code=payload.country_code,
+        country_code=account_country_code,
         status="unpaired" if payload.enabled else "disabled",
         source="landing_page",
         source_ref_type=payload.source_ref_type,
@@ -1110,9 +1113,10 @@ async def import_account(
     normalized_name = (name or session.display_name or session.phone_e164).strip()
     if not normalized_name or len(normalized_name) > 120:
         raise HTTPException(status_code=422, detail="账号名称长度必须为 1-120 个字符")
+    account_country_code = phone_country_code(session.phone_e164)
     selected_proxy_id = requested_proxy_id
     if not selected_proxy_id:
-        proxy = _auto_proxy(db, current_user.id, None)
+        proxy = _auto_proxy(db, current_user.id, account_country_code)
         if proxy is not None:
             selected_proxy_id = str(proxy.id)
         elif not WaGatewayClient().settings.wa_gateway_mock:
@@ -1125,6 +1129,7 @@ async def import_account(
         public_id=new_public_id("wa"),
         name=normalized_name,
         phone_e164=session.phone_e164,
+        country_code=account_country_code,
         status="validating",
         source="json_import",
         import_format=session.import_format,
@@ -1690,10 +1695,9 @@ def update_account(account_id: str, payload: PersonalAccountUpdate, db: DbSessio
         item.name = payload.name
     if "phone" in payload.model_fields_set:
         item.phone_e164 = payload.phone
+        item.country_code = phone_country_code(payload.phone)
         if payload.phone:
             gateway_changes["phone_e164"] = payload.phone
-    if "country_code" in payload.model_fields_set:
-        item.country_code = payload.country_code
     if "group_id" in payload.model_fields_set:
         item.group_id = _group_database_id(
             db,
@@ -1816,6 +1820,7 @@ def pairing_code(account_id: str, payload: PairRequest, db: DbSession, current_u
         db.commit()
         raise HTTPException(status_code=502, detail=str(exc)) from None
     item.phone_e164 = phone
+    item.country_code = phone_country_code(phone)
     item.status = "linked_offline" if WaGatewayClient().settings.wa_gateway_mock else "pairing"
     item.last_error = None
     db.commit()

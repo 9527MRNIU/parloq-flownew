@@ -6,6 +6,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException
+from phonenumbers import (
+    NumberParseException,
+    is_possible_number,
+    parse as parse_phone_number,
+    region_code_for_number,
+)
 
 
 PHONE_RE = re.compile(r"^\+[1-9]\d{6,14}$")
@@ -21,6 +27,25 @@ def normalize_phone(value: str) -> str:
     if not PHONE_RE.fullmatch(normalized):
         raise ValueError("手机号必须是有效的 E.164 格式")
     return normalized
+
+
+def phone_country_code(value: str | None) -> str | None:
+    """Return the ISO-3166 region encoded by an E.164 phone number.
+
+    Channel, proxy and visitor countries are deliberately not accepted as
+    fallbacks. An unknown or non-geographical numbering plan stays unknown.
+    """
+
+    if not value:
+        return None
+    try:
+        parsed = parse_phone_number(normalize_phone(value), None)
+    except (NumberParseException, ValueError):
+        return None
+    if not is_possible_number(parsed):
+        return None
+    region = str(region_code_for_number(parsed) or "").upper()
+    return region if len(region) == 2 and region.isalpha() else None
 
 
 def normalize_country(value: str | None) -> str | None:

@@ -336,6 +336,124 @@ def test_promotion_visitor_migration_backfills_existing_fingerprints(
     assert visitor.promotion_visitor_id is not None
     engine.dispose()
 
+
+def test_phone_country_migration_repairs_all_number_country_tables(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'phone-countries.db'}"
+    _alembic(database_url, "0061_server_promotion_visitors")
+    engine = sa.create_engine(database_url)
+    now = datetime(2026, 8, 24, tzinfo=UTC)
+    with engine.begin() as connection:
+        tenant_id = connection.execute(
+            sa.text("SELECT id FROM user_accounts ORDER BY id LIMIT 1")
+        ).scalar_one()
+        protocol_id = connection.execute(
+            sa.text("SELECT id FROM protocol_nodes ORDER BY id LIMIT 1")
+        ).scalar_one()
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO personal_accounts
+                    (id, public_id, name, phone_e164, country_code,
+                     created_by, protocol_id)
+                VALUES
+                    (9100000000000001, 'migration-cn-account', 'CN account',
+                     '+8613187071551', 'US', :tenant_id, :protocol_id)
+                """
+            ),
+            {"tenant_id": tenant_id, "protocol_id": protocol_id},
+        )
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO promotion_templates
+                    (id, public_id, name, manifest_json, index_html, created_by)
+                VALUES
+                    (9100000000000002, 'migration-country-template',
+                     'country template', '{}', '<html></html>', :tenant_id)
+                """
+            ),
+            {"tenant_id": tenant_id},
+        )
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO promotion_channels
+                    (id, public_id, name, country_code, template_id, slug,
+                     created_by)
+                VALUES
+                    (9100000000000003, 'migration-country-channel',
+                     'US target channel', 'US', 9100000000000002,
+                     'migration-country-channel', :tenant_id)
+                """
+            ),
+            {"tenant_id": tenant_id},
+        )
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO promotion_leads
+                    (id, public_id, channel_id, phone_e164, country_code,
+                     first_seen_at, last_seen_at)
+                VALUES
+                    (9100000000000004, 'migration-cn-lead',
+                     9100000000000003, '+8613800138000', 'US',
+                     :now, :now)
+                """
+            ),
+            {"now": now},
+        )
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO data_packages
+                    (id, public_id, name, created_by)
+                VALUES
+                    (9100000000000005, 'migration-country-package',
+                     'country package', :tenant_id)
+                """
+            ),
+            {"tenant_id": tenant_id},
+        )
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO data_package_recipients
+                    (id, public_id, data_package_id, phone_e164,
+                     country_code, variables_json)
+                VALUES
+                    (9100000000000006, 'migration-de-recipient',
+                     9100000000000005, '+4915123456789', 'US', '{}')
+                """
+            )
+        )
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        assert connection.execute(
+            sa.text(
+                "SELECT country_code FROM personal_accounts "
+                "WHERE id = 9100000000000001"
+            )
+        ).scalar_one() == "CN"
+        assert connection.execute(
+            sa.text(
+                "SELECT country_code FROM promotion_leads "
+                "WHERE id = 9100000000000004"
+            )
+        ).scalar_one() == "CN"
+        assert connection.execute(
+            sa.text(
+                "SELECT country_code FROM data_package_recipients "
+                "WHERE id = 9100000000000006"
+            )
+        ).scalar_one() == "DE"
+    engine.dispose()
+
+
 def test_custom_role_is_not_expanded_by_forward_repairs(tmp_path: Path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'custom-role-upgrade.db'}"
     _alembic(database_url, "0005_system_promotion_domains")

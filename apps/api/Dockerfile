@@ -9,6 +9,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY pyproject.toml ./
+COPY vendor/phonenumberslite/phonenumberslite-9.0.34-py2.py3-none-any.whl ./vendor/phonenumberslite/
+RUN pip install --no-cache-dir ./vendor/phonenumberslite/phonenumberslite-9.0.34-py2.py3-none-any.whl
 COPY app ./app
 RUN pip install --no-cache-dir .
 

@@ -276,13 +276,10 @@ function parseRecipientFile(contents: string) {
   }
   return lines
     .map((line) => {
-      const [phone = "", countryCode = ""] = line
-        .split(/[,;\t]/, 2)
-        .map((value) => value.trim());
-      const cleanPhone = formatPhoneDisplay(phone).replace(/[\s()-]/g, "");
-      return [cleanPhone, countryCode.toUpperCase()].filter(Boolean).join(",");
+      const [phone = ""] = line.split(/[,;\t]/, 1);
+      return formatPhoneDisplay(phone.trim()).replace(/[\s()-]/g, "");
     })
-    .filter((line) => line.split(",", 1)[0]);
+    .filter(Boolean);
 }
 const jsonText = (value: unknown) => {
   if (value && typeof value === "object")
@@ -1219,7 +1216,7 @@ const configs: Record<string, ModuleConfig> = {
   },
   packages: {
     title: "数据包",
-    description: "管理超链任务的目标号码、国家和变量数据。",
+    description: "管理超链任务的目标号码和变量数据，号码国家由系统自动识别。",
     endpoint: "/api/hyperlink/data-packages",
     permissionKey: "marketing.data_packages.manage",
     createLabel: "导入数据包",
@@ -1232,8 +1229,7 @@ const configs: Record<string, ModuleConfig> = {
         key: "recipients",
         label: "号码数据（新建时填写）",
         type: "textarea",
-        placeholder:
-          "每行一个号码，可选国家代码：\n8613800000000,CN\n15550000000,US",
+        placeholder: "每行一个完整国际号码：\n+8613800000000\n+12025550000",
       },
     ],
     columns: [
@@ -1254,12 +1250,8 @@ const configs: Record<string, ModuleConfig> = {
             recipients: form.recipients
               .split("\n")
               .map((line) => {
-                const [phone, countryCode] = line
-                  .split(",")
-                  .map((item) => item.trim());
                 return {
-                  phone: formatPhoneDisplay(phone),
-                  ...(countryCode ? { countryCode } : {}),
+                  phone: formatPhoneDisplay(line.trim()),
                 };
               })
               .filter((row) => row.phone),

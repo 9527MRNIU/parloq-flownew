@@ -21,6 +21,7 @@ from app.models import (
     MessageDelivery,
     PersonalAccount,
     PromotionEvent,
+    PromotionLead,
     PromotionVisitor,
 )
 from app.routers import promotion as promotion_router
@@ -1459,7 +1460,7 @@ def test_personal_account_gateway_and_hyperlink_delivery(
     insight = admin_client.get("/api/hyperlink/market-insights").json()["data"]
     us_row = next(row for row in insight["rows"] if row["sourceCountry"] == "US")
     assert us_row["bannedAccounts"] == 1
-    assert us_row["banRate"] == 1.0
+    assert us_row["banRate"] == round(1 / us_row["accountCount"], 6)
 
 
 def test_landing_pairing_failure_stays_in_intake_records(
@@ -1774,6 +1775,57 @@ def test_channel_stats_combines_events_and_attempts_into_pairing_funnel(
     assert counts[-1] >= 1
     assert all(0 <= step["visitorRate"] <= 1 for step in funnel)
     assert all(0 <= step["stepRate"] <= 1 for step in funnel)
+
+
+def test_number_country_is_independent_from_channel_and_visit_country(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        promotion_router,
+        "resolve_request_network",
+        lambda _request: RequestNetwork("203.0.113.86", "US", "cloudflare"),
+    )
+    started = admin_client.post(
+        "/api/public/promotion/channels/de-facebook-demo/pairing/start",
+        json={
+            "phone": "+8613187071551",
+            "deviceFingerprint": "6ef8bdbc97de077c45a46358ecc4ba42",
+        },
+    )
+    assert started.status_code == 200, started.text
+    pairing = started.json()["data"]["pairing"]
+    verified = admin_client.get(
+        pairing["statusUrl"],
+        headers={"Authorization": f"Bearer {pairing['statusToken']}"},
+    )
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["data"]["pairingStatus"] == "verified"
+
+    intake = admin_client.get(
+        "/api/personal-accounts/intake/attempts?keyword=8613187071551"
+    ).json()["data"]
+    assert intake["total"] == 1
+    assert intake["rows"][0]["account"]["countryCode"] == "CN"
+    assert intake["rows"][0]["visitorCountryCode"] == "US"
+
+    with SessionLocal() as db:
+        lead = db.scalar(
+            select(PromotionLead).where(
+                PromotionLead.phone_e164 == "+8613187071551"
+            )
+        )
+        assert lead is not None
+        assert lead.country_code == "CN"
+
+    countries = admin_client.get("/api/account-statistics/countries")
+    assert countries.status_code == 200, countries.text
+    cn = next(
+        row
+        for row in countries.json()["data"]["rows"]
+        if row["countryCode"] == "CN"
+    )
+    assert cn["totalAccounts"] >= 1
 
 
 def test_legacy_unverified_landing_pairing_can_request_a_fresh_code(

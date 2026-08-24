@@ -533,11 +533,18 @@ def test_data_package_revision_is_frozen_per_started_task(
     assert removed.status_code == 409, removed.text
     added = admin_client.post(
         f"/api/hyperlink/data-packages/{package_id}/recipients",
-        json={"recipients": [{"phone": "+12025553959", "countryCode": "US"}]},
+        json={"recipients": [{"phone": "+8613800138000", "countryCode": "US"}]},
     )
     assert added.status_code == 200, added.text
     latest_revision = added.json()["data"]["dataPackage"]["revision"]
     assert latest_revision > frozen_revision
+    current_recipients = admin_client.get(
+        f"/api/hyperlink/data-packages/{package_id}/recipients"
+    ).json()["data"]["rows"]
+    china_recipient = next(
+        row for row in current_recipients if row["phone"] == "+8613800138000"
+    )
+    assert china_recipient["countryCode"] == "CN"
 
     second_task = _create_task(admin_client, "package-snapshot-second", resources)
     second_start = admin_client.post(
@@ -577,7 +584,7 @@ def test_data_package_revision_is_frozen_per_started_task(
         assert phones_for(second_task["id"]) == {
             "+12025553000",
             "+12025553001",
-            "+12025553959",
+            "+8613800138000",
         }
 
 
