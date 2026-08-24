@@ -91,8 +91,7 @@ parloq-flow/
 │   ├── api/                         # FastAPI、Worker、Alembic 和 API 测试
 │   └── web/                         # React 管理端与生产 Nginx 配置
 ├── services/
-│   ├── wa-gateway-baileys/          # 当前生产 WhatsApp 数据面
-│   └── wa-gateway/                  # 旧 whatsmeow 实验实现，不在当前 Compose 中
+│   └── wa-gateway-baileys/          # 当前生产 WhatsApp 数据面
 ├── deploy/                          # 生产 Compose、服务器本机更新及基础设施工具
 ├── docs/                            # 架构、ID、模板和生产交接文档
 ├── docker-compose.yml               # 仅用于本地开发

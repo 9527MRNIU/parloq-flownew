@@ -1,6 +1,7 @@
 import * as CountryFlags from "country-flag-icons/react/3x2";
 import { Globe2Icon } from "lucide-react";
 import type { ComponentType, SVGProps } from "react";
+import worldFlagUrl from "../assets/flags/ww.svg";
 import { promotionCountryOptions } from "../lib/countries";
 import { cn } from "../lib/utils";
 
@@ -18,6 +19,18 @@ export function countryDisplayName(code: string): string {
 
 export function CountryFlag({ code }: { code: string }) {
   const normalized = code.trim().toUpperCase();
+
+  if (normalized === "WW") {
+    return (
+      <img
+        src={worldFlagUrl}
+        alt=""
+        aria-hidden="true"
+        className="block h-4 w-6 shrink-0 overflow-hidden rounded-[2px] shadow-sm ring-1 ring-black/10"
+      />
+    );
+  }
+
   const Flag = (
     CountryFlags as unknown as Record<
       string,

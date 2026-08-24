@@ -20,11 +20,6 @@ __pycache__/
 .venv/
 *.egg-info/
 
-# Go
-bin/
-coverage.out
-/services/wa-gateway/wa-gateway
-
 # Editors and operating systems
 .DS_Store
 .idea/

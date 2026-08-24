@@ -1,8 +1,8 @@
 # Baileys WhatsApp gateway
 
-Node/TypeScript replacement for the original Go/whatsmeow data plane. Baileys
-7 is the only production protocol engine; `WA_ENGINE=mock` is retained for
-local and automated tests and never contacts WhatsApp.
+The WhatsApp data plane is implemented with Node.js, TypeScript and Baileys 7.
+Baileys 7 is the only production protocol engine; `WA_ENGINE=mock` is retained
+for local and automated tests and never contacts WhatsApp.
 
 ## Persistence and security
 
