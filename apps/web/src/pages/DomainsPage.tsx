@@ -851,6 +851,8 @@ export function DomainsPage() {
       toast.error(caught instanceof Error ? caught.message : "删除失败");
     }
   }
+  const waitingForDomainSearch = !purchaseHostname
+    && domainSearch?.status === "running";
   return (
     <StandardListPage viewport>
       <ListToolbar
@@ -1462,11 +1464,11 @@ export function DomainsPage() {
                 onClick={() => void (purchaseHostname ? requestQuote() : requestDomainSearch())}
                 disabled={
                   purchasePending
-                  || domainSearch?.status === "running"
+                  || waitingForDomainSearch
                   || (!purchaseHostname && !purchaseLabel.trim())
                 }
               >
-                {purchasePending || domainSearch?.status === "running" ? <Spinner /> : null}
+                {purchasePending || waitingForDomainSearch ? <Spinner /> : null}
                 {purchaseHostname ? "确认所选域名" : domainSearch ? "重新查询后缀" : "查询可购买域名"}
               </Button>
             )}
