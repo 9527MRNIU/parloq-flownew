@@ -65,10 +65,9 @@ pairingStatus === "verified" && verified === true
 ID。访问事件、iframe 集成事件、配对尝试、UV、限速和 Meta 回传都关联这个服务端
 访客实体。
 
-浏览器不再生成或保存额外的访客 UUID，也没有 `visitorId`、`deviceToken` 或
-`sessionToken` 链路。iframe 集成同样复用 `_fp`，只从 URL fragment 接收非敏感的
-渠道 slug 和直推/裂变来源；每次上报时由服务端重新验证域名、渠道、模板与集成绑定。
-这些步骤均由平台运行时自动完成，模板不需要读取或保存身份字段。
+iframe 集成同样复用 `_fp`，只从 URL fragment 接收非敏感的渠道 slug 和直推/裂变
+来源；每次上报时由服务端重新验证域名、渠道、模板与集成绑定。这些步骤均由平台
+运行时自动完成，模板不需要读取或保存身份字段。
 
 ## 四、请求开始配对
 

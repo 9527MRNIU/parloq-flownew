@@ -42,11 +42,9 @@
   组件组合、浏览器配置或漂移匹配键。正常 Thumbmark 标为 high，随机持久化
   回退值标为 low。
 - 服务端按租户 HMAC 查找或创建唯一的 `PromotionVisitor`，并为它分配
-  Snowflake ID；浏览器不再生成 `visitorId`，也不再签发 `deviceToken` 或
-  `sessionToken`。只有配对状态查询与取消保留本次配对专用的状态令牌。
-- 原有 `visitorCheck` / `visitorAttempt` 以及事件 `sessionReports` 限速统一
-  使用租户 HMAC 指纹键，不再保留浏览器 `visitorId` 回退，也没有新增重复的
-  设备限速配置；`ipStart` / `ipReports` 始终作为独立 IP 维度执行。
+  Snowflake ID。配对状态查询与取消使用本次配对专用的状态凭证。
+- `visitorCheck` / `visitorAttempt` 以及事件 `sessionReports` 限速统一使用租户
+  HMAC 指纹键；`ipStart` / `ipReports` 始终作为独立 IP 维度执行。
 - 原生事件、iframe 事件与配对尝试统一关联 `PromotionVisitor`；原始指纹不
   落库，HMAC、版本和质量只保存在访客实体中。渠道 UV 与监控列表均按服务端
   Snowflake 访客口径展示和去重。
