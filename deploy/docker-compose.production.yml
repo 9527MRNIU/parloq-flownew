@@ -19,7 +19,7 @@ x-gateway-build: &gateway-build
 x-api-environment: &api-environment
   APP_ENV: production
   DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
-  REDIS_URL: redis://redis:6379/0
+  REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
   SEED_ADMIN_USERNAME: ${SEED_ADMIN_USERNAME:-admin}
   SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?SEED_ADMIN_PASSWORD is required}
   APP_SECRET_KEY: ${APP_SECRET_KEY:?APP_SECRET_KEY is required}
@@ -45,6 +45,9 @@ x-api-environment: &api-environment
   WA_GATEWAY_API_TOKEN: ${WA_GATEWAY_API_TOKEN:?WA_GATEWAY_API_TOKEN is required}
   WA_GATEWAY_MOCK: "false"
   WA_GATEWAY_WEBHOOK_SECRET: ${WA_GATEWAY_WEBHOOK_SECRET:?WA_GATEWAY_WEBHOOK_SECRET is required}
+  PROTOCOL_BUILDER_URL: http://protocol-builder:8011
+  PROTOCOL_BUILDER_API_TOKEN: ${WA_GATEWAY_API_TOKEN:?WA_GATEWAY_API_TOKEN is required}
+  PROTOCOL_BUILD_TIMEOUT_SECONDS: ${PROTOCOL_BUILD_TIMEOUT_SECONDS:-300}
   TASK_QUEUE_MOCK: "false"
   TASK_WORKER_MAX_CONCURRENCY: ${TASK_WORKER_MAX_CONCURRENCY:-200}
   DOMAIN_VERIFY_MOCK: ${DOMAIN_VERIFY_MOCK:-false}
@@ -80,7 +83,18 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--save", ""]
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - ""
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     volumes:
       - ${PARLOQ_PERSIST_ROOT:-/data/parloq-flow}/redis:/data
     healthcheck:
@@ -123,11 +137,38 @@ services:
       WA_GATEWAY_WEBHOOK_SECRET: ${WA_GATEWAY_WEBHOOK_SECRET:?WA_GATEWAY_WEBHOOK_SECRET is required}
       WA_GATEWAY_WEBHOOK_RETRIES: ${WA_GATEWAY_WEBHOOK_RETRIES:-3}
       WA_GATEWAY_MATERIAL_BASE_URL: http://api:8000
+      PROTOCOL_ARTIFACT_ROOT: /var/lib/parloq/protocols
+      WA_PROTOCOL_RUNTIME_DATABASE_MAX_CONNECTIONS: ${WA_PROTOCOL_RUNTIME_DATABASE_MAX_CONNECTIONS:-10}
+    volumes:
+      - ${PARLOQ_PERSIST_ROOT:-/data/parloq-flow}/protocol-artifacts:/var/lib/parloq/protocols:ro
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8010/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  protocol-builder:
+    image: ${PARLOQ_WA_GATEWAY_IMAGE:-parloq-flow-wa-gateway-server:latest}
+    pull_policy: ${PARLOQ_APP_PULL_POLICY:-build}
+    build: *gateway-build
+    restart: unless-stopped
+    command: ["node", "dist/builder-server.js"]
+    user: "0:0"
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${WA_GATEWAY_LOG_LEVEL:-info}
+      PROTOCOL_BUILDER_ADDR: :8011
+      PROTOCOL_BUILDER_API_TOKEN: ${WA_GATEWAY_API_TOKEN:?WA_GATEWAY_API_TOKEN is required}
+      PROTOCOL_ARTIFACT_ROOT: /var/lib/parloq/protocols
+      PROTOCOL_BUILD_TIMEOUT_SECONDS: ${PROTOCOL_BUILD_TIMEOUT_SECONDS:-300}
+    volumes:
+      - ${PARLOQ_PERSIST_ROOT:-/data/parloq-flow}/protocol-artifacts:/var/lib/parloq/protocols
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8011/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -161,6 +202,8 @@ services:
         condition: service_healthy
       wa-gateway:
         condition: service_healthy
+      protocol-builder:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
       interval: 10s
@@ -184,6 +227,8 @@ services:
       wa-gateway:
         condition: service_healthy
       api:
+        condition: service_healthy
+      protocol-builder:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-m", "app.worker_health"]

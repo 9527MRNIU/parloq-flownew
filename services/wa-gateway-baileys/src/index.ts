@@ -1,16 +1,19 @@
 import pino from 'pino'
 import { loadConfig } from './config.js'
-import { BaileysEngine, MockEngine } from './engine.js'
+import { MockEngine } from './engine.js'
 import { buildServer } from './http.js'
 import { GatewayService } from './service.js'
 import { PostgresStore } from './store.js'
 import { WebhookClient } from './webhook.js'
+import { VersionedProtocolEngine } from './versioned-engine.js'
 
 async function main(): Promise<void> {
   const config = loadConfig()
   const logger = pino({ level: process.env.LOG_LEVEL || 'info', redact: ['req.headers.authorization', '*.proxyUrl', '*.session', '*.creds', '*.keys', '*.token'] })
   const store = new PostgresStore(config.databaseUrl, config.databaseMaxConnections)
-  const engine = config.engine === 'baileys' ? new BaileysEngine(store, logger, config.materialBaseUrl) : new MockEngine()
+  const engine = config.engine === 'baileys'
+    ? new VersionedProtocolEngine(store, logger)
+    : new MockEngine()
   const webhook = new WebhookClient(config.webhookUrl, config.webhookSecret, config.webhookRetries, logger)
   const service = new GatewayService(store, engine, webhook, logger, config.queueSize, config.sendQps)
   await service.start()

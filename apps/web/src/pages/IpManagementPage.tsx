@@ -1,19 +1,24 @@
 import {
+  ChevronDownIcon,
   CircleGaugeIcon,
+  EyeIcon,
   LinkIcon,
+  ListChecksIcon,
   LoaderCircleIcon,
   PlusIcon,
   RefreshCwIcon,
   SaveIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
+  Trash2Icon,
   UnlinkIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import {
   ListPagination,
+  ListTableCard,
   ListToolbar,
   StandardListPage,
   useClientPagination,
@@ -29,12 +34,24 @@ import {
   type EntityStatusMeta,
 } from "../components/entity-primary-cell";
 import {
+  CountryDisplay,
+  CountryFlag,
+  countryDisplayName,
+} from "../components/country-display";
+import {
   Badge,
   Button,
+  Checkbox,
   Drawer,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
   EmptyState,
   IconButton,
   Input,
+  SearchableSelect,
   SelectField,
   Spinner,
   Switch,
@@ -53,13 +70,13 @@ import {
   legacyReadKey,
   snowflakeId,
 } from "../lib/entity-identifiers";
+import { countryOptions } from "../lib/countries";
 import { formatPhoneDisplay } from "../lib/utils";
 
 type ProxyStatus = "healthy" | "unhealthy" | "testing" | "disabled" | "unknown";
 type IpProxy = {
   id: string;
   readKey: string;
-  name: string;
   protocol: string;
   host: string;
   port: number;
@@ -73,8 +90,12 @@ type IpProxy = {
   latencyMs?: number | null;
   lastCheckedAt?: string;
   lastError?: string;
+  consecutiveFailures: number;
+  cooldownUntil?: string;
+  lastCheckSource?: string;
   bindingCount: number;
   createdAt?: string;
+  updatedAt?: string;
 };
 type ProxyBinding = {
   id: string;
@@ -91,33 +112,55 @@ type AllocationMode =
   | "tenant_reuse"
   | "least_load"
   | "manual";
-type CountryMatch = "strict" | "prefer" | "off";
+type CountryMatch = "visitor_country" | "phone_country";
 type AllocationPolicy = {
   allocationMode: AllocationMode;
   countryMatch: CountryMatch;
   maxAccountsPerIp: number;
   avoidUnhealthy: boolean;
   stickyBinding: boolean;
+  failureThreshold: number;
+  cooldownSeconds: number;
 };
-type BulkImportResult = {
+type BulkPreviewResult = {
   line: number;
-  status: "created" | "duplicate" | "failed";
+  status: "checked" | "duplicate" | "failed";
   reason?: string;
-  proxyId?: string;
+  protocol?: string;
+  host?: string;
+  port?: number;
+  healthStatus?: "healthy" | "unhealthy";
+  countryCode?: string;
+  latencyMs?: number | null;
+  error?: string;
 };
-type BulkImportSummary = {
+type BulkPreviewSummary = {
   total: number;
-  created: number;
+  candidates: number;
+  healthy: number;
+  unhealthy: number;
   duplicate: number;
   failed: number;
+};
+type BulkDetectionResult = {
+  line: number;
+  key: string;
+  endpoint: string;
+  countryCode: string;
+  countryName: string;
+  status: "checking" | "healthy" | "unhealthy";
+  latencyMs?: number | null;
+  error?: string;
 };
 
 const defaultPolicy: AllocationPolicy = {
   allocationMode: "least_load",
-  countryMatch: "prefer",
+  countryMatch: "visitor_country",
   maxAccountsPerIp: 5,
   avoidUnhealthy: true,
   stickyBinding: true,
+  failureThreshold: 2,
+  cooldownSeconds: 900,
 };
 
 const allocationDescriptions: Record<AllocationMode, string> = {
@@ -131,10 +174,26 @@ const allocationDescriptions: Record<AllocationMode, string> = {
     "手动分配：系统不自动选择 IP，账号必须由管理员显式绑定后才能使用代理。",
 };
 const countryDescriptions: Record<CountryMatch, string> = {
-  strict: "严格匹配：找不到账号目标国家的健康 IP 时不自动分配。",
-  prefer: "国家优先：优先使用同国家 IP，不足时再选择其他符合条件的 IP。",
-  off: "关闭匹配：分配时不考虑账号与 IP 的国家信息。",
+  visitor_country:
+    "访问国家：公开落地页按访客访问国家优先匹配；后台创建没有访问国家时回退到号码国家。",
+  phone_country: "号码国家：按账号 E.164 号码识别的国家优先匹配代理。",
 };
+
+const proxyCountryOptions = countryOptions.map((option) => ({
+  ...option,
+  leading: <CountryFlag code={option.value} />,
+}));
+
+const optionalProxyCountryOptions = [
+  {
+    value: "",
+    label: "自动检测",
+    description: "首次健康检测时识别代理出口国家",
+    keywords: "自动检测 auto detect 自动识别",
+    leading: <CountryFlag code="WW" />,
+  },
+  ...proxyCountryOptions,
+];
 
 function normalizePolicy(input: unknown): AllocationPolicy {
   const row = (input || {}) as Record<string, unknown>;
@@ -149,7 +208,7 @@ function normalizePolicy(input: unknown): AllocationPolicy {
     ].includes(allocationMode)
       ? (allocationMode as AllocationMode)
       : defaultPolicy.allocationMode,
-    countryMatch: ["strict", "prefer", "off"].includes(countryMatch)
+    countryMatch: ["visitor_country", "phone_country"].includes(countryMatch)
       ? (countryMatch as CountryMatch)
       : defaultPolicy.countryMatch,
     maxAccountsPerIp: Math.max(
@@ -168,6 +227,28 @@ function normalizePolicy(input: unknown): AllocationPolicy {
     stickyBinding: Boolean(
       row.stickyBinding ?? row.sticky_binding ?? defaultPolicy.stickyBinding,
     ),
+    failureThreshold: Math.max(
+      1,
+      Math.min(
+        10,
+        Number(
+          row.failureThreshold ??
+            row.failure_threshold ??
+            defaultPolicy.failureThreshold,
+        ),
+      ),
+    ),
+    cooldownSeconds: Math.max(
+      60,
+      Math.min(
+        86400,
+        Number(
+          row.cooldownSeconds ??
+            row.cooldown_seconds ??
+            defaultPolicy.cooldownSeconds,
+        ),
+      ),
+    ),
   };
 }
 
@@ -184,22 +265,11 @@ function maskCredential(value: string) {
   return `${value.slice(0, 2)}${"•".repeat(Math.min(6, value.length - 2))}`;
 }
 
-function countryName(code: string) {
-  if (!code) return "";
-  try {
-    return (
-      new Intl.DisplayNames(["zh-CN"], { type: "region" }).of(
-        code.toUpperCase(),
-      ) || code.toUpperCase()
-    );
-  } catch {
-    return code.toUpperCase();
-  }
-}
-
 function normalizeProxy(input: unknown): IpProxy {
   const row = input as Record<string, unknown>;
   const id = snowflakeId(row, "id");
+  const countryCode = text(row, "countryCode", "country_code").toUpperCase();
+  const latencyValue = row.latencyMs ?? row.latency_ms;
   const enabled = Boolean(row.enabled ?? row.isActive ?? row.is_active ?? true);
   const rawStatus = text(
     row,
@@ -223,7 +293,6 @@ function normalizeProxy(input: unknown): IpProxy {
   return {
     id,
     readKey: entityRowKey(row, id, "ip-proxy", `${text(row, "host", "hostname")}:${String(row.port || "")}`),
-    name: text(row, "name", "label") || "未命名代理",
     protocol:
       text(row, "protocol", "proxyType", "proxy_type").toLowerCase() || "http",
     host: text(row, "host", "hostname"),
@@ -246,19 +315,23 @@ function normalizeProxy(input: unknown): IpProxy {
         "maskedPassword",
         "masked_password",
       ) || (row.hasPassword || row.has_password ? "••••••••" : "-"),
-    countryCode: text(row, "countryCode", "country_code").toUpperCase(),
+    countryCode,
     countryName:
       text(row, "countryName", "country_name", "country") ||
-      countryName(text(row, "countryCode", "country_code")),
+      (countryCode ? countryDisplayName(countryCode) : ""),
     provider: text(row, "provider"),
     enabled,
     status,
-    latencyMs:
-      row.latencyMs === undefined && row.latency_ms === undefined
-        ? null
-        : Number(row.latencyMs ?? row.latency_ms),
+    latencyMs: latencyValue === undefined || latencyValue === null
+      ? null
+      : Number(latencyValue),
     lastCheckedAt: text(row, "lastCheckedAt", "last_checked_at"),
     lastError: text(row, "lastError", "last_error"),
+    consecutiveFailures: Number(
+      row.consecutiveFailures ?? row.consecutive_failures ?? 0,
+    ),
+    cooldownUntil: text(row, "cooldownUntil", "cooldown_until"),
+    lastCheckSource: text(row, "lastCheckSource", "last_check_source"),
     bindingCount: Number(
       row.bindingCount ??
         row.binding_count ??
@@ -269,6 +342,7 @@ function normalizeProxy(input: unknown): IpProxy {
         0,
     ),
     createdAt: text(row, "createdAt", "created_at"),
+    updatedAt: text(row, "updatedAt", "updated_at"),
   };
 }
 
@@ -294,13 +368,34 @@ function normalizeBinding(input: unknown): ProxyBinding {
   };
 }
 
+function bulkProxyEndpoint(rawLine: string, line: number): string {
+  const withoutScheme = rawLine
+    .trim()
+    .replace(/^[a-z][a-z\d+.-]*:\/\//i, "");
+  const authority = withoutScheme.includes("@")
+    ? withoutScheme.slice(withoutScheme.lastIndexOf("@") + 1)
+    : withoutScheme;
+  const ipv6 = authority.match(/^(\[[^\]]+\]):(\d+)/);
+  if (ipv6) return `${ipv6[1]}:${ipv6[2]}`;
+  const endpoint = authority.match(/^([^:\s/]+):(\d+)/);
+  return endpoint ? `${endpoint[1]}:${endpoint[2]}` : `第 ${line} 行（等待解析）`;
+}
+
 function proxyStatus(row: IpProxy): EntityStatusMeta {
   if (!row.enabled || row.status === "disabled")
     return { label: "已停用", description: "代理已停用，不会参与自动分配。", tone: "neutral" };
   if (row.status === "healthy")
     return { label: "健康", description: "最近一次健康检测通过，可以参与账号分配。", tone: "success" };
   if (row.status === "unhealthy")
-    return { label: "异常", description: row.lastError || "最近一次健康检测失败。", tone: "danger" };
+    return {
+      label: row.cooldownUntil ? "冷却中" : "异常",
+      description:
+        row.lastError ||
+        (row.cooldownUntil
+          ? `冷却至 ${formatDateTime(row.cooldownUntil)}`
+          : "代理需要修复或手动复检。"),
+      tone: "danger",
+    };
   if (row.status === "testing")
     return { label: "检测中", description: "系统正在检测代理连通性与延迟。", tone: "warning" };
   return { label: "待检测", description: "代理尚未完成首次健康检测。", tone: "warning" };
@@ -327,8 +422,19 @@ export function IpManagementPage() {
   const [bulkPending, setBulkPending] = useState(false);
   const [bulkText, setBulkText] = useState("");
   const [bulkResult, setBulkResult] = useState<{
-    summary: BulkImportSummary;
-    results: BulkImportResult[];
+    summary: BulkPreviewSummary;
+    results: BulkPreviewResult[];
+  } | null>(null);
+  const [bulkPreviewToken, setBulkPreviewToken] = useState("");
+  const [bulkStage, setBulkStage] = useState<"importing" | "checking" | "">(
+    "",
+  );
+  const [bulkConfirmMode, setBulkConfirmMode] = useState<
+    "healthy" | "all" | ""
+  >("");
+  const bulkPreviewRequestRef = useRef<{
+    requestId: string;
+    controller: AbortController;
   } | null>(null);
   const [bulkDefaults, setBulkDefaults] = useState({
     protocol: "http",
@@ -336,6 +442,8 @@ export function IpManagementPage() {
     provider: "",
     enabled: true,
   });
+  const [selectedProxyIds, setSelectedProxyIds] = useState<string[]>([]);
+  const [batchAction, setBatchAction] = useState<"test" | "delete" | "">("");
   const [testingIds, setTestingIds] = useState<string[]>([]);
   const [accountId, setAccountId] = useState("");
   const [bindingPending, setBindingPending] = useState(false);
@@ -345,7 +453,6 @@ export function IpManagementPage() {
   const [policySaving, setPolicySaving] = useState(false);
   const [policyError, setPolicyError] = useState("");
   const [form, setForm] = useState({
-    name: "",
     protocol: "http",
     host: "",
     port: "",
@@ -367,6 +474,9 @@ export function IpManagementPage() {
       const list = unwrapList<unknown>(payload);
       const nextRows = list.rows.map(normalizeProxy);
       setRows(nextRows);
+      setSelectedProxyIds((current) =>
+        current.filter((id) => nextRows.some((row) => row.id === id)),
+      );
       setAccounts(
         unwrapList<Record<string, unknown>>(accountPayload)
           .rows.map((row) => {
@@ -386,7 +496,7 @@ export function IpManagementPage() {
       setSelectedId((current) =>
         current && nextRows.some((row) => row.id === current)
           ? current
-          : nextRows.find((row) => row.id)?.id || "",
+          : "",
       );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "加载 IP 代理失败");
@@ -463,7 +573,7 @@ export function IpManagementPage() {
     return rows.filter((row) => {
       if (
         search &&
-        !`${row.name} ${row.host} ${row.countryName} ${row.countryCode} ${row.provider}`
+        !`${row.host} ${row.port} ${row.countryName} ${row.countryCode} ${row.provider}`
           .toLowerCase()
           .includes(search)
       )
@@ -478,6 +588,16 @@ export function IpManagementPage() {
   const proxyPagination = useClientPagination(visibleRows, {
     resetKey: `${keyword}|${protocol}|${country}|${status}`,
   });
+  const pageProxyIds = useMemo(
+    () => proxyPagination.rows.map((row) => row.id).filter(Boolean),
+    [proxyPagination.rows],
+  );
+  const allPageSelected =
+    Boolean(pageProxyIds.length) &&
+    pageProxyIds.every((id) => selectedProxyIds.includes(id));
+  const somePageSelected =
+    !allPageSelected &&
+    pageProxyIds.some((id) => selectedProxyIds.includes(id));
   const bindingPagination = useClientPagination(bindings, {
     initialPageSize: 20,
     resetKey: selectedId,
@@ -490,8 +610,55 @@ export function IpManagementPage() {
         .filter((line) => line.trim() && !line.trim().startsWith("#")).length,
     [bulkText],
   );
+  const bulkDetectionResults = useMemo<BulkDetectionResult[]>(() => {
+    if (!bulkResult) return [];
+    const detected: BulkDetectionResult[] = [];
+    for (const item of bulkResult.results) {
+      if (item.status !== "checked") continue;
+      const countryCode = item.countryCode?.toUpperCase() || "";
+      detected.push({
+        line: item.line,
+        key: `preview-${item.line}`,
+        endpoint:
+          item.host && item.port
+            ? `${item.host}:${item.port}`
+            : `第 ${item.line} 行`,
+        countryCode,
+        countryName: countryCode ? countryDisplayName(countryCode) : "",
+        status: item.healthStatus === "healthy" ? "healthy" : "unhealthy",
+        latencyMs: item.latencyMs,
+        error: item.error,
+      });
+    }
+    return detected;
+  }, [bulkResult]);
+  const bulkPendingDetectionResults = useMemo<BulkDetectionResult[]>(() => {
+    if (!bulkPending || bulkStage !== "checking" || bulkResult) return [];
+    const pendingRows: BulkDetectionResult[] = [];
+    for (const [index, rawLine] of bulkText.split(/\r?\n/).entries()) {
+      const trimmedLine = rawLine.trim();
+      if (!trimmedLine || trimmedLine.startsWith("#")) continue;
+      pendingRows.push({
+        line: index + 1,
+        key: `pending-${index + 1}`,
+        endpoint: bulkProxyEndpoint(trimmedLine, index + 1),
+        countryCode: "",
+        countryName: "",
+        status: "checking",
+      });
+    }
+    return pendingRows;
+  }, [bulkPending, bulkResult, bulkStage, bulkText]);
+  const isBulkChecking =
+    bulkPending && bulkStage === "checking" && !bulkResult;
+  const visibleBulkDetectionResults = bulkResult
+    ? bulkDetectionResults
+    : bulkPendingDetectionResults;
   function openBulkCreate() {
     setBulkResult(null);
+    setBulkPreviewToken("");
+    setBulkStage("");
+    setBulkConfirmMode("");
     setBulkText("");
     setBulkDrawerOpen(true);
   }
@@ -499,7 +666,6 @@ export function IpManagementPage() {
     if (!row.id) return;
     setEditing(row);
     setForm({
-      name: row.name,
       protocol: row.protocol,
       host: row.host,
       port: String(row.port || ""),
@@ -516,18 +682,16 @@ export function IpManagementPage() {
   }
 
   async function save() {
-    if (!editing?.id || !form.name.trim() || !form.host.trim() || !form.port)
-      return;
+    if (!editing?.id || !form.host.trim() || !form.port) return;
     setPending(true);
     try {
       const body = {
-        name: form.name.trim(),
         protocol: form.protocol,
         host: form.host.trim(),
         port: Number(form.port),
         username: form.username || undefined,
         password: form.password || undefined,
-        countryCode: form.countryCode.trim().toUpperCase() || undefined,
+        countryCode: form.countryCode.trim().toUpperCase() || null,
         provider: form.provider.trim() || undefined,
         enabled: form.enabled,
       };
@@ -545,48 +709,129 @@ export function IpManagementPage() {
     }
   }
 
-  async function bulkCreate() {
+  function bulkImportRequestBody() {
+    return {
+      lines: bulkText.split(/\r?\n/),
+      defaultProtocol: bulkDefaults.protocol,
+      countryCode:
+        bulkDefaults.countryCode.trim().toUpperCase() || undefined,
+      provider: bulkDefaults.provider.trim() || undefined,
+      enabled: bulkDefaults.enabled,
+    };
+  }
+
+  async function previewBulkCreate() {
     if (!bulkLineCount || bulkLineCount > 1000) return;
+    const requestId = crypto.randomUUID();
+    const controller = new AbortController();
+    bulkPreviewRequestRef.current = { requestId, controller };
     setBulkPending(true);
+    setBulkStage("checking");
     setBulkResult(null);
+    setBulkPreviewToken("");
     try {
-      const payload = await apiRequest("/api/ip-proxies/bulk", {
+      const payload = await apiRequest("/api/ip-proxies/import-preview", {
         method: "POST",
         body: JSON.stringify({
-          lines: bulkText.split(/\r?\n/),
-          defaultProtocol: bulkDefaults.protocol,
-          countryCode:
-            bulkDefaults.countryCode.trim().toUpperCase() || undefined,
-          provider: bulkDefaults.provider.trim() || undefined,
-          enabled: bulkDefaults.enabled,
+          ...bulkImportRequestBody(),
+          requestId,
         }),
+        signal: controller.signal,
       });
       const data = ((payload as { data?: Record<string, unknown> }).data ||
         payload) as Record<string, unknown>;
       const rawSummary = (data.summary || {}) as Record<string, unknown>;
-      const summary: BulkImportSummary = {
+      const summary: BulkPreviewSummary = {
         total: Number(rawSummary.total || 0),
-        created: Number(rawSummary.created || 0),
+        candidates: Number(rawSummary.candidates || 0),
+        healthy: Number(rawSummary.healthy || 0),
+        unhealthy: Number(rawSummary.unhealthy || 0),
         duplicate: Number(rawSummary.duplicate || 0),
         failed: Number(rawSummary.failed || 0),
       };
       const results = Array.isArray(data.results)
-        ? (data.results as BulkImportResult[])
+        ? (data.results as BulkPreviewResult[])
         : [];
       setBulkResult({ summary, results });
-      await load();
-      if (!summary.failed && !summary.duplicate) {
-        toast.success(`已批量添加 ${summary.created} 条代理`);
-        setBulkDrawerOpen(false);
-        setBulkText("");
+      setBulkPreviewToken(text(data, "previewToken", "preview_token"));
+      if (!summary.failed && !summary.duplicate && !summary.unhealthy) {
+        toast.success(`检测完成：${summary.healthy} 条代理健康，等待确认导入`);
       } else {
         toast.warning(
-          `导入完成：新增 ${summary.created}，重复 ${summary.duplicate}，失败 ${summary.failed}`,
+          `检测完成：健康 ${summary.healthy}，异常 ${summary.unhealthy}，重复 ${summary.duplicate}，格式失败 ${summary.failed}`,
         );
       }
     } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "批量添加代理失败");
+      if (caught instanceof DOMException && caught.name === "AbortError") return;
+      toast.error(caught instanceof Error ? caught.message : "代理检测失败");
     } finally {
+      if (bulkPreviewRequestRef.current?.requestId === requestId) {
+        bulkPreviewRequestRef.current = null;
+        setBulkStage("");
+        setBulkPending(false);
+      }
+    }
+  }
+
+  async function cancelBulkPreview() {
+    const activeRequest = bulkPreviewRequestRef.current;
+    if (!activeRequest || bulkStage !== "checking") return;
+    const cancellation = apiRequest(
+      `/api/ip-proxies/import-preview/${activeRequest.requestId}/cancel`,
+      { method: "POST" },
+    );
+    activeRequest.controller.abort();
+    bulkPreviewRequestRef.current = null;
+    setBulkPending(false);
+    setBulkStage("");
+    setBulkResult(null);
+    setBulkPreviewToken("");
+    try {
+      await cancellation;
+      toast.info("已取消代理检测");
+    } catch {
+      toast.warning("页面已停止检测，服务端取消通知失败");
+    }
+  }
+
+  async function confirmBulkCreate(importMode: "healthy" | "all") {
+    if (!bulkResult || !bulkPreviewToken || bulkPending) return;
+    setBulkPending(true);
+    setBulkStage("importing");
+    setBulkConfirmMode(importMode);
+    try {
+      const payload = await apiRequest("/api/ip-proxies/import-confirm", {
+        method: "POST",
+        body: JSON.stringify({
+          ...bulkImportRequestBody(),
+          previewToken: bulkPreviewToken,
+          importMode,
+        }),
+      });
+      const data = ((payload as { data?: Record<string, unknown> }).data ||
+        payload) as Record<string, unknown>;
+      const summary = (data.summary || {}) as Record<string, unknown>;
+      const created = Number(summary.created || 0);
+      const skipped = Number(summary.skipped || 0);
+      const duplicate = Number(summary.duplicate || 0);
+      const failed = Number(summary.failed || 0);
+      await load();
+      if (!skipped && !duplicate && !failed) {
+        toast.success(`已导入 ${created} 条代理`);
+      } else {
+        toast.warning(
+          `导入完成：新增 ${created}，跳过异常 ${skipped}，重复 ${duplicate}，格式失败 ${failed}`,
+        );
+      }
+      setBulkDrawerOpen(false);
+      setBulkText("");
+      setBulkResult(null);
+      setBulkPreviewToken("");
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "确认导入失败");
+    } finally {
+      setBulkStage("");
+      setBulkConfirmMode("");
       setBulkPending(false);
     }
   }
@@ -617,11 +862,124 @@ export function IpManagementPage() {
       setTestingIds((current) => current.filter((id) => id !== row.id));
     }
   }
+  async function batchHealthTest() {
+    const proxyIds = [...selectedProxyIds];
+    if (!proxyIds.length || batchAction) return;
+    setBatchAction("test");
+    setTestingIds((current) => Array.from(new Set([...current, ...proxyIds])));
+    try {
+      let healthy = 0;
+      let unhealthy = 0;
+      for (let index = 0; index < proxyIds.length; index += 100) {
+        const payload = await apiRequest("/api/ip-proxies/test-batch", {
+          method: "POST",
+          body: JSON.stringify({
+            proxyIds: proxyIds.slice(index, index + 100),
+            source: "manual",
+          }),
+        });
+        const data = ((payload as { data?: Record<string, unknown> }).data ||
+          payload) as Record<string, unknown>;
+        const summary = (data.summary || {}) as Record<string, unknown>;
+        healthy += Number(summary.healthy || 0);
+        unhealthy += Number(summary.unhealthy || 0);
+      }
+      await load();
+      if (unhealthy) {
+        toast.warning(`批量检测完成：健康 ${healthy}，异常 ${unhealthy}`);
+      } else {
+        toast.success(`批量检测完成：${healthy} 条代理健康`);
+      }
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "批量检测失败");
+    } finally {
+      setTestingIds((current) =>
+        current.filter((id) => !proxyIds.includes(id)),
+      );
+      setBatchAction("");
+    }
+  }
+  async function batchDelete() {
+    const proxyIds = [...selectedProxyIds];
+    if (!proxyIds.length || batchAction) return;
+    const selectedRowsById = new Map(rows.map((row) => [row.id, row]));
+    const boundProxyIds = proxyIds.filter(
+      (id) => (selectedRowsById.get(id)?.bindingCount || 0) > 0,
+    );
+    const boundAccountCount = boundProxyIds.reduce(
+      (total, id) => total + (selectedRowsById.get(id)?.bindingCount || 0),
+      0,
+    );
+    const boundProxyIdSet = new Set(boundProxyIds);
+    const deletableIds = proxyIds.filter((id) => !boundProxyIdSet.has(id));
+    if (!deletableIds.length) {
+      toast.warning(
+        `选中的 ${boundProxyIds.length} 条代理共绑定 ${boundAccountCount} 个账号，不能直接删除。请打开代理详情解除绑定后重试`,
+      );
+      return;
+    }
+    if (
+      !(await confirmAction({
+        title: `删除选中的 ${deletableIds.length} 条可删除代理？`,
+        description: boundProxyIds.length
+          ? `另有 ${boundProxyIds.length} 条代理仍绑定 ${boundAccountCount} 个账号，本次会自动跳过。删除后无法恢复。`
+          : "删除后无法恢复。",
+        confirmText: "批量删除",
+        destructive: true,
+      }))
+    )
+      return;
+    setBatchAction("delete");
+    try {
+      const results = await Promise.allSettled(
+        deletableIds.map((id) =>
+          apiRequest(`/api/ip-proxies/${id}`, { method: "DELETE" }),
+        ),
+      );
+      const deletedIds = deletableIds.filter(
+        (_, index) => results[index]?.status === "fulfilled",
+      );
+      const failedResults = results.filter(
+        (result): result is PromiseRejectedResult =>
+          result.status === "rejected",
+      );
+      const failedReasons = Array.from(
+        new Set(
+          failedResults.map((result) =>
+            result.reason instanceof Error
+              ? result.reason.message
+              : "请求失败",
+          ),
+        ),
+      );
+      setSelectedProxyIds((current) =>
+        current.filter((id) => !deletedIds.includes(id)),
+      );
+      await load();
+      if (boundProxyIds.length || failedResults.length) {
+        const details = [
+          boundProxyIds.length
+            ? `${boundProxyIds.length} 条仍有账号绑定，已跳过`
+            : "",
+          failedResults.length
+            ? `${failedResults.length} 条删除失败${failedReasons.length ? `：${failedReasons.slice(0, 2).join("；")}` : ""}`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("；");
+        toast.warning(`已删除 ${deletedIds.length} 条；${details}`);
+      } else {
+        toast.success(`已删除 ${deletedIds.length} 条代理`);
+      }
+    } finally {
+      setBatchAction("");
+    }
+  }
   async function remove(row: IpProxy) {
     if (!row.id) return;
     if (
       !(await confirmAction({
-        title: `删除代理“${row.name}”？`,
+        title: `删除代理“${row.host}:${row.port}”？`,
         description: "删除后无法恢复；已有绑定时需先解绑账号。",
         confirmText: "确认删除",
         destructive: true,
@@ -713,7 +1071,7 @@ export function IpManagementPage() {
         search={{
           value: keyword,
           onChange: setKeyword,
-          placeholder: "搜索名称、主机、国家或地区",
+          placeholder: "搜索主机、端口、国家、地区或供应商",
         }}
         filters={
           <>
@@ -728,13 +1086,28 @@ export function IpManagementPage() {
                 { value: "socks5", label: "SOCKS5" },
               ]}
             />
-            <SelectField
+            <SearchableSelect
               ariaLabel="国家筛选"
               value={country}
               onValueChange={setCountry}
+              className="w-44"
+              searchPlaceholder="搜索国家、地区或代码"
+              emptyText="没有匹配的国家或地区"
               options={[
-                { value: "all", label: "全部国家" },
-                ...countries.map(([value, label]) => ({ value, label })),
+                {
+                  value: "all",
+                  label: "全部国家",
+                  keywords: "全部 all",
+                  leading: <CountryFlag code="WW" />,
+                },
+                ...countries.map(([value, label]) => ({
+                  value,
+                  label: /^[A-Z]{2}$/.test(value)
+                    ? `${countryDisplayName(value)} · ${value}`
+                    : label,
+                  keywords: `${value} ${label}`,
+                  leading: <CountryFlag code={value} />,
+                })),
               ]}
             />
             <SelectField
@@ -751,7 +1124,11 @@ export function IpManagementPage() {
             />
           </>
         }
-        meta={`${visibleRows.length} 条代理`}
+        meta={
+          selectedProxyIds.length
+            ? `已选择 ${selectedProxyIds.length} 条代理`
+            : `${visibleRows.length} 条代理`
+        }
         actions={
           <>
             <Button
@@ -773,6 +1150,42 @@ export function IpManagementPage() {
               刷新
             </Button>
             {canManage ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="outline"
+                    disabled={!selectedProxyIds.length || Boolean(batchAction)}
+                  >
+                    {batchAction ? (
+                      <Spinner />
+                    ) : (
+                      <ListChecksIcon data-icon="inline-start" />
+                    )}
+                    批量操作
+                    {selectedProxyIds.length
+                      ? ` (${selectedProxyIds.length})`
+                      : ""}
+                    <ChevronDownIcon data-icon="inline-end" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuGroup>
+                    <DropdownMenuItem onSelect={() => void batchHealthTest()}>
+                      <CircleGaugeIcon />
+                      批量检测
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      variant="destructive"
+                      onSelect={() => void batchDelete()}
+                    >
+                      <Trash2Icon />
+                      批量删除
+                    </DropdownMenuItem>
+                  </DropdownMenuGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
+            {canManage ? (
               <Button onClick={openBulkCreate}>
                 <PlusIcon size={17} />
                 批量添加
@@ -791,8 +1204,7 @@ export function IpManagementPage() {
         onPageSizeChange={proxyPagination.setPageSize}
       />
 
-      <div className="ip-content-grid">
-        <section className="card table-card">
+      <ListTableCard>
           {loading ? (
             <div className="loading-state">
               <Spinner />
@@ -811,49 +1223,97 @@ export function IpManagementPage() {
               <Table layout="list">
                 <TableHeader>
                   <TableRow>
+                    <TableHead>
+                      <Checkbox
+                        aria-label="选择本页代理"
+                        disabled={!canManage || !pageProxyIds.length}
+                        checked={
+                          allPageSelected
+                            ? true
+                            : somePageSelected
+                              ? "indeterminate"
+                              : false
+                        }
+                        onCheckedChange={(checked) =>
+                          setSelectedProxyIds((current) =>
+                            checked === true
+                              ? Array.from(
+                                  new Set([...current, ...pageProxyIds]),
+                                )
+                              : current.filter(
+                                  (id) => !pageProxyIds.includes(id),
+                                ),
+                          )
+                        }
+                      />
+                    </TableHead>
                     <TableHead adaptive>代理</TableHead>
+                    <TableHead>协议</TableHead>
                     <TableHead>国家 / 地区</TableHead>
+                    <TableHead>供应商</TableHead>
                     <TableHead>凭证</TableHead>
-                    <TableHead>健康</TableHead>
+                    <TableHead>健康状态</TableHead>
                     <TableHead>绑定</TableHead>
+                    <TableHead>创建时间</TableHead>
+                    <TableHead>更新时间</TableHead>
                     <TableHead>操作</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {proxyPagination.rows.map((row) => (
-                    <TableRow
-                      key={row.readKey}
-                      className={
-                        selectedId === row.id ? "selected-row" : ""
-                      }
-                      onClick={() => row.id && setSelectedId(row.id)}
-                    >
+                    <TableRow key={row.readKey}>
                       <TableCell>
+                        <Checkbox
+                          aria-label={`选择代理 ${row.host}:${row.port}`}
+                          disabled={!canManage || !row.id}
+                          checked={
+                            Boolean(row.id) &&
+                            selectedProxyIds.includes(row.id)
+                          }
+                          onCheckedChange={(checked) =>
+                            row.id &&
+                            setSelectedProxyIds((current) =>
+                              checked === true
+                                ? Array.from(new Set([...current, row.id]))
+                                : current.filter((id) => id !== row.id),
+                            )
+                          }
+                        />
+                      </TableCell>
+                      <TableCell primary>
                         <EntityPrimaryCell
-                          title={row.name}
+                          title={`${row.host}:${row.port}`}
                           id={row.id}
-                          description={`${row.protocol.toUpperCase()} · ${row.host}:${row.port}`}
                           status={{
                             ...proxyStatus(row),
                             details: [
                               { label: "延迟", value: row.latencyMs ? `${row.latencyMs} ms` : "-" },
-                              { label: "国家", value: row.countryName || row.countryCode || "未设置" },
+                              { label: "国家", value: row.countryName || row.countryCode || "待自动检测" },
                               { label: "绑定数", value: row.bindingCount },
                             ],
                           }}
                         />
                       </TableCell>
+                      <TableCell>{row.protocol.toUpperCase()}</TableCell>
                       <TableCell>
-                        <div className="cell-main country-cell">
-                          <strong>
-                            {row.countryName || row.countryCode || "未设置"}
-                          </strong>
-                          <span>
-                            {[row.countryCode, row.provider]
-                              .filter(Boolean)
-                              .join(" · ") || "-"}
+                        <div className="flex min-w-max flex-col items-center gap-1 text-center">
+                          {row.countryCode ? (
+                            <CountryDisplay
+                              code={row.countryCode}
+                              className="justify-center font-semibold"
+                            />
+                          ) : (
+                            <strong>{row.countryName || "待自动检测"}</strong>
+                          )}
+                          <span className="text-xs text-muted-foreground">
+                            {row.countryCode || "首次健康检测时识别"}
                           </span>
                         </div>
+                      </TableCell>
+                      <TableCell>
+                        <span className={row.provider ? "" : "text-muted-foreground"}>
+                          {row.provider || "-"}
+                        </span>
                       </TableCell>
                       <TableCell>
                         <div className="credential-cell">
@@ -863,55 +1323,85 @@ export function IpManagementPage() {
                       </TableCell>
                       <TableCell>
                         <div className="health-cell">
-                          <span>
-                            {row.latencyMs ? `${row.latencyMs} ms` : "-"}
-                          </span>
+                          <div className="health-cell__summary">
+                            <Badge tone={proxyStatus(row).tone}>
+                              {proxyStatus(row).label}
+                            </Badge>
+                            <span>
+                              {row.latencyMs ? `${row.latencyMs} ms` : "-"}
+                            </span>
+                          </div>
                           <small title={row.lastError}>
-                            {row.lastError || formatDateTime(row.lastCheckedAt)}
+                            {row.cooldownUntil
+                              ? `冷却至 ${formatDateTime(row.cooldownUntil)}`
+                              : row.lastError || formatDateTime(row.lastCheckedAt)}
                           </small>
                         </div>
                       </TableCell>
                       <TableCell className="tabular-nums">
                         {row.bindingCount}
                       </TableCell>
-                      <TableCell onClick={(event) => event.stopPropagation()}>
-                        {canManage ? <div className="flex min-w-max items-center justify-end gap-2">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={
-                              !row.id || !row.enabled || testingIds.includes(row.id)
-                            }
-                            onClick={() => void healthTest(row)}
-                          >
-                            {testingIds.includes(row.id) ? <LoaderCircleIcon className="spin" size={16} /> : null}
-                            健康检测
-                          </Button>
+                      <TableCell className="text-muted-foreground">
+                        {formatDateTime(row.createdAt)}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {formatDateTime(row.updatedAt)}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex min-w-max items-center justify-end gap-2">
                           <Button
                             variant="outline"
                             size="sm"
                             disabled={!row.id}
-                            onClick={() => openEdit(row)}
+                            onClick={() => setSelectedId(row.id)}
                           >
-                            编辑
+                            <EyeIcon />
+                            详情
                           </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={!row.id}
-                            onClick={() => void toggle(row)}
-                          >
-                            {row.enabled ? "停用" : "启用"}
-                          </Button>
-                          <Button
-                            variant="destructive"
-                            size="sm"
-                            disabled={!row.id}
-                            onClick={() => void remove(row)}
-                          >
-                            删除
-                          </Button>
-                        </div> : null}
+                          {canManage ? (
+                            <>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={
+                                  !row.id ||
+                                  !row.enabled ||
+                                  testingIds.includes(row.id)
+                                }
+                                onClick={() => void healthTest(row)}
+                              >
+                                {testingIds.includes(row.id) ? (
+                                  <LoaderCircleIcon className="spin" size={16} />
+                                ) : null}
+                                健康检测
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={!row.id}
+                                onClick={() => openEdit(row)}
+                              >
+                                编辑
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={!row.id}
+                                onClick={() => void toggle(row)}
+                              >
+                                {row.enabled ? "停用" : "启用"}
+                              </Button>
+                              <Button
+                                variant="destructive"
+                                size="sm"
+                                disabled={!row.id}
+                                onClick={() => void remove(row)}
+                              >
+                                删除
+                              </Button>
+                            </>
+                          ) : null}
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -924,59 +1414,205 @@ export function IpManagementPage() {
               description="调整筛选条件，或添加新的 HTTP、HTTPS、SOCKS5 代理。"
             />
           )}
-        </section>
+      </ListTableCard>
 
-        <aside className="card binding-panel">
-          <header>
-            <div>
-              <h2>账号绑定</h2>
-              <p>{selected ? selected.name : "请先选择代理"}</p>
-            </div>
-            <CircleGaugeIcon size={19} />
-          </header>
-          {selected ? (
-            <>
-              <div className="binding-notice">
-                通过统一账号池建立固定绑定，并应用到发送服务。在线账号更换代理前需要先断开连接。
+      <Drawer
+        open={Boolean(selected)}
+        onClose={() => {
+          setSelectedId("");
+          setAccountId("");
+        }}
+        title="代理详情"
+        description={
+          selected
+            ? `${selected.host}:${selected.port} · ${selected.id}`
+            : "集中查看代理信息、健康状态和账号绑定。"
+        }
+      >
+        {selected ? (
+          <div className="grid gap-6 pb-6">
+            <section className="grid gap-3">
+              <div>
+                <h3 className="text-sm font-semibold">基本信息</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  代理端点、来源标识和访问凭证。
+                </p>
               </div>
-              {canManage ? <form
-                className="binding-form"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void bindAccount();
-                }}
-              >
-                <label className="field">
-                  <span>账号</span>
-                  <SelectField
-                    ariaLabel="账号"
-                    value={accountId}
-                    placeholder="请选择账号"
-                    onValueChange={setAccountId}
-                    options={accounts.map((account) => ({
-                      value: account.id,
-                      label: `${account.label} · ${account.status || "未知状态"}`,
-                    }))}
-                  />
-                </label>
-                <Button
-                  type="submit"
-                  disabled={
-                    bindingPending ||
-                    !accountId.trim() ||
-                    !selected?.id
-                  }
+              <div className="grid gap-3 rounded-xl border p-4 sm:grid-cols-2">
+                <div className="cell-main">
+                  <span>代理地址</span>
+                  <strong>{selected.host}:{selected.port}</strong>
+                </div>
+                <div className="cell-main">
+                  <span>系统 ID</span>
+                  <strong>{selected.id}</strong>
+                </div>
+                <div className="cell-main">
+                  <span>协议</span>
+                  <strong>{selected.protocol.toUpperCase()}</strong>
+                </div>
+                <div className="cell-main">
+                  <span>国家 / 地区</span>
+                  {selected.countryCode ? (
+                    <CountryDisplay
+                      code={selected.countryCode}
+                      className="justify-start font-semibold"
+                    />
+                  ) : (
+                    <strong>待自动检测</strong>
+                  )}
+                </div>
+                <div className="cell-main">
+                  <span>供应商</span>
+                  <strong>{selected.provider || "-"}</strong>
+                </div>
+                <div className="cell-main">
+                  <span>访问凭证</span>
+                  <strong>用户 {selected.usernameMasked}</strong>
+                  <span>密码 {selected.passwordMasked}</span>
+                </div>
+                <div className="cell-main">
+                  <span>创建时间</span>
+                  <strong>{formatDateTime(selected.createdAt)}</strong>
+                </div>
+              </div>
+            </section>
+
+            <section className="grid gap-3">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold">健康状态</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    首次导入检测与网关实际使用回写的最新结果。
+                  </p>
+                </div>
+                {canManage ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={
+                        !selected.enabled || testingIds.includes(selected.id)
+                      }
+                      onClick={() => void healthTest(selected)}
+                    >
+                      {testingIds.includes(selected.id) ? (
+                        <LoaderCircleIcon className="spin" />
+                      ) : (
+                        <CircleGaugeIcon />
+                      )}
+                      健康检测
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setSelectedId("");
+                        openEdit(selected);
+                      }}
+                    >
+                      编辑代理
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+              <div className="grid gap-3 rounded-xl border p-4 sm:grid-cols-2">
+                <div className="cell-main">
+                  <span>当前状态</span>
+                  <Badge tone={proxyStatus(selected).tone}>
+                    {proxyStatus(selected).label}
+                  </Badge>
+                </div>
+                <div className="cell-main">
+                  <span>延迟</span>
+                  <strong>{selected.latencyMs ? `${selected.latencyMs} ms` : "-"}</strong>
+                </div>
+                <div className="cell-main">
+                  <span>最近检测</span>
+                  <strong>{formatDateTime(selected.lastCheckedAt)}</strong>
+                </div>
+                <div className="cell-main">
+                  <span>结果来源</span>
+                  <strong>
+                    {selected.lastCheckSource === "gateway"
+                      ? "网关实际使用"
+                      : selected.lastCheckSource === "import"
+                        ? "首次导入检测"
+                        : selected.lastCheckSource === "manual"
+                          ? "手动检测"
+                          : selected.lastCheckSource || "-"}
+                  </strong>
+                </div>
+                <div className="cell-main">
+                  <span>连续失败</span>
+                  <strong>{selected.consecutiveFailures}</strong>
+                </div>
+                <div className="cell-main">
+                  <span>冷却状态</span>
+                  <strong>
+                    {selected.cooldownUntil
+                      ? `至 ${formatDateTime(selected.cooldownUntil)}`
+                      : "未冷却"}
+                  </strong>
+                </div>
+                <div className="cell-main sm:col-span-2">
+                  <span>最新异常</span>
+                  <strong className={selected.lastError ? "text-destructive" : ""}>
+                    {selected.lastError || "无异常"}
+                  </strong>
+                </div>
+              </div>
+            </section>
+
+            <section className="grid gap-3">
+              <div>
+                <h3 className="text-sm font-semibold">账号绑定</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  固定绑定会应用到发送服务；在线账号更换代理前需要先断开连接。
+                </p>
+              </div>
+              {canManage ? (
+                <form
+                  className="rounded-xl border p-4"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void bindAccount();
+                  }}
                 >
-                  {bindingPending ? <Spinner /> : <LinkIcon size={16} />}绑定
-                </Button>
-              </form> : null}
-              <div className="binding-list-header">
-                <strong>已绑定账号</strong>
-                <span>{bindings.length}</span>
+                  <DrawerFormField label="绑定账号" align="start">
+                    <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
+                      <SelectField
+                        ariaLabel="绑定账号"
+                        className="min-w-0 flex-1"
+                        value={accountId}
+                        placeholder="请选择账号"
+                        onValueChange={setAccountId}
+                        options={accounts.map((account) => ({
+                          value: account.id,
+                          label: `${account.label} · ${account.status || "未知状态"}`,
+                        }))}
+                      />
+                      <Button
+                        type="submit"
+                        disabled={
+                          bindingPending ||
+                          !accountId.trim() ||
+                          !selected.id
+                        }
+                      >
+                        {bindingPending ? <Spinner /> : <LinkIcon />}
+                        绑定
+                      </Button>
+                    </div>
+                  </DrawerFormField>
+                </form>
+              ) : null}
+              <div className="flex items-center justify-between gap-3">
+                <strong className="text-sm">已绑定账号</strong>
+                <Badge tone="neutral">{bindings.length}</Badge>
               </div>
               <ListPagination
                 ariaLabel="账号绑定分页"
-                className="binding-pagination"
                 page={bindingPagination.page}
                 pageSize={bindingPagination.pageSize}
                 total={bindingPagination.total}
@@ -986,42 +1622,58 @@ export function IpManagementPage() {
                 onPageSizeChange={bindingPagination.setPageSize}
               />
               {bindingsLoading ? (
-                <div className="binding-loading">
+                <div className="loading-state min-h-28">
                   <Spinner />
+                  正在加载绑定账号…
                 </div>
               ) : bindings.length ? (
-                <div className="binding-list">
-                  {bindingPagination.rows.map((binding) => (
-                    <div
-                      className="binding-item"
-                      key={binding.readKey}
-                    >
-                      <span className="small-avatar">
-                        <ShieldCheckIcon size={15} />
-                      </span>
-                      <div>
-                        <strong>
-                          {binding.accountName ||
-                            binding.accountPhone ||
-                            "账号已不存在"}
-                        </strong>
-                        {binding.accountId ? (
-                          <small>{binding.accountId}</small>
-                        ) : (
-                          <small>残留 IP 绑定</small>
-                        )}
-                      </div>
-                      {canManage ? (
-                        <IconButton
-                          label="解绑"
-                          disabled={!binding.id}
-                          onClick={() => void unbind(binding)}
-                        >
-                          <UnlinkIcon size={15} />
-                        </IconButton>
-                      ) : null}
-                    </div>
-                  ))}
+                <div className="overflow-hidden rounded-xl border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead adaptive>账号</TableHead>
+                        <TableHead>绑定时间</TableHead>
+                        <TableHead>操作</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {bindingPagination.rows.map((binding) => (
+                        <TableRow key={binding.readKey}>
+                          <TableCell>
+                            <div className="flex min-w-0 items-center gap-3">
+                              <span className="small-avatar">
+                                <ShieldCheckIcon />
+                              </span>
+                              <div className="cell-main min-w-0">
+                                <strong>
+                                  {binding.accountName ||
+                                    binding.accountPhone ||
+                                    "账号已不存在"}
+                                </strong>
+                                <span>
+                                  {binding.accountId || "残留 IP 绑定"}
+                                </span>
+                              </div>
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            {formatDateTime(binding.createdAt)}
+                          </TableCell>
+                          <TableCell>
+                            {canManage ? (
+                              <IconButton
+                                label="解绑"
+                                disabled={!binding.id}
+                                onClick={() => void unbind(binding)}
+                              >
+                                <UnlinkIcon />
+                              </IconButton>
+                            ) : null}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
                 </div>
               ) : (
                 <EmptyState
@@ -1029,15 +1681,10 @@ export function IpManagementPage() {
                   description="从统一账号池选择账号，将它固定到当前代理。"
                 />
               )}
-            </>
-          ) : (
-            <EmptyState
-              title="选择一个代理"
-              description="选择左侧代理后，可以查看和维护账号绑定关系。"
-            />
-          )}
-        </aside>
-      </div>
+            </section>
+          </div>
+        ) : null}
+      </Drawer>
 
       <Drawer
         open={policyDrawerOpen}
@@ -1124,9 +1771,8 @@ export function IpManagementPage() {
                     }))
                   }
                   options={[
-                    { value: "strict", label: "严格匹配" },
-                    { value: "prefer", label: "国家优先（推荐）" },
-                    { value: "off", label: "关闭匹配" },
+                    { value: "visitor_country", label: "访问国家（推荐）" },
+                    { value: "phone_country", label: "号码国家" },
                   ]}
                 />
               </DrawerFormField>
@@ -1159,17 +1805,48 @@ export function IpManagementPage() {
               </DrawerFormField>
             </DrawerFormSection>
             <DrawerFormSection title="健康与绑定">
-              <DrawerFormField label="避开异常 IP" hint="自动分配时排除健康检测异常或已停用的代理。">
-                <Switch
-                  checked={policy.avoidUnhealthy}
+              <DrawerFormField
+                required
+                label="连续失败次数"
+                hint="网关实际使用连续失败达到该次数后，代理进入冷却；认证失败会立即隔离。"
+              >
+                <Input
+                  type="number"
+                  min="1"
+                  max="10"
+                  value={policy.failureThreshold}
                   disabled={!canManage || policySaving || Boolean(policyError)}
-                  onCheckedChange={(checked) =>
+                  onChange={(event) =>
                     setPolicy((current) => ({
                       ...current,
-                      avoidUnhealthy: checked,
+                      failureThreshold: Math.max(
+                        1,
+                        Math.min(10, Number(event.target.value) || 1),
+                      ),
                     }))
                   }
-                  aria-label="避开异常 IP"
+                />
+              </DrawerFormField>
+              <DrawerFormField
+                required
+                label="冷却时间（秒）"
+                hint="冷却期间不参与任何自动分配；到期后以最低优先级试用，成功即恢复。"
+              >
+                <Input
+                  type="number"
+                  min="60"
+                  max="86400"
+                  value={policy.cooldownSeconds}
+                  disabled={!canManage || policySaving || Boolean(policyError)}
+                  onChange={(event) =>
+                    setPolicy((current) => ({
+                      ...current,
+                      cooldownSeconds: Math.max(
+                        60,
+                        Math.min(86400, Number(event.target.value) || 60),
+                      ),
+                    }))
+                  }
                 />
               </DrawerFormField>
               <DrawerFormField label="保持固定绑定" hint="账号成功分配后持续使用同一 IP，除非管理员手动解绑。">
@@ -1194,29 +1871,69 @@ export function IpManagementPage() {
         open={bulkDrawerOpen}
         onClose={() => !bulkPending && setBulkDrawerOpen(false)}
         title="批量添加 IP 代理"
-        description="每行一个代理，整批共用下方默认设置；代理凭证会加密保存。"
+        description="先检测代理的 WhatsApp 可达性与出口国家，确认结果后再选择导入正常代理或导入全部。"
         footer={
           <>
             <Button
               variant="outline"
-              disabled={bulkPending}
-              onClick={() => setBulkDrawerOpen(false)}
+              disabled={bulkPending && bulkStage !== "checking"}
+              onClick={() => {
+                if (isBulkChecking) {
+                  void cancelBulkPreview();
+                  return;
+                }
+                setBulkDrawerOpen(false);
+              }}
             >
-              取消
+              {isBulkChecking ? "取消检测" : "取消"}
             </Button>
-            <Button
-              disabled={
-                bulkPending || !bulkLineCount || bulkLineCount > 1000
-              }
-              onClick={() => void bulkCreate()}
-            >
-              {bulkPending ? (
-                <LoaderCircleIcon className="spin" size={17} />
-              ) : (
-                <PlusIcon size={17} />
-              )}
-              开始导入
-            </Button>
+            {bulkResult ? (
+              <>
+                <Button
+                  variant="outline"
+                  disabled={bulkPending}
+                  onClick={() => {
+                    setBulkResult(null);
+                    setBulkPreviewToken("");
+                  }}
+                >
+                  重新填写
+                </Button>
+                <Button
+                  disabled={bulkPending || !bulkResult.summary.healthy}
+                  onClick={() => void confirmBulkCreate("healthy")}
+                >
+                  {bulkPending && bulkConfirmMode === "healthy" ? (
+                    <LoaderCircleIcon className="spin" size={17} />
+                  ) : null}
+                  导入正常（{bulkResult.summary.healthy}）
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={bulkPending || !bulkResult.summary.candidates}
+                  onClick={() => void confirmBulkCreate("all")}
+                >
+                  {bulkPending && bulkConfirmMode === "all" ? (
+                    <LoaderCircleIcon className="spin" size={17} />
+                  ) : null}
+                  导入全部（{bulkResult.summary.candidates}）
+                </Button>
+              </>
+            ) : (
+              <Button
+                disabled={
+                  bulkPending || !bulkLineCount || bulkLineCount > 1000
+                }
+                onClick={() => void previewBulkCreate()}
+              >
+                {bulkPending ? (
+                  <LoaderCircleIcon className="spin" size={17} />
+                ) : (
+                  <CircleGaugeIcon size={17} />
+                )}
+                {bulkPending ? "正在检测" : "开始检测"}
+              </Button>
+            )}
           </>
         }
       >
@@ -1226,9 +1943,11 @@ export function IpManagementPage() {
             <Textarea
               className="min-h-64 resize-y font-mono"
               value={bulkText}
+              disabled={bulkPending || Boolean(bulkResult)}
               onChange={(event) => {
                 setBulkText(event.target.value);
                 setBulkResult(null);
+                setBulkPreviewToken("");
               }}
               placeholder={[
                 "203.0.113.10:8080",
@@ -1250,6 +1969,7 @@ export function IpManagementPage() {
               <DrawerFieldLabel required>默认协议</DrawerFieldLabel>
               <SelectField
                 value={bulkDefaults.protocol}
+                disabled={bulkPending || Boolean(bulkResult)}
                 onValueChange={(value) =>
                   setBulkDefaults((current) => ({
                     ...current,
@@ -1263,24 +1983,29 @@ export function IpManagementPage() {
                 ]}
               />
             </label>
-            <label className="field">
-              <DrawerFieldLabel>国家代码</DrawerFieldLabel>
-              <Input
+            <div className="field">
+              <DrawerFieldLabel>国家 / 地区</DrawerFieldLabel>
+              <SearchableSelect
                 value={bulkDefaults.countryCode}
-                maxLength={2}
-                onChange={(event) =>
+                disabled={bulkPending || Boolean(bulkResult)}
+                onValueChange={(value) =>
                   setBulkDefaults((current) => ({
                     ...current,
-                    countryCode: event.target.value,
+                    countryCode: value,
                   }))
                 }
-                placeholder="US"
+                options={optionalProxyCountryOptions}
+                placeholder="选择国家或地区"
+                searchPlaceholder="搜索国家、地区或代码"
+                emptyText="没有匹配的国家或地区"
+                ariaLabel="批量导入代理国家"
               />
-            </label>
+            </div>
             <label className="field">
               <DrawerFieldLabel>代理供应商</DrawerFieldLabel>
               <Input
                 value={bulkDefaults.provider}
+                disabled={bulkPending || Boolean(bulkResult)}
                 maxLength={120}
                 onChange={(event) =>
                   setBulkDefaults((current) => ({
@@ -1300,6 +2025,7 @@ export function IpManagementPage() {
             </span>
             <Switch
               checked={bulkDefaults.enabled}
+              disabled={bulkPending || Boolean(bulkResult)}
               onCheckedChange={(checked) =>
                 setBulkDefaults((current) => ({
                   ...current,
@@ -1316,38 +2042,165 @@ export function IpManagementPage() {
             </div>
           ) : null}
 
-          {bulkResult ? (
-            <div className="rounded-lg border bg-muted/30 p-4">
-              <strong>导入结果</strong>
-              <p className="mt-1 text-sm text-muted-foreground">
-                共 {bulkResult.summary.total} 条 · 新增 {bulkResult.summary.created}
-                条 · 重复 {bulkResult.summary.duplicate} 条 · 失败 {bulkResult.summary.failed}
-                条
-              </p>
-              {bulkResult.results.some(
-                (item) => item.status !== "created",
-              ) ? (
-                <div className="mt-3 max-h-44 space-y-2 overflow-y-auto">
-                  {bulkResult.results
-                    .filter((item) => item.status !== "created")
-                    .map((item) => (
-                      <div
-                        className="flex items-start gap-2 rounded-md border bg-background px-3 py-2 text-sm"
-                        key={`${item.line}-${item.status}`}
-                      >
+          {isBulkChecking || bulkResult ? (
+            <div className="grid gap-4 rounded-lg border bg-muted/30 p-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  {isBulkChecking ? (
+                    <LoaderCircleIcon className="spin text-primary" size={18} />
+                  ) : null}
+                  <strong>
+                    {isBulkChecking
+                      ? "正在检测（尚未导入）"
+                      : "检测结果（尚未导入）"}
+                  </strong>
+                </div>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {isBulkChecking ? (
+                    <>
+                      共 {visibleBulkDetectionResults.length} 条 · 正在检查 WhatsApp
+                      可达性并识别出口国家
+                    </>
+                  ) : bulkResult ? (
+                    <>
+                      共 {bulkResult.summary.total} 条 · 可确认 {bulkResult.summary.candidates}
+                      条 · 重复 {bulkResult.summary.duplicate} 条 · 格式失败 {bulkResult.summary.failed} 条
+                    </>
+                  ) : null}
+                </p>
+              </div>
+
+              {visibleBulkDetectionResults.length ? (
+                <div className="grid gap-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {isBulkChecking ? (
+                      <>
+                        <Badge tone="warning">
+                          <LoaderCircleIcon className="spin" size={12} />
+                          检测中 {visibleBulkDetectionResults.length}
+                        </Badge>
+                        <span className="text-xs text-muted-foreground">
+                          检测结果会在当前列表中更新
+                        </span>
+                      </>
+                    ) : bulkResult ? (
+                      <>
+                        <Badge tone="success">
+                          健康 {bulkResult.summary.healthy}
+                        </Badge>
                         <Badge
                           tone={
-                            item.status === "failed" ? "danger" : "warning"
+                            bulkResult.summary.unhealthy ? "danger" : "neutral"
                           }
                         >
-                          {item.status === "failed" ? "失败" : "重复"}
+                          异常 {bulkResult.summary.unhealthy}
                         </Badge>
-                        <span>
-                          第 {item.line} 行
-                          {item.reason ? `：${item.reason}` : ""}
+                        <span className="text-xs text-muted-foreground">
+                          检测已完成，请选择导入范围
                         </span>
-                      </div>
-                    ))}
+                      </>
+                    ) : null}
+                  </div>
+
+                  <div className="overflow-hidden rounded-lg border bg-background">
+                    <div className="grid grid-cols-[minmax(0,1fr)_8rem_7rem] gap-3 border-b bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground">
+                      <span>代理地址</span>
+                      <span>国家 / 地区</span>
+                      <span>健康状态</span>
+                    </div>
+                    <div className="max-h-72 divide-y overflow-y-auto">
+                      {visibleBulkDetectionResults.map((item) => (
+                        <div
+                          className="grid grid-cols-[minmax(0,1fr)_8rem_7rem] items-center gap-3 px-3 py-2.5 text-sm"
+                          key={item.key}
+                        >
+                          <div className="min-w-0">
+                            <strong className="block truncate">
+                              {item.endpoint}
+                            </strong>
+                            <span
+                              className="block truncate text-xs text-muted-foreground"
+                              title={item.error || undefined}
+                            >
+                              第 {item.line} 行
+                              {item.error ? ` · ${item.error}` : ""}
+                            </span>
+                          </div>
+                          <div className="min-w-0">
+                            {item.countryCode ? (
+                              <CountryDisplay
+                                code={item.countryCode}
+                                className="justify-start"
+                              />
+                            ) : (
+                              <div className="flex items-center gap-2 text-muted-foreground">
+                                <CountryFlag code="WW" />
+                                <span>
+                                  {item.status === "checking"
+                                    ? "识别中"
+                                    : "未识别"}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                          <div className="grid justify-items-start gap-1">
+                            <Badge
+                              tone={
+                                item.status === "checking"
+                                  ? "warning"
+                                  : item.status === "healthy"
+                                  ? "success"
+                                  : "danger"
+                              }
+                            >
+                              {item.status === "checking" ? (
+                                <LoaderCircleIcon className="spin" size={12} />
+                              ) : null}
+                              {item.status === "checking"
+                                ? "检测中"
+                                : item.status === "healthy"
+                                ? "健康"
+                                : "异常"}
+                            </Badge>
+                            {item.latencyMs !== undefined &&
+                            item.latencyMs !== null ? (
+                              <span className="text-xs text-muted-foreground">
+                                {item.latencyMs} ms
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              {bulkResult?.results.some((item) => item.status !== "checked") ? (
+                <div className="grid gap-2">
+                  <span className="text-sm font-medium">不可导入明细</span>
+                  <div className="max-h-44 space-y-2 overflow-y-auto">
+                    {bulkResult.results
+                      .filter((item) => item.status !== "checked")
+                      .map((item) => (
+                        <div
+                          className="flex items-start gap-2 rounded-md border bg-background px-3 py-2 text-sm"
+                          key={`${item.line}-${item.status}`}
+                        >
+                          <Badge
+                            tone={
+                              item.status === "failed" ? "danger" : "warning"
+                            }
+                          >
+                            {item.status === "failed" ? "失败" : "重复"}
+                          </Badge>
+                          <span>
+                            第 {item.line} 行
+                            {item.reason ? `：${item.reason}` : ""}
+                          </span>
+                        </div>
+                      ))}
+                  </div>
                 </div>
               ) : null}
             </div>
@@ -1370,9 +2223,7 @@ export function IpManagementPage() {
               取消
             </Button>
             <Button
-              disabled={
-                pending || !form.name.trim() || !form.host.trim() || !form.port
-              }
+              disabled={pending || !form.host.trim() || !form.port}
               onClick={() => void save()}
             >
               {pending ? <LoaderCircleIcon className="spin" size={17} /> : null}
@@ -1383,14 +2234,6 @@ export function IpManagementPage() {
       >
         <div className="drawer-form">
           <div className="form-grid">
-            <label className="field form-span-2">
-              <DrawerFieldLabel required>代理名称</DrawerFieldLabel>
-              <Input
-                value={form.name}
-                onChange={(event) => updateForm("name", event.target.value)}
-                placeholder="例如：美国线路 A01"
-              />
-            </label>
             <label className="field">
               <DrawerFieldLabel required>协议</DrawerFieldLabel>
               <SelectField
@@ -1441,17 +2284,18 @@ export function IpManagementPage() {
                 placeholder={editing?.passwordMasked || "未设置"}
               />
             </label>
-            <label className="field">
-              <DrawerFieldLabel>国家代码</DrawerFieldLabel>
-              <Input
+            <div className="field">
+              <DrawerFieldLabel>国家 / 地区</DrawerFieldLabel>
+              <SearchableSelect
                 value={form.countryCode}
-                maxLength={2}
-                onChange={(event) =>
-                  updateForm("countryCode", event.target.value)
-                }
-                placeholder="US"
+                onValueChange={(value) => updateForm("countryCode", value)}
+                options={optionalProxyCountryOptions}
+                placeholder="选择国家或地区"
+                searchPlaceholder="搜索国家、地区或代码"
+                emptyText="没有匹配的国家或地区"
+                ariaLabel="代理国家"
               />
-            </label>
+            </div>
             <label className="field">
               <DrawerFieldLabel>代理供应商</DrawerFieldLabel>
               <Input

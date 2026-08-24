@@ -368,10 +368,20 @@ def test_native_bundle_import_export_round_trip(
         if row["available"]
     )
 
-    def import_session(self, account_id, session, proxy_url):
+    def import_session(
+        self,
+        account_id,
+        session,
+        proxy_url,
+        *,
+        protocol_definition_id,
+        protocol_version,
+    ):
         relayed["accountId"] = account_id
         relayed["session"] = session
         relayed["proxyUrl"] = proxy_url
+        relayed["protocolDefinitionId"] = protocol_definition_id
+        relayed["protocolVersion"] = protocol_version
         return {"id": account_id, "state": "validating"}
 
     monkeypatch.setattr(WaGatewayClient, "import_session", import_session)

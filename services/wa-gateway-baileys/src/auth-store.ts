@@ -1,13 +1,13 @@
-import {
-  BufferJSON,
-  initAuthCreds,
-  proto,
-  type AuthenticationCreds,
-  type AuthenticationState,
-  type SignalDataSet,
-  type SignalDataTypeMap,
+import * as BuiltinBaileys from '@whiskeysockets/baileys'
+import type {
+  AuthenticationCreds,
+  AuthenticationState,
+  SignalDataSet,
+  SignalDataTypeMap,
 } from '@whiskeysockets/baileys'
 import type { Store } from './store.js'
+
+export type BaileysRuntimeModule = typeof BuiltinBaileys
 
 function encode(value: unknown): unknown {
   return JSON.parse(JSON.stringify(value, (_key, current: unknown) => {
@@ -26,17 +26,35 @@ function encode(value: unknown): unknown {
   })) as unknown
 }
 
-export function decode<T>(value: unknown): T {
-  return JSON.parse(JSON.stringify(value), BufferJSON.reviver) as T
+export function decode<T>(value: unknown, baileys: BaileysRuntimeModule = BuiltinBaileys): T {
+  return JSON.parse(JSON.stringify(value), baileys.BufferJSON.reviver) as T
 }
 
 export async function loadAuthState(store: Store, accountId: string, create: boolean): Promise<{
   state: AuthenticationState
   saveCreds: () => Promise<void>
+}>
+export async function loadAuthState(
+  store: Store,
+  accountId: string,
+  create: boolean,
+  baileys: BaileysRuntimeModule,
+): Promise<{
+  state: AuthenticationState
+  saveCreds: () => Promise<void>
+}>
+export async function loadAuthState(
+  store: Store,
+  accountId: string,
+  create: boolean,
+  baileys: BaileysRuntimeModule = BuiltinBaileys,
+): Promise<{
+  state: AuthenticationState
+  saveCreds: () => Promise<void>
 }> {
   const stored = await store.getCreds(accountId)
   if (stored === null && !create) throw new Error('saved Baileys credentials do not exist')
-  const creds = stored === null ? initAuthCreds() : decode<AuthenticationCreds>(stored)
+  const creds = stored === null ? baileys.initAuthCreds() : decode<AuthenticationCreds>(stored, baileys)
   if (stored === null) await store.setCreds(accountId, encode(creds))
 
   const state: AuthenticationState = {
@@ -46,9 +64,9 @@ export async function loadAuthState(store: Store, accountId: string, create: boo
         const storedKeys = await store.getKeys(accountId, type, ids)
         const result: { [id: string]: SignalDataTypeMap[T] } = {}
         for (const [id, encodedValue] of Object.entries(storedKeys)) {
-          let value = decode<SignalDataTypeMap[T]>(encodedValue)
+          let value = decode<SignalDataTypeMap[T]>(encodedValue, baileys)
           if (type === 'app-state-sync-key' && value) {
-            value = proto.Message.AppStateSyncKeyData.fromObject(value as unknown as Record<string, unknown>) as unknown as SignalDataTypeMap[T]
+            value = baileys.proto.Message.AppStateSyncKeyData.fromObject(value as unknown as Record<string, unknown>) as unknown as SignalDataTypeMap[T]
           }
           result[id] = value
         }

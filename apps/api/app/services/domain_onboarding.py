@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -15,6 +16,9 @@ from app.services.platform_clients import (
     NameSiloClient,
     PlatformClientError,
 )
+
+
+logger = logging.getLogger("parloq.domain-onboarding")
 
 
 @dataclass(frozen=True)
@@ -116,11 +120,22 @@ def _nameservers(zone: dict[str, object]) -> list[str]:
     ]
 
 
+def _baota_domain_policy(settings: dict[str, object]) -> dict[str, bool]:
+    raw = settings.get("domainPolicy")
+    policy = raw if isinstance(raw, dict) else {}
+    return {
+        "cdnEnabled": bool(policy.get("cdnEnabled", True)),
+        "ccEnabled": bool(policy.get("ccEnabled", False)),
+        "chinaBlocked": bool(policy.get("chinaBlocked", True)),
+    }
+
+
 def continue_domain_onboarding(db: Session, item: DomainRecord) -> DomainRecord:
     """Advance a domain as far as current third-party state safely allows.
 
-    This is deliberately synchronous and user-driven. Every mutation is preceded
-    or followed by a read so a later click can recover after an uncertain response.
+    A background worker normally calls this synchronous, idempotent step. Every
+    mutation is preceded or followed by a read so the next retry can recover after
+    an uncertain response; the same function also supports an explicit retry.
     """
 
     state = dict(item.onboarding_state_json or {})
@@ -201,7 +216,7 @@ def continue_domain_onboarding(db: Session, item: DomainRecord) -> DomainRecord:
         state["cloudflareNameservers"] = nameservers
         if zone_status != "active":
             if managed_with_namesilo:
-                message = "域名服务器已提交，等待 Cloudflare 激活；稍后点击继续即可"
+                message = "域名服务器已提交，等待 Cloudflare 激活；后台将自动继续核对"
             else:
                 message = "请在域名注册商处改用下列 Cloudflare 域名服务器，生效后点击继续"
             return _wait(
@@ -271,7 +286,7 @@ def continue_domain_onboarding(db: Session, item: DomainRecord) -> DomainRecord:
         site = baota.find_site(item.hostname)
         if site is None:
             # Persist the intent first; an uncertain response can then be recovered
-            # by reading the site on the next user-triggered continuation.
+            # by reading the site on the next retry.
             state["baotaSiteIntent"] = True
             _save(
                 db,
@@ -293,10 +308,27 @@ def continue_domain_onboarding(db: Session, item: DomainRecord) -> DomainRecord:
         if state.get("baotaSiteIntent") and site_path.rstrip("/") != expected_path:
             raise PlatformClientError("宝塔同名站点目录与预期不一致，已停止以避免接管")
         baota.ensure_reverse_proxy(item.hostname, upstream)
+        firewall_policy = _baota_domain_policy(baota_platform.settings)
+        try:
+            firewall_configured = baota.ensure_site_firewall_policy(
+                item.hostname,
+                cdn_enabled=firewall_policy["cdnEnabled"],
+                cc_enabled=firewall_policy["ccEnabled"],
+                china_blocked=firewall_policy["chinaBlocked"],
+            )
+        except PlatformClientError as exc:
+            firewall_configured = False
+            logger.warning(
+                "baota_firewall_policy_skipped",
+                extra={"domain_id": item.id, "reason": str(exc)[:300]},
+            )
         state.update(
             {
                 "baotaSiteId": str(site.get("id") or ""),
                 "baotaSiteReady": True,
+                "baotaFirewallStatus": (
+                    "configured" if firewall_configured else "skipped"
+                ),
             }
         )
         item.hosting_status = "pending"
@@ -305,7 +337,11 @@ def continue_domain_onboarding(db: Session, item: DomainRecord) -> DomainRecord:
             item,
             status="running",
             stage=stage,
-            message="宝塔独立站点与反向代理已就绪",
+            message=(
+                "宝塔独立站点、反向代理与防火墙策略已就绪"
+                if firewall_configured
+                else "宝塔独立站点与反向代理已就绪；防火墙插件不可用，已自动跳过"
+            ),
             state=state,
         )
 
@@ -351,7 +387,7 @@ def continue_domain_onboarding(db: Session, item: DomainRecord) -> DomainRecord:
                 db,
                 item,
                 stage=stage,
-                message="外部平台写入结果暂时无法确认；稍后继续时会先核对现状",
+                message="外部平台写入结果暂时无法确认；后台重试时会先核对现状",
                 state=state,
             )
         return _fail(

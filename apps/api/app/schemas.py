@@ -106,6 +106,18 @@ class SystemPlatformConfigurationUpdate(ApiModel):
     payment_id: str | None = Field(default=None, alias="paymentId", max_length=64)
     account_id: str | None = Field(default=None, alias="accountId", max_length=64)
     base_url: str | None = Field(default=None, alias="baseUrl", max_length=2048)
+    firewall_cdn_enabled: bool | None = Field(
+        default=None,
+        alias="firewallCdnEnabled",
+    )
+    firewall_cc_enabled: bool | None = Field(
+        default=None,
+        alias="firewallCcEnabled",
+    )
+    firewall_china_blocked: bool | None = Field(
+        default=None,
+        alias="firewallChinaBlocked",
+    )
     repository: str | None = Field(default=None, max_length=255)
     repository_ref: str | None = Field(default=None, alias="ref", max_length=255)
     catalog_path: str | None = Field(
@@ -301,6 +313,25 @@ class ProxyEndpointBulkCreate(ApiModel):
         return normalized
 
 
+class ProxyEndpointImportPreview(ProxyEndpointBulkCreate):
+    request_id: str | None = Field(
+        default=None,
+        alias="requestId",
+        min_length=16,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9-]+$",
+    )
+
+
+class ProxyEndpointImportConfirm(ProxyEndpointBulkCreate):
+    preview_token: str = Field(
+        alias="previewToken",
+        min_length=32,
+        max_length=2_000_000,
+    )
+    import_mode: Literal["healthy", "all"] = Field(alias="importMode")
+
+
 class ProxyEndpointUpdate(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     protocol: Literal["http", "https", "socks5"] | None = None
@@ -337,14 +368,27 @@ class IpAllocationPolicyUpdate(ApiModel):
     allocation_mode: Literal[
         "strict_one_to_one", "tenant_reuse", "least_load", "manual"
     ] = Field(default="least_load", alias="allocationMode")
-    country_match: Literal["strict", "prefer", "off"] = Field(
-        default="prefer", alias="countryMatch"
+    country_match: Literal["visitor_country", "phone_country"] = Field(
+        default="visitor_country", alias="countryMatch"
     )
     max_accounts_per_ip: int = Field(
         default=100, alias="maxAccountsPerIp", ge=1, le=10000
     )
     avoid_unhealthy: bool = Field(default=True, alias="avoidUnhealthy")
     sticky_binding: bool = Field(default=True, alias="stickyBinding")
+    failure_threshold: int = Field(
+        default=2, alias="failureThreshold", ge=1, le=10
+    )
+    cooldown_seconds: int = Field(
+        default=900, alias="cooldownSeconds", ge=60, le=86400
+    )
+
+
+class ProxyEndpointBulkTest(ApiModel):
+    proxy_ids: list[str] = Field(
+        alias="proxyIds", min_length=1, max_length=100
+    )
+    source: Literal["import", "manual"] = "manual"
 
 
 class AccountProxyBindingCreate(ApiModel):

@@ -21,7 +21,9 @@ _HTTP_CLIENT = httpx.Client(
 
 
 class GatewayError(Exception):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class WaGatewayClient:
@@ -52,7 +54,10 @@ class WaGatewayClient:
         except httpx.HTTPError as exc:
             raise GatewayError("WhatsApp 网关不可用") from exc
         if not response.is_success:
-            raise GatewayError(f"WhatsApp 网关请求失败（{response.status_code}）")
+            raise GatewayError(
+                f"WhatsApp 网关请求失败（{response.status_code}）",
+                status_code=response.status_code,
+            )
         try:
             value = response.json()
         except ValueError as exc:
@@ -70,6 +75,8 @@ class WaGatewayClient:
         phone_e164: str,
         proxy_url: str | None,
         *,
+        protocol_definition_id: str,
+        protocol_version: str,
         connection_policy: str | object = _UNSET,
         idle_disconnect_seconds: int | object = _UNSET,
         post_verify_grace_seconds: int | object = _UNSET,
@@ -79,6 +86,8 @@ class WaGatewayClient:
             return {"id": account_id, "phoneE164": phone_e164, "state": "unpaired"}
         payload: dict[str, Any] = {
             "id": account_id,
+            "protocolDefinitionId": protocol_definition_id,
+            "protocolVersion": protocol_version,
             "phoneE164": phone_e164,
             "proxyUrl": proxy_url or "",
         }
@@ -104,6 +113,32 @@ class WaGatewayClient:
             return []
         value = self._request("GET", "/v1/accounts")
         return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+    def protocol_info(self) -> dict[str, Any]:
+        if self.settings.wa_gateway_mock:
+            return {
+                "protocol": "baileys",
+                "name": "Baileys Web",
+                "baileysVersion": None,
+                "engine": "mock",
+                "currentWaWebVersion": None,
+                "latestWaWebVersion": None,
+                "versionStatus": "unavailable",
+                "checkedAt": None,
+                "checkError": None,
+            }
+        value = self._request("GET", "/v1/protocol-info")
+        return value if isinstance(value, dict) else {}
+
+    def test_proxy(self, proxy_url: str) -> dict[str, Any]:
+        if self.settings.wa_gateway_mock:
+            return {
+                "healthy": True,
+                "latencyMs": 0,
+                "reasonCategory": "proxy_ok",
+            }
+        value = self._post("/v1/proxy-check", {"proxyUrl": proxy_url})
+        return value if isinstance(value, dict) else {}
 
     def update_proxy(self, account_id: str, proxy_url: str | None) -> dict[str, Any]:
         return self.update(account_id, proxy_url=proxy_url)
@@ -219,12 +254,20 @@ class WaGatewayClient:
         account_id: str,
         credentials: dict[str, Any],
         proxy_url: str | None,
+        *,
+        protocol_definition_id: str,
+        protocol_version: str,
     ) -> dict[str, Any]:
         if self.settings.wa_gateway_mock:
             return {"id": account_id, "state": "validating"}
         value = self._post(
             f"/v1/accounts/{account_id}/import-session",
-            {"session": credentials, "proxyUrl": proxy_url or ""},
+            {
+                "session": credentials,
+                "proxyUrl": proxy_url or "",
+                "protocolDefinitionId": protocol_definition_id,
+                "protocolVersion": protocol_version,
+            },
         )
         return value if isinstance(value, dict) else {}
 

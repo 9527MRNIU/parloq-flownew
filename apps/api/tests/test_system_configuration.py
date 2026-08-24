@@ -254,6 +254,10 @@ def test_baota_connection_test_uses_saved_panel_address(
         def verify_connection(self) -> None:
             calls.append("verified")
 
+        def nginx_firewall_plugin_available(self) -> bool:
+            calls.append("firewall-probed")
+            return False
+
         def close(self) -> None:
             calls.append("closed")
 
@@ -271,7 +275,33 @@ def test_baota_connection_test_uses_saved_panel_address(
         tested = admin_client.post("/api/system/configuration/baota/test")
         assert tested.status_code == 200
         assert tested.json()["data"]["ok"] is True
-        assert calls == ["https://panel.example.com:8888", "verified", "closed"]
+        platform = tested.json()["data"]["platform"]
+        assert platform["lastTestStatus"] == "success"
+        assert platform["settings"]["nginxFirewallPlugin"]["status"] == "unavailable"
+        assert "自动跳过" in tested.json()["data"]["message"]
+        assert calls == [
+            "https://panel.example.com:8888",
+            "verified",
+            "firewall-probed",
+            "closed",
+        ]
+
+        policy = admin_client.put(
+            "/api/system/configuration/baota",
+            json={
+                "firewallCdnEnabled": True,
+                "firewallCcEnabled": False,
+                "firewallChinaBlocked": True,
+            },
+        )
+        assert policy.status_code == 200
+        saved_platform = policy.json()["data"]["platform"]
+        assert saved_platform["lastTestStatus"] == "success"
+        assert saved_platform["settings"]["domainPolicy"] == {
+            "cdnEnabled": True,
+            "ccEnabled": False,
+            "chinaBlocked": True,
+        }
     finally:
         admin_client.delete("/api/system/configuration/baota")
 

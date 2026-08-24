@@ -42,7 +42,9 @@ from app.services.account_group_wakeups import dispatch_pending_group_wakeups
 from app.services.account_metadata_sync import (
     process_pending_account_metadata_sync_jobs,
 )
+from app.services.domain_onboarding_worker import process_domain_onboarding_once
 from app.services.meta_conversions import process_due_meta_conversions
+from app.services.protocol_builds import start_protocol_build_worker
 from app.services.wa_gateway import GatewayError, WaGatewayClient
 from app.snowflake import new_public_id, parse_snowflake_id
 from app.task_queue import (
@@ -976,9 +978,20 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     client = redis_client()
     start_worker_heartbeat(client)
+    start_protocol_build_worker()
     gateway = WaGatewayClient()
     last_recovery = 0.0
     while True:
+        try:
+            with SessionLocal() as db:
+                processed_domains = process_domain_onboarding_once(db, limit=2)
+            if processed_domains:
+                logger.info(
+                    "domain_onboarding_batch_processed",
+                    extra={"processed": processed_domains},
+                )
+        except Exception:
+            logger.exception("domain_onboarding_batch_failed")
         try:
             result = process_due_meta_conversions()
             if result["claimed"]:

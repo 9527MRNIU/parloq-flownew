@@ -4,6 +4,7 @@ import type { Logger } from 'pino'
 import { GatewayError } from './domain.js'
 import type { GatewayService } from './service.js'
 import type { SendMessageRequest } from './message-content.js'
+import { checkProxy } from './proxy-health.js'
 
 interface ServerOptions {
   service: GatewayService
@@ -39,7 +40,12 @@ export function buildServer(options: ServerOptions) {
   app.get('/metrics', async (_request, reply) => reply.type('text/plain; version=0.0.4; charset=utf-8').send(
     '# HELP wa_gateway_info Static gateway identity.\n# TYPE wa_gateway_info gauge\nwa_gateway_info{engine="' + options.service.engineName + '"} 1\n'))
 
-  app.post<{ Body: { id?: string; phoneE164: string; proxyUrl?: string; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: import('./domain.js').SyncPolicy } }>('/v1/accounts', async (request, reply) => {
+  app.get('/v1/protocol-info', async () => ({ data: await options.service.protocolInfo() }))
+  app.post<{ Body: { proxyUrl?: string } }>('/v1/proxy-check', async (request) => ({
+    data: await checkProxy(String(request.body?.proxyUrl || '')),
+  }))
+
+  app.post<{ Body: { id?: string; protocolDefinitionId?: string; protocolVersion?: string; phoneE164: string; proxyUrl?: string; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: import('./domain.js').SyncPolicy } }>('/v1/accounts', async (request, reply) => {
     const data = await options.service.createAccount(request.body)
     return reply.status(201).send({ data })
   })
@@ -59,9 +65,15 @@ export function buildServer(options: ServerOptions) {
     data: await options.service.logout(request.params.accountId),
     meta: { sessionPreserved: false, message: 'Logged out. The linked-device session was removed and pairing is required.' },
   }))
-  app.post<{ Params: { accountId: string }; Body: { session: unknown; proxyUrl?: string } }>('/v1/accounts/:accountId/import-session', async (request) => {
+  app.post<{ Params: { accountId: string }; Body: { session: unknown; proxyUrl?: string; protocolDefinitionId?: string; protocolVersion?: string } }>('/v1/accounts/:accountId/import-session', async (request) => {
     if (!request.body || !('session' in request.body)) throw new GatewayError('invalid_argument', 'session is required')
-    const result = await options.service.importSession(request.params.accountId, request.body.session, request.body.proxyUrl)
+    const result = await options.service.importSession(
+      request.params.accountId,
+      request.body.session,
+      request.body.proxyUrl,
+      request.body.protocolDefinitionId,
+      request.body.protocolVersion,
+    )
     return { ...result, data: result }
   })
   app.get<{ Params: { accountId: string } }>('/v1/accounts/:accountId/export-session', async (_request, reply) => {

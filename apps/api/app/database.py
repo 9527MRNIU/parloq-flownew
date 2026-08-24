@@ -89,7 +89,10 @@ def seed_initial_data(db: Session) -> None:
             or menu.public_id in {"menu_system", "menu_system_developer_docs"}
             or menu.public_id in {
                 "menu_resources_operations",
+                "menu_resources_protocol_center",
+                "menu_resources_protocol_definitions",
                 "menu_resources_protocol",
+                "menu_resources_protocol_routing",
                 "menu_resources_materials",
             }
             or menu.public_id.startswith(

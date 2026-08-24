@@ -125,6 +125,12 @@ def proxy_endpoint_row(proxy: ProxyEndpoint, assigned_count: int = 0) -> dict[st
         "healthStatus": proxy.health_status,
         "lastCheckedAt": iso(proxy.last_checked_at),
         "lastError": proxy.last_error,
+        "consecutiveFailures": proxy.consecutive_failures,
+        "cooldownUntil": iso(proxy.cooldown_until),
+        "lastSuccessAt": iso(proxy.last_success_at),
+        "lastFailureAt": iso(proxy.last_failure_at),
+        "lastCheckSource": proxy.last_check_source,
+        "latencyMs": proxy.latency_ms,
         "assignedAccountCount": assigned_count,
         "createdAt": iso(proxy.created_at),
         "updatedAt": iso(proxy.updated_at),
@@ -132,7 +138,10 @@ def proxy_endpoint_row(proxy: ProxyEndpoint, assigned_count: int = 0) -> dict[st
 
 
 def account_proxy_binding_row(
-    binding: AccountProxyBinding, account_id: str | None = None
+    binding: AccountProxyBinding,
+    account_id: str | None = None,
+    account_name: str | None = None,
+    account_phone: str | None = None,
 ) -> dict[str, Any]:
     row = {
         "id": str(binding.id),
@@ -144,4 +153,6 @@ def account_proxy_binding_row(
     }
     if account_id is not None:
         row["accountId"] = account_id
+        row["accountName"] = account_name
+        row["accountPhone"] = account_phone
     return row

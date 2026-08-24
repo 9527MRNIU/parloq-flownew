@@ -13,6 +13,7 @@ from app.models import (
     AccountLifecycleEvent,
     MessageDelivery,
     PersonalAccount,
+    ProtocolDefinition,
     ProtocolNode,
     UserAccount,
     UserGroup,
@@ -110,14 +111,20 @@ def test_account_statistics_are_event_based_and_tenant_scoped(
 
         owner = _make_operator(db, "account-stats-owner")
         other = _make_operator(db, "account-stats-other")
+        protocol_definition = db.scalar(
+            select(ProtocolDefinition).where(ProtocolDefinition.is_builtin.is_(True))
+        )
+        assert protocol_definition is not None
         owner_protocol = ProtocolNode(
             public_id="protocol_account_stats_owner",
             name="Account statistics owner",
+            protocol_definition_id=protocol_definition.id,
             created_by=owner.id,
         )
         other_protocol = ProtocolNode(
             public_id="protocol_account_stats_other",
             name="Account statistics other",
+            protocol_definition_id=protocol_definition.id,
             created_by=other.id,
         )
         db.add_all((owner_protocol, other_protocol))

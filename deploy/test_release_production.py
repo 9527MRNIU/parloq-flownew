@@ -9,6 +9,7 @@ SCRIPT = Path(__file__).with_name("release-production.sh")
 COMPOSE = Path(__file__).with_name("docker-compose.production.yml")
 WEB_DIR = Path(__file__).parents[1] / "apps" / "web"
 NGINX_REFERENCE = Path(__file__).with_name("nginx.center.parloq.com.conf")
+PUBLIC_DATA_SCRIPT = Path(__file__).with_name("public-data-access.sh")
 
 
 class ProductionReleaseScriptTests(unittest.TestCase):
@@ -24,6 +25,7 @@ class ProductionReleaseScriptTests(unittest.TestCase):
             encoding="utf-8"
         )
         cls.nginx_reference = NGINX_REFERENCE.read_text(encoding="utf-8")
+        cls.public_data_script = PUBLIC_DATA_SCRIPT.read_text(encoding="utf-8")
 
     def test_script_is_valid_bash(self) -> None:
         checked = subprocess.run(
@@ -74,6 +76,17 @@ class ProductionReleaseScriptTests(unittest.TestCase):
         self.assertIn('chmod 600 "${management_origin_candidate}"', self.script)
         self.assertIn('"${management_origin}/api/auth/security', self.script)
         self.assertIn("public management SPA did not load", self.script)
+
+    def test_first_authenticated_redis_release_prompts_and_persists_password(self) -> None:
+        self.assertIn("configure_redis_password", self.script)
+        self.assertIn("REDIS_PASSWORD", self.script)
+        self.assertIn("Redis 密码", self.script)
+        self.assertIn('chmod 600 "${redis_password_candidate}"', self.script)
+        self.assertIn("redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0", self.compose)
+        self.assertIn("--requirepass", self.compose)
+        self.assertIn("REDISCLI_AUTH", self.compose)
+        rollback_body = self.script.split("rollback() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("redis || true", rollback_body)
 
     def test_management_origin_is_runtime_configuration(self) -> None:
         self.assertIn("MANAGEMENT_ORIGIN", self.compose)
@@ -152,6 +165,13 @@ class ProductionReleaseScriptTests(unittest.TestCase):
         self.assertNotIn("/data/waba", self.compose)
         self.assertNotIn("down -v", self.script)
         self.assertNotIn("docker compose down", self.script)
+
+    def test_public_data_access_is_isolated_and_does_not_restart_services(self) -> None:
+        self.assertNotIn("/data/waba", self.public_data_script)
+        self.assertNotIn("docker compose", self.public_data_script)
+        self.assertNotIn("docker restart", self.public_data_script)
+        self.assertNotIn("docker stop", self.public_data_script)
+        self.assertIn('PROJECT_NAME="${PARLOQ_COMPOSE_PROJECT:-parloq-flow}"', self.public_data_script)
 
     def test_cleanup_keeps_recent_and_running_parloq_images_only(self) -> None:
         self.assertIn('PARLOQ_IMAGE_RETENTION:-3', self.script)

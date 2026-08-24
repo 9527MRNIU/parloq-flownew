@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import hmac
+import json
 import logging
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import ValidationError
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
-from app.config import get_settings
 from app.deps import AdminUser, CurrentUser, DbSession
 from app.entity_ids import entity_id, identifier_filter
+from app.config import get_settings
 from app.snowflake import new_public_id, parse_snowflake_id
 
 from app.models import AccountProxyBinding, IpAllocationPolicy, PersonalAccount, ProxyEndpoint
@@ -19,18 +28,31 @@ from app.schemas import (
     AccountProxyBindingCreate,
     AccountProxyBindingUpdate,
     ProxyEndpointBulkCreate,
+    ProxyEndpointBulkTest,
     ProxyEndpointCreate,
+    ProxyEndpointImportConfirm,
+    ProxyEndpointImportPreview,
     ProxyEndpointUpdate,
     IpAllocationPolicyUpdate,
 )
-from app.security import encrypt_secret, utcnow
+from app.security import encrypt_secret
 from app.serializers import account_proxy_binding_row, proxy_endpoint_row
-from app.services.proxy_health import ProxyHealthError, check_public_tcp_reachability
+from app.services.proxy_health import (
+    ProxyHealthError,
+    ProxyHealthPolicy,
+    ProxyProbeResult,
+    apply_proxy_health_result,
+    probe_proxy,
+    proxy_is_quarantined,
+)
 from app.services.wa_gateway import GatewayError, WaGatewayClient
 
 
 router = APIRouter(tags=["ip-proxies"])
 logger = logging.getLogger(__name__)
+_IMPORT_PREVIEW_TTL_SECONDS = 15 * 60
+_ACTIVE_IMPORT_PREVIEWS: dict[tuple[int, str], threading.Event] = {}
+_ACTIVE_IMPORT_PREVIEWS_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -111,6 +133,137 @@ def _parse_proxy_line(raw_line: str, default_protocol: str) -> _ParsedProxyLine:
     )
 
 
+def _parsed_proxy_fingerprint(parsed: _ParsedProxyLine) -> str:
+    canonical = json.dumps(
+        [
+            parsed.protocol,
+            parsed.host.lower(),
+            parsed.port,
+            parsed.username or "",
+            parsed.password or "",
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _issue_import_preview_token(admin_id: int, checks: list[dict]) -> str:
+    payload = {
+        "adminId": str(admin_id),
+        "exp": int(time.time()) + _IMPORT_PREVIEW_TTL_SECONDS,
+        "checks": checks,
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).decode().rstrip("=")
+    signature = hmac.new(
+        get_settings().app_secret_key.encode(),
+        encoded.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{encoded}.{signature}"
+
+
+def _verify_import_preview_token(token: str, admin_id: int) -> list[dict]:
+    try:
+        encoded, signature = token.split(".", 1)
+        expected = hmac.new(
+            get_settings().app_secret_key.encode(),
+            encoded.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            raise ValueError("invalid signature")
+        padded = encoded + "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
+        if payload.get("adminId") != str(admin_id):
+            raise ValueError("wrong owner")
+        if int(payload.get("exp") or 0) < int(time.time()):
+            raise ValueError("expired")
+        checks = payload.get("checks")
+        if not isinstance(checks, list) or not all(
+            isinstance(item, dict) for item in checks
+        ):
+            raise ValueError("invalid checks")
+        return checks
+    except (
+        ValueError,
+        TypeError,
+        UnicodeError,
+        binascii.Error,
+        json.JSONDecodeError,
+    ) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="检测结果已失效，请重新检测",
+        ) from exc
+
+
+def _transient_proxy(parsed: _ParsedProxyLine) -> ProxyEndpoint:
+    username = (parsed.username or "").strip()
+    password = (parsed.password or "").strip()
+    return ProxyEndpoint(
+        public_id=new_public_id("ipx"),
+        name=f"{parsed.protocol.upper()} {parsed.host}:{parsed.port}"[:120],
+        protocol=parsed.protocol,
+        host=parsed.host,
+        port=parsed.port,
+        username_ciphertext=encrypt_secret(username) if username else None,
+        username_last4=username[-4:] if username else "",
+        password_ciphertext=encrypt_secret(password) if password else None,
+        password_last4=password[-4:] if password else "",
+        enabled=True,
+        health_status="untested",
+    )
+
+
+def _run_proxy_probe(proxy: ProxyEndpoint) -> ProxyProbeResult:
+    try:
+        return probe_proxy(proxy)
+    except ProxyHealthError as exc:
+        return ProxyProbeResult(
+            healthy=False,
+            reason_category="proxy_probe_failed",
+            error=str(exc)[:500],
+        )
+
+
+def _register_import_preview(admin_id: int, request_id: str) -> threading.Event:
+    key = (admin_id, request_id)
+    with _ACTIVE_IMPORT_PREVIEWS_LOCK:
+        if key in _ACTIVE_IMPORT_PREVIEWS:
+            raise HTTPException(status_code=409, detail="相同检测任务正在进行中")
+        cancel_event = threading.Event()
+        _ACTIVE_IMPORT_PREVIEWS[key] = cancel_event
+        return cancel_event
+
+
+def _finish_import_preview(
+    admin_id: int,
+    request_id: str,
+    cancel_event: threading.Event,
+) -> None:
+    key = (admin_id, request_id)
+    with _ACTIVE_IMPORT_PREVIEWS_LOCK:
+        if _ACTIVE_IMPORT_PREVIEWS.get(key) is cancel_event:
+            _ACTIVE_IMPORT_PREVIEWS.pop(key, None)
+
+
+def _cancel_import_preview(admin_id: int, request_id: str) -> bool:
+    with _ACTIVE_IMPORT_PREVIEWS_LOCK:
+        cancel_event = _ACTIVE_IMPORT_PREVIEWS.get((admin_id, request_id))
+        if cancel_event is None:
+            return False
+        cancel_event.set()
+        return True
+
+
 def _policy_row(item: IpAllocationPolicy) -> dict:
     return {
         "id": entity_id(item),
@@ -119,6 +272,8 @@ def _policy_row(item: IpAllocationPolicy) -> dict:
         "maxAccountsPerIp": item.max_accounts_per_ip,
         "avoidUnhealthy": item.avoid_unhealthy,
         "stickyBinding": item.sticky_binding,
+        "failureThreshold": item.failure_threshold,
+        "cooldownSeconds": item.cooldown_seconds,
         "updatedAt": item.updated_at.isoformat() if item.updated_at else None,
     }
 
@@ -131,10 +286,12 @@ def _owner_policy(db: DbSession, owner_id: int) -> IpAllocationPolicy:
         item = IpAllocationPolicy(
             public_id=new_public_id("ipp"),
             allocation_mode="least_load",
-            country_match="prefer",
+            country_match="visitor_country",
             max_accounts_per_ip=100,
             avoid_unhealthy=True,
             sticky_binding=True,
+            failure_threshold=2,
+            cooldown_seconds=900,
             created_by=owner_id,
         )
         db.add(item)
@@ -160,6 +317,8 @@ def update_ip_allocation_policy(
     item.max_accounts_per_ip = payload.max_accounts_per_ip
     item.avoid_unhealthy = payload.avoid_unhealthy
     item.sticky_binding = payload.sticky_binding
+    item.failure_threshold = payload.failure_threshold
+    item.cooldown_seconds = payload.cooldown_seconds
     db.commit()
     db.refresh(item)
     return {"data": {"policy": _policy_row(item)}}
@@ -206,6 +365,28 @@ def _assigned_count(db: DbSession, proxy_id: int) -> int:
         )
         or 0
     )
+
+
+def _bound_gateway_account_ids(db: DbSession, proxy_id: int) -> list[str]:
+    return list(
+        db.scalars(
+            select(AccountProxyBinding.account_public_id).where(
+                AccountProxyBinding.proxy_id == proxy_id
+            )
+        ).all()
+    )
+
+
+def _disconnect_accounts_best_effort(account_ids: list[str]) -> None:
+    client = WaGatewayClient()
+    for account_id in account_ids:
+        try:
+            client.disconnect(account_id)
+        except GatewayError:
+            logger.warning(
+                "Failed to disconnect gateway account %s after proxy cooldown",
+                account_id,
+            )
 
 
 def _sync_account_proxy(db: DbSession, account_public_id: str) -> None:
@@ -277,7 +458,10 @@ def _binding_row(db: DbSession, binding: AccountProxyBinding) -> dict:
         )
     )
     return account_proxy_binding_row(
-        binding, str(account.id) if account is not None else None
+        binding,
+        str(account.id) if account is not None else None,
+        account.name if account is not None else None,
+        account.phone_e164 if account is not None else None,
     )
 
 
@@ -360,6 +544,304 @@ def create_proxy(payload: ProxyEndpointCreate, db: DbSession, _admin: AdminUser)
     db.commit()
     db.refresh(proxy)
     return {"data": {"proxy": proxy_endpoint_row(proxy)}}
+
+
+@router.post("/api/ip-proxies/import-preview")
+def preview_proxy_import(
+    payload: ProxyEndpointImportPreview,
+    db: DbSession,
+    admin: AdminUser,
+) -> dict:
+    request_id = payload.request_id or uuid4().hex
+    cancel_event = _register_import_preview(admin.id, request_id)
+    try:
+        return _preview_proxy_import(payload, db, admin, cancel_event)
+    finally:
+        _finish_import_preview(admin.id, request_id, cancel_event)
+
+
+@router.post("/api/ip-proxies/import-preview/{request_id}/cancel")
+def cancel_proxy_import_preview(request_id: str, admin: AdminUser) -> dict:
+    if (
+        len(request_id) < 16
+        or len(request_id) > 80
+        or not all(character.isalnum() or character == "-" for character in request_id)
+    ):
+        raise HTTPException(status_code=422, detail="检测任务 ID 无效")
+    return {
+        "data": {
+            "ok": True,
+            "cancelled": _cancel_import_preview(admin.id, request_id),
+        }
+    }
+
+
+def _preview_proxy_import(
+    payload: ProxyEndpointImportPreview,
+    db: DbSession,
+    admin: AdminUser,
+    cancel_event: threading.Event,
+) -> dict:
+    existing_keys = {
+        (proxy.protocol.lower(), proxy.host.lower(), proxy.port)
+        for proxy in db.scalars(select(ProxyEndpoint)).all()
+    }
+    seen_keys: set[tuple[str, str, int]] = set()
+    results: list[dict] = []
+    candidates: list[tuple[int, _ParsedProxyLine, ProxyEndpoint]] = []
+
+    for line_number, raw_line in enumerate(payload.lines, start=1):
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        try:
+            parsed = _parse_proxy_line(stripped, payload.default_protocol)
+        except ValueError as exc:
+            results.append(
+                {"line": line_number, "status": "failed", "reason": str(exc)}
+            )
+            continue
+
+        key = (parsed.protocol, parsed.host.lower(), parsed.port)
+        if key in existing_keys or key in seen_keys:
+            results.append(
+                {
+                    "line": line_number,
+                    "status": "duplicate",
+                    "reason": "相同协议、主机和端口的代理已存在",
+                }
+            )
+            continue
+        seen_keys.add(key)
+        result_index = len(results)
+        results.append(
+            {
+                "line": line_number,
+                "status": "checking",
+                "protocol": parsed.protocol,
+                "host": parsed.host,
+                "port": parsed.port,
+            }
+        )
+        candidates.append((result_index, parsed, _transient_proxy(parsed)))
+
+    if not results:
+        raise HTTPException(status_code=422, detail="请至少填写一行代理配置")
+
+    probe_results: dict[int, ProxyProbeResult] = {}
+    if candidates:
+        if cancel_event.is_set():
+            raise HTTPException(status_code=409, detail="代理检测已取消")
+
+        def run(proxy: ProxyEndpoint) -> ProxyProbeResult | None:
+            if cancel_event.is_set():
+                return None
+            return _run_proxy_probe(proxy)
+
+        with ThreadPoolExecutor(max_workers=min(10, len(candidates))) as executor:
+            future_items = {
+                executor.submit(run, proxy): result_index
+                for result_index, _parsed, proxy in candidates
+            }
+            for future in as_completed(future_items):
+                probe = future.result()
+                if probe is not None:
+                    probe_results[future_items[future]] = probe
+
+    if cancel_event.is_set():
+        raise HTTPException(status_code=409, detail="代理检测已取消")
+
+    signed_checks: list[dict] = []
+    for result_index, parsed, _proxy in candidates:
+        probe = probe_results[result_index]
+        country_code = payload.country_code or probe.country_code
+        results[result_index].update(
+            {
+                "status": "checked",
+                "healthStatus": "healthy" if probe.healthy else "unhealthy",
+                "countryCode": country_code,
+                "latencyMs": probe.latency_ms,
+                "error": probe.error,
+            }
+        )
+        signed_checks.append(
+            {
+                "line": results[result_index]["line"],
+                "fingerprint": _parsed_proxy_fingerprint(parsed),
+                "healthy": probe.healthy,
+                "latencyMs": probe.latency_ms,
+                "reasonCategory": probe.reason_category,
+                "error": probe.error,
+                "countryCode": country_code,
+            }
+        )
+
+    healthy_count = sum(
+        item.get("healthStatus") == "healthy" for item in results
+    )
+    unhealthy_count = sum(
+        item.get("healthStatus") == "unhealthy" for item in results
+    )
+    return {
+        "data": {
+            "previewToken": _issue_import_preview_token(admin.id, signed_checks),
+            "results": results,
+            "summary": {
+                "total": len(results),
+                "candidates": len(candidates),
+                "healthy": healthy_count,
+                "unhealthy": unhealthy_count,
+                "duplicate": sum(item["status"] == "duplicate" for item in results),
+                "failed": sum(item["status"] == "failed" for item in results),
+            },
+        }
+    }
+
+
+@router.post("/api/ip-proxies/import-confirm", status_code=status.HTTP_201_CREATED)
+def confirm_proxy_import(
+    payload: ProxyEndpointImportConfirm,
+    db: DbSession,
+    admin: AdminUser,
+) -> dict:
+    checks = _verify_import_preview_token(payload.preview_token, admin.id)
+    checks_by_line = {int(item.get("line") or 0): item for item in checks}
+    if len(checks_by_line) != len(checks):
+        raise HTTPException(status_code=409, detail="检测结果已失效，请重新检测")
+
+    existing_keys = {
+        (proxy.protocol.lower(), proxy.host.lower(), proxy.port)
+        for proxy in db.scalars(select(ProxyEndpoint)).all()
+    }
+    seen_keys: set[tuple[str, str, int]] = set()
+    consumed_check_lines: set[int] = set()
+    results: list[dict] = []
+    created: list[tuple[int, ProxyEndpoint]] = []
+    policy_row = _owner_policy(db, admin.id)
+    policy = ProxyHealthPolicy(
+        failure_threshold=policy_row.failure_threshold,
+        cooldown_seconds=policy_row.cooldown_seconds,
+    )
+
+    for line_number, raw_line in enumerate(payload.lines, start=1):
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        try:
+            parsed = _parse_proxy_line(stripped, payload.default_protocol)
+        except ValueError as exc:
+            results.append(
+                {"line": line_number, "status": "failed", "reason": str(exc)}
+            )
+            continue
+
+        key = (parsed.protocol, parsed.host.lower(), parsed.port)
+        check = checks_by_line.get(line_number)
+        if check is not None:
+            if check.get("fingerprint") != _parsed_proxy_fingerprint(parsed):
+                raise HTTPException(
+                    status_code=409,
+                    detail="代理内容已变化，请重新检测",
+                )
+            consumed_check_lines.add(line_number)
+
+        if key in existing_keys or key in seen_keys:
+            results.append(
+                {
+                    "line": line_number,
+                    "status": "duplicate",
+                    "reason": "相同协议、主机和端口的代理已存在",
+                }
+            )
+            continue
+        seen_keys.add(key)
+
+        if check is None:
+            raise HTTPException(
+                status_code=409,
+                detail="代理内容已变化，请重新检测",
+            )
+        healthy = bool(check.get("healthy"))
+        if payload.import_mode == "healthy" and not healthy:
+            results.append(
+                {
+                    "line": line_number,
+                    "status": "skipped",
+                    "reason": "代理检测异常，未导入",
+                }
+            )
+            continue
+
+        username = (parsed.username or "").strip()
+        password = (parsed.password or "").strip()
+        proxy = ProxyEndpoint(
+            public_id=new_public_id("ipx"),
+            name=f"{parsed.protocol.upper()} {parsed.host}:{parsed.port}"[:120],
+            protocol=parsed.protocol,
+            host=parsed.host,
+            port=parsed.port,
+            username_ciphertext=encrypt_secret(username) if username else None,
+            username_last4=username[-4:] if username else "",
+            password_ciphertext=encrypt_secret(password) if password else None,
+            password_last4=password[-4:] if password else "",
+            country_code=payload.country_code,
+            provider=payload.provider or None,
+            enabled=payload.enabled,
+            health_status="untested",
+        )
+        apply_proxy_health_result(
+            proxy,
+            ProxyProbeResult(
+                healthy=healthy,
+                latency_ms=(
+                    int(check["latencyMs"])
+                    if isinstance(check.get("latencyMs"), (int, float))
+                    else None
+                ),
+                reason_category=str(
+                    check.get("reasonCategory") or "proxy_probe_failed"
+                )[:64],
+                error=(str(check["error"])[:500] if check.get("error") else None),
+                country_code=(
+                    str(check["countryCode"])[:2]
+                    if check.get("countryCode")
+                    else None
+                ),
+            ),
+            source="import",
+            policy=policy,
+            direct_probe=True,
+        )
+        result_index = len(results)
+        results.append({"line": line_number, "status": "created"})
+        created.append((result_index, proxy))
+
+    if consumed_check_lines != set(checks_by_line):
+        raise HTTPException(status_code=409, detail="代理内容已变化，请重新检测")
+
+    if created:
+        db.add_all([proxy for _index, proxy in created])
+        db.flush()
+        for result_index, proxy in created:
+            results[result_index]["proxyId"] = entity_id(proxy)
+        db.commit()
+
+    created_rows = [
+        proxy_endpoint_row(proxy) for _result_index, proxy in created
+    ]
+    return {
+        "data": {
+            "rows": created_rows,
+            "results": results,
+            "summary": {
+                "total": len(results),
+                "created": len(created_rows),
+                "skipped": sum(item["status"] == "skipped" for item in results),
+                "duplicate": sum(item["status"] == "duplicate" for item in results),
+                "failed": sum(item["status"] == "failed" for item in results),
+            },
+        }
+    }
 
 
 @router.post("/api/ip-proxies/bulk", status_code=status.HTTP_201_CREATED)
@@ -491,12 +973,32 @@ def update_proxy(
         proxy.provider = payload.provider or None
     if payload.enabled is not None:
         proxy.enabled = payload.enabled
-    if connection_fields & payload.model_fields_set:
+    connection_changed = bool(connection_fields & payload.model_fields_set)
+    bound_account_ids = _bound_gateway_account_ids(db, proxy.id) if connection_changed else []
+    if connection_changed:
         proxy.health_status = "untested"
         proxy.last_checked_at = None
         proxy.last_error = None
+        proxy.consecutive_failures = 0
+        proxy.cooldown_until = None
+        proxy.last_success_at = None
+        proxy.last_failure_at = None
+        proxy.last_check_source = None
+        proxy.latency_ms = None
     db.commit()
     db.refresh(proxy)
+    if connection_changed:
+        # A live Baileys socket cannot swap its transport. Disconnect first,
+        # then push the repaired configuration while preserving the session.
+        _disconnect_accounts_best_effort(bound_account_ids)
+        for account_public_id in bound_account_ids:
+            try:
+                _sync_account_proxy(db, account_public_id)
+            except GatewayError:
+                logger.warning(
+                    "Failed to synchronize edited proxy to gateway account %s",
+                    account_public_id,
+                )
     return {"data": {"proxy": proxy_endpoint_row(proxy, _assigned_count(db, proxy.id))}}
 
 
@@ -511,20 +1013,97 @@ def delete_proxy(proxy_id: str, db: DbSession, _admin: AdminUser) -> dict:
 
 
 @router.post("/api/ip-proxies/{proxy_id}/test")
-def test_proxy(proxy_id: str, db: DbSession, _admin: AdminUser) -> dict:
+def test_proxy(proxy_id: str, db: DbSession, admin: AdminUser) -> dict:
     proxy = _proxy_or_404(db, proxy_id)
-    proxy.last_checked_at = utcnow()
+    policy_row = _owner_policy(db, admin.id)
+    policy = ProxyHealthPolicy(
+        failure_threshold=policy_row.failure_threshold,
+        cooldown_seconds=policy_row.cooldown_seconds,
+    )
     try:
-        if not get_settings().ip_proxy_mock:
-            check_public_tcp_reachability(proxy.host, proxy.port)
-        proxy.health_status = "healthy"
-        proxy.last_error = None
+        result = probe_proxy(proxy)
     except ProxyHealthError as exc:
-        proxy.health_status = "unhealthy"
-        proxy.last_error = str(exc)[:2000]
+        result = ProxyProbeResult(
+            healthy=False,
+            reason_category="proxy_probe_failed",
+            error=str(exc)[:2000],
+        )
+    transition = apply_proxy_health_result(
+        proxy,
+        result,
+        source="manual",
+        policy=policy,
+        direct_probe=True,
+    )
+    affected_accounts = (
+        _bound_gateway_account_ids(db, proxy.id)
+        if transition.entered_cooldown
+        else []
+    )
     db.commit()
+    _disconnect_accounts_best_effort(affected_accounts)
     db.refresh(proxy)
     return {"data": {"proxy": proxy_endpoint_row(proxy, _assigned_count(db, proxy.id))}}
+
+
+@router.post("/api/ip-proxies/test-batch")
+def test_proxies_batch(
+    payload: ProxyEndpointBulkTest,
+    db: DbSession,
+    admin: AdminUser,
+) -> dict:
+    identifiers = list(dict.fromkeys(payload.proxy_ids))
+    proxies: list[ProxyEndpoint] = []
+    for identifier in identifiers:
+        proxies.append(_proxy_or_404(db, identifier))
+    policy_row = _owner_policy(db, admin.id)
+    policy = ProxyHealthPolicy(
+        failure_threshold=policy_row.failure_threshold,
+        cooldown_seconds=policy_row.cooldown_seconds,
+    )
+
+    results: dict[int, ProxyProbeResult] = {}
+
+    def run(item: ProxyEndpoint) -> ProxyProbeResult:
+        try:
+            return probe_proxy(item)
+        except ProxyHealthError as exc:
+            return ProxyProbeResult(
+                healthy=False,
+                reason_category="proxy_probe_failed",
+                error=str(exc)[:2000],
+            )
+
+    with ThreadPoolExecutor(max_workers=min(10, len(proxies))) as executor:
+        future_items = {executor.submit(run, proxy): proxy for proxy in proxies}
+        for future in as_completed(future_items):
+            proxy = future_items[future]
+            results[proxy.id] = future.result()
+
+    for proxy in proxies:
+        apply_proxy_health_result(
+            proxy,
+            results[proxy.id],
+            source=payload.source,
+            policy=policy,
+            direct_probe=True,
+        )
+    db.commit()
+    for proxy in proxies:
+        db.refresh(proxy)
+    return {
+        "data": {
+            "rows": [
+                proxy_endpoint_row(proxy, _assigned_count(db, proxy.id))
+                for proxy in proxies
+            ],
+            "summary": {
+                "total": len(proxies),
+                "healthy": sum(results[item.id].healthy for item in proxies),
+                "unhealthy": sum(not results[item.id].healthy for item in proxies),
+            },
+        }
+    }
 
 
 @router.get("/api/ip-proxy-bindings")
@@ -578,6 +1157,8 @@ def create_binding(
     proxy = _proxy_or_404(db, payload.proxy_id)
     if not proxy.enabled:
         raise HTTPException(status_code=409, detail="不能绑定已停用的代理")
+    if proxy_is_quarantined(proxy):
+        raise HTTPException(status_code=409, detail="代理正在冷却或需要修复，不能绑定账号")
     account = _binding_account(db, payload.account_id)
     if account is None:
         raise HTTPException(status_code=404, detail="个人账号不存在")
@@ -620,6 +1201,8 @@ def update_binding(
     proxy = _proxy_or_404(db, payload.proxy_id)
     if not proxy.enabled:
         raise HTTPException(status_code=409, detail="不能绑定已停用的代理")
+    if proxy_is_quarantined(proxy):
+        raise HTTPException(status_code=409, detail="代理正在冷却或需要修复，不能绑定账号")
     binding.proxy_id = proxy.id
     try:
         db.flush()
@@ -645,8 +1228,13 @@ def delete_binding(binding_id: str, db: DbSession, _admin: AdminUser) -> dict:
         _sync_account_proxy(db, account_public_id)
         db.commit()
     except GatewayError as exc:
-        _rollback_and_reconcile(db, account_public_id)
-        raise HTTPException(status_code=502, detail=str(exc)) from None
+        if exc.status_code == 404:
+            # The data plane has already lost this account, so clearing its
+            # control-plane binding is an idempotent success.
+            db.commit()
+        else:
+            _rollback_and_reconcile(db, account_public_id)
+            raise HTTPException(status_code=502, detail=str(exc)) from None
     except Exception:
         _rollback_and_reconcile(db, account_public_id)
         raise

@@ -13,6 +13,14 @@ export interface WaWebVersionResult {
   error?: unknown
 }
 
+export interface WaWebVersionStatus {
+  resolvedVersion: WAVersion
+  latestVersion: WAVersion | null
+  resolution: 'remote' | 'stale' | 'fallback'
+  checkedAt: string
+  error: string | null
+}
+
 type FetchWaWebVersion = (options: {
   timeout: number
   headers: Record<string, string>
@@ -27,16 +35,19 @@ type FetchWaWebVersion = (options: {
  * fresh companion registration must resolve the revision served by WA itself.
  */
 export class WaWebVersionResolver {
-  private cached: { version: WAVersion; expiresAt: number } | null = null
+  private cached: { status: WaWebVersionStatus; expiresAt: number } | null = null
 
   constructor(
     private readonly logger: Logger,
     private readonly fetchVersion: FetchWaWebVersion = fetchLatestWaWebVersion,
   ) {}
 
-  async current(agent?: Agent, requireLatest = false): Promise<WAVersion> {
+  async inspect(
+    agent?: Agent,
+    requireLatest = false,
+  ): Promise<WaWebVersionStatus> {
     const now = Date.now()
-    if (this.cached && this.cached.expiresAt > now) return this.cached.version
+    if (this.cached && this.cached.expiresAt > now) return this.cached.status
 
     const options = {
       timeout: 15_000,
@@ -46,21 +57,49 @@ export class WaWebVersionResolver {
     }
     const result = await this.fetchVersion(options)
     if (result.isLatest) {
-      this.cached = { version: result.version, expiresAt: now + CACHE_TTL_MS }
+      const status: WaWebVersionStatus = {
+        resolvedVersion: result.version,
+        latestVersion: result.version,
+        resolution: 'remote',
+        checkedAt: new Date(now).toISOString(),
+        error: null,
+      }
+      this.cached = { status, expiresAt: now + CACHE_TTL_MS }
       this.logger.info(
         { waWebVersion: result.version.join('.') },
         'wa_web_version_resolved',
       )
-      return result.version
+      return status
     }
-    if (this.cached) return this.cached.version
+    const error = result.error instanceof Error
+      ? result.error.message
+      : String(result.error ?? 'unknown')
+    if (this.cached) {
+      return {
+        ...this.cached.status,
+        latestVersion: null,
+        resolution: 'stale',
+        checkedAt: new Date(now).toISOString(),
+        error,
+      }
+    }
     if (requireLatest) {
       throw new Error('unable to resolve the current WhatsApp Web client revision')
     }
     this.logger.warn(
-      { error: result.error instanceof Error ? result.error.message : String(result.error ?? 'unknown') },
+      { error },
       'wa_web_version_fallback',
     )
-    return result.version
+    return {
+      resolvedVersion: result.version,
+      latestVersion: null,
+      resolution: 'fallback',
+      checkedAt: new Date(now).toISOString(),
+      error,
+    }
+  }
+
+  async current(agent?: Agent, requireLatest = false): Promise<WAVersion> {
+    return (await this.inspect(agent, requireLatest)).resolvedVersion
   }
 }

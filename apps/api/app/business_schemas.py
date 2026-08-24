@@ -168,8 +168,47 @@ class ProtocolRateLimitPolicy(Model):
     )
 
 
+class ProtocolDefinitionCreate(Model):
+    name: str = Field(min_length=1, max_length=64)
+    adapter_key: Literal["baileys"] = Field(default="baileys", alias="adapterKey")
+    repository_url: str = Field(
+        default="https://github.com/WhiskeySockets/Baileys",
+        alias="repositoryUrl",
+        min_length=12,
+        max_length=512,
+    )
+    package_name: str = Field(
+        default="@whiskeysockets/baileys",
+        alias="packageName",
+        min_length=1,
+        max_length=160,
+    )
+    version: str = Field(min_length=1, max_length=64)
+    upstream_ref: str | None = Field(
+        default=None, alias="upstreamRef", max_length=80
+    )
+    remark: str | None = Field(default=None, max_length=512)
+
+    @field_validator("repository_url")
+    @classmethod
+    def https_repository(cls, value: str) -> str:
+        if not value.startswith("https://"):
+            raise ValueError("实现仓库必须使用 HTTPS 地址")
+        return value.rstrip("/")
+
+    @field_validator("version")
+    @classmethod
+    def valid_version(cls, value: str) -> str:
+        if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z._+-]{0,63}", value):
+            raise ValueError("协议版本格式不正确")
+        return value
+
+
 class ProtocolNodeCreate(Model):
     name: str = Field(min_length=1, max_length=64)
+    protocol_definition_id: str | None = Field(
+        default=None, alias="protocolDefinitionId", max_length=20
+    )
     remark: str | None = Field(default=None, max_length=512)
     ingress_enabled: bool = Field(default=True, alias="ingressEnabled")
     marketing_enabled: bool = Field(default=True, alias="marketingEnabled")
@@ -198,9 +237,16 @@ class ProtocolNodeCreate(Model):
         default_factory=ProtocolRateLimitPolicy, alias="rateLimitPolicy"
     )
 
+    _protocol_definition_id = field_validator("protocol_definition_id")(
+        lambda value: str(parse_snowflake_id(value)) if value is not None else None
+    )
+
 
 class ProtocolNodeUpdate(Model):
     name: str | None = Field(default=None, min_length=1, max_length=64)
+    protocol_definition_id: str | None = Field(
+        default=None, alias="protocolDefinitionId", max_length=20
+    )
     remark: str | None = Field(default=None, max_length=512)
     ingress_enabled: bool | None = Field(default=None, alias="ingressEnabled")
     marketing_enabled: bool | None = Field(default=None, alias="marketingEnabled")
@@ -227,6 +273,10 @@ class ProtocolNodeUpdate(Model):
     )
     rate_limit_policy: ProtocolRateLimitPolicy | None = Field(
         default=None, alias="rateLimitPolicy"
+    )
+
+    _protocol_definition_id = field_validator("protocol_definition_id")(
+        lambda value: str(parse_snowflake_id(value)) if value is not None else None
     )
 
 

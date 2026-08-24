@@ -2,11 +2,18 @@ import {
   ArrowDownToLineIcon,
   ArrowUpFromLineIcon,
   LoaderCircleIcon,
-  NetworkIcon,
   PlusIcon,
   RefreshCwIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { useSearchParams } from "react-router-dom";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
@@ -51,6 +58,8 @@ type ProtocolNode = {
   id: string;
   readKey: string;
   name: string;
+  protocol: string;
+  protocolDefinition: ProtocolDefinitionRef;
   ingressEnabled: boolean;
   marketingEnabled: boolean;
   online: boolean;
@@ -72,6 +81,15 @@ type ProtocolNode = {
   syncPolicy: SyncPolicy;
   rateLimitPolicy: RateLimitPolicy;
   createdAt: string;
+};
+
+type ProtocolDefinitionRef = {
+  id: string;
+  name: string;
+  adapterKey: string;
+  version: string;
+  buildStatus: string;
+  enabled: boolean;
 };
 
 type SyncPolicy = {
@@ -107,19 +125,6 @@ type RateLimitPolicyForm = {
     maxRequests: string;
     windowSeconds: string;
   };
-};
-
-type ProtocolPool = {
-  id: string;
-  name: string;
-  remark: string;
-  members: Array<{
-    protocolNodeId: string;
-    protocolNodeName: string;
-    priority: number;
-    enabled: boolean;
-    available: boolean;
-  }>;
 };
 
 const DEFAULT_SYNC_POLICY: SyncPolicy = {
@@ -220,6 +225,7 @@ function normalizeRate(explicit: number | null, count: number | null, total: num
 function protocolNode(input: unknown): ProtocolNode {
   const row = input as Record<string, unknown>;
   const id = snowflakeId(row, "id");
+  const protocol = text(row, "protocol", "protocolType", "protocol_type");
   const totalCount = number(row, "totalCount", "total_count", "accountTotal", "account_total", "accountCount", "account_count");
   const validCount = number(row, "validCount", "valid_count", "validAccounts", "valid_accounts", "effectiveCount", "effective_count");
   const onlineCount = number(row, "onlineCount", "online_count", "onlineAccounts", "online_accounts");
@@ -229,6 +235,11 @@ function protocolNode(input: unknown): ProtocolNode {
     id,
     readKey: entityRowKey(row, id, "protocol-node", `${text(row, "name", "title")}:${text(row, "createdAt", "created_at")}`),
     name: text(row, "name", "title"),
+    protocol,
+    protocolDefinition: protocolDefinitionRef(
+      value(row, "protocolDefinition", "protocol_definition"),
+      protocol,
+    ),
     ingressEnabled: boolean(row, true, "ingressEnabled", "ingress_enabled", "accountIngressEnabled", "account_ingress_enabled", "allowIngress", "allow_ingress"),
     marketingEnabled: boolean(row, true, "marketingEnabled", "marketing_enabled", "allowMarketing", "allow_marketing"),
     online: boolean(row, true, "online", "onlineEnabled", "online_enabled"),
@@ -268,23 +279,19 @@ function protocolNode(input: unknown): ProtocolNode {
     createdAt: text(row, "createdAt", "created_at"),
   };
 }
-function protocolPool(input: unknown): ProtocolPool {
-  const row = input as Record<string, unknown>;
-  const rawMembers = Array.isArray(row.members) ? row.members : [];
+
+function protocolDefinitionRef(
+  input: unknown,
+  fallbackProtocol = "",
+): ProtocolDefinitionRef {
+  const row = (input || {}) as Record<string, unknown>;
   return {
     id: snowflakeId(row, "id"),
-    name: text(row, "name"),
-    remark: text(row, "remark"),
-    members: rawMembers.map((inputMember) => {
-      const member = inputMember as Record<string, unknown>;
-      return {
-        protocolNodeId: snowflakeId(member, "protocolNodeId", "protocol_node_id"),
-        protocolNodeName: text(member, "protocolNodeName", "protocol_node_name"),
-        priority: number(member, "priority") || 100,
-        enabled: boolean(member, true, "enabled"),
-        available: boolean(member, false, "available"),
-      };
-    }),
+    name: text(row, "name") || fallbackProtocol || "未知协议",
+    adapterKey: text(row, "adapterKey", "adapter_key") || fallbackProtocol,
+    version: text(row, "version"),
+    buildStatus: text(row, "buildStatus", "build_status"),
+    enabled: boolean(row, true, "enabled"),
   };
 }
 function rateBadge(rate: number | null, kind: "valid" | "online") {
@@ -298,23 +305,27 @@ function rateBadge(rate: number | null, kind: "valid" | "online") {
   );
 }
 
-export function ProtocolManagementPage() {
+export function ProtocolManagementPage({
+  toolbarTabs,
+}: {
+  toolbarTabs?: ReactNode;
+} = {}) {
   const { can } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
   const canManage = can("resources.protocol.manage") || can("resources.ip.manage");
   const [rows, setRows] = useState<ProtocolNode[]>([]);
-  const [pools, setPools] = useState<ProtocolPool[]>([]);
+  const [definitions, setDefinitions] = useState<ProtocolDefinitionRef[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [keyword, setKeyword] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [editing, setEditing] = useState<ProtocolNode | null>(null);
   const [creating, setCreating] = useState(false);
+  const handledCreateRequest = useRef(false);
   const [interfaceSpec, setInterfaceSpec] = useState<Record<string, unknown> | null>(null);
   const [specLoading, setSpecLoading] = useState(false);
-  const [poolEditing, setPoolEditing] = useState<ProtocolPool | "new" | null>(null);
-  const [poolSaving, setPoolSaving] = useState(false);
-  const [poolForm, setPoolForm] = useState({ name: "", remark: "", memberIds: [] as string[] });
   const [form, setForm] = useState({
+    protocolDefinitionId: "",
     name: "",
     ingressEnabled: true,
     marketingEnabled: true,
@@ -339,23 +350,42 @@ export function ProtocolManagementPage() {
     setLoading(true);
     setError("");
     try {
-      const [payload, poolPayload] = await Promise.all([
+      const [nodePayload, definitionPayload] = await Promise.all([
         apiRequest("/api/protocol-nodes?pageSize=100"),
-        apiRequest("/api/protocol-pools?pageSize=100"),
+        apiRequest("/api/protocol-definitions/options"),
       ]);
-      const nextRows = unwrapList<unknown>(payload).rows.map(protocolNode);
+      const nextRows = unwrapList<unknown>(nodePayload).rows.map(protocolNode);
+      const nextDefinitions = unwrapList<unknown>(definitionPayload).rows.map(
+        (item) => protocolDefinitionRef(item),
+      );
       setRows(nextRows);
-      setPools(unwrapList<unknown>(poolPayload).rows.map(protocolPool));
+      setDefinitions(nextDefinitions);
       setSelected((current) => current.filter((id) => nextRows.some((row) => row.id === id)));
     } catch (caught) {
       setRows([]);
-      setPools([]);
-      setError(caught instanceof Error ? caught.message : "协议节点加载失败");
+      setDefinitions([]);
+      setError(caught instanceof Error ? caught.message : "节点加载失败");
     } finally {
       setLoading(false);
     }
   }, []);
   useEffect(() => void load(), [load]);
+  useEffect(() => {
+    if (
+      handledCreateRequest.current ||
+      searchParams.get("create") !== "1" ||
+      !definitions.length
+    )
+      return;
+    handledCreateRequest.current = true;
+    const requestedDefinitionId = searchParams.get("protocolDefinitionId") || "";
+    openCreate(
+      definitions.some((item) => item.id === requestedDefinitionId)
+        ? requestedDefinitionId
+        : definitions[0].id,
+    );
+    setSearchParams({}, { replace: true });
+  }, [definitions, searchParams, setSearchParams]);
   useEffect(() => {
     if (cooldownUntil <= Date.now()) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -365,11 +395,14 @@ export function ProtocolManagementPage() {
   const visible = useMemo(() => {
     const search = keyword.trim().toLowerCase();
     return search
-      ? rows.filter((row) => `${row.id} ${row.name} ${row.remark}`.toLowerCase().includes(search))
+      ? rows.filter((row) =>
+          `${row.id} ${row.name} ${row.remark} ${row.protocolDefinition.name} ${row.protocolDefinition.version}`
+            .toLowerCase()
+            .includes(search),
+        )
       : rows;
   }, [keyword, rows]);
   const nodePagination = useClientPagination(visible, { resetKey: keyword });
-  const poolPagination = useClientPagination(pools);
   const visibleIds = visible.map((row) => row.id).filter(Boolean);
   const allVisibleSelected = Boolean(visibleIds.length) && visibleIds.every((id) => selected.includes(id));
   const remainingSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
@@ -378,6 +411,7 @@ export function ProtocolManagementPage() {
     setCreating(false);
     setEditing(row);
     setForm({
+      protocolDefinitionId: row.protocolDefinition.id,
       name: row.name,
       ingressEnabled: row.ingressEnabled,
       marketingEnabled: row.marketingEnabled,
@@ -392,10 +426,11 @@ export function ProtocolManagementPage() {
       remark: row.remark,
     });
   }
-  function openCreate() {
+  function openCreate(protocolDefinitionId = definitions[0]?.id || "") {
     setEditing(null);
     setCreating(true);
     setForm({
+      protocolDefinitionId,
       name: "",
       ingressEnabled: true,
       marketingEnabled: true,
@@ -411,12 +446,13 @@ export function ProtocolManagementPage() {
     });
   }
   async function save() {
-    if ((!creating && !editing?.id) || !form.name.trim()) return;
+    if ((!creating && !editing?.id) || !form.name.trim() || !form.protocolDefinitionId) return;
     setSaving(true);
     try {
       await apiRequest(creating ? "/api/protocol-nodes" : `/api/protocol-nodes/${editing?.id}`, {
         method: creating ? "POST" : "PATCH",
         body: JSON.stringify({
+          protocolDefinitionId: form.protocolDefinitionId,
           name: form.name.trim(),
           ingressEnabled: form.ingressEnabled,
           marketingEnabled: form.marketingEnabled,
@@ -442,7 +478,7 @@ export function ProtocolManagementPage() {
       setEditing(null);
       setCreating(false);
       await load();
-      toast.success(creating ? "协议节点已创建" : "协议设置已保存");
+      toast.success(creating ? "节点已创建" : "节点设置已保存");
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "保存失败");
     } finally {
@@ -462,63 +498,21 @@ export function ProtocolManagementPage() {
     }
   }
   async function removeNode(row: ProtocolNode) {
-    if (!(await confirmAction({ title: `删除协议“${row.name}”？`, description: "删除后无法恢复；仍有账号、渠道或协议池引用时系统会拒绝。", confirmText: "确认删除", destructive: true }))) return;
+    if (!(await confirmAction({ title: `删除节点“${row.name}”？`, description: "删除后无法恢复；仍有账号、渠道或路由策略引用时系统会拒绝。", confirmText: "确认删除", destructive: true }))) return;
     try {
       await apiRequest(`/api/protocol-nodes/${row.id}`, { method: "DELETE" });
-      toast.success("协议已删除");
+      toast.success("节点已删除");
       await load();
-    } catch (caught) { toast.error(caught instanceof Error ? caught.message : "协议删除失败"); }
-  }
-  function openPool(pool?: ProtocolPool) {
-    setPoolEditing(pool || "new");
-    setPoolForm({
-      name: pool?.name || "",
-      remark: pool?.remark || "",
-      memberIds: pool?.members.filter((member) => member.enabled).map((member) => member.protocolNodeId) || [],
-    });
-  }
-  async function savePool() {
-    if (!poolEditing || !poolForm.name.trim() || !poolForm.memberIds.length) return;
-    setPoolSaving(true);
-    try {
-      const creatingPool = poolEditing === "new";
-      await apiRequest(creatingPool ? "/api/protocol-pools" : `/api/protocol-pools/${poolEditing.id}`, {
-        method: creatingPool ? "POST" : "PATCH",
-        body: JSON.stringify({
-          name: poolForm.name.trim(),
-          remark: poolForm.remark.trim() || null,
-          members: poolForm.memberIds.map((protocolNodeId, index) => ({
-            protocolNodeId,
-            priority: (index + 1) * 100,
-            enabled: true,
-          })),
-        }),
-      });
-      setPoolEditing(null);
-      toast.success(creatingPool ? "协议池已创建" : "协议池已保存");
-      await load();
-    } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "协议池保存失败");
-    } finally {
-      setPoolSaving(false);
-    }
-  }
-  async function removePool(pool: ProtocolPool) {
-    if (!(await confirmAction({ title: `删除协议池“${pool.name}”？`, description: "删除后无法恢复；仍被推广渠道使用的协议池不能删除。", confirmText: "确认删除", destructive: true }))) return;
-    try {
-      await apiRequest(`/api/protocol-pools/${pool.id}`, { method: "DELETE" });
-      toast.success("协议池已删除");
-      await load();
-    } catch (caught) { toast.error(caught instanceof Error ? caught.message : "协议池删除失败"); }
+    } catch (caught) { toast.error(caught instanceof Error ? caught.message : "节点删除失败"); }
   }
   async function batch(operation: "connect" | "disconnect") {
     if (!selected.length || remainingSeconds > 0) return;
     const label = operation === "connect" ? "上线" : "下线";
     if (!(await confirmAction({
-      title: `确认将选中的 ${selected.length} 个协议批量${label}？`,
+      title: `确认将选中的 ${selected.length} 个节点批量${label}？`,
       description: operation === "connect"
-        ? "系统将逐个连接这些协议下当前离线且可上线的账号。"
-        : "系统将逐个断开这些协议下当前在线的账号。",
+        ? "系统将逐个连接这些节点下当前离线且可上线的账号。"
+        : "系统将逐个断开这些节点下当前在线的账号。",
       confirmText: `批量${label}`,
     }))) return;
     setBatching(operation);
@@ -531,7 +525,7 @@ export function ProtocolManagementPage() {
       window.localStorage.setItem(COOLDOWN_KEY, String(until));
       setCooldownUntil(until);
       setNow(Date.now());
-      toast.success(`已提交 ${selected.length} 个协议批量${label}`);
+      toast.success(`已提交 ${selected.length} 个节点批量${label}`);
       await load();
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : `批量${label}失败`);
@@ -542,21 +536,19 @@ export function ProtocolManagementPage() {
 
   return (
     <StandardListPage viewport>
-      <div className="rounded-lg border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
-        协议节点用于批量管控一组账号。进号开关影响后续账号接入；营销开关关闭后，该节点账号会被营销任务跳过。
-      </div>
       <ListToolbar
-        search={{ value: keyword, onChange: setKeyword, placeholder: "搜索协议名称、ID 或备注" }}
-        meta={selected.length ? `已选择 ${selected.length} 个协议` : `${visible.length} 个协议`}
+        search={{ value: keyword, onChange: setKeyword, placeholder: "搜索节点名称、ID、绑定协议或备注" }}
+        filters={toolbarTabs}
+        meta={selected.length ? `已选择 ${selected.length} 个节点` : `${visible.length} 个节点`}
         actions={
           <>
-            <Button disabled={!canManage} onClick={openCreate}>
-              <PlusIcon size={16} />新建协议
+            <Button disabled={!canManage || !definitions.length} onClick={() => openCreate()}>
+              <PlusIcon size={16} />新建节点
             </Button>
             <Button
               variant="outline"
               disabled={!canManage || !selected.length || Boolean(batching) || remainingSeconds > 0}
-              title={remainingSeconds ? `操作冷却中，还需等待 ${remainingSeconds} 秒` : "对选中协议下所有离线账号发起上线"}
+              title={remainingSeconds ? `操作冷却中，还需等待 ${remainingSeconds} 秒` : "对选中节点下所有离线账号发起上线"}
               onClick={() => void batch("connect")}
             >
               {batching === "connect" ? <Spinner /> : <ArrowUpFromLineIcon size={16} />}
@@ -565,7 +557,7 @@ export function ProtocolManagementPage() {
             <Button
               variant="outline"
               disabled={!canManage || !selected.length || Boolean(batching) || remainingSeconds > 0}
-              title={remainingSeconds ? `操作冷却中，还需等待 ${remainingSeconds} 秒` : "对选中协议下所有在线账号发起下线"}
+              title={remainingSeconds ? `操作冷却中，还需等待 ${remainingSeconds} 秒` : "对选中节点下所有在线账号发起下线"}
               onClick={() => void batch("disconnect")}
             >
               {batching === "disconnect" ? <Spinner /> : <ArrowDownToLineIcon size={16} />}
@@ -586,23 +578,23 @@ export function ProtocolManagementPage() {
         onPageSizeChange={nodePagination.setPageSize}
       />
       <ListTableCard>
-        {loading ? <div className="loading-state"><Spinner />正在加载协议节点…</div> : error ? (
-          <div className="error-state"><strong>协议加载失败</strong><span>{error}</span><Button variant="outline" onClick={() => void load()}>重试</Button></div>
+        {loading ? <div className="loading-state"><Spinner />正在加载节点…</div> : error ? (
+          <div className="error-state"><strong>节点加载失败</strong><span>{error}</span><Button variant="outline" onClick={() => void load()}>重试</Button></div>
         ) : visible.length ? (
           <Table layout="list">
             <TableHeader><TableRow>
-              <TableHead><Checkbox aria-label="选择全部协议" checked={allVisibleSelected} onCheckedChange={(checked) => setSelected(checked ? Array.from(new Set([...selected, ...visibleIds])) : selected.filter((id) => !visibleIds.includes(id)))} /></TableHead>
-              <TableHead>协议名称</TableHead><TableHead>进号开关</TableHead><TableHead>营销开关</TableHead><TableHead>账号总量</TableHead><TableHead>有效数 / 率</TableHead><TableHead>在线数 / 率</TableHead><TableHead adaptive>备注</TableHead><TableHead>创建时间</TableHead><TableHead>操作</TableHead>
+              <TableHead><Checkbox aria-label="选择全部节点" checked={allVisibleSelected} onCheckedChange={(checked) => setSelected(checked ? Array.from(new Set([...selected, ...visibleIds])) : selected.filter((id) => !visibleIds.includes(id)))} /></TableHead>
+              <TableHead>节点名称</TableHead><TableHead>绑定协议</TableHead><TableHead>进号开关</TableHead><TableHead>营销开关</TableHead><TableHead>账号总量</TableHead><TableHead>有效数 / 率</TableHead><TableHead>在线数 / 率</TableHead><TableHead adaptive>备注</TableHead><TableHead>创建时间</TableHead><TableHead>操作</TableHead>
             </TableRow></TableHeader>
             <TableBody>{nodePagination.rows.map((row) => <TableRow key={row.readKey}>
-              <TableCell><Checkbox aria-label={`选择协议 ${row.name || "待迁移协议"}`} disabled={!row.id} checked={Boolean(row.id) && selected.includes(row.id)} onCheckedChange={(checked) => row.id && setSelected((current) => checked ? [...current, row.id] : current.filter((id) => id !== row.id))} /></TableCell>
+              <TableCell><Checkbox aria-label={`选择节点 ${row.name || "待迁移节点"}`} disabled={!row.id} checked={Boolean(row.id) && selected.includes(row.id)} onCheckedChange={(checked) => row.id && setSelected((current) => checked ? [...current, row.id] : current.filter((id) => id !== row.id))} /></TableCell>
               <TableCell primary>
                 <EntityPrimaryCell
-                  title={row.name || "待迁移协议"}
+                  title={row.name || "待迁移节点"}
                   id={row.id}
                   status={{
                     label: row.healthStatus === "available" ? "可接入" : row.healthStatus === "capacity_limited" ? "容量受限" : "不可接入",
-                    description: row.healthReason || "协议节点当前可承载新的账号接入。",
+                    description: row.healthReason || "节点当前可承载新的账号接入。",
                     tone: row.healthStatus === "available" ? "success" : row.healthStatus === "capacity_limited" ? "warning" : "neutral",
                     details: [
                       { label: "进号", value: row.ingressEnabled ? "已开启" : "已关闭" },
@@ -613,12 +605,22 @@ export function ProtocolManagementPage() {
                   }}
                 />
               </TableCell>
+              <TableCell>
+                <div className="grid min-w-max gap-1">
+                  <span>{row.protocolDefinition.name}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {row.protocolDefinition.version
+                      ? `${row.protocolDefinition.adapterKey} · v${row.protocolDefinition.version}`
+                      : row.protocolDefinition.adapterKey || "版本未知"}
+                  </span>
+                </div>
+              </TableCell>
               <TableCell><Badge tone={row.ingressEnabled ? "success" : "neutral"}>{row.ingressEnabled ? "已开启" : "已关闭"}</Badge></TableCell>
               <TableCell><Badge tone={row.marketingEnabled ? "success" : "neutral"}>{row.marketingEnabled ? "已开启" : "已关闭"}</Badge></TableCell>
               <TableCell>{row.totalCount == null ? <span className="text-muted-foreground">-</span> : row.totalCount.toLocaleString()}</TableCell>
               <TableCell><div className="flex items-center gap-2"><span>{row.validCount == null ? "-" : row.validCount.toLocaleString()}</span>{rateBadge(row.validRate, "valid")}</div></TableCell>
               <TableCell><div className="flex items-center gap-2"><span>{row.onlineCount == null ? "-" : row.onlineCount.toLocaleString()}</span>{rateBadge(row.onlineRate, "online")}</div></TableCell>
-              <TableCell><span className="block max-w-52 truncate text-muted-foreground" title={row.remark}>{row.remark || "-"}</span></TableCell>
+              <TableCell className="max-w-0"><span className="block w-full truncate text-center text-muted-foreground" title={row.remark}>{row.remark || "-"}</span></TableCell>
               <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
               <TableCell><div className="flex min-w-max justify-end gap-2">
                 <Button variant="outline" size="sm" disabled={!row.id || specLoading} onClick={() => void openSpec(row)}>接口规范</Button>
@@ -627,43 +629,22 @@ export function ProtocolManagementPage() {
               </div></TableCell>
             </TableRow>)}</TableBody>
           </Table>
-        ) : <EmptyState title="暂无协议节点" description="协议节点由系统接入配置创建，当前没有可管理的节点。" />}
-      </ListTableCard>
-      <div className="mt-4 flex items-center justify-between">
-        <div><h2 className="text-base font-semibold">协议池回退</h2><p className="text-sm text-muted-foreground">只有渠道明确绑定协议池时才会按成员优先级回退；直接绑定节点永不自动切换。</p></div>
-        <Button variant="outline" disabled={!canManage || !rows.length} onClick={() => openPool()}><NetworkIcon size={16} />新建协议池</Button>
-      </div>
-      <ListPagination
-        ariaLabel="协议池分页"
-        page={poolPagination.page}
-        pageSize={poolPagination.pageSize}
-        total={poolPagination.total}
-        disabled={loading}
-        onPageChange={poolPagination.setPage}
-        onPageSizeChange={poolPagination.setPageSize}
-      />
-      <ListTableCard>
-        {pools.length ? <Table layout="list">
-          <TableHeader><TableRow><TableHead>协议池</TableHead><TableHead adaptive>回退顺序</TableHead><TableHead>备注</TableHead><TableHead>操作</TableHead></TableRow></TableHeader>
-          <TableBody>{poolPagination.rows.map((pool) => <TableRow key={pool.id}>
-            <TableCell><EntityPrimaryCell title={pool.name} id={pool.id} status={{ label: pool.members.some((member) => member.available) ? "可回退" : "无可用成员", description: pool.members.some((member) => member.available) ? "池中至少有一个成员可接入。" : "当前所有成员不可接入，渠道请求会明确失败。", tone: pool.members.some((member) => member.available) ? "success" : "warning" }} /></TableCell>
-            <TableCell><div className="flex flex-wrap gap-1">{pool.members.map((member, index) => <Badge key={member.protocolNodeId} tone={member.available ? "success" : "neutral"}>{index + 1}. {member.protocolNodeName}</Badge>)}</div></TableCell>
-            <TableCell><span className="block max-w-64 truncate text-muted-foreground">{pool.remark || "-"}</span></TableCell>
-            <TableCell><div className="flex min-w-max justify-end gap-2">{canManage ? <><Button variant="outline" size="sm" onClick={() => openPool(pool)}>编辑</Button><Button variant="destructive" size="sm" onClick={() => void removePool(pool)}>删除</Button></> : null}</div></TableCell>
-          </TableRow>)}</TableBody>
-        </Table> : <EmptyState title="暂无协议池" description="默认拒绝不可用节点；需要回退时再显式创建协议池并绑定渠道。" />}
+        ) : <EmptyState title="暂无节点" description="先在协议管理中准备可用协议，再为协议创建运营节点。" />}
       </ListTableCard>
       <Drawer
         open={creating || Boolean(editing)}
         onClose={() => { if (!saving) { setEditing(null); setCreating(false); } }}
-        title={creating ? "新建协议节点" : `编辑协议 · ${editing?.id || ""}`}
-        description="协议节点是共享 Baileys 网关上的逻辑运营分区；容量、连接和同步设置只影响此节点。"
-        footer={<><Button variant="outline" disabled={saving} onClick={() => { setEditing(null); setCreating(false); }}>取消</Button><Button disabled={saving || !form.name.trim() || form.name.trim().length > 64 || form.remark.length > 512 || Number(form.idleDisconnectSeconds) < 60 || Number(form.postVerifyGraceSeconds) < 0 || !validRateLimitForm(form.rateLimitPolicy)} onClick={() => void save()}>{saving ? <LoaderCircleIcon className="spin" size={16} /> : null}{creating ? "创建" : "保存"}</Button></>}
+        title={creating ? "新建节点" : `编辑节点 · ${editing?.id || ""}`}
+        description="节点绑定一个已构建协议，并承载容量、连接、同步和配对限速等运营参数。"
+        footer={<><Button variant="outline" disabled={saving} onClick={() => { setEditing(null); setCreating(false); }}>取消</Button><Button disabled={saving || !form.protocolDefinitionId || !form.name.trim() || form.name.trim().length > 64 || form.remark.length > 512 || Number(form.idleDisconnectSeconds) < 60 || Number(form.postVerifyGraceSeconds) < 0 || !validRateLimitForm(form.rateLimitPolicy)} onClick={() => void save()}>{saving ? <LoaderCircleIcon className="spin" size={16} /> : null}{creating ? "创建" : "保存"}</Button></>}
       >
         <DrawerFormLayout>
           <DrawerFormSection title="基础信息" hideHeader>
-            <DrawerFormField label="协议名称" meta={`${form.name.length}/64`} required>
-              <Input maxLength={64} value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="请输入协议名称，用于识别区分不同协议" />
+            <DrawerFormField label="绑定协议" hint={editing?.totalCount ? "已有账号的节点不能直接切换协议。" : "协议版本和实现仓库在协议管理中维护。"} required>
+              <SelectField className="w-full" value={form.protocolDefinitionId} disabled={Boolean(editing?.totalCount)} onValueChange={(next) => setForm((current) => ({ ...current, protocolDefinitionId: next }))} options={definitions.map((item) => ({ value: item.id, label: `${item.name} · v${item.version}` }))} />
+            </DrawerFormField>
+            <DrawerFormField label="节点名称" meta={`${form.name.length}/64`} required>
+              <Input maxLength={64} value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="请输入节点名称，用于区分不同运营配置" />
             </DrawerFormField>
             <DrawerFormField label="进号开关" hint="关闭后暂停新账号通过该节点接入，不影响已在线账号。">
               <Switch checked={form.ingressEnabled} onCheckedChange={(checked) => setForm((current) => ({ ...current, ingressEnabled: checked }))} aria-label="进号开关" />
@@ -727,22 +708,6 @@ export function ProtocolManagementPage() {
             </DrawerFormField>
           </DrawerFormSection>
         </DrawerFormLayout>
-      </Drawer>
-      <Drawer
-        open={Boolean(poolEditing)}
-        onClose={() => !poolSaving && setPoolEditing(null)}
-        title={poolEditing === "new" ? "新建协议池" : "编辑协议池"}
-        description="勾选顺序就是回退顺序。接入时选择第一个当前可用且未超容量的节点。"
-        footer={<><Button variant="outline" disabled={poolSaving} onClick={() => setPoolEditing(null)}>取消</Button><Button disabled={poolSaving || !poolForm.name.trim() || !poolForm.memberIds.length} onClick={() => void savePool()}>{poolSaving ? <Spinner /> : null}保存</Button></>}
-      >
-        <div className="drawer-form">
-          <label className="field"><DrawerFieldLabel required>协议池名称</DrawerFieldLabel><Input maxLength={64} value={poolForm.name} onChange={(event) => setPoolForm((current) => ({ ...current, name: event.target.value }))} /></label>
-          <div className="field"><DrawerFieldLabel required>成员与回退顺序</DrawerFieldLabel><div className="rounded-lg border p-3 space-y-2">{rows.map((row) => {
-            const selectedIndex = poolForm.memberIds.indexOf(row.id);
-            return <label className="flex items-center justify-between gap-3" key={row.id}><span className="flex items-center gap-2"><Checkbox checked={selectedIndex >= 0} onCheckedChange={(checked) => setPoolForm((current) => ({ ...current, memberIds: checked ? [...current.memberIds, row.id] : current.memberIds.filter((id) => id !== row.id) }))} /><span>{row.name}</span></span><small className="text-muted-foreground">{selectedIndex >= 0 ? `优先级 ${selectedIndex + 1}` : "未启用"}</small></label>;
-          })}</div><small>若要调整优先级，可取消后按目标顺序重新勾选。</small></div>
-          <label className="field"><DrawerFieldLabel>备注</DrawerFieldLabel><Textarea rows={4} maxLength={512} value={poolForm.remark} onChange={(event) => setPoolForm((current) => ({ ...current, remark: event.target.value }))} /></label>
-        </div>
       </Drawer>
       <Drawer
         open={Boolean(interfaceSpec)}

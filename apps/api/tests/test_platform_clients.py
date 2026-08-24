@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from urllib.parse import parse_qs
 
 import httpx
 import pytest
@@ -629,3 +630,68 @@ def test_baota_creates_site_and_proxy_once_and_refuses_conflicts() -> None:
     with pytest.raises(PlatformClientError, match="未进行覆盖"):
         client.ensure_reverse_proxy("landing.example", "http://127.0.0.1:18100")
     assert mutations == ["AddSite", "CreateProxy"]
+
+
+def test_baota_applies_optional_nginx_firewall_policy() -> None:
+    state = {"cdn": False, "cc": True, "drop_china": False}
+    mutations: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/plugin"
+        operation = request.url.params["s"]
+        if operation == "get_site_config":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "siteName": "landing.example",
+                            "cdn": state["cdn"],
+                            "cc": {"open": state["cc"]},
+                            "drop_china": state["drop_china"],
+                        }
+                    ]
+                },
+            )
+        if operation == "set_site_obj_open":
+            values = parse_qs(request.content.decode())
+            setting = values["obj"][0]
+            mutations.append(setting)
+            state[setting] = not state[setting]
+            return httpx.Response(200, json={"status": True})
+        raise AssertionError(f"unexpected request {request.url}")
+
+    client = BaoTaClient(
+        "https://panel.example",
+        "baota-key",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert client.nginx_firewall_plugin_available() is True
+    assert client.ensure_site_firewall_policy(
+        "landing.example",
+        cdn_enabled=True,
+        cc_enabled=False,
+        china_blocked=True,
+    ) is True
+    assert state == {"cdn": True, "cc": False, "drop_china": True}
+    assert mutations == ["cdn", "cc", "drop_china"]
+
+
+def test_baota_missing_nginx_firewall_plugin_is_optional() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": False, "msg": "plugin missing"})
+
+    client = BaoTaClient(
+        "https://panel.example",
+        "baota-key",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert client.nginx_firewall_plugin_available() is False
+    assert client.ensure_site_firewall_policy(
+        "landing.example",
+        cdn_enabled=True,
+        cc_enabled=False,
+        china_blocked=True,
+    ) is False

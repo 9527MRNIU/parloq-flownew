@@ -378,6 +378,20 @@ class ProxyEndpoint(Base, TimestampMixin):
             name="ck_proxy_endpoints_health_status",
         ),
         CheckConstraint("port >= 1 AND port <= 65535", name="ck_proxy_endpoints_port"),
+        CheckConstraint(
+            "consecutive_failures >= 0",
+            name="ck_proxy_endpoints_consecutive_failures",
+        ),
+        CheckConstraint(
+            "latency_ms IS NULL OR latency_ms >= 0",
+            name="ck_proxy_endpoints_latency_ms",
+        ),
+        Index(
+            "ix_proxy_endpoints_allocation_health",
+            "enabled",
+            "health_status",
+            "cooldown_until",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
@@ -398,6 +412,14 @@ class ProxyEndpoint(Base, TimestampMixin):
     )
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     last_error: Mapped[str | None] = mapped_column(Text)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cooldown_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_check_source: Mapped[str | None] = mapped_column(String(24), index=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
 
     bindings: Mapped[list[AccountProxyBinding]] = relationship(back_populates="proxy")
 
@@ -410,12 +432,20 @@ class IpAllocationPolicy(Base, TimestampMixin):
             name="ck_ip_allocation_policies_mode",
         ),
         CheckConstraint(
-            "country_match IN ('strict', 'prefer', 'off')",
+            "country_match IN ('visitor_country', 'phone_country')",
             name="ck_ip_allocation_policies_country_match",
         ),
         CheckConstraint(
             "max_accounts_per_ip >= 1 AND max_accounts_per_ip <= 10000",
             name="ck_ip_allocation_policies_max_accounts",
+        ),
+        CheckConstraint(
+            "failure_threshold >= 1 AND failure_threshold <= 10",
+            name="ck_ip_allocation_policies_failure_threshold",
+        ),
+        CheckConstraint(
+            "cooldown_seconds >= 60 AND cooldown_seconds <= 86400",
+            name="ck_ip_allocation_policies_cooldown_seconds",
         ),
         UniqueConstraint("created_by", name="uq_ip_allocation_policies_owner"),
     )
@@ -426,11 +456,13 @@ class IpAllocationPolicy(Base, TimestampMixin):
         String(24), default="least_load", nullable=False, index=True
     )
     country_match: Mapped[str] = mapped_column(
-        String(16), default="prefer", nullable=False, index=True
+        String(24), default="visitor_country", nullable=False, index=True
     )
     max_accounts_per_ip: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
     avoid_unhealthy: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     sticky_binding: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    failure_threshold: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+    cooldown_seconds: Mapped[int] = mapped_column(Integer, default=900, nullable=False)
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
@@ -451,6 +483,40 @@ class AccountProxyBinding(Base, TimestampMixin):
     proxy: Mapped[ProxyEndpoint] = relationship(back_populates="bindings")
 
 
+class ProxyHealthEvent(Base, TimestampMixin):
+    __tablename__ = "proxy_health_events"
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('success', 'failure')",
+            name="ck_proxy_health_events_outcome",
+        ),
+        Index(
+            "ix_proxy_health_events_proxy_occurred",
+            "proxy_id",
+            "occurred_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
+    public_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    proxy_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("proxy_endpoints.id", ondelete="CASCADE"),
+        index=True,
+    )
+    account_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("personal_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    reason_category: Mapped[str] = mapped_column(String(64), nullable=False)
+    proxy_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+
 class AccountGroup(Base, TimestampMixin):
     __tablename__ = "account_groups"
     __table_args__ = (
@@ -467,12 +533,94 @@ class AccountGroup(Base, TimestampMixin):
     )
 
 
+class ProtocolDefinition(Base, TimestampMixin):
+    __tablename__ = "protocol_definitions"
+    __table_args__ = (
+        CheckConstraint(
+            "build_status IN ('pending', 'building', 'ready', 'failed', 'requires_adaptation', 'disabled')",
+            name="ck_protocol_definitions_build_status",
+        ),
+        UniqueConstraint(
+            "adapter_key",
+            "repository_url",
+            "version",
+            name="uq_protocol_definitions_source_version",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=next_snowflake_id
+    )
+    public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(64), index=True)
+    adapter_key: Mapped[str] = mapped_column(String(32), index=True)
+    repository_url: Mapped[str] = mapped_column(String(512))
+    package_name: Mapped[str] = mapped_column(String(160), index=True)
+    version: Mapped[str] = mapped_column(String(64), index=True)
+    upstream_ref: Mapped[str | None] = mapped_column(String(80))
+    build_status: Mapped[str] = mapped_column(
+        String(32), default="pending", nullable=False, index=True
+    )
+    contract_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    is_builtin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    remark: Mapped[str | None] = mapped_column(String(512))
+    artifact_digest: Mapped[str | None] = mapped_column(String(64), index=True)
+    artifact_integrity: Mapped[str | None] = mapped_column(String(255))
+    build_error_code: Mapped[str | None] = mapped_column(String(64))
+    build_error_message: Mapped[str | None] = mapped_column(String(1024))
+    build_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    built_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    nodes: Mapped[list["ProtocolNode"]] = relationship(
+        back_populates="protocol_definition"
+    )
+    build_jobs: Mapped[list["ProtocolBuildJob"]] = relationship(
+        back_populates="protocol_definition",
+        cascade="all, delete-orphan",
+    )
+
+
+class ProtocolBuildJob(Base, TimestampMixin):
+    __tablename__ = "protocol_build_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'building', 'succeeded', 'failed', 'requires_adaptation')",
+            name="ck_protocol_build_jobs_status",
+        ),
+        Index("ix_protocol_build_jobs_definition_status", "protocol_definition_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=next_snowflake_id
+    )
+    public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    protocol_definition_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("protocol_definitions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), default="queued", nullable=False, index=True
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    error_message: Mapped[str | None] = mapped_column(String(1024))
+    log_excerpt: Mapped[str | None] = mapped_column(Text)
+    artifact_digest: Mapped[str | None] = mapped_column(String(64))
+    artifact_integrity: Mapped[str | None] = mapped_column(String(255))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    protocol_definition: Mapped[ProtocolDefinition] = relationship(
+        back_populates="build_jobs"
+    )
+
+
 class ProtocolNode(Base, TimestampMixin):
     __tablename__ = "protocol_nodes"
     __table_args__ = (
-        CheckConstraint(
-            "protocol_type IN ('baileys')", name="ck_protocol_nodes_type"
-        ),
         CheckConstraint(
             "connection_policy IN ('on_demand', 'always_on')",
             name="ck_protocol_nodes_connection_policy",
@@ -497,6 +645,12 @@ class ProtocolNode(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(64), index=True)
     protocol_type: Mapped[str] = mapped_column(
         String(24), default="baileys", nullable=False, index=True
+    )
+    protocol_definition_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("protocol_definitions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
     )
     remark: Mapped[str | None] = mapped_column(String(512))
     ingress_enabled: Mapped[bool] = mapped_column(
@@ -532,6 +686,9 @@ class ProtocolNode(Base, TimestampMixin):
     created_by: Mapped[int] = mapped_column(
         BigInteger,
         ForeignKey("user_accounts.id", ondelete="CASCADE"), index=True
+    )
+    protocol_definition: Mapped[ProtocolDefinition] = relationship(
+        back_populates="nodes"
     )
 
 

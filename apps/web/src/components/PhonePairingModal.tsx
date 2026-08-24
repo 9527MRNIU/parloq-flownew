@@ -125,10 +125,14 @@ export function PhonePairingModal({
       .then((payload) => {
         const options = unwrapList<Record<string, unknown>>(payload)
           .rows.filter((row) => row.enabled !== false)
-          .map((row) => ({
-            id: snowflakeId(row, "id", "proxyId", "proxy_id"),
-            label: `${String(row.name || "IP 代理")}${row.countryCode ? ` · ${String(row.countryCode)}` : ""}`,
-          }))
+          .map((row) => {
+            const host = String(row.host || row.hostname || "");
+            const port = Number(row.port || 0);
+            return {
+              id: snowflakeId(row, "id", "proxyId", "proxy_id"),
+              label: `${host && port ? `${host}:${port}` : "IP 代理"}${row.countryCode ? ` · ${String(row.countryCode)}` : ""}`,
+            };
+          })
           .filter((option) => option.id);
         setProxies(options);
         setProxyId((current) =>

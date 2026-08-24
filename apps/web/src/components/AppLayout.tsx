@@ -9,12 +9,12 @@ import {
   HouseIcon,
   ImagesIcon,
   MoonIcon,
+  NetworkIcon,
   SettingsIcon,
   ShieldCheckIcon,
   UsersRoundIcon,
   SunIcon,
   UserCircleIcon,
-  WrenchIcon,
   WorkflowIcon,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -254,15 +254,15 @@ export const navigation: NavSection[] = [
       },
       {
         label: "运营管理",
-        icon: WrenchIcon,
+        icon: NetworkIcon,
         children: [
           {
-            label: "协议管理",
-            to: "/resources/operations/protocol",
-            permissionKey: "resources.protocol.read",
+            label: "协议中心",
+            to: "/resources/operations/protocol-center",
+            permissionKey: "resources.protocol_center.read",
           },
           {
-            label: "IP 管理",
+            label: "代理管理",
             to: "/resources/operations/ip",
             permissionKey: "resources.ip.manage",
           },

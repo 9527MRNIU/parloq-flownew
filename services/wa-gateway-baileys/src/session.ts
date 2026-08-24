@@ -55,11 +55,11 @@ export function parseImportedSession(session: unknown): {
   }
 }
 
-export function exportSession(auth: StoredAuth): SessionBundle {
+export function exportSession(auth: StoredAuth, libraryVersion = BAILEYS_VERSION): SessionBundle {
   return {
     format: SESSION_FORMAT,
     version: SESSION_VERSION,
-    library: { name: '@whiskeysockets/baileys', version: BAILEYS_VERSION },
+    library: { name: '@whiskeysockets/baileys', version: libraryVersion },
     exportedAt: new Date().toISOString(),
     auth,
   }

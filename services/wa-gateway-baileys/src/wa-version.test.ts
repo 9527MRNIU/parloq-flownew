@@ -12,6 +12,12 @@ describe('WA Web version resolution', () => {
 
     await expect(resolver.current(undefined, true)).resolves.toEqual([2, 3000, 1045195504])
     await expect(resolver.current(undefined, true)).resolves.toEqual([2, 3000, 1045195504])
+    await expect(resolver.inspect()).resolves.toMatchObject({
+      resolvedVersion: [2, 3000, 1045195504],
+      latestVersion: [2, 3000, 1045195504],
+      resolution: 'remote',
+      error: null,
+    })
     expect(fetchVersion).toHaveBeenCalledTimes(1)
   })
 

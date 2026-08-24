@@ -8,6 +8,9 @@ COMPOSE_DIR="${PARLOQ_COMPOSE_DIR:-/www/server/panel/data/compose/parloq-flow}"
 COMPOSE_FILE="${COMPOSE_DIR}/docker-compose.yaml"
 ENV_FILE="${COMPOSE_DIR}/.env"
 GITHUB_TOKEN_FILE="${COMPOSE_DIR}/github-token"
+PERSIST_ROOT="${PARLOQ_PERSIST_ROOT:-/data/parloq-flow}"
+COMPOSE_TEMPLATE="${SCRIPT_DIR}/docker-compose.production.yml"
+ENV_TEMPLATE="${SCRIPT_DIR}/production.env.example"
 IMAGE_RETENTION="${PARLOQ_IMAGE_RETENTION:-3}"
 BUILD_CACHE_MAX_AGE="${PARLOQ_BUILD_CACHE_MAX_AGE:-168h}"
 ORIGINAL_ARGUMENTS=("$@")
@@ -55,7 +58,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-for command_name in git docker flock curl mktemp sort; do
+for command_name in git docker flock curl mktemp sort python3 install; do
   command -v "${command_name}" >/dev/null 2>&1 || die "${command_name} is required"
 done
 
@@ -64,9 +67,8 @@ case "${IMAGE_RETENTION}" in
 esac
 [ "${IMAGE_RETENTION}" -gt 0 ] || die "PARLOQ_IMAGE_RETENTION must be greater than zero"
 
-[ -d "${COMPOSE_DIR}" ] || die "BaoTa Compose directory does not exist: ${COMPOSE_DIR}"
-[ -f "${COMPOSE_FILE}" ] || die "BaoTa Compose file does not exist: ${COMPOSE_FILE}"
-[ -f "${ENV_FILE}" ] || die "production env file does not exist: ${ENV_FILE}"
+[ -f "${COMPOSE_TEMPLATE}" ] || die "production Compose template does not exist: ${COMPOSE_TEMPLATE}"
+[ -f "${ENV_TEMPLATE}" ] || die "production env template does not exist: ${ENV_TEMPLATE}"
 case "${RELEASE_SOURCE_DIR}" in
   /*) ;;
   *) die "PARLOQ_RELEASE_SOURCE_DIR must be an absolute path" ;;
@@ -80,6 +82,8 @@ esac
 token_candidate=""
 askpass_file=""
 management_origin_candidate=""
+bootstrap_env_candidate=""
+bootstrap_compose_candidate=""
 cleanup_local_files() {
   if [ -n "${token_candidate}" ]; then
     rm -f -- "${token_candidate}"
@@ -89,6 +93,12 @@ cleanup_local_files() {
   fi
   if [ -n "${management_origin_candidate}" ]; then
     rm -f -- "${management_origin_candidate}"
+  fi
+  if [ -n "${bootstrap_env_candidate}" ]; then
+    rm -f -- "${bootstrap_env_candidate}"
+  fi
+  if [ -n "${bootstrap_compose_candidate}" ]; then
+    rm -f -- "${bootstrap_compose_candidate}"
   fi
 }
 trap cleanup_local_files EXIT
@@ -136,8 +146,125 @@ normalize_management_origin() {
 }
 
 read_env_value() {
-  key="$1"
+  local key="$1"
   awk -v key="${key}" 'index($0, key "=") == 1 { sub("^[^=]*=", ""); print; exit }' "${ENV_FILE}"
+}
+
+set_env_value_in_file() {
+  local target_file="$1"
+  local key="$2"
+  local value="$3"
+  local candidate found line
+  candidate="$(mktemp "${target_file}.rewrite.XXXXXX")"
+  found=0
+  while IFS= read -r line || [ -n "${line}" ]; do
+    case "${line}" in
+      "${key}"=*)
+        printf '%s=%s\n' "${key}" "${value}"
+        found=1
+        ;;
+      *) printf '%s\n' "${line}" ;;
+    esac
+  done <"${target_file}" >"${candidate}"
+  if [ "${found}" = 0 ]; then
+    printf '%s=%s\n' "${key}" "${value}" >>"${candidate}"
+  fi
+  chmod --reference="${target_file}" "${candidate}"
+  mv "${candidate}" "${target_file}"
+}
+
+generate_urlsafe_secret() {
+  python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(48))
+PY
+}
+
+generate_fernet_key() {
+  python3 - <<'PY'
+import base64
+import secrets
+print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())
+PY
+}
+
+configure_bootstrap_turnstile() {
+  local site_key secret_key
+  if ! IFS= read -r -p 'Turnstile Site Key: ' site_key; then
+    printf '\n'
+    die "Turnstile Site Key input was cancelled"
+  fi
+  if [ "${#site_key}" -lt 10 ] || [ "${#site_key}" -gt 200 ]; then
+    unset site_key
+    die "Turnstile Site Key has an invalid length"
+  fi
+  case "${site_key}" in
+    *[[:space:]]*) unset site_key; die "Turnstile Site Key must not contain whitespace" ;;
+  esac
+  if ! IFS= read -r -s -p 'Turnstile Secret Key（输入不会显示）: ' secret_key; then
+    printf '\n'
+    unset site_key
+    die "Turnstile Secret Key input was cancelled"
+  fi
+  printf '\n'
+  if [ "${#secret_key}" -lt 10 ] || [ "${#secret_key}" -gt 200 ]; then
+    unset site_key secret_key
+    die "Turnstile Secret Key has an invalid length"
+  fi
+  case "${secret_key}" in
+    *[[:space:]]*) unset site_key secret_key; die "Turnstile Secret Key must not contain whitespace" ;;
+  esac
+  set_env_value_in_file "${ENV_FILE}" TURNSTILE_SITE_KEY "${site_key}"
+  set_env_value_in_file "${ENV_FILE}" TURNSTILE_SECRET_KEY "${secret_key}"
+  unset site_key secret_key
+}
+
+bootstrap_production_environment() {
+  local encryption_key_id encryption_key
+  log "未检测到 Parloq Flow 生产配置，开始初始化全新部署。"
+  if [ -e "${PERSIST_ROOT}/postgres/PG_VERSION" ]; then
+    die "PostgreSQL data already exists but production configuration is missing"
+  fi
+  if [ -d "${PERSIST_ROOT}/redis" ] \
+    && [ -n "$(find "${PERSIST_ROOT}/redis" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+    die "Redis data already exists but production configuration is missing"
+  fi
+
+  install -d -m 700 "${COMPOSE_DIR}"
+  install -d -m 700 \
+    "${PERSIST_ROOT}/postgres" \
+    "${PERSIST_ROOT}/redis" \
+    "${PERSIST_ROOT}/protocol-artifacts"
+
+  bootstrap_env_candidate="$(mktemp "${COMPOSE_DIR}/.env.bootstrap.XXXXXX")"
+  cp "${ENV_TEMPLATE}" "${bootstrap_env_candidate}"
+  chmod 600 "${bootstrap_env_candidate}"
+  set_env_value_in_file "${bootstrap_env_candidate}" PARLOQ_PERSIST_ROOT "${PERSIST_ROOT}"
+  set_env_value_in_file "${bootstrap_env_candidate}" MANAGEMENT_ORIGIN ""
+  set_env_value_in_file "${bootstrap_env_candidate}" POSTGRES_PASSWORD "$(generate_urlsafe_secret)"
+  set_env_value_in_file "${bootstrap_env_candidate}" REDIS_PASSWORD "$(generate_urlsafe_secret)"
+  set_env_value_in_file "${bootstrap_env_candidate}" SEED_ADMIN_PASSWORD "$(generate_urlsafe_secret)"
+  set_env_value_in_file "${bootstrap_env_candidate}" APP_SECRET_KEY "$(generate_urlsafe_secret)"
+  set_env_value_in_file "${bootstrap_env_candidate}" PROMOTION_SUCCESS_WEBHOOK_SECRET "$(generate_urlsafe_secret)"
+  set_env_value_in_file "${bootstrap_env_candidate}" WA_GATEWAY_API_TOKEN "$(generate_urlsafe_secret)"
+  set_env_value_in_file "${bootstrap_env_candidate}" WA_GATEWAY_WEBHOOK_SECRET "$(generate_urlsafe_secret)"
+  encryption_key_id="primary-$(date -u +%Y%m%d)"
+  encryption_key="$(generate_fernet_key)"
+  set_env_value_in_file "${bootstrap_env_candidate}" DATA_ENCRYPTION_ACTIVE_KEY_ID "${encryption_key_id}"
+  set_env_value_in_file "${bootstrap_env_candidate}" DATA_ENCRYPTION_KEYS \
+    "{\"${encryption_key_id}\":\"${encryption_key}\"}"
+  unset encryption_key
+  mv "${bootstrap_env_candidate}" "${ENV_FILE}"
+  bootstrap_env_candidate=""
+
+  bootstrap_compose_candidate="$(mktemp "${COMPOSE_DIR}/docker-compose.yaml.bootstrap.XXXXXX")"
+  cp "${COMPOSE_TEMPLATE}" "${bootstrap_compose_candidate}"
+  chmod 600 "${bootstrap_compose_candidate}"
+  mv "${bootstrap_compose_candidate}" "${COMPOSE_FILE}"
+  bootstrap_compose_candidate=""
+
+  configure_bootstrap_turnstile
+  log "全新生产环境配置已初始化；内部密码和密钥只保存在 ${ENV_FILE}。"
 }
 
 persist_management_origin() {
@@ -169,6 +296,12 @@ configure_management_origin() {
   log "管理后台域名已保存到 ${ENV_FILE}"
 }
 
+validate_redis_password() {
+  local value="$1"
+  [ "${#value}" -ge 32 ] && [ "${#value}" -le 128 ] \
+    && printf '%s' "${value}" | grep -Eq '^[A-Za-z0-9._~-]+$'
+}
+
 configure_github_token() {
   if ! IFS= read -r -s -p 'GitHub fine-grained token（输入不会显示）: ' github_token; then
     printf '\n'
@@ -195,6 +328,24 @@ configure_github_token() {
   log "GitHub Token 已保存到 ${GITHUB_TOKEN_FILE}"
 }
 
+cd "${PROJECT_DIR}"
+[ "$(git rev-parse --abbrev-ref HEAD)" = "main" ] || die "production updates must run from main"
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  die "working tree has tracked changes"
+fi
+if [ -n "$(git ls-files --others --exclude-standard)" ]; then
+  die "working tree has untracked files"
+fi
+
+if [ -f "${COMPOSE_FILE}" ] && [ -f "${ENV_FILE}" ]; then
+  bootstrap_mode=0
+elif [ ! -e "${COMPOSE_FILE}" ] && [ ! -e "${ENV_FILE}" ]; then
+  bootstrap_mode=1
+  bootstrap_production_environment
+else
+  die "partial production configuration detected; Compose and env files must both exist or both be absent"
+fi
+
 if [ ! -s "${GITHUB_TOKEN_FILE}" ]; then
   log "服务器尚未配置 GitHub Token，首次更新需要输入一次。"
   configure_github_token
@@ -211,14 +362,14 @@ elif ! normalized_origin="$(normalize_management_origin "${management_origin}")"
 fi
 management_host="${management_origin#https://}"
 
-cd "${PROJECT_DIR}"
-[ "$(git rev-parse --abbrev-ref HEAD)" = "main" ] || die "production updates must run from main"
-if ! git diff --quiet || ! git diff --cached --quiet; then
-  die "working tree has tracked changes"
+redis_password="$(read_env_value REDIS_PASSWORD)"
+if [ -z "${redis_password}" ]; then
+  die "REDIS_PASSWORD is missing; existing deployments must be repaired manually before release"
+elif ! validate_redis_password "${redis_password}"; then
+  unset redis_password
+  die "REDIS_PASSWORD in ${ENV_FILE} must contain 32-128 URL-safe characters"
 fi
-if [ -n "$(git ls-files --others --exclude-standard)" ]; then
-  die "working tree has untracked files"
-fi
+unset redis_password
 
 create_git_askpass
 
@@ -410,7 +561,12 @@ rollback() {
       --env-file "${ENV_FILE}" \
       -f "${COMPOSE_FILE}" \
       up -d --no-deps --wait --wait-timeout 600 \
-      wa-gateway api api-worker web || true
+      redis || true
+    PARLOQ_APP_PULL_POLICY=never docker compose \
+      --env-file "${ENV_FILE}" \
+      -f "${COMPOSE_FILE}" \
+      up -d --no-deps --wait --wait-timeout 600 \
+      protocol-builder wa-gateway api api-worker web || true
   fi
   die "update failed with exit code ${code}"
 }
@@ -473,6 +629,7 @@ verify_service api "${api_image}"
 verify_service api-worker "${api_image}"
 verify_service web "${web_image}"
 verify_service wa-gateway "${gateway_image}"
+verify_service protocol-builder "${gateway_image}"
 curl -fsS --max-time 20 http://127.0.0.1:18100/healthz >/dev/null
 curl -fsS --max-time 20 http://127.0.0.1:18100/readyz >/dev/null
 management_page="$(curl -fsS --max-time 20 -H "Host: ${management_host}" http://127.0.0.1:18100/)"

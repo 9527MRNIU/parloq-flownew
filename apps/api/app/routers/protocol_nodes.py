@@ -20,6 +20,7 @@ from app.models import (
     AccountPairingAttempt,
     PersonalAccount,
     PromotionChannel,
+    ProtocolDefinition,
     ProtocolNode,
     ProtocolPool,
     ProtocolPoolMember,
@@ -27,6 +28,7 @@ from app.models import (
 from app.snowflake import new_public_id
 from app.services.protocol_nodes import (
     DEFAULT_SYNC_POLICY,
+    default_protocol_definition,
     ingress_unavailable_reason,
     normalized_rate_limit_policy,
     normalized_sync_policy,
@@ -89,11 +91,33 @@ def _node(db: DbSession, identifier: str, user) -> ProtocolNode:
         )
     )
     if item is None:
-        raise HTTPException(status_code=404, detail="协议不存在")
+        raise HTTPException(status_code=404, detail="节点不存在")
     return item
 
 
-def _row(db: DbSession, item: ProtocolNode) -> dict:
+def _definition_payload(item: ProtocolDefinition) -> dict:
+    return {
+        "id": entity_id(item),
+        "name": item.name,
+        "adapterKey": item.adapter_key,
+        "version": item.version,
+        "buildStatus": item.build_status,
+        "enabled": item.enabled,
+    }
+
+
+def _row(
+    db: DbSession,
+    item: ProtocolNode,
+    *,
+    definition: ProtocolDefinition | None = None,
+) -> dict:
+    definition = definition or db.get(
+        ProtocolDefinition,
+        item.protocol_definition_id,
+    )
+    if definition is None:
+        raise HTTPException(status_code=500, detail="节点绑定的协议不存在")
     account_states = list(
         db.execute(
             select(PersonalAccount.status, PersonalAccount.validation_status).where(
@@ -124,6 +148,7 @@ def _row(db: DbSession, item: ProtocolNode) -> dict:
         "id": entity_id(item),
         "name": item.name,
         "protocol": item.protocol_type,
+        "protocolDefinition": _definition_payload(definition),
         "remark": item.remark,
         "ingressEnabled": item.ingress_enabled,
         "marketingEnabled": item.marketing_enabled,
@@ -158,10 +183,26 @@ def create_protocol_node(
     db: DbSession,
     current_user: CurrentUser,
 ) -> dict:
+    if payload.protocol_definition_id is None:
+        definition = default_protocol_definition(db)
+    else:
+        definition = db.scalar(
+            select(ProtocolDefinition).where(
+                identifier_filter(
+                    ProtocolDefinition,
+                    payload.protocol_definition_id,
+                )
+            )
+        )
+    if definition is None:
+        raise HTTPException(status_code=404, detail="协议不存在")
+    if definition.build_status != "ready" or not definition.enabled:
+        raise HTTPException(status_code=409, detail="该协议尚未构建完成，不能创建节点")
     item = ProtocolNode(
         public_id=new_public_id("proto"),
         name=payload.name,
-        protocol_type="baileys",
+        protocol_type=definition.adapter_key,
+        protocol_definition_id=definition.id,
         remark=payload.remark,
         ingress_enabled=payload.ingress_enabled,
         marketing_enabled=payload.marketing_enabled,
@@ -182,9 +223,9 @@ def create_protocol_node(
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(status_code=409, detail="协议名称已存在") from None
+        raise HTTPException(status_code=409, detail="节点名称已存在") from None
     db.refresh(item)
-    return {"data": {"protocol": _row(db, item)}}
+    return {"data": {"protocol": _row(db, item, definition=definition)}}
 
 
 @router.get("")
@@ -199,7 +240,28 @@ def list_protocol_nodes(db: DbSession, current_user: CurrentUser) -> dict:
         db.commit()
     statement = _scope(select(ProtocolNode), current_user)
     items = db.scalars(statement.order_by(ProtocolNode.id)).all()
-    return {"data": {"rows": [_row(db, item) for item in items], "total": len(items)}}
+    definition_ids = {item.protocol_definition_id for item in items}
+    definitions = {
+        item.id: item
+        for item in db.scalars(
+            select(ProtocolDefinition).where(
+                ProtocolDefinition.id.in_(definition_ids)
+            )
+        ).all()
+    } if definition_ids else {}
+    return {
+        "data": {
+            "rows": [
+                _row(
+                    db,
+                    item,
+                    definition=definitions.get(item.protocol_definition_id),
+                )
+                for item in items
+            ],
+            "total": len(items),
+        }
+    }
 
 
 @router.patch("/{protocol_id}")
@@ -211,6 +273,33 @@ def update_protocol_node(
 ) -> dict:
     item = _node(db, protocol_id, current_user)
     marketing_was_enabled = item.marketing_enabled
+    selected_definition: ProtocolDefinition | None = None
+    if "protocol_definition_id" in payload.model_fields_set:
+        if payload.protocol_definition_id is None:
+            raise HTTPException(status_code=422, detail="节点必须绑定协议")
+        selected_definition = db.scalar(
+            select(ProtocolDefinition).where(
+                identifier_filter(
+                    ProtocolDefinition,
+                    payload.protocol_definition_id,
+                )
+            )
+        )
+        if selected_definition is None:
+            raise HTTPException(status_code=404, detail="协议不存在")
+        if selected_definition.build_status != "ready" or not selected_definition.enabled:
+            raise HTTPException(status_code=409, detail="该协议尚未构建完成")
+        if (
+            selected_definition.id != item.protocol_definition_id
+            and db.scalar(
+                select(PersonalAccount.id).where(
+                    PersonalAccount.protocol_id == item.id
+                ).limit(1)
+            ) is not None
+        ):
+            raise HTTPException(status_code=409, detail="已有账号的节点不能直接切换协议")
+        item.protocol_definition_id = selected_definition.id
+        item.protocol_type = selected_definition.adapter_key
     if payload.name is not None:
         item.name = payload.name
     if "remark" in payload.model_fields_set:
@@ -283,10 +372,18 @@ def update_protocol_node(
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise HTTPException(status_code=409, detail="协议名称已存在") from None
+        raise HTTPException(status_code=409, detail="节点名称已存在") from None
     for group_id in wakeup_group_ids:
         dispatch_group_wakeups_best_effort(group_id)
-    return {"data": {"protocol": _row(db, item)}}
+    return {
+        "data": {
+            "protocol": _row(
+                db,
+                item,
+                definition=selected_definition,
+            )
+        }
+    }
 
 
 @router.delete("/{protocol_id}")

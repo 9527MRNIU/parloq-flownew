@@ -1062,16 +1062,32 @@ tr.selected-row {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
 }
-.health-cell > span {
+.health-cell {
+  min-width: 180px;
+  max-width: 240px;
+  white-space: normal;
+}
+.health-cell__summary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.health-cell__summary > span {
   color: var(--foreground);
   font-family: Inter, ui-sans-serif, system-ui, sans-serif;
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
 .health-cell small {
-  max-width: 160px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  display: block;
+  color: var(--muted-foreground);
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+  line-height: 20px;
+  white-space: normal;
 }
 .binding-panel {
   min-height: 370px;

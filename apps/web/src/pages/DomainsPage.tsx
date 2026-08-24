@@ -1,8 +1,8 @@
 import {
   LoaderCircleIcon,
   PlayCircleIcon,
-  PlusIcon,
   RefreshCwIcon,
+  ShieldCheckIcon,
   ShoppingCartIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -14,6 +14,7 @@ import {
   Drawer,
   EmptyState,
   Input,
+  Modal,
   Spinner,
   Switch,
   Table,
@@ -135,6 +136,48 @@ type DomainSearchState = {
   candidateCount: number;
   error?: string;
 };
+type BaoTaDomainPolicy = {
+  cdnEnabled: boolean;
+  ccEnabled: boolean;
+  chinaBlocked: boolean;
+};
+type BaoTaFirewallCapability = {
+  status: "available" | "unavailable" | "unknown";
+  checkedAt?: string;
+};
+const defaultBaoTaDomainPolicy: BaoTaDomainPolicy = {
+  cdnEnabled: true,
+  ccEnabled: false,
+  chinaBlocked: true,
+};
+
+function baoTaSettings(input: unknown): {
+  policy: BaoTaDomainPolicy;
+  capability: BaoTaFirewallCapability;
+  configured: boolean;
+  enabled: boolean;
+} {
+  const row = (input ?? {}) as Record<string, unknown>;
+  const settings = (row.settings ?? {}) as Record<string, unknown>;
+  const rawPolicy = (settings.domainPolicy ?? {}) as Record<string, unknown>;
+  const rawCapability = (settings.nginxFirewallPlugin ?? {}) as Record<string, unknown>;
+  const statusValue = String(rawCapability.status || "unknown");
+  return {
+    policy: {
+      cdnEnabled: Boolean(rawPolicy.cdnEnabled ?? defaultBaoTaDomainPolicy.cdnEnabled),
+      ccEnabled: Boolean(rawPolicy.ccEnabled ?? defaultBaoTaDomainPolicy.ccEnabled),
+      chinaBlocked: Boolean(rawPolicy.chinaBlocked ?? defaultBaoTaDomainPolicy.chinaBlocked),
+    },
+    capability: {
+      status: statusValue === "available" || statusValue === "unavailable"
+        ? statusValue
+        : "unknown",
+      checkedAt: String(rawCapability.checkedAt || ""),
+    },
+    configured: Boolean(row.configured),
+    enabled: Boolean(row.enabled),
+  };
+}
 const get = (row: Record<string, unknown>, ...keys: string[]) => {
   for (const key of keys) if (row[key] != null) return String(row[key]);
   return "";
@@ -420,7 +463,7 @@ function nameSiloDomainStatus(row: NameSiloDomainRow): EntityStatusMeta {
   };
 }
 export function DomainsPage() {
-  const { can } = useAuth();
+  const { can, user } = useAuth();
   const canManage = can("promotion.domain.manage");
   const canPurchase = can("promotion.domain.purchase");
   const currentSystemHostname = typeof window === "undefined"
@@ -452,6 +495,12 @@ export function DomainsPage() {
   const [purchasePending, setPurchasePending] = useState(false);
   const [orderPending, setOrderPending] = useState("");
   const [importPending, setImportPending] = useState("");
+  const [baotaPolicyOpen, setBaoTaPolicyOpen] = useState(false);
+  const [baotaPolicy, setBaoTaPolicy] = useState<BaoTaDomainPolicy>(defaultBaoTaDomainPolicy);
+  const [baotaCapability, setBaoTaCapability] = useState<BaoTaFirewallCapability>({ status: "unknown" });
+  const [baotaPolicyLoading, setBaoTaPolicyLoading] = useState(false);
+  const [baotaPolicySaving, setBaoTaPolicySaving] = useState(false);
+  const [baotaPolicyError, setBaoTaPolicyError] = useState("");
   const load = useCallback(async () => {
     setLoading(true);
     const [systemResult, cloudflareResult, nameSiloResult] = await Promise.allSettled([
@@ -510,6 +559,27 @@ export function DomainsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+  const hasActiveOnboarding = rows.some((row) =>
+    ["idle", "running", "waiting"].includes(row.onboarding.status)
+  );
+  useEffect(() => {
+    if (!hasActiveOnboarding) return;
+    let inFlight = false;
+    const refresh = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const payload = await apiRequest("/api/domains?pageSize=100");
+        setRows(unwrapList<unknown>(payload).rows.map(normalize));
+      } catch {
+        // Keep the previous rows and retry on the next interval.
+      } finally {
+        inFlight = false;
+      }
+    };
+    const timer = window.setInterval(() => void refresh(), 5000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveOnboarding]);
   const visible = useMemo(() => {
     const search = keyword.trim().toLowerCase();
     return search
@@ -572,10 +642,73 @@ export function DomainsPage() {
       if (timer) clearTimeout(timer);
     };
   }, [domainSearch?.searchId, domainSearch?.status, purchaseOpen]);
-  function open(row?: DomainRow) {
-    setEditing(row || null);
-    setHostname(row?.hostname || "");
-    setEnabled(row?.enabled ?? true);
+
+  async function openBaoTaPolicy() {
+    setBaoTaPolicyOpen(true);
+    setBaoTaPolicyLoading(true);
+    setBaoTaPolicyError("");
+    try {
+      const payload = await apiRequest("/api/system/configuration");
+      const platforms = (payload as { data?: { platforms?: unknown[] } }).data?.platforms || [];
+      let platform = platforms.find((value) =>
+        String((value as Record<string, unknown>).key || "") === "baota"
+      );
+      if (!platform) throw new Error("未找到宝塔系统配置");
+      const current = baoTaSettings(platform);
+      if (current.configured && current.enabled) {
+        const tested = await apiRequest("/api/system/configuration/baota/test", {
+          method: "POST",
+        }) as { data?: { ok?: boolean; message?: string; platform?: unknown } };
+        platform = tested.data?.platform || platform;
+        if (!tested.data?.ok) {
+          setBaoTaPolicyError(tested.data?.message || "宝塔连接或插件检测失败");
+        }
+      }
+      const next = baoTaSettings(platform);
+      setBaoTaPolicy(next.policy);
+      setBaoTaCapability(next.capability);
+      if (!next.configured || !next.enabled) {
+        setBaoTaPolicyError("请先在系统配置中启用并测试宝塔面板");
+      }
+    } catch (caught) {
+      setBaoTaPolicyError(caught instanceof Error ? caught.message : "宝塔策略读取失败");
+      setBaoTaCapability({ status: "unknown" });
+    } finally {
+      setBaoTaPolicyLoading(false);
+    }
+  }
+
+  async function saveBaoTaPolicy() {
+    if (baotaCapability.status !== "available") return;
+    setBaoTaPolicySaving(true);
+    try {
+      const payload = await apiRequest("/api/system/configuration/baota", {
+        method: "PUT",
+        body: JSON.stringify({
+          firewallCdnEnabled: baotaPolicy.cdnEnabled,
+          firewallCcEnabled: baotaPolicy.ccEnabled,
+          firewallChinaBlocked: baotaPolicy.chinaBlocked,
+        }),
+      });
+      const platform = (payload as { data?: { platform?: unknown } }).data?.platform;
+      if (platform) {
+        const next = baoTaSettings(platform);
+        setBaoTaPolicy(next.policy);
+        setBaoTaCapability(next.capability);
+      }
+      setBaoTaPolicyOpen(false);
+      toast.success("宝塔策略已保存，将应用到后续域名接入");
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "宝塔策略保存失败");
+    } finally {
+      setBaoTaPolicySaving(false);
+    }
+  }
+
+  function open(row: DomainRow) {
+    setEditing(row);
+    setHostname(row.hostname);
+    setEnabled(row.enabled);
     setDrawer(true);
   }
   async function continueOnboarding(row: DomainRow, quiet = false) {
@@ -607,35 +740,19 @@ export function DomainsPage() {
     }
   }
   async function save() {
-    if (!hostname.trim()) return;
+    if (!editing || !hostname.trim()) return;
     setPending(true);
     try {
-      const payload = await apiRequest(
-        editing ? `/api/domains/${editing.id}` : "/api/domains",
-        {
-          method: editing ? "PATCH" : "POST",
-          body: JSON.stringify({
-            hostname: hostname
-              .trim()
-              .toLowerCase()
-              .replace(/^https?:\/\//, "")
-              .replace(/\/$/, ""),
-            enabled,
-            managementMode: "external",
-          }),
-        },
-      );
+      const payload = await apiRequest(`/api/domains/${editing.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled }),
+      });
       const saved = (payload as { data?: { domain?: unknown } }).data?.domain;
       const savedRow = saved ? normalize(saved) : null;
       if (savedRow) setEditing(savedRow);
-      if (editing) setDrawer(false);
+      setDrawer(false);
       await load();
-      if (editing) {
-        toast.success("域名已更新");
-      } else if (savedRow) {
-        toast.success("域名记录已创建，正在启动自动接入");
-        await continueOnboarding(savedRow);
-      }
+      toast.success("域名已更新");
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "保存失败");
     } finally {
@@ -908,10 +1025,10 @@ export function DomainsPage() {
               <RefreshCwIcon size={16} />
               刷新
             </Button>
-            {canManage && activeList === "system" ? (
-              <Button variant="outline" onClick={() => open()}>
-                <PlusIcon size={17} />
-                接入已有域名
+            {user?.isAdmin ? (
+              <Button variant="outline" onClick={() => void openBaoTaPolicy()}>
+                <ShieldCheckIcon size={17} />
+                宝塔策略
               </Button>
             ) : null}
             {canPurchase ? (
@@ -1058,7 +1175,7 @@ export function DomainsPage() {
                                 onClick={() => void continueOnboarding(row)}
                               >
                                 {onboardingPending === row.id ? <Spinner /> : null}
-                                继续自动接入
+                                立即重试
                               </Button>
                             ) : null}
                             <Button
@@ -1315,10 +1432,103 @@ export function DomainsPage() {
         )}
         </ListTableCard>
       )}
+      <Modal
+        open={baotaPolicyOpen}
+        onClose={() => !baotaPolicySaving && setBaoTaPolicyOpen(false)}
+        title="宝塔策略"
+        description="策略会应用到之后的自动域名接入；未安装 Nginx 防火墙插件时系统会自动跳过。"
+        footer={
+          <>
+            <Button variant="outline" onClick={() => setBaoTaPolicyOpen(false)}>
+              关闭
+            </Button>
+            <Button
+              disabled={baotaPolicyLoading || baotaPolicySaving || baotaCapability.status !== "available"}
+              onClick={() => void saveBaoTaPolicy()}
+            >
+              {baotaPolicySaving ? <Spinner /> : null}
+              保存策略
+            </Button>
+          </>
+        }
+      >
+        {baotaPolicyLoading ? (
+          <div className="loading-state min-h-32">
+            <Spinner />
+            正在检测宝塔和防火墙插件…
+          </div>
+        ) : (
+          <div className="grid gap-4">
+            <section className="rounded-lg border border-border bg-muted/30 p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone={baotaCapability.status === "available" ? "success" : "neutral"}>
+                  {baotaCapability.status === "available"
+                    ? "防火墙插件可用"
+                    : baotaCapability.status === "unavailable"
+                      ? "未检测到防火墙插件"
+                      : "插件状态未知"}
+                </Badge>
+                {baotaCapability.checkedAt ? (
+                  <span className="text-sm text-muted-foreground">
+                    检测于 {formatDateTime(baotaCapability.checkedAt)}
+                  </span>
+                ) : null}
+              </div>
+              <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                {baotaCapability.status === "available"
+                  ? "以下策略将在宝塔站点和反向代理创建后应用。"
+                  : "域名仍会正常完成站点、反向代理和公网验证，防火墙配置不会阻断接入。"}
+              </p>
+              {baotaPolicyError ? (
+                <p className="mt-2 text-sm leading-6 text-destructive">{baotaPolicyError}</p>
+              ) : null}
+            </section>
+            <div className="grid gap-3">
+              {[
+                {
+                  key: "cdnEnabled" as const,
+                  label: "CDN 模式",
+                  description: "让宝塔防火墙按 CDN 回源场景处理访客地址。",
+                },
+                {
+                  key: "ccEnabled" as const,
+                  label: "CC 防御",
+                  description: "控制宝塔防火墙插件的站点 CC 防御开关。",
+                },
+                {
+                  key: "chinaBlocked" as const,
+                  label: "中国地区拦截",
+                  description: "开启后由宝塔防火墙插件拦截中国地区访问。",
+                },
+              ].map((setting) => (
+                <div
+                  key={setting.key}
+                  className="flex items-center justify-between gap-4 rounded-lg border border-border px-3 py-3"
+                >
+                  <div>
+                    <div className="text-sm font-medium">{setting.label}</div>
+                    <p className="mt-1 text-sm leading-5 text-muted-foreground">
+                      {setting.description}
+                    </p>
+                  </div>
+                  <Switch
+                    checked={baotaPolicy[setting.key]}
+                    disabled={baotaCapability.status !== "available" || baotaPolicySaving}
+                    onCheckedChange={(checked) =>
+                      setBaoTaPolicy((current) => ({ ...current, [setting.key]: checked }))
+                    }
+                    aria-label={setting.label}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </Modal>
       <Drawer
         open={drawer}
         onClose={() => !pending && !onboardingPending && setDrawer(false)}
-        title={editing ? "域名接入与验证" : "接入已有域名"}
+        title="域名接入与验证"
         footer={
           <>
             <Button variant="outline" onClick={() => setDrawer(false)}>
@@ -1328,7 +1538,7 @@ export function DomainsPage() {
               disabled={pending || !hostname.trim()}
               onClick={() => void save()}
             >
-              {pending ? <Spinner /> : null}{editing ? "保存设置" : "生成接入记录"}
+              {pending ? <Spinner /> : null}保存设置
             </Button>
           </>
         }
@@ -1357,7 +1567,7 @@ export function DomainsPage() {
             {editing ? (
               <DrawerFormSection
                 title="自动接入"
-                description="依次核对 Cloudflare Zone、域名服务器、DNS、宝塔站点和公网可用性。等待外部生效时不会后台重复写入。"
+                description="系统会在后台依次核对 Cloudflare Zone、域名服务器、DNS、宝塔站点和公网可用性，无需反复点击继续。"
               >
                 <DrawerFormField label="当前状态">
                   <div className="flex h-8 items-center gap-2">
@@ -1374,7 +1584,7 @@ export function DomainsPage() {
                           ? "需要处理"
                           : editing.onboarding.status === "running"
                             ? "执行中"
-                            : "等待继续"}
+                            : "后台等待"}
                     </Badge>
                     <span className="text-sm text-muted-foreground">
                       {onboardingStageLabels[editing.onboarding.stage] || editing.onboarding.stage}
@@ -1383,7 +1593,7 @@ export function DomainsPage() {
                 </DrawerFormField>
                 <DrawerFormField label="状态说明" align="start">
                   <p className="pt-1.5 text-sm leading-5 text-muted-foreground">
-                    {editing.onboarding.message || "点击继续自动接入开始配置。"}
+                    {editing.onboarding.message || "后台自动接入将在几秒内开始。"}
                   </p>
                 </DrawerFormField>
                 {editing.onboarding.nameservers.length ? (
@@ -1404,7 +1614,7 @@ export function DomainsPage() {
                         onClick={() => void continueOnboarding(editing)}
                       >
                         {onboardingPending === editing.id ? <Spinner /> : <PlayCircleIcon size={16} />}
-                        继续自动接入
+                        立即重试
                       </Button>
                     ) : null}
                     <Button

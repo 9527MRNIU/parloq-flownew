@@ -9,9 +9,9 @@ export interface Store {
   migrate(): Promise<void>
   ready(): Promise<void>
   close(): Promise<void>
-  createAccount(account: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>): Promise<Account>
-  claimUnpairedAccount(account: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>): Promise<Account | null>
-  createImportedAccount(account: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>, auth: StoredAuth): Promise<Account>
+  createAccount(account: Pick<Account, 'id' | 'protocolDefinitionId' | 'protocolVersion' | 'phoneE164' | 'proxyUrl' | 'state' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>): Promise<Account>
+  claimUnpairedAccount(account: Pick<Account, 'id' | 'protocolDefinitionId' | 'protocolVersion' | 'phoneE164' | 'proxyUrl' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>): Promise<Account | null>
+  createImportedAccount(account: Pick<Account, 'id' | 'protocolDefinitionId' | 'protocolVersion' | 'phoneE164' | 'proxyUrl' | 'state' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>, auth: StoredAuth): Promise<Account>
   listAccounts(): Promise<Account[]>
   getAccount(id: string): Promise<Account>
   updateAccount(id: string, changes: Partial<Pick<Account, 'phoneE164' | 'proxyUrl' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'pairingStatus' | 'pairingExpiresAt' | 'metadataSyncStatus' | 'hasAvatar' | 'groupCount' | 'friendCount' | 'mutualContactCount' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy' | 'metadata'>>): Promise<Account>
@@ -33,6 +33,8 @@ const schema = `
 CREATE SCHEMA IF NOT EXISTS wa_gateway_baileys;
 CREATE TABLE IF NOT EXISTS wa_gateway_baileys.accounts (
   id TEXT PRIMARY KEY,
+  protocol_definition_id TEXT NOT NULL DEFAULT '0',
+  protocol_version TEXT NOT NULL DEFAULT '6.7.24',
   phone_e164 TEXT NOT NULL UNIQUE,
   proxy_url TEXT NOT NULL DEFAULT '',
   state TEXT NOT NULL DEFAULT 'unpaired',
@@ -61,6 +63,11 @@ CREATE TABLE IF NOT EXISTS wa_gateway_baileys.accounts (
 );
 ALTER TABLE wa_gateway_baileys.accounts
   ADD COLUMN IF NOT EXISTS metadata_sync_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS protocol_definition_id TEXT NOT NULL DEFAULT '0';
+ALTER TABLE wa_gateway_baileys.accounts ALTER COLUMN protocol_definition_id SET DEFAULT '0';
+UPDATE wa_gateway_baileys.accounts SET protocol_definition_id='0' WHERE protocol_definition_id='builtin';
+ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS protocol_version TEXT NOT NULL DEFAULT '6.7.24';
+CREATE INDEX IF NOT EXISTS accounts_protocol_definition_idx ON wa_gateway_baileys.accounts(protocol_definition_id);
 ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS has_avatar BOOLEAN;
 ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS group_count INTEGER;
 ALTER TABLE wa_gateway_baileys.accounts ADD COLUMN IF NOT EXISTS friend_count INTEGER;
@@ -249,6 +256,8 @@ END $$;
 
 interface AccountRow {
   id: string
+  protocol_definition_id: string
+  protocol_version: string
   phone_e164: string
   proxy_url: string
   state: AccountState
@@ -292,6 +301,8 @@ interface MessageRow {
 function accountFromRow(row: AccountRow): Account {
   return {
     id: row.id,
+    protocolDefinitionId: row.protocol_definition_id,
+    protocolVersion: row.protocol_version,
     phoneE164: row.phone_e164,
     proxyUrl: row.proxy_url,
     state: row.state,
@@ -346,11 +357,11 @@ export class PostgresStore implements Store {
   async ready(): Promise<void> { await this.pool.query('SELECT 1') }
   async close(): Promise<void> { await this.pool.end() }
 
-  async createAccount(input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>): Promise<Account> {
+  async createAccount(input: Pick<Account, 'id' | 'protocolDefinitionId' | 'protocolVersion' | 'phoneE164' | 'proxyUrl' | 'state' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>): Promise<Account> {
     try {
       const result = await this.pool.query<AccountRow>(`
-        INSERT INTO wa_gateway_baileys.accounts(internal_id,id, phone_e164, proxy_url, state, connection_policy, idle_disconnect_seconds, post_verify_grace_seconds, sync_policy)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`, [nextSnowflakeId(), input.id, input.phoneE164, input.proxyUrl, input.state, input.connectionPolicy, input.idleDisconnectSeconds, input.postVerifyGraceSeconds, input.syncPolicy])
+        INSERT INTO wa_gateway_baileys.accounts(internal_id,id,protocol_definition_id,protocol_version,phone_e164,proxy_url,state,connection_policy,idle_disconnect_seconds,post_verify_grace_seconds,sync_policy)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`, [nextSnowflakeId(), input.id, input.protocolDefinitionId, input.protocolVersion, input.phoneE164, input.proxyUrl, input.state, input.connectionPolicy, input.idleDisconnectSeconds, input.postVerifyGraceSeconds, input.syncPolicy])
       return accountFromRow(result.rows[0]!)
     } catch (error) {
       if ((error as { code?: string }).code === '23505') throw new GatewayError('conflict', 'account id or phone already exists')
@@ -358,11 +369,12 @@ export class PostgresStore implements Store {
     }
   }
 
-  async claimUnpairedAccount(input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>): Promise<Account | null> {
+  async claimUnpairedAccount(input: Pick<Account, 'id' | 'protocolDefinitionId' | 'protocolVersion' | 'phoneE164' | 'proxyUrl' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>): Promise<Account | null> {
     const result = await this.pool.query<AccountRow>(`
       UPDATE wa_gateway_baileys.accounts AS account
-      SET id=$1, proxy_url=$3, connection_policy=$4, idle_disconnect_seconds=$5,
-          post_verify_grace_seconds=$6, sync_policy=$7, updated_at=NOW(),
+      SET id=$1, proxy_url=$3, protocol_definition_id=$4, protocol_version=$5,
+          connection_policy=$6, idle_disconnect_seconds=$7,
+          post_verify_grace_seconds=$8, sync_policy=$9, updated_at=NOW(),
           reason_category='orphan_reclaimed', provider_code=NULL
       WHERE account.phone_e164=$2
         AND account.id<>$1
@@ -373,12 +385,12 @@ export class PostgresStore implements Store {
         AND NOT EXISTS (SELECT 1 FROM wa_gateway_baileys.auth_creds creds WHERE creds.account_id=account.id)
         AND NOT EXISTS (SELECT 1 FROM wa_gateway_baileys.auth_keys keys WHERE keys.account_id=account.id)
         AND NOT EXISTS (SELECT 1 FROM wa_gateway_baileys.messages messages WHERE messages.account_id=account.id)
-      RETURNING account.*`, [input.id, input.phoneE164, input.proxyUrl, input.connectionPolicy, input.idleDisconnectSeconds, input.postVerifyGraceSeconds, input.syncPolicy])
+      RETURNING account.*`, [input.id, input.phoneE164, input.proxyUrl, input.protocolDefinitionId, input.protocolVersion, input.connectionPolicy, input.idleDisconnectSeconds, input.postVerifyGraceSeconds, input.syncPolicy])
     return result.rows[0] ? accountFromRow(result.rows[0]) : null
   }
 
   async createImportedAccount(
-    input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>,
+    input: Pick<Account, 'id' | 'protocolDefinitionId' | 'protocolVersion' | 'phoneE164' | 'proxyUrl' | 'state' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>,
     auth: StoredAuth,
   ): Promise<Account> {
     const client = await this.pool.connect()
@@ -386,9 +398,9 @@ export class PostgresStore implements Store {
       await client.query('BEGIN')
       const result = await client.query<AccountRow>(`
         INSERT INTO wa_gateway_baileys.accounts
-          (internal_id,id,phone_e164,proxy_url,state,device_jid,auto_connect,session_status,session_completeness,connection_policy,idle_disconnect_seconds,post_verify_grace_seconds,sync_policy,reason_category)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'session_imported') RETURNING *`,
-      [nextSnowflakeId(), input.id, input.phoneE164, input.proxyUrl, input.state, input.deviceJid, input.autoConnect, input.sessionStatus, input.sessionCompleteness, input.connectionPolicy, input.idleDisconnectSeconds, input.postVerifyGraceSeconds, input.syncPolicy])
+          (internal_id,id,protocol_definition_id,protocol_version,phone_e164,proxy_url,state,device_jid,auto_connect,session_status,session_completeness,connection_policy,idle_disconnect_seconds,post_verify_grace_seconds,sync_policy,reason_category)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'session_imported') RETURNING *`,
+      [nextSnowflakeId(), input.id, input.protocolDefinitionId, input.protocolVersion, input.phoneE164, input.proxyUrl, input.state, input.deviceJid, input.autoConnect, input.sessionStatus, input.sessionCompleteness, input.connectionPolicy, input.idleDisconnectSeconds, input.postVerifyGraceSeconds, input.syncPolicy])
       await client.query(`INSERT INTO wa_gateway_baileys.auth_creds(internal_id,account_internal_id,account_id,value)
         SELECT $1,internal_id,id,$3 FROM wa_gateway_baileys.accounts WHERE id=$2`, [nextSnowflakeId(), input.id, auth.creds])
       for (const key of auth.keys) {

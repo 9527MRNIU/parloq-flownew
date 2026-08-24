@@ -17,7 +17,9 @@ type AuthValue = {
   user: AuthUser | null
   loading: boolean
   actionPermissions: ReadonlySet<string>
+  menuPermissions: ReadonlySet<string>
   can: (permissionKey: string) => boolean
+  canView: (permissionKey: string) => boolean
   login: (username: string, password: string, turnstileToken?: string) => Promise<LoginResult>
   verifyMfaLogin: (challengeToken: string, code: string) => Promise<void>
   logout: () => Promise<void>
@@ -44,6 +46,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [loading, setLoading] = useState(true)
   const [actionPermissions, setActionPermissions] = useState<ReadonlySet<string>>(new Set())
+  const [menuPermissions, setMenuPermissions] = useState<ReadonlySet<string>>(new Set())
 
   const loadMe = useCallback(async () => {
     try {
@@ -67,17 +70,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let cancelled = false
     if (!user || user.isAdmin) {
       setActionPermissions(new Set())
+      setMenuPermissions(new Set())
       return () => { cancelled = true }
     }
     setActionPermissions(new Set())
+    setMenuPermissions(new Set())
     apiRequest('/api/system/menus/me')
       .then((response) => {
         if (cancelled) return
-        const values = (response as { data?: { actionPermissions?: unknown[] } }).data?.actionPermissions
-        setActionPermissions(new Set(Array.isArray(values) ? values.map(String) : []))
+        const data = (response as {
+          data?: { actionPermissions?: unknown[]; permissions?: unknown[] }
+        }).data
+        setActionPermissions(new Set(
+          Array.isArray(data?.actionPermissions)
+            ? data.actionPermissions.map(String)
+            : [],
+        ))
+        setMenuPermissions(new Set(
+          Array.isArray(data?.permissions) ? data.permissions.map(String) : [],
+        ))
       })
       .catch(() => {
-        if (!cancelled) setActionPermissions(new Set())
+        if (!cancelled) {
+          setActionPermissions(new Set())
+          setMenuPermissions(new Set())
+        }
       })
     return () => { cancelled = true }
   }, [user])
@@ -122,6 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } finally {
       setUser(null)
       setActionPermissions(new Set())
+      setMenuPermissions(new Set())
     }
   }
 
@@ -129,9 +147,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     (permissionKey: string) => Boolean(user?.isAdmin || actionPermissions.has(permissionKey)),
     [actionPermissions, user?.isAdmin],
   )
+  const canView = useCallback(
+    (permissionKey: string) => Boolean(user?.isAdmin || menuPermissions.has(permissionKey)),
+    [menuPermissions, user?.isAdmin],
+  )
   const value = useMemo(
-    () => ({ user, loading, actionPermissions, can, login, verifyMfaLogin, logout }),
-    [actionPermissions, can, loading, user],
+    () => ({
+      user,
+      loading,
+      actionPermissions,
+      menuPermissions,
+      can,
+      canView,
+      login,
+      verifyMfaLogin,
+      logout,
+    }),
+    [actionPermissions, can, canView, loading, menuPermissions, user],
   )
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

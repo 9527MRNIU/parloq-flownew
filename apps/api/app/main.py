@@ -30,6 +30,7 @@ from app.routers import (
     promotion_integrations,
     promotion_monitoring,
     promotion_policy,
+    protocol_definitions,
     protocol_nodes,
     system,
     system_configuration,
@@ -72,6 +73,7 @@ app.include_router(ip_proxies.router)
 app.include_router(personal_accounts.router)
 app.include_router(personal_accounts.group_router)
 app.include_router(account_statistics.router)
+app.include_router(protocol_definitions.router)
 app.include_router(protocol_nodes.router)
 app.include_router(protocol_nodes.pool_router)
 app.include_router(domains.router)

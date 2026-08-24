@@ -17,6 +17,7 @@ WORKDIR /app
 COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+RUN mkdir -p /var/lib/parloq/protocols && chown -R node:node /var/lib/parloq
 USER node
-EXPOSE 8010
+EXPOSE 8010 8011
 CMD ["node", "dist/index.js"]

@@ -47,11 +47,13 @@ from app.services.baileys_credentials import (
     validate_baileys_session,
 )
 from app.services.wa_gateway import GatewayError, WaGatewayClient
+from app.services.proxy_health import proxy_is_quarantined
 from app.services.protocol_nodes import (
     ingress_unavailable_reason,
     marketing_protocol_available,
     normalized_sync_policy,
     protocol_capacity,
+    protocol_runtime_binding,
     select_ingress_protocol,
 )
 from app.services.protocol_session_imports import (
@@ -674,6 +676,8 @@ def _set_binding(db: DbSession, account_id: str, proxy_id: str | None) -> None:
     )
     if proxy is None:
         raise HTTPException(status_code=404, detail="可用代理不存在")
+    if proxy_is_quarantined(proxy):
+        raise HTTPException(status_code=409, detail="代理正在冷却或需要修复，不能绑定账号")
     if existing:
         existing.proxy_id = proxy.id
     else:
@@ -700,17 +704,25 @@ def _group_database_id(
 
 
 def _auto_proxy(
-    db: DbSession, owner_id: int, country_code: str | None
+    db: DbSession,
+    owner_id: int,
+    phone_country_code: str | None,
+    visitor_country_code: str | None = None,
 ) -> ProxyEndpoint | None:
     policy = db.scalar(
         select(IpAllocationPolicy).where(IpAllocationPolicy.created_by == owner_id)
     )
     mode = policy.allocation_mode if policy else "least_load"
-    country_match = policy.country_match if policy else "prefer"
+    country_match = policy.country_match if policy else "visitor_country"
     max_accounts = policy.max_accounts_per_ip if policy else 100
-    avoid_unhealthy = policy.avoid_unhealthy if policy else True
     if mode == "manual":
         return None
+    match_country = (
+        visitor_country_code
+        if country_match == "visitor_country" and visitor_country_code
+        else phone_country_code
+    )
+    now = utcnow()
     statement = (
         select(ProxyEndpoint)
         .outerjoin(
@@ -719,11 +731,21 @@ def _auto_proxy(
         )
         .where(
             ProxyEndpoint.enabled.is_(True),
+            # Active cooldowns never participate in a new allocation. A
+            # transiently unhealthy proxy becomes a low-priority probation
+            # candidate after cooldown expiry; hard auth/config failures have
+            # no cooldown timestamp and remain quarantined.
+            or_(
+                ProxyEndpoint.cooldown_until.is_(None),
+                ProxyEndpoint.cooldown_until <= now,
+            ),
+            or_(
+                ProxyEndpoint.health_status != "unhealthy",
+                ProxyEndpoint.cooldown_until.is_not(None),
+            ),
         )
         .group_by(ProxyEndpoint.id)
     )
-    if avoid_unhealthy:
-        statement = statement.where(ProxyEndpoint.health_status != "unhealthy")
     if mode == "strict_one_to_one":
         statement = statement.having(func.count(AccountProxyBinding.id) == 0)
     else:
@@ -746,16 +768,15 @@ def _auto_proxy(
             )
         )
         statement = statement.where(~exists(foreign_binding))
-    health_rank = case((ProxyEndpoint.health_status == "healthy", 0), else_=1)
-    if country_code and country_match == "strict":
-        statement = statement.where(ProxyEndpoint.country_code == country_code)
-        statement = statement.order_by(
-            health_rank, func.count(AccountProxyBinding.id), ProxyEndpoint.id
-        )
-    elif country_code and country_match == "prefer":
+    health_rank = case(
+        (ProxyEndpoint.health_status == "healthy", 0),
+        (ProxyEndpoint.health_status == "untested", 1),
+        else_=2,
+    )
+    if match_country:
         statement = statement.order_by(
             health_rank,
-            case((ProxyEndpoint.country_code == country_code, 0), else_=1),
+            case((ProxyEndpoint.country_code == match_country, 0), else_=1),
             func.count(AccountProxyBinding.id),
             ProxyEndpoint.id,
         )
@@ -1028,6 +1049,7 @@ def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: 
     )
     db.add(item)
     client = WaGatewayClient()
+    runtime_binding = protocol_runtime_binding(db, protocol)
     gateway_attempted = False
     try:
         db.flush()
@@ -1039,6 +1061,8 @@ def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: 
                 item.gateway_account_id,
                 item.phone_e164,
                 _proxy_url(db, item.gateway_account_id),
+                protocol_definition_id=runtime_binding.definition_id,
+                protocol_version=runtime_binding.version,
                 connection_policy=protocol.connection_policy,
                 idle_disconnect_seconds=protocol.idle_disconnect_seconds,
                 post_verify_grace_seconds=protocol.post_verify_grace_seconds,
@@ -1143,6 +1167,7 @@ async def import_account(
     )
     db.add(item)
     client = WaGatewayClient()
+    runtime_binding = protocol_runtime_binding(db, protocol)
     gateway_attempted = False
     try:
         db.flush()
@@ -1155,6 +1180,8 @@ async def import_account(
             item.gateway_account_id,
             session.value,
             _proxy_url(db, item.gateway_account_id),
+            runtime_binding.definition_id,
+            runtime_binding.version,
         )
         # Import acceptance is not proof that the remote session is usable.
         # A later gateway sync promotes validation_status to ready.
@@ -1791,11 +1818,14 @@ def pairing_code(account_id: str, payload: PairRequest, db: DbSession, current_u
         protocol = db.get(ProtocolNode, item.protocol_id)
         if protocol is None:
             raise HTTPException(status_code=409, detail="账号所属协议节点不存在")
+        runtime_binding = protocol_runtime_binding(db, protocol)
         if not item.phone_e164 and phone:
             client.create(
                 item.gateway_account_id,
                 phone,
                 _proxy_url(db, item.gateway_account_id),
+                protocol_definition_id=runtime_binding.definition_id,
+                protocol_version=runtime_binding.version,
                 connection_policy=protocol.connection_policy,
                 idle_disconnect_seconds=protocol.idle_disconnect_seconds,
                 post_verify_grace_seconds=protocol.post_verify_grace_seconds,

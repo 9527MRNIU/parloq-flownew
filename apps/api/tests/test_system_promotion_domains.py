@@ -435,8 +435,21 @@ def test_system_roles_menus_and_backend_permission(admin_client: TestClient) -> 
     assert "/hyperlink/tasks" in by_route
     assert "/group-marketing/blast/tasks" in by_route
     assert "/group-marketing/market-analysis" in by_route
-    assert "/resources/operations/protocol" in by_route
+    assert "/resources/operations/protocol-center" in by_route
+    protocol_center = by_route["/resources/operations/protocol-center"]
+    assert protocol_center["name"] == "协议中心"
+    assert protocol_center["permissionKey"] == "resources.protocol_center.read"
+    assert protocol_center["visible"] is True
+    assert by_route["/resources/operations/protocols"]["visible"] is False
+    assert by_route["/resources/operations/nodes"]["visible"] is False
+    assert "/resources/operations/protocol" not in by_route
+    assert by_route["/resources/operations/routing"]["visible"] is False
+    assert (
+        by_route["/resources/operations/routing"]["permissionKey"]
+        == "resources.protocol_routing.read"
+    )
     assert "/resources/operations/ip" in by_route
+    assert by_route["/resources/operations/ip"]["name"] == "代理管理"
     assert by_route["/promotion/domains"]["permissionKey"] == "promotion.domain.read"
     assert "/system/menus" not in by_route
 

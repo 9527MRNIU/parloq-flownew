@@ -89,6 +89,9 @@ class Settings:
     wa_gateway_mock: bool
     wa_gateway_api_token: str
     wa_gateway_webhook_secret: str
+    protocol_builder_url: str
+    protocol_builder_api_token: str
+    protocol_build_timeout_seconds: int
     redis_url: str
     task_queue_mock: bool
     pairing_rate_limit_mock: bool
@@ -167,7 +170,7 @@ def get_settings() -> Settings:
         seed_admin_password=os.getenv("SEED_ADMIN_PASSWORD", "admin"),
         bitly_mock=_bool_env("BITLY_MOCK", False),
         bitly_base_url=os.getenv("BITLY_BASE_URL", "https://api-ssl.bitly.com").rstrip("/"),
-        ip_proxy_mock=_bool_env("IP_PROXY_MOCK", _bool_env("BITLY_MOCK", False)),
+        ip_proxy_mock=_bool_env("IP_PROXY_MOCK", False),
         wa_gateway_url=os.getenv(
             "WA_GATEWAY_URL",
             os.getenv("WA_GATEWAY_BASE_URL", "http://wa-gateway:8010"),
@@ -177,6 +180,16 @@ def get_settings() -> Settings:
         wa_gateway_mock=_bool_env("WA_GATEWAY_MOCK", False),
         wa_gateway_api_token=os.getenv("WA_GATEWAY_API_TOKEN", ""),
         wa_gateway_webhook_secret=os.getenv("WA_GATEWAY_WEBHOOK_SECRET", ""),
+        protocol_builder_url=os.getenv(
+            "PROTOCOL_BUILDER_URL", "http://protocol-builder:8011"
+        ).rstrip("/"),
+        protocol_builder_api_token=os.getenv(
+            "PROTOCOL_BUILDER_API_TOKEN",
+            os.getenv("WA_GATEWAY_API_TOKEN", ""),
+        ),
+        protocol_build_timeout_seconds=_bounded_int_env(
+            "PROTOCOL_BUILD_TIMEOUT_SECONDS", 600, 60, 1800
+        ),
         redis_url=os.getenv("REDIS_URL", "redis://redis:6379/0"),
         task_queue_mock=_bool_env("TASK_QUEUE_MOCK", False),
         pairing_rate_limit_mock=_bool_env("PAIRING_RATE_LIMIT_MOCK", False),
@@ -300,6 +313,8 @@ def get_settings() -> Settings:
             errors.append("WA_GATEWAY_API_TOKEN 必须使用至少 32 位的生产令牌")
         if len(settings.wa_gateway_webhook_secret) < 32:
             errors.append("WA_GATEWAY_WEBHOOK_SECRET 必须使用至少 32 位的生产密钥")
+        if len(settings.protocol_builder_api_token) < 32:
+            errors.append("PROTOCOL_BUILDER_API_TOKEN 必须使用至少 32 位的生产令牌")
         if not settings.login_security_enabled:
             errors.append("LOGIN_SECURITY_ENABLED 在生产环境必须为 true")
         if not settings.turnstile_enabled:

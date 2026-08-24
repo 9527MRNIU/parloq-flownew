@@ -17,16 +17,16 @@ class MemoryStore implements Store {
   async migrate() {}
   async ready() {}
   async close() {}
-  async createAccount(input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state'>): Promise<Account> {
+  async createAccount(input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state'> & Partial<Pick<Account, 'protocolDefinitionId' | 'protocolVersion'>>): Promise<Account> {
     if (this.accounts.has(input.id) || [...this.accounts.values()].some((account) => account.phoneE164 === input.phoneE164)) {
       throw new GatewayError('conflict', 'duplicate')
     }
     const now = new Date()
-    const account: Account = { ...input, deviceJid: '', autoConnect: false, connectionPolicy: 'on_demand', idleDisconnectSeconds: 600, postVerifyGraceSeconds: 120, syncPolicy: { avatar: true, profileStatus: true, businessProfile: true, groupSummary: true, groupDetails: false, contacts: false, chats: false, messageHistory: false, privacySettings: false, blocklist: false }, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'idle', pairingExpiresAt: null, metadataSyncStatus: 'pending', hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {}, stateChangedAt: now, invalidatedAt: null, reasonCategory: 'created', providerCode: null, createdAt: now, updatedAt: now }
+    const account: Account = { ...input, protocolDefinitionId: input.protocolDefinitionId ?? '0', protocolVersion: input.protocolVersion ?? '6.7.24', deviceJid: '', autoConnect: false, connectionPolicy: 'on_demand', idleDisconnectSeconds: 600, postVerifyGraceSeconds: 120, syncPolicy: { avatar: true, profileStatus: true, businessProfile: true, groupSummary: true, groupDetails: false, contacts: false, chats: false, messageHistory: false, privacySettings: false, blocklist: false }, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'idle', pairingExpiresAt: null, metadataSyncStatus: 'pending', hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {}, stateChangedAt: now, invalidatedAt: null, reasonCategory: 'created', providerCode: null, createdAt: now, updatedAt: now }
     this.accounts.set(account.id, account)
     return account
   }
-  async claimUnpairedAccount(input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl'>): Promise<Account | null> {
+  async claimUnpairedAccount(input: Pick<Account, 'id' | 'protocolDefinitionId' | 'protocolVersion' | 'phoneE164' | 'proxyUrl'>): Promise<Account | null> {
     const current = [...this.accounts.values()].find((account) => account.phoneE164 === input.phoneE164)
     if (!current || current.id === input.id || current.state !== 'unpaired' || current.deviceJid || current.sessionStatus !== 'none' || this.creds.has(current.id)) return null
     if ([...this.keys.keys()].some((id) => id.startsWith(`${current.id}:`)) || [...this.messages.values()].some((message) => message.accountId === current.id)) return null
@@ -35,7 +35,7 @@ class MemoryStore implements Store {
     this.accounts.set(claimed.id, claimed)
     return claimed
   }
-  async createImportedAccount(input: Pick<Account, 'id' | 'phoneE164' | 'proxyUrl' | 'state' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness'>, auth: StoredAuth) {
+  async createImportedAccount(input: Pick<Account, 'id' | 'protocolDefinitionId' | 'protocolVersion' | 'phoneE164' | 'proxyUrl' | 'state' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness'>, auth: StoredAuth) {
     if (this.accounts.has(input.id) || [...this.accounts.values()].some((account) => account.phoneE164 === input.phoneE164)) throw new GatewayError('conflict', 'duplicate')
     const now = new Date()
     const account: Account = {
@@ -194,6 +194,22 @@ describe('Baileys gateway HTTP contract', () => {
     expect((await app.inject({ method: 'GET', url: '/healthz' })).statusCode).toBe(200)
     expect((await app.inject({ method: 'GET', url: '/readyz' })).statusCode).toBe(200)
     expect((await app.inject({ method: 'GET', url: '/v1/accounts' })).statusCode).toBe(401)
+  })
+
+  it('exposes the bundled protocol version through an authenticated endpoint', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/protocol-info',
+      headers: { authorization: `Bearer ${token}` },
+    })
+    expect(response.statusCode).toBe(200)
+    expect(response.json().data).toMatchObject({
+      protocol: 'baileys',
+      name: 'Baileys Web',
+      baileysVersion: '6.7.24',
+      engine: 'mock',
+      versionStatus: 'unavailable',
+    })
   })
 
   it('keeps the legacy account and pairing response shape without leaking proxy credentials', async () => {

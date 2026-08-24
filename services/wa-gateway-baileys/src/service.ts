@@ -2,13 +2,14 @@ import type { Logger } from 'pino'
 import type { Account, AccountState, Message, PublicAccount } from './domain.js'
 import { GatewayError, defaultSyncPolicy, normalizeE164, normalizeSyncPolicy, publicAccount, safeError, validateProxy, type SyncPolicy } from './domain.js'
 import type { EngineEvent, PairResult, ProtocolEngine } from './engine.js'
-import { exportSession, parseImportedSession, phoneFromDeviceJid } from './session.js'
+import { BAILEYS_VERSION, exportSession, parseImportedSession, phoneFromDeviceJid } from './session.js'
 import type { Store } from './store.js'
 import { newPublicId } from './snowflake.js'
 import { WebhookClient } from './webhook.js'
 import { normalizeOutboundMessage, type OutboundMessage, type SendMessageRequest } from './message-content.js'
+import { engineAccount } from './versioned-engine.js'
 
-export interface CreateAccountRequest { id?: string; phoneE164: string; proxyUrl?: string; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: SyncPolicy }
+export interface CreateAccountRequest { id?: string; protocolDefinitionId?: string; protocolVersion?: string; phoneE164: string; proxyUrl?: string; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: SyncPolicy }
 export interface UpdateAccountRequest { phoneE164?: string; proxyUrl?: string; autoConnect?: boolean; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: SyncPolicy }
 export interface MetadataSyncRequest { syncPolicy?: SyncPolicy }
 
@@ -48,6 +49,25 @@ export class GatewayService {
   }
 
   get engineName(): string { return this.engine.name }
+
+  async protocolInfo() {
+    const runtime = this.engine.protocolVersionInfo
+      ? await this.engine.protocolVersionInfo()
+      : {
+          currentWaWebVersion: null,
+          latestWaWebVersion: null,
+          versionStatus: 'unavailable' as const,
+          checkedAt: null,
+          checkError: null,
+        }
+    return {
+      protocol: 'baileys',
+      name: 'Baileys Web',
+      baileysVersion: BAILEYS_VERSION,
+      engine: this.engine.name,
+      ...runtime,
+    }
+  }
 
   async start(): Promise<void> {
     await this.store.migrate()
@@ -96,16 +116,20 @@ export class GatewayService {
     const idleDisconnectSeconds = Math.min(86_400, Math.max(60, request.idleDisconnectSeconds ?? 600))
     const postVerifyGraceSeconds = Math.min(3_600, Math.max(0, request.postVerifyGraceSeconds ?? 120))
     const syncPolicy = normalizeSyncPolicy(request.syncPolicy ?? defaultSyncPolicy)
+    const protocolDefinitionId = request.protocolDefinitionId?.trim() || '0'
+    const protocolVersion = request.protocolVersion?.trim() || BAILEYS_VERSION
+    if (!/^\d{1,20}$/.test(protocolDefinitionId)) throw new GatewayError('invalid_argument', 'protocolDefinitionId must be a Snowflake identifier')
+    if (!/^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$/.test(protocolVersion)) throw new GatewayError('invalid_argument', 'protocolVersion has an invalid format')
     const id = request.id?.trim() || newPublicId('wa')
     if (!/^[A-Za-z0-9_.-]{1,80}$/.test(id)) throw new GatewayError('invalid_argument', 'account id contains unsupported characters')
     try {
-      return publicAccount(await this.store.createAccount({ id, phoneE164, proxyUrl, state: 'unpaired', connectionPolicy, idleDisconnectSeconds, postVerifyGraceSeconds, syncPolicy }))
+      return publicAccount(await this.store.createAccount({ id, protocolDefinitionId, protocolVersion, phoneE164, proxyUrl, state: 'unpaired', connectionPolicy, idleDisconnectSeconds, postVerifyGraceSeconds, syncPolicy }))
     } catch (error) {
       if (!(error instanceof GatewayError) || error.code !== 'conflict') throw error
       // A control-plane transaction may fail after the gateway account was
       // created. Reclaim only a credential-free, unused row for the exact
       // phone so a later landing-page retry is not permanently blocked.
-      const reclaimed = await this.store.claimUnpairedAccount({ id, phoneE164, proxyUrl, connectionPolicy, idleDisconnectSeconds, postVerifyGraceSeconds, syncPolicy })
+      const reclaimed = await this.store.claimUnpairedAccount({ id, protocolDefinitionId, protocolVersion, phoneE164, proxyUrl, connectionPolicy, idleDisconnectSeconds, postVerifyGraceSeconds, syncPolicy })
       if (!reclaimed) throw error
       return publicAccount(reclaimed)
     }
@@ -181,7 +205,7 @@ export class GatewayService {
       pairingExpiresAt: provisionalExpiry,
     }, 'pairing_started')
     try {
-      const result = await this.engine.pair({ accountId: id, phoneE164: current.phoneE164, proxyUrl: current.proxyUrl, syncPolicy: current.syncPolicy })
+      const result = await this.engine.pair(engineAccount(current))
       const expiresAt = result.expiresAt.getTime() > Date.now() ? result.expiresAt : provisionalExpiry
       await this.store.updateAccount(id, { pairingStatus: 'waiting_phone', pairingExpiresAt: expiresAt })
       this.schedulePairingExpiry(id, expiresAt)
@@ -248,7 +272,7 @@ export class GatewayService {
     const autoConnect = current.connectionPolicy === 'always_on'
     await this.transitionAccount(id, 'warming', { autoConnect }, 'connect_requested')
     try {
-      await this.engine.connect({ accountId: id, phoneE164: current.phoneE164, proxyUrl: current.proxyUrl, syncPolicy: current.syncPolicy })
+      await this.engine.connect(engineAccount(current))
       const updated = await this.transitionAccount(id, 'online_idle', { autoConnect, sessionStatus: 'verified' }, 'connected')
       this.scheduleIdleDisconnect(updated)
       return publicAccount(updated)
@@ -283,7 +307,7 @@ export class GatewayService {
     const current = await this.store.getAccount(id)
     if (!(await this.store.getCreds(id)) && !current.deviceJid) return publicAccount(current)
     this.clearIdleDisconnect(id)
-    try { await this.engine.logout({ accountId: id, phoneE164: current.phoneE164, proxyUrl: current.proxyUrl, syncPolicy: current.syncPolicy }) } catch (error) {
+    try { await this.engine.logout(engineAccount(current)) } catch (error) {
       this.logger.warn({ accountId: id, error: safeError(error) }, 'account_logout_failed')
       throw new GatewayError('protocol_error', 'WhatsApp did not confirm logout')
     }
@@ -293,7 +317,13 @@ export class GatewayService {
     return publicAccount(await this.transitionAccount(id, 'unpaired', { deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'idle', pairingExpiresAt: null }, 'manual_logout'))
   }
 
-  async importSession(id: string, session: unknown, proxyUrl?: string): Promise<{ account: PublicAccount; format: string; status: string }> {
+  async importSession(
+    id: string,
+    session: unknown,
+    proxyUrl?: string,
+    protocolDefinitionId = '0',
+    protocolVersion = BAILEYS_VERSION,
+  ): Promise<{ account: PublicAccount; format: string; status: string }> {
     const parsed = parseImportedSession(session)
     let current: Account | null = null
     try {
@@ -306,6 +336,8 @@ export class GatewayService {
       if (proxyUrl === undefined || !proxyUrl.trim()) throw new GatewayError('invalid_argument', 'proxyUrl is required when importing a new account')
       const created = await this.store.createImportedAccount({
         id,
+        protocolDefinitionId,
+        protocolVersion,
         phoneE164: phoneFromDeviceJid(parsed.deviceJid),
         proxyUrl: validateProxy(proxyUrl),
         state: 'linked_offline',
@@ -319,6 +351,12 @@ export class GatewayService {
         syncPolicy: { ...defaultSyncPolicy },
       }, parsed.auth)
       return { account: publicAccount(created), format: parsed.completeness === 'full' ? 'parloq-baileys-session/v1' : 'baileys-creds', status: 'pending_verification' }
+    }
+    if (
+      current.protocolDefinitionId !== protocolDefinitionId
+      || current.protocolVersion !== protocolVersion
+    ) {
+      throw new GatewayError('conflict', 'an existing account cannot change its protocol binding')
     }
     if (this.engine.isOnline(id) || current.state === 'pairing') throw new GatewayError('conflict', 'disconnect the account before importing a session')
     const nextProxy = proxyUrl === undefined ? current.proxyUrl : validateProxy(proxyUrl)
@@ -336,12 +374,12 @@ export class GatewayService {
   }
 
   async exportSession(id: string): Promise<{ session: unknown; format: string; status: string }> {
-    await this.store.getAccount(id)
+    const current = await this.store.getAccount(id)
     if (this.engine.isOnline(id)) throw new GatewayError('conflict', 'disconnect the account before exporting its session')
     const creds = await this.store.getCreds(id)
     if (!creds) throw new GatewayError('conflict', 'account has no Baileys session to export')
     const keys = await this.store.getAllKeys(id)
-    return { session: exportSession({ creds, keys }), format: 'parloq-baileys-session/v1', status: 'ready' }
+    return { session: exportSession({ creds, keys }, current.protocolVersion), format: 'parloq-baileys-session/v1', status: 'ready' }
   }
 
   async syncAccountMetadata(id: string, request: MetadataSyncRequest = {}): Promise<PublicAccount> {
@@ -570,7 +608,17 @@ export class GatewayService {
 
   private async handleEngineEvent(event: EngineEvent): Promise<void> {
     try {
-      if (event.kind === 'connected') {
+      if (event.kind === 'proxy_result') {
+        this.webhook.deliverProxyHealth({
+          event: 'proxy.health',
+          eventId: newPublicId('phv'),
+          accountId: event.accountId,
+          outcome: event.outcome,
+          reasonCategory: event.reasonCategory,
+          proxyFingerprint: event.proxyFingerprint,
+          occurredAt: new Date(),
+        })
+      } else if (event.kind === 'connected') {
         const current = await this.store.getAccount(event.accountId)
         const completedPairing = current.state === 'pairing' && ['waiting_phone', 'reconnecting'].includes(current.pairingStatus)
         if (completedPairing) this.clearPairingExpiry(event.accountId)

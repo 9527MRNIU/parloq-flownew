@@ -35,6 +35,13 @@ from app.services.github_repository import (
 router = APIRouter(prefix="/api/system/configuration", tags=["system-configuration"])
 
 
+DEFAULT_BAOTA_DOMAIN_POLICY = {
+    "cdnEnabled": True,
+    "ccEnabled": False,
+    "chinaBlocked": True,
+}
+
+
 @dataclass(frozen=True)
 class PlatformDefinition:
     name: str
@@ -115,6 +122,14 @@ def _platform_row(db: DbSession, platform_key: str, definition: PlatformDefiniti
     settings = dict(config.settings_json or {}) if config else {}
     if platform_key == "namesilo":
         settings["paymentMode"] = namesilo_payment_mode(settings.get("paymentMode"))
+    elif platform_key == "baota":
+        settings["domainPolicy"] = _baota_domain_policy(settings)
+        capability = settings.get("nginxFirewallPlugin")
+        if not isinstance(capability, dict):
+            settings["nginxFirewallPlugin"] = {
+                "status": "unknown",
+                "checkedAt": None,
+            }
     return {
         "key": platform_key,
         "name": definition.name,
@@ -135,6 +150,33 @@ def _platform_row(db: DbSession, platform_key: str, definition: PlatformDefiniti
 def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
+
+
+def _baota_domain_policy(settings: dict) -> dict[str, bool]:
+    raw = settings.get("domainPolicy")
+    current = raw if isinstance(raw, dict) else {}
+    return {
+        "cdnEnabled": bool(
+            current.get("cdnEnabled", DEFAULT_BAOTA_DOMAIN_POLICY["cdnEnabled"])
+        ),
+        "ccEnabled": bool(
+            current.get("ccEnabled", DEFAULT_BAOTA_DOMAIN_POLICY["ccEnabled"])
+        ),
+        "chinaBlocked": bool(
+            current.get(
+                "chinaBlocked",
+                DEFAULT_BAOTA_DOMAIN_POLICY["chinaBlocked"],
+            )
+        ),
+    }
+
+
+def _test_sensitive_settings(platform_key: str, settings: dict) -> dict:
+    result = dict(settings)
+    if platform_key == "baota":
+        result.pop("domainPolicy", None)
+        result.pop("nginxFirewallPlugin", None)
+    return result
 
 
 def _normalized_settings(
@@ -162,20 +204,37 @@ def _normalized_settings(
         settings["paymentMode"] = payment_mode
     elif platform_key == "cloudflare" and payload.account_id is not None:
         settings["accountId"] = payload.account_id.strip()
-    elif platform_key == "baota" and payload.base_url is not None:
-        base_url = payload.base_url.strip().rstrip("/")
-        parsed = urlsplit(base_url)
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.netloc
-            or parsed.username
-            or parsed.password
-            or parsed.query
-            or parsed.fragment
-            or parsed.path not in {"", "/"}
+    elif platform_key == "baota":
+        if payload.base_url is not None:
+            base_url = payload.base_url.strip().rstrip("/")
+            parsed = urlsplit(base_url)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.netloc
+                or parsed.username
+                or parsed.password
+                or parsed.query
+                or parsed.fragment
+                or parsed.path not in {"", "/"}
+            ):
+                raise HTTPException(status_code=422, detail="宝塔面板地址格式不正确")
+            settings["baseUrl"] = base_url
+        policy = _baota_domain_policy(settings)
+        if payload.firewall_cdn_enabled is not None:
+            policy["cdnEnabled"] = payload.firewall_cdn_enabled
+        if payload.firewall_cc_enabled is not None:
+            policy["ccEnabled"] = payload.firewall_cc_enabled
+        if payload.firewall_china_blocked is not None:
+            policy["chinaBlocked"] = payload.firewall_china_blocked
+        if any(
+            value is not None
+            for value in (
+                payload.firewall_cdn_enabled,
+                payload.firewall_cc_enabled,
+                payload.firewall_china_blocked,
+            )
         ):
-            raise HTTPException(status_code=422, detail="宝塔面板地址格式不正确")
-        settings["baseUrl"] = base_url
+            settings["domainPolicy"] = policy
     elif platform_key == "github":
         try:
             if payload.repository is not None:
@@ -241,7 +300,8 @@ def set_system_configuration(
     enabled = payload.enabled if payload.enabled is not None else config.enabled
     configuration_changed = (
         changed_secret
-        or settings != current_settings
+        or _test_sensitive_settings(platform_key, settings)
+        != _test_sensitive_settings(platform_key, current_settings)
         or bool(enabled) != bool(config.enabled)
     )
     if enabled and not configured:
@@ -271,6 +331,11 @@ def set_system_configuration(
         config.last_test_status = "untested"
         config.last_test_message = None
         config.last_test_at = None
+        if platform_key == "baota":
+            settings["nginxFirewallPlugin"] = {
+                "status": "unknown",
+                "checkedAt": None,
+            }
         if platform_key == "github":
             clear_github_repository_snapshot(db)
     db.commit()
@@ -328,7 +393,16 @@ def test_system_configuration(
                 raise PlatformClientError("请先填写宝塔面板地址")
             client = BaoTaClient(base_url, secret)
             client.verify_connection()
-            message = "宝塔面板连接成功"
+            firewall_available = client.nginx_firewall_plugin_available()
+            settings["nginxFirewallPlugin"] = {
+                "status": "available" if firewall_available else "unavailable",
+                "checkedAt": iso(utcnow()),
+            }
+            message = (
+                "宝塔面板连接成功，已检测到 Nginx 防火墙插件"
+                if firewall_available
+                else "宝塔面板连接成功，未检测到 Nginx 防火墙插件；域名接入时将自动跳过防火墙配置"
+            )
         else:
             repository = str(settings.get("repository") or "")
             if not repository:

@@ -63,7 +63,6 @@ type Account = {
   status: string;
   connected: boolean;
   proxyId: string;
-  proxyName: string;
   source: string;
   sourceRefType: string;
   importFormat: string;
@@ -91,7 +90,7 @@ type Account = {
 };
 type ProxyRow = {
   id: string;
-  name: string;
+  endpoint: string;
   countryCode: string;
   enabled: boolean;
 };
@@ -167,9 +166,6 @@ function accountRow(input: unknown): Account {
     proxyId:
       snowflakeId(row, "proxyId", "proxy_id") ||
       snowflakeId(proxy, "id", "proxyId", "proxy_id"),
-    proxyName:
-      val(row, "proxyName", "proxy_name") ||
-      val(proxy, "proxyName", "proxy_name"),
     source: val(row, "source", "credentialSource", "credential_source"),
     sourceRefType: val(row, "sourceRefType", "source_ref_type"),
     importFormat: val(row, "importFormat", "import_format"),
@@ -245,9 +241,12 @@ function lifecycleEvent(input: unknown): LifecycleEvent {
 }
 function proxyRow(input: unknown): ProxyRow {
   const row = input as Record<string, unknown>;
+  const id = snowflakeId(row, "id", "proxyId", "proxy_id");
+  const host = val(row, "host", "hostname");
+  const port = val(row, "port");
   return {
-    id: snowflakeId(row, "id", "proxyId", "proxy_id"),
-    name: val(row, "name"),
+    id,
+    endpoint: host && port ? `${host}:${port}` : `代理 #${id}`,
     countryCode: val(row, "countryCode", "country_code"),
     enabled: Boolean(row.enabled ?? true),
   };
@@ -328,6 +327,10 @@ export function PersonalAccountsPage() {
   const [detailAccount, setDetailAccount] = useState<Account | null>(null);
   const [detailEvents, setDetailEvents] = useState<LifecycleEvent[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
+  const proxyEndpointById = useMemo(
+    () => new Map(proxies.map((proxy) => [proxy.id, proxy.endpoint])),
+    [proxies],
+  );
 
   const loadAccounts = useCallback(async () => {
     setLoading(true);
@@ -381,9 +384,7 @@ export function PersonalAccountsPage() {
       const [groupsPayload, proxiesPayload, importOptionsPayload, filterPayload] =
         await Promise.all([
         apiRequest("/api/account-groups?pageSize=100"),
-        user?.isAdmin
-          ? apiRequest("/api/ip-proxies?pageSize=100").catch(() => null)
-          : Promise.resolve(null),
+        apiRequest("/api/ip-proxies?pageSize=100").catch(() => null),
         apiRequest("/api/personal-accounts/import-options"),
         apiRequest("/api/personal-accounts/filter-options"),
       ]);
@@ -1089,7 +1090,7 @@ export function PersonalAccountsPage() {
                             .filter((proxy) => proxy.enabled && proxy.id)
                             .map((proxy) => ({
                               value: proxy.id,
-                              label: `${proxy.name}${proxy.countryCode ? ` · ${proxy.countryCode}` : ""}`,
+                              label: `${proxy.endpoint}${proxy.countryCode ? ` · ${proxy.countryCode}` : ""}`,
                             }))}
                         />
                         {!canSwitchProxy(row) ? (
@@ -1099,7 +1100,9 @@ export function PersonalAccountsPage() {
                     ) : (
                       <div className="cell-main">
                         <strong>
-                          {row.proxyName || "系统自动分配隔离 IP"}
+                          {row.proxyId
+                            ? proxyEndpointById.get(row.proxyId) || "已绑定固定代理"
+                            : "系统自动分配隔离 IP"}
                         </strong>
                         <span>隔离代理由系统维护</span>
                       </div>
@@ -1241,7 +1244,7 @@ export function PersonalAccountsPage() {
               <h3 className="text-sm font-semibold">接入资源</h3>
               <div className="grid gap-3 rounded-xl border p-4 sm:grid-cols-2">
                 <div className="cell-main"><span>协议节点</span><strong>{detailAccount.protocolName || "未识别"}</strong><span>{detailAccount.protocolType || "协议类型未知"}</span></div>
-                <div className="cell-main"><span>隔离代理</span><strong>{detailAccount.proxyName || "系统自动分配"}</strong></div>
+                <div className="cell-main"><span>隔离代理</span><strong>{detailAccount.proxyId ? proxyEndpointById.get(detailAccount.proxyId) || "已绑定固定代理" : "系统自动分配"}</strong></div>
               </div>
             </section>
 
@@ -1421,7 +1424,7 @@ export function PersonalAccountsPage() {
                   .filter((proxy) => proxy.enabled && proxy.id)
                   .map((proxy) => ({
                     value: proxy.id,
-                    label: `${proxy.name}${proxy.countryCode ? ` · ${proxy.countryCode}` : ""}`,
+                    label: `${proxy.endpoint}${proxy.countryCode ? ` · ${proxy.countryCode}` : ""}`,
                   }))}
                 placeholder="按当前 IP 分配策略自动选择"
                 clearable

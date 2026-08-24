@@ -1,5 +1,5 @@
 import { lazy, Suspense, type ReactNode } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useAuth } from "./auth/AuthContext";
 import { AppLayout } from "./components/AppLayout";
 import {
@@ -36,7 +36,7 @@ const AccountExportPage = lazy(() => import("./pages/AccountCenterPages").then((
 const AccountGroupsPage = lazy(() => import("./pages/AccountCenterPages").then((module) => ({ default: module.AccountGroupsPage })));
 const AccountIntakePage = lazy(() => import("./pages/AccountCenterPages").then((module) => ({ default: module.AccountIntakePage })));
 const AccountStatisticsPage = lazy(() => import("./pages/AccountStatisticsPage").then((module) => ({ default: module.AccountStatisticsPage })));
-const ProtocolManagementPage = lazy(() => import("./pages/ProtocolManagementPage").then((module) => ({ default: module.ProtocolManagementPage })));
+const ProtocolCenterPage = lazy(() => import("./pages/ProtocolCenterPage").then((module) => ({ default: module.ProtocolCenterPage })));
 const HomePage = lazy(() => import("./pages/HomePage").then((module) => ({ default: module.HomePage })));
 const DeveloperDocsPage = lazy(() => import("./pages/DeveloperDocsPage").then((module) => ({ default: module.DeveloperDocsPage })));
 const GroupMarketingConstructionPage = lazy(() => import("./pages/GroupMarketingPages").then((module) => ({ default: module.GroupMarketingConstructionPage })));
@@ -84,6 +84,22 @@ function ProtectedPage({ children }: { children: ReactNode }) {
     );
   if (!user) return <Navigate to="/login" replace />;
   return children;
+}
+
+function ProtocolCenterRedirect({
+  tab,
+}: {
+  tab: "nodes" | "protocols" | "routing";
+}) {
+  const location = useLocation();
+  const search = new URLSearchParams(location.search);
+  search.set("tab", tab);
+  return (
+    <Navigate
+      to={`/resources/operations/protocol-center?${search.toString()}`}
+      replace
+    />
+  );
 }
 
 export default function App() {
@@ -151,7 +167,11 @@ export default function App() {
           <Route path="/resources/accounts/intake" element={<AccountIntakePage />} />
           <Route path="/resources/accounts/statistics" element={<AccountStatisticsPage />} />
           <Route path="/resources/materials" element={<MaterialsPage />} />
-          <Route path="/resources/operations/protocol" element={<ProtocolManagementPage />} />
+          <Route path="/resources/operations/protocol-center" element={<ProtocolCenterPage />} />
+          <Route path="/resources/operations/protocols" element={<ProtocolCenterRedirect tab="protocols" />} />
+          <Route path="/resources/operations/nodes" element={<ProtocolCenterRedirect tab="nodes" />} />
+          <Route path="/resources/operations/protocol" element={<ProtocolCenterRedirect tab="nodes" />} />
+          <Route path="/resources/operations/routing" element={<ProtocolCenterRedirect tab="routing" />} />
           <Route
             path="/ip-management"
             element={<Navigate to="/resources/operations/ip" replace />}

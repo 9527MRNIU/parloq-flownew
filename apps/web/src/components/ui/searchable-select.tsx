@@ -10,6 +10,7 @@ export type SearchableSelectOption = {
   label: string;
   keywords?: string;
   description?: string;
+  leading?: ReactNode;
   preview?: ReactNode;
   disabled?: boolean;
 };
@@ -66,8 +67,18 @@ export function SearchableSelect({
           disabled={disabled}
           className={cn("w-full justify-between px-2.5 font-normal", className)}
         >
-          <span className={cn("truncate", !selected && "text-muted-foreground")}>
-            {selected?.label || placeholder}
+          <span
+            className={cn(
+              "flex min-w-0 items-center gap-2",
+              !selected && "text-muted-foreground",
+            )}
+          >
+            {selected?.leading ? (
+              <span className="flex shrink-0 items-center">
+                {selected.leading}
+              </span>
+            ) : null}
+            <span className="truncate">{selected?.label || placeholder}</span>
           </span>
           <ChevronsUpDownIcon className="text-muted-foreground" size={15} />
         </Button>
@@ -117,6 +128,11 @@ export function SearchableSelect({
                     option.value === value ? "opacity-100" : "opacity-0",
                   )}
                 />
+                {option.leading ? (
+                  <span className="flex shrink-0 items-center">
+                    {option.leading}
+                  </span>
+                ) : null}
                 {option.preview ? (
                   <span className="flex h-14 w-20 shrink-0 items-center justify-center">
                     {option.preview}

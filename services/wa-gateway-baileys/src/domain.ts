@@ -53,6 +53,8 @@ export function normalizeSyncPolicy(value: unknown): SyncPolicy {
 
 export interface Account {
   id: string
+  protocolDefinitionId: string
+  protocolVersion: string
   phoneE164: string
   proxyUrl: string
   state: AccountState
@@ -94,6 +96,16 @@ export interface AccountStateWebhookEvent {
   toState: AccountState
   reasonCategory: string
   providerCode?: string
+  occurredAt: Date
+}
+
+export interface ProxyHealthWebhookEvent {
+  event: 'proxy.health'
+  eventId: string
+  accountId: string
+  outcome: 'success' | 'failure'
+  reasonCategory: string
+  proxyFingerprint: string
   occurredAt: Date
 }
 

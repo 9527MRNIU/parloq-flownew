@@ -25,7 +25,7 @@ class ProtocolSessionImporter:
     formats: tuple[str, ...]
     validate: Callable[[Any], ValidatedProtocolSession]
     import_to_gateway: Callable[
-        [WaGatewayClient, str, dict[str, Any], str | None], None
+        [WaGatewayClient, str, dict[str, Any], str | None, str, str], None
     ]
 
 
@@ -44,8 +44,16 @@ def _import_baileys(
     account_id: str,
     session: dict[str, Any],
     proxy_url: str | None,
+    protocol_definition_id: str,
+    protocol_version: str,
 ) -> None:
-    client.import_session(account_id, session, proxy_url)
+    client.import_session(
+        account_id,
+        session,
+        proxy_url,
+        protocol_definition_id=protocol_definition_id,
+        protocol_version=protocol_version,
+    )
 
 
 _IMPORTERS = {
@@ -82,10 +90,19 @@ def import_protocol_session(
     account_id: str,
     session: dict[str, Any],
     proxy_url: str | None,
+    protocol_definition_id: str,
+    protocol_version: str,
 ) -> None:
     importer = _IMPORTERS.get(protocol_type)
     if importer is None:
         raise ProtocolSessionImportError(
             f"{protocol_type} 协议暂不支持会话文件导入"
         )
-    importer.import_to_gateway(client, account_id, session, proxy_url)
+    importer.import_to_gateway(
+        client,
+        account_id,
+        session,
+        proxy_url,
+        protocol_definition_id,
+        protocol_version,
+    )

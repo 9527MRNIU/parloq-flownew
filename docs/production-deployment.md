@@ -67,6 +67,11 @@ API 容器设置 `AUTO_MIGRATE=true`，启动时先执行 Alembic，再开始监
 宝塔普通 `up` 即可完成迁移，仍然只有 6 个常驻服务，不会因为一次性迁移容器
 显示为停止。`migration` profile 仅保留为应急迁移入口。
 
+生产 Redis 使用 `REDIS_PASSWORD` 启用认证，API、Worker 与健康检查使用同一个
+生产环境值。第一次发布需要认证的版本时，标准发布脚本会在终端无回显地要求输入
+并确认一次，然后以 `600` 权限保存到生产 `.env`；后续发布直接复用，禁止把密码
+写入仓库或打印到终端。
+
 不得执行 `docker compose down -v`，不得在宝塔点击「删除编排」，不得删除
 `/data/parloq-flow`。宝塔的删除编排流程可能连带 volumes。
 
@@ -141,6 +146,22 @@ Baileys 三个组件分别保留最近 3 个 `server`/旧 `local` Git SHA 镜像
 
 服务器上的 `github-token` 权限为 `600`，仅由更新脚本的 Git 凭据助手读取；Token
 不进入 Compose、镜像、构建参数或 Git URL。
+
+## PostgreSQL 与 Redis 临时公网访问
+
+需要从公网工具直接连接时，在生产服务器仓库根目录运行：
+
+```bash
+bash deploy/public-data-access.sh
+```
+
+脚本只有“状态、打开、关闭”三个菜单。打开操作使用独立的临时 `iptables` 链把
+公网 `5432/6379` 转发到当前 Parloq Flow PostgreSQL/Redis 容器，不限制来源 IP；
+关闭操作只删除这些自有规则。它不会修改 Compose、重启容器、持久化防火墙规则或
+接触 WABA。服务器重启后默认关闭；容器被重新创建后再次选择“打开”即可刷新目标。
+
+脚本会打印主机、端口、数据库、用户名和连接串模板，但不会显示生产密码。打开前
+必须确认 PostgreSQL 与 Redis 均为 healthy，且生产 `.env` 已配置两项密码。
 
 ## 人工验证与回滚
 

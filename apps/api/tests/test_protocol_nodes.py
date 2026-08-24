@@ -15,11 +15,16 @@ def test_protocol_node_metrics_ingress_and_marketing_controls(
     listed = admin_client.get("/api/protocol-nodes")
     assert listed.status_code == 200, listed.text
     node = listed.json()["data"]["rows"][0]
+    definition = node["protocolDefinition"]
     assert node["id"].isdecimal()
     assert "publicId" not in node
     assert node["protocol"] == "baileys"
     assert node["accountTotal"] >= 0
     assert node["validRate"] is None or 0 <= node["validRate"] <= 100
+    assert definition["name"] == "Baileys Web协议"
+    assert definition["adapterKey"] == "baileys"
+    assert definition["version"] == "6.7.24"
+    assert definition["buildStatus"] == "ready"
 
     disabled_ingress = admin_client.patch(
         f"/api/protocol-nodes/{node['id']}",
@@ -121,6 +126,7 @@ def test_protocol_node_create_pool_and_template_contract(
     assert created.status_code == 201, created.text
     node = created.json()["data"]["protocol"]
     assert node["id"].isdecimal()
+    assert node["protocolDefinition"]["version"] == "6.7.24"
     assert node["maxAccountCount"] is None
     assert node["maxOnlineAccounts"] == 1000
     assert node["connectionPolicy"] == "on_demand"

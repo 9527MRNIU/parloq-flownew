@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, TypeAlias
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
@@ -19,6 +19,7 @@ from app.security import secret_fingerprint, utcnow
 
 
 DbSession = Annotated[Session, Depends(get_db)]
+PermissionRequirement: TypeAlias = str | tuple[str, ...]
 
 
 def _request_token(request: Request) -> str | None:
@@ -54,7 +55,10 @@ def _validate_cookie_request_origin(request: Request) -> None:
         )
 
 
-def _request_permission(method: str, path: str) -> tuple[str | None, bool] | None:
+def _request_permission(
+    method: str,
+    path: str,
+) -> tuple[PermissionRequirement | None, bool] | None:
     # These endpoints intentionally require only a valid session. Every other
     # CurrentUser endpoint must be mapped below or non-admin users fail closed.
     if path in {
@@ -95,7 +99,16 @@ def _request_permission(method: str, path: str) -> tuple[str | None, bool] | Non
         return "resources.accounts.export", True
     rules = (
         ("/api/account-statistics", "resources.account_statistics.read", None),
-        ("/api/protocol-pools", "resources.protocol.read", "resources.protocol.manage"),
+        (
+            "/api/protocol-definitions",
+            "resources.protocol_definitions.read",
+            "resources.protocol.manage",
+        ),
+        (
+            "/api/protocol-pools",
+            "resources.protocol_routing.read",
+            "resources.protocol.manage",
+        ),
         ("/api/bitly-accounts", "marketing.direct_short_links.read", "marketing.direct_short_links.manage"),
         ("/api/direct-short-links/accounts", "marketing.direct_short_links.read", "marketing.direct_short_links.manage"),
         ("/api/promotion/template-kits", "promotion.templates.read", None),
@@ -112,7 +125,11 @@ def _request_permission(method: str, path: str) -> tuple[str | None, bool] | Non
         ("/api/meta-pixels", "promotion.channels.read", "promotion.channels.manage"),
         ("/api/personal-accounts", "resources.accounts.read", "resources.accounts.manage"),
         ("/api/account-groups", "resources.account_groups.read", "resources.accounts.manage"),
-        ("/api/protocol-nodes", "resources.protocol.read", "resources.protocol.manage"),
+        (
+            "/api/protocol-nodes",
+            ("resources.protocol.read", "resources.protocol_routing.read"),
+            "resources.protocol.manage",
+        ),
         ("/api/materials", "resources.materials.read", "resources.materials.manage"),
         ("/api/hyperlink/tasks", "marketing.hyperlink_tasks.read", "marketing.hyperlink_tasks.manage"),
         ("/api/hyperlink/data-packages", "marketing.data_packages.read", "marketing.data_packages.manage"),
@@ -172,12 +189,17 @@ def get_current_user(request: Request, db: DbSession) -> UserAccount:
                 )
             )
         else:
+            permission_keys = (
+                permission_key
+                if isinstance(permission_key, tuple)
+                else (permission_key,)
+            )
             allowed = db.scalar(
                 select(RoleMenuPermission.id)
                 .join(SystemMenu)
                 .where(
                     RoleMenuPermission.role_id == user.group_id,
-                    SystemMenu.permission_key == permission_key,
+                    SystemMenu.permission_key.in_(permission_keys),
                     SystemMenu.enabled.is_(True),
                 )
             )

@@ -83,6 +83,25 @@ def test_namesilo_managed_domain_onboarding_advances_all_platforms_idempotently(
         def ensure_reverse_proxy(self, domain: str, upstream: str) -> None:
             calls.append(("proxy", domain, upstream))
 
+        def ensure_site_firewall_policy(
+            self,
+            domain: str,
+            *,
+            cdn_enabled: bool,
+            cc_enabled: bool,
+            china_blocked: bool,
+        ) -> bool:
+            calls.append(
+                (
+                    "firewall",
+                    domain,
+                    cdn_enabled,
+                    cc_enabled,
+                    china_blocked,
+                )
+            )
+            return True
+
         def close(self) -> None:
             calls.append(("close_baota",))
 
@@ -97,7 +116,14 @@ def test_namesilo_managed_domain_onboarding_advances_all_platforms_idempotently(
         ),
         "baota": domain_onboarding._Platform(
             secret="baota-key",
-            settings={"baseUrl": "https://panel.example"},
+            settings={
+                "baseUrl": "https://panel.example",
+                "domainPolicy": {
+                    "cdnEnabled": True,
+                    "ccEnabled": False,
+                    "chinaBlocked": True,
+                },
+            },
         ),
     }
     monkeypatch.setattr(
@@ -143,6 +169,7 @@ def test_namesilo_managed_domain_onboarding_advances_all_platforms_idempotently(
         assert result.onboarding_state_json["registrarNameserversUpdated"] is True
         assert result.onboarding_state_json["cloudflareRoutingResetCompleted"] is True
         assert result.onboarding_state_json["baotaSiteReady"] is True
+        assert result.onboarding_state_json["baotaFirewallStatus"] == "configured"
 
     assert (
         "change_nameservers",
@@ -153,6 +180,13 @@ def test_namesilo_managed_domain_onboarding_advances_all_platforms_idempotently(
         "proxy",
         "automatic-purchase.example",
         "http://127.0.0.1:18100",
+    ) in calls
+    assert (
+        "firewall",
+        "automatic-purchase.example",
+        True,
+        False,
+        True,
     ) in calls
     assert len([call for call in calls if call[0] == "dns"]) == 2
     assert len([call for call in calls if call[0] == "reset_dns"]) == 1

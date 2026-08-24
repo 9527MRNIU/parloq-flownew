@@ -188,9 +188,17 @@ must never silently fall back to the host's direct IP.
 
 The allocation policy is tenant-configurable: strict one-account-to-one-IP,
 tenant-only reuse, lowest-load preference, or manual assignment. Country
-matching can be strict, preferred, or disabled. Operators may also configure a
-per-IP account limit, unhealthy-IP exclusion and sticky binding. Reuse never
-crosses tenant boundaries when tenant isolation is selected.
+matching uses either the public visitor/access country or the E.164 phone
+country. Operators may also configure a per-IP account limit, consecutive
+failure threshold, cooldown duration and sticky binding. Reuse never crosses
+tenant boundaries when tenant isolation is selected.
+
+Proxy health is event-driven. Import performs one credential-aware gateway
+probe against WhatsApp Web; afterward real gateway connections report success
+or classified proxy failures. There is no scheduled proxy polling. Active
+cooldowns are excluded from every allocation mode, while an expired transient
+cooldown re-enters as a low-priority probation candidate. Authentication and
+configuration failures remain quarantined until an edit or manual recheck.
 
 ## Delivery data
 

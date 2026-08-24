@@ -12,6 +12,7 @@ from app.models import (
     AccountPairingAttempt,
     PersonalAccount,
     PromotionChannel,
+    ProtocolDefinition,
     ProtocolNode,
     ProtocolPool,
     ProtocolPoolMember,
@@ -56,6 +57,23 @@ class ProtocolCapacity:
     total_accounts: int
     online_accounts: int
     active_pairings: int
+
+
+@dataclass(frozen=True)
+class ProtocolRuntimeBinding:
+    definition_id: str
+    version: str
+
+
+def protocol_runtime_binding(
+    db: Session, item: ProtocolNode
+) -> ProtocolRuntimeBinding:
+    definition = db.get(ProtocolDefinition, item.protocol_definition_id)
+    if definition is None or not definition.enabled:
+        raise HTTPException(status_code=409, detail="协议定义不存在或已停用")
+    if definition.build_status != "ready":
+        raise HTTPException(status_code=409, detail="协议尚未构建完成，暂不能接入账号")
+    return ProtocolRuntimeBinding(str(definition.id), definition.version)
 
 
 def normalized_sync_policy(value: dict | None) -> dict[str, bool]:
@@ -183,11 +201,34 @@ def protocol_health(db: Session, item: ProtocolNode) -> tuple[str, str | None]:
     return "offline", reason
 
 
-def _new_default_node(owner_id: int) -> ProtocolNode:
+def default_protocol_definition(db: Session) -> ProtocolDefinition:
+    item = db.scalar(
+        select(ProtocolDefinition)
+        .where(
+            ProtocolDefinition.adapter_key == "baileys",
+            ProtocolDefinition.build_status == "ready",
+            ProtocolDefinition.enabled.is_(True),
+        )
+        .order_by(
+            ProtocolDefinition.is_builtin.desc(),
+            ProtocolDefinition.id,
+        )
+        .limit(1)
+    )
+    if item is None:
+        raise HTTPException(status_code=409, detail="当前没有可用的协议定义")
+    return item
+
+
+def _new_default_node(
+    owner_id: int,
+    definition: ProtocolDefinition,
+) -> ProtocolNode:
     return ProtocolNode(
         public_id=new_public_id("proto"),
-        name="Baileys 默认协议",
-        protocol_type="baileys",
+        name="默认节点",
+        protocol_type=definition.adapter_key,
+        protocol_definition_id=definition.id,
         remark="系统默认 Baileys 协议节点",
         ingress_enabled=True,
         marketing_enabled=True,
@@ -229,7 +270,10 @@ def select_ingress_protocol(
             ).limit(1)
         )
         if existing_node is None:
-            item = _new_default_node(owner_id)
+            item = _new_default_node(
+                owner_id,
+                default_protocol_definition(db),
+            )
             try:
                 with db.begin_nested():
                     db.add(item)

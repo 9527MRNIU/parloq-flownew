@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto'
 import type { Logger } from 'pino'
-import type { AccountStateWebhookEvent, Message } from './domain.js'
+import type { AccountStateWebhookEvent, Message, ProxyHealthWebhookEvent } from './domain.js'
 import { safeError } from './domain.js'
 
 export class WebhookClient {
@@ -32,6 +32,22 @@ export class WebhookClient {
     const payload: Record<string, unknown> = { ...event }
     void this.run(payload, event.eventId).catch((error: unknown) => {
       this.logger.warn({ eventId: event.eventId, accountId: event.accountId, toState: event.toState, error: safeError(error) }, 'account_state_webhook_failed')
+    })
+  }
+
+  deliverProxyHealth(event: ProxyHealthWebhookEvent): void {
+    if (!this.url) return
+    const payload: Record<string, unknown> = { ...event }
+    void this.run(payload, event.eventId).catch((error: unknown) => {
+      this.logger.warn(
+        {
+          eventId: event.eventId,
+          accountId: event.accountId,
+          outcome: event.outcome,
+          error: safeError(error),
+        },
+        'proxy_health_webhook_failed',
+      )
     })
   }
 

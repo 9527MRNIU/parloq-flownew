@@ -35,6 +35,15 @@ type PlatformSettings = {
   paymentId?: string;
   accountId?: string;
   baseUrl?: string;
+  domainPolicy?: {
+    cdnEnabled: boolean;
+    ccEnabled: boolean;
+    chinaBlocked: boolean;
+  };
+  nginxFirewallPlugin?: {
+    status: "available" | "unavailable" | "unknown";
+    checkedAt?: string;
+  };
   repository?: string;
   ref?: string;
   catalogPath?: string;
@@ -75,6 +84,8 @@ function platformRows(payload: unknown): PlatformConfiguration[] {
   return (body.data?.platforms ?? []).map((value) => {
     const row = value as Record<string, unknown>;
     const settings = (row.settings ?? {}) as Record<string, unknown>;
+    const domainPolicy = (settings.domainPolicy ?? {}) as Record<string, unknown>;
+    const firewallPlugin = (settings.nginxFirewallPlugin ?? {}) as Record<string, unknown>;
     return {
       key: String(row.key || "") as PlatformConfiguration["key"],
       name: String(row.name || ""),
@@ -88,6 +99,17 @@ function platformRows(payload: unknown): PlatformConfiguration[] {
         paymentId: String(settings.paymentId || ""),
         accountId: String(settings.accountId || ""),
         baseUrl: String(settings.baseUrl || ""),
+        domainPolicy: {
+          cdnEnabled: Boolean(domainPolicy.cdnEnabled ?? true),
+          ccEnabled: Boolean(domainPolicy.ccEnabled ?? false),
+          chinaBlocked: Boolean(domainPolicy.chinaBlocked ?? true),
+        },
+        nginxFirewallPlugin: {
+          status: ["available", "unavailable"].includes(String(firewallPlugin.status))
+            ? String(firewallPlugin.status) as "available" | "unavailable"
+            : "unknown",
+          checkedAt: String(firewallPlugin.checkedAt || ""),
+        },
         repository: String(settings.repository || ""),
         ref: String(settings.ref || ""),
         catalogPath: String(settings.catalogPath || ""),
@@ -326,16 +348,43 @@ export function SystemConfigurationPage() {
                   </DrawerFormField>
 
                   {row.key === "baota" ? (
-                    <DrawerFormField label="面板地址" htmlFor="system-baota-base-url">
-                      <Input
-                        id="system-baota-base-url"
-                        value={draft.baseUrl || ""}
-                        disabled={busy}
-                        onChange={(event) => updateDraft(row.key, { baseUrl: event.target.value })}
-                        placeholder="https://panel.example.com:8888"
-                        className="max-w-2xl"
-                      />
-                    </DrawerFormField>
+                    <>
+                      <DrawerFormField label="面板地址" htmlFor="system-baota-base-url">
+                        <Input
+                          id="system-baota-base-url"
+                          value={draft.baseUrl || ""}
+                          disabled={busy}
+                          onChange={(event) => updateDraft(row.key, { baseUrl: event.target.value })}
+                          placeholder="https://panel.example.com:8888"
+                          className="max-w-2xl"
+                        />
+                      </DrawerFormField>
+                      <DrawerFormField label="防火墙插件" align="start">
+                        <div className="min-h-8 pt-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge
+                              tone={row.settings.nginxFirewallPlugin?.status === "available"
+                                ? "success"
+                                : "neutral"}
+                            >
+                              {row.settings.nginxFirewallPlugin?.status === "available"
+                                ? "已检测到"
+                                : row.settings.nginxFirewallPlugin?.status === "unavailable"
+                                  ? "未安装"
+                                  : "尚未检测"}
+                            </Badge>
+                            {row.settings.nginxFirewallPlugin?.checkedAt ? (
+                              <span className="text-sm text-muted-foreground">
+                                {formatDateTime(row.settings.nginxFirewallPlugin.checkedAt)}
+                              </span>
+                            ) : null}
+                          </div>
+                          <p className="mt-1.5 text-sm leading-5 text-muted-foreground">
+                            未安装 Nginx 防火墙插件不会影响宝塔连接，域名接入时会自动跳过对应策略。
+                          </p>
+                        </div>
+                      </DrawerFormField>
+                    </>
                   ) : null}
 
                   {row.key === "github" ? (

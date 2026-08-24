@@ -14,18 +14,29 @@ from app.database import SessionLocal
 from app.models import (
     AccountLifecycleEvent,
     AccountPairingAttempt,
+    AccountProxyBinding,
     HyperlinkTask,
     HyperlinkTaskAccountSlot,
     HyperlinkTaskDelivery,
     MessageDelivery,
     PersonalAccount,
     PromotionChannel,
+    IpAllocationPolicy,
+    ProxyEndpoint,
+    ProxyHealthEvent,
 )
 from app.routers.personal_accounts import delivery_row
 from app.security import utcnow
 from app.services.pairing_observability import (
     persist_pairing_attempt_failure_event,
 )
+from app.services.proxy_health import (
+    ProxyHealthPolicy,
+    ProxyProbeResult,
+    apply_proxy_health_result,
+    proxy_fingerprint,
+)
+from app.services.wa_gateway import GatewayError, WaGatewayClient
 
 
 router = APIRouter(prefix="/api/internal/wa-gateway", tags=["internal-wa-gateway"])
@@ -45,6 +56,23 @@ ACCOUNT_STATES = {
 }
 EVENT_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 REASON_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+FINGERPRINT_RE = re.compile(r"^[a-f0-9]{64}$")
+
+
+def _event_time(payload: dict) -> datetime:
+    occurred_value = payload.get("occurredAt")
+    if not isinstance(occurred_value, str) or len(occurred_value) > 64:
+        raise HTTPException(status_code=422, detail="occurredAt 无效")
+    try:
+        occurred_at = datetime.fromisoformat(occurred_value.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="occurredAt 无效") from None
+    if occurred_at.tzinfo is None:
+        raise HTTPException(status_code=422, detail="occurredAt 必须包含时区")
+    occurred_at = occurred_at.astimezone(UTC)
+    if occurred_at > utcnow() + timedelta(minutes=5):
+        raise HTTPException(status_code=422, detail="occurredAt 超出允许范围")
+    return occurred_at
 
 
 def _account_state_event(payload: dict) -> dict:
@@ -59,7 +87,6 @@ def _account_state_event(payload: dict) -> dict:
     to_state = str(payload.get("toState") or "").strip().lower()
     reason = str(payload.get("reasonCategory") or "").strip().lower()
     provider_code = str(payload.get("providerCode") or "").strip() or None
-    occurred_value = payload.get("occurredAt")
 
     if not EVENT_ID_RE.fullmatch(event_id):
         raise HTTPException(status_code=422, detail="eventId 无效")
@@ -73,17 +100,7 @@ def _account_state_event(payload: dict) -> dict:
         raise HTTPException(status_code=422, detail="reasonCategory 无效")
     if provider_code is not None and not REASON_RE.fullmatch(provider_code):
         raise HTTPException(status_code=422, detail="providerCode 无效")
-    if not isinstance(occurred_value, str) or len(occurred_value) > 64:
-        raise HTTPException(status_code=422, detail="occurredAt 无效")
-    try:
-        occurred_at = datetime.fromisoformat(occurred_value.replace("Z", "+00:00"))
-    except ValueError:
-        raise HTTPException(status_code=422, detail="occurredAt 无效") from None
-    if occurred_at.tzinfo is None:
-        raise HTTPException(status_code=422, detail="occurredAt 必须包含时区")
-    occurred_at = occurred_at.astimezone(UTC)
-    if occurred_at > utcnow() + timedelta(minutes=5):
-        raise HTTPException(status_code=422, detail="occurredAt 超出允许范围")
+    occurred_at = _event_time(payload)
 
     with SessionLocal() as db:
         account = db.scalar(
@@ -303,6 +320,155 @@ def _account_state_event(payload: dict) -> dict:
         }
 
 
+def _proxy_health_event(payload: dict) -> dict:
+    event_id = str(payload.get("eventId") or "").strip()
+    account_public_id = str(payload.get("accountId") or "").strip()
+    outcome = str(payload.get("outcome") or "").strip().lower()
+    reason = str(payload.get("reasonCategory") or "").strip().lower()
+    fingerprint = str(payload.get("proxyFingerprint") or "").strip().lower()
+    occurred_at = _event_time(payload)
+    if not EVENT_ID_RE.fullmatch(event_id):
+        raise HTTPException(status_code=422, detail="eventId 无效")
+    if not EVENT_ID_RE.fullmatch(account_public_id):
+        raise HTTPException(status_code=422, detail="accountId 无效")
+    if outcome not in {"success", "failure"}:
+        raise HTTPException(status_code=422, detail="outcome 无效")
+    if not REASON_RE.fullmatch(reason):
+        raise HTTPException(status_code=422, detail="reasonCategory 无效")
+    if not FINGERPRINT_RE.fullmatch(fingerprint):
+        raise HTTPException(status_code=422, detail="proxyFingerprint 无效")
+
+    disconnect_account = False
+    affected_account_ids: list[str] = []
+    with SessionLocal() as db:
+        account = db.scalar(
+            select(PersonalAccount).where(
+                PersonalAccount.public_id == account_public_id
+            )
+        )
+        if account is None:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        row = db.execute(
+            select(AccountProxyBinding, ProxyEndpoint)
+            .join(ProxyEndpoint, ProxyEndpoint.id == AccountProxyBinding.proxy_id)
+            .where(
+                AccountProxyBinding.account_public_id == account.gateway_account_id
+            )
+            .with_for_update(of=ProxyEndpoint)
+        ).first()
+        if row is None:
+            return {
+                "data": {
+                    "ok": True,
+                    "ignored": True,
+                    "reason": "proxy_binding_missing",
+                    "eventId": event_id,
+                }
+            }
+        proxy = row[1]
+        # Recheck idempotency only after locking the proxy row. Concurrent
+        # webhook retries for the same event then serialize and cannot count
+        # one gateway failure twice.
+        existing = db.scalar(
+            select(ProxyHealthEvent).where(ProxyHealthEvent.public_id == event_id)
+        )
+        if existing is not None:
+            if existing.account_id != account.id:
+                raise HTTPException(status_code=409, detail="事件与账号不匹配")
+            return {"data": {"ok": True, "duplicate": True, "eventId": event_id}}
+        if proxy_fingerprint(proxy) != fingerprint:
+            return {
+                "data": {
+                    "ok": True,
+                    "ignored": True,
+                    "reason": "stale_proxy_configuration",
+                    "eventId": event_id,
+                }
+            }
+
+        event = ProxyHealthEvent(
+            public_id=event_id,
+            proxy_id=proxy.id,
+            account_id=account.id,
+            outcome=outcome,
+            reason_category=reason,
+            proxy_fingerprint=fingerprint,
+            occurred_at=occurred_at,
+        )
+        db.add(event)
+        stale = bool(
+            proxy.last_checked_at
+            and occurred_at
+            < proxy.last_checked_at.replace(
+                tzinfo=proxy.last_checked_at.tzinfo or UTC
+            )
+        )
+        if not stale:
+            policy_row = db.scalar(
+                select(IpAllocationPolicy).where(
+                    IpAllocationPolicy.created_by == account.created_by
+                )
+            )
+            policy = ProxyHealthPolicy(
+                failure_threshold=(
+                    policy_row.failure_threshold if policy_row is not None else 2
+                ),
+                cooldown_seconds=(
+                    policy_row.cooldown_seconds if policy_row is not None else 900
+                ),
+            )
+            result = ProxyProbeResult(
+                healthy=outcome == "success",
+                reason_category=reason,
+                error=(
+                    None
+                    if outcome == "success"
+                    else (
+                        "代理认证失败，请检查账号和密码"
+                        if reason == "proxy_authentication_failed"
+                        else "网关实际使用代理连接 WhatsApp 失败"
+                    )
+                ),
+            )
+            transition = apply_proxy_health_result(
+                proxy,
+                result,
+                source="gateway",
+                policy=policy,
+            )
+            disconnect_account = transition.entered_cooldown
+            if disconnect_account:
+                affected_account_ids = list(
+                    db.scalars(
+                        select(AccountProxyBinding.account_public_id).where(
+                            AccountProxyBinding.proxy_id == proxy.id
+                        )
+                    ).all()
+                )
+        db.commit()
+        cooldown_until = (
+            proxy.cooldown_until.isoformat() if proxy.cooldown_until else None
+        )
+
+    if disconnect_account:
+        client = WaGatewayClient()
+        for affected_account_id in affected_account_ids:
+            try:
+                client.disconnect(affected_account_id)
+            except GatewayError:
+                pass
+    return {
+        "data": {
+            "ok": True,
+            "duplicate": False,
+            "stale": stale,
+            "enteredCooldown": disconnect_account,
+            "cooldownUntil": cooldown_until,
+            "eventId": event_id,
+        }
+    }
+
+
 @router.post("/events")
 async def receive_status_event(
     request: Request,
@@ -332,6 +498,8 @@ async def receive_status_event(
         raise HTTPException(status_code=422, detail="回调事件类型无效")
     if payload.get("event") == "account.state":
         return _account_state_event(payload)
+    if payload.get("event") == "proxy.health":
+        return _proxy_health_event(payload)
     if payload.get("event") != "message.status":
         raise HTTPException(status_code=422, detail="回调事件类型无效")
     message_id = str(payload.get("messageId") or "").strip()

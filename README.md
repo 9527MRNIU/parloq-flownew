@@ -366,6 +366,27 @@ curl -fsS https://center.parloq.com/readyz
 - `center.parloq.com` 的反代和证书有效；
 - 旧 `waba` 栈的容器数量、镜像、端口和数据未发生变化。
 
+### PostgreSQL 与 Redis 公网开关
+
+生产 Compose 默认仍不发布 PostgreSQL 和 Redis 端口。需要临时从公网直连时，
+在生产服务器的仓库根目录运行：
+
+```bash
+bash deploy/public-data-access.sh
+```
+
+脚本只提供“状态、打开、关闭”三个菜单。打开后将宿主机 `5432` 和 `6379` 直接
+转发到 Parloq Flow 的 PostgreSQL 与 Redis 容器，并打印连接地址；关闭后删除该
+脚本创建的临时规则。规则不会持久化，服务器重启后默认关闭，也不会重启数据库、
+Redis 或任何 WABA 服务。
+
+如果公网访问打开期间 PostgreSQL 或 Redis 容器被重新创建，选择“状态”会提示规则
+目标已经变化；再次选择“打开”即可按新的容器地址刷新转发规则。
+
+公网打开后不限制来源 IP，PostgreSQL 与 Redis 均依赖服务密码认证。首次部署带
+Redis 认证的版本时，标准发布脚本会提示输入并确认 `REDIS_PASSWORD`，保存后后续
+发布不再询问。公网开关脚本不会把生产密码打印到终端。
+
 ### 失败与回滚
 
 服务器每次使用带 commit 短 SHA 的本地镜像标签，上一版镜像不会被本次构建覆盖；

@@ -2992,6 +2992,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
     from app.services.protocol_nodes import (
         normalized_sync_policy,
         protocol_capacity,
+        protocol_runtime_binding,
         resolve_channel_ingress_protocol,
     )
 
@@ -3417,9 +3418,15 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
     from app.services.wa_gateway import GatewayError, WaGatewayClient
 
     client = WaGatewayClient()
+    runtime_binding = protocol_runtime_binding(db, protocol)
     try:
         if _proxy_url(db, item.gateway_account_id) is None:
-            proxy = _auto_proxy(db, channel.created_by, account_country_code)
+            proxy = _auto_proxy(
+                db,
+                channel.created_by,
+                account_country_code,
+                network.visitor_country_code,
+            )
             if proxy is None:
                 db.rollback()
                 return _recorded_pairing_failure_response(
@@ -3495,6 +3502,8 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 item.gateway_account_id,
                 payload.phone,
                 _proxy_url(db, item.gateway_account_id),
+                protocol_definition_id=runtime_binding.definition_id,
+                protocol_version=runtime_binding.version,
                 connection_policy=protocol.connection_policy,
                 idle_disconnect_seconds=protocol.idle_disconnect_seconds,
                 post_verify_grace_seconds=protocol.post_verify_grace_seconds,

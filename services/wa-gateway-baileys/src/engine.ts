@@ -1,38 +1,51 @@
 import { Boom } from '@hapi/boom'
-import makeWASocket, {
-  Browsers,
-  DisconnectReason,
-  generateWAMessageFromContent,
-  prepareWAMessageMedia,
+import * as BuiltinBaileys from '@whiskeysockets/baileys'
+import type {
   proto,
-  WAMessageStatus,
-  type ConnectionState,
-  type WASocket,
+  ConnectionState,
+  WASocket,
 } from '@whiskeysockets/baileys'
 import type { Agent } from 'node:https'
 import { createHash } from 'node:crypto'
 import pino, { type Logger } from 'pino'
 import { ProxyAgent } from 'proxy-agent'
-import { loadAuthState, mergeCreds } from './auth-store.js'
+import { loadAuthState, mergeCreds, type BaileysRuntimeModule } from './auth-store.js'
 import type { Store } from './store.js'
 import { WaWebVersionResolver } from './wa-version.js'
 import type { ManagedMediaReference, MessageButton, OutboundMessage } from './message-content.js'
 import type { SyncPolicy } from './domain.js'
+import { classifyProxyFailure, proxyFingerprint } from './proxy-health.js'
 
 export type EngineEvent =
   | { kind: 'connected'; accountId: string; deviceJid: string }
+  | { kind: 'proxy_result'; accountId: string; outcome: 'success' | 'failure'; reasonCategory: string; proxyFingerprint: string }
   | { kind: 'pairing_restarting'; accountId: string; reasonCategory: string; providerCode?: string }
   | { kind: 'disconnected' | 'logged_out' | 'reauth_required' | 'restricted'; accountId: string; reasonCategory: string; providerCode?: string }
   | { kind: 'delivered'; accountId: string; providerMessageId: string }
 
 export interface PairResult { accountId: string; code: string; expiresAt: Date; deviceJid?: string }
-export interface EngineAccount { accountId: string; phoneE164: string; proxyUrl: string; syncPolicy: SyncPolicy }
+export interface EngineAccount {
+  accountId: string
+  protocolDefinitionId: string
+  protocolVersion: string
+  phoneE164: string
+  proxyUrl: string
+  syncPolicy: SyncPolicy
+}
 export interface AccountQuality {
   hasAvatar: boolean | null
   groupCount: number | null
   friendCount: number | null
   mutualContactCount: number | null
   metadata: Record<string, unknown>
+}
+
+export interface ProtocolVersionInfo {
+  currentWaWebVersion: string | null
+  latestWaWebVersion: string | null
+  versionStatus: 'current' | 'update_available' | 'stale' | 'fallback' | 'unavailable'
+  checkedAt: string | null
+  checkError: string | null
 }
 
 export interface ProtocolEngine {
@@ -48,12 +61,14 @@ export interface ProtocolEngine {
   getQuality(accountId: string, policy: SyncPolicy): Promise<AccountQuality>
   isOnline(accountId: string): boolean
   setEventHandler(handler: (event: EngineEvent) => void): void
+  protocolVersionInfo?(): Promise<ProtocolVersionInfo>
 }
 
 interface ActiveSocket {
   socket: WASocket
   online: boolean
   proxyAgent?: ProxyAgent
+  proxyFailureReported?: boolean
 }
 
 interface PairingEventEmitter {
@@ -79,8 +94,9 @@ export function isRequiredPairingRestart(
   statusCode: number,
   pairingConfigured: boolean,
   creds: ReconnectableCredentials,
+  restartRequired = BuiltinBaileys.DisconnectReason.restartRequired,
 ): boolean {
-  return statusCode === DisconnectReason.restartRequired
+  return statusCode === restartRequired
     && pairingConfigured
     && hasReconnectableIdentity(creds)
 }
@@ -177,20 +193,54 @@ export class BaileysEngine implements ProtocolEngine {
   private started = false
   private readonly protocolLogger: Logger
   private readonly versionResolver: WaWebVersionResolver
+  private currentWaWebVersion: string | null = null
 
   constructor(
     private readonly store: Store,
     logger?: Logger,
     private readonly materialBaseUrl = 'http://api:8000',
+    private readonly baileys: BaileysRuntimeModule = BuiltinBaileys,
   ) {
     this.protocolLogger = (logger ?? pino({ level: 'warn' })).child({ component: 'baileys' })
-    this.versionResolver = new WaWebVersionResolver(this.protocolLogger)
+    this.versionResolver = new WaWebVersionResolver(
+      this.protocolLogger,
+      this.baileys.fetchLatestWaWebVersion,
+    )
   }
 
   setEventHandler(handler: (event: EngineEvent) => void): void { this.handler = handler }
   async start(): Promise<void> { this.started = true }
   async ready(): Promise<void> { if (!this.started) throw new Error('Baileys engine is not started') }
   isOnline(accountId: string): boolean { return this.sockets.get(accountId)?.online === true }
+
+  async protocolVersionInfo(): Promise<ProtocolVersionInfo> {
+    try {
+      const status = await this.versionResolver.inspect()
+      const latest = status.latestVersion?.join('.') ?? null
+      const current = this.currentWaWebVersion ?? status.resolvedVersion.join('.')
+      return {
+        currentWaWebVersion: current,
+        latestWaWebVersion: latest,
+        versionStatus: status.resolution === 'stale'
+          ? 'stale'
+          : status.resolution === 'fallback'
+            ? 'fallback'
+            : latest && current !== latest
+              ? 'update_available'
+              : 'current',
+        checkedAt: status.checkedAt,
+        checkError: status.error,
+      }
+    } catch (error) {
+      return {
+        currentWaWebVersion: this.currentWaWebVersion,
+        latestWaWebVersion: null,
+        versionStatus: 'unavailable',
+        checkedAt: new Date().toISOString(),
+        checkError: error instanceof Error ? error.message : String(error),
+      }
+    }
+  }
 
   async close(): Promise<void> {
     for (const accountId of [...this.sockets.keys()]) await this.disconnect(accountId)
@@ -211,6 +261,7 @@ export class BaileysEngine implements ProtocolEngine {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         active.socket.ev.off('connection.update', listener)
+        this.reportProxyFailure(account, active, new Error('timed out waiting for proxy connection'))
         reject(new Error('timed out waiting for Baileys connection'))
       }, 45_000)
       const listener = (update: Partial<ConnectionState>) => {
@@ -329,7 +380,7 @@ export class BaileysEngine implements ProtocolEngine {
       if (message.header.type === 'text') header.title = message.header.text
       if (message.header.type === 'image') {
         const content = await this.fetchManagedMaterial(message.header.media)
-        const media = await prepareWAMessageMedia(
+        const media = await this.baileys.prepareWAMessageMedia(
           { image: content },
           { upload: active.socket.waUploadToServer },
         )
@@ -338,7 +389,7 @@ export class BaileysEngine implements ProtocolEngine {
         header.imageMessage = media.imageMessage
       } else if (message.header.type === 'video') {
         const content = await this.fetchManagedMaterial(message.header.media)
-        const media = await prepareWAMessageMedia(
+        const media = await this.baileys.prepareWAMessageMedia(
           { video: content },
           { upload: active.socket.waUploadToServer },
         )
@@ -347,7 +398,7 @@ export class BaileysEngine implements ProtocolEngine {
         header.videoMessage = media.videoMessage
       } else if (message.header.type === 'document') {
         const content = await this.fetchManagedMaterial(message.header.media)
-        const media = await prepareWAMessageMedia(
+        const media = await this.baileys.prepareWAMessageMedia(
           {
             document: content,
             fileName: message.header.media.fileName,
@@ -359,7 +410,7 @@ export class BaileysEngine implements ProtocolEngine {
         if (!media.documentMessage) throw new Error('provider did not prepare the document header')
         header.documentMessage = media.documentMessage
       }
-      const interactiveMessage = proto.Message.InteractiveMessage.fromObject({
+      const interactiveMessage = this.baileys.proto.Message.InteractiveMessage.fromObject({
         header,
         body: { text: message.body.text },
         footer: { text: message.footer.text },
@@ -369,7 +420,7 @@ export class BaileysEngine implements ProtocolEngine {
           messageVersion: 1,
         },
       })
-      const generated = generateWAMessageFromContent(
+      const generated = this.baileys.generateWAMessageFromContent(
         jid,
         {
           viewOnceMessage: {
@@ -444,20 +495,22 @@ export class BaileysEngine implements ProtocolEngine {
     this.blockedReconnect.delete(account.accountId)
     const existing = this.sockets.get(account.accountId)
     if (existing) return existing
-    const { state, saveCreds } = await loadAuthState(this.store, account.accountId, createAuth)
+    const { state, saveCreds } = await loadAuthState(this.store, account.accountId, createAuth, this.baileys)
     const proxyAgent = account.proxyUrl
       ? new ProxyAgent({ getProxyForUrl: () => account.proxyUrl })
       : undefined
     let version
     try {
       version = await this.versionResolver.current(proxyAgent as Agent | undefined, createAuth)
+      this.currentWaWebVersion = version.join('.')
     } catch (error) {
+      this.reportProxyFailure(account, undefined, error)
       proxyAgent?.destroy()
       throw error
     }
-    const socket = makeWASocket({
+    const socket = this.baileys.default({
       auth: state,
-      browser: Browsers.macOS('Chrome'),
+      browser: this.baileys.Browsers.macOS('Chrome'),
       version,
       logger: this.protocolLogger,
       markOnlineOnConnect: false,
@@ -482,7 +535,17 @@ export class BaileysEngine implements ProtocolEngine {
       if (update.isNewLogin === true) pairingConfigured = true
       if (update.connection === 'open') {
         active.online = true
+        active.proxyFailureReported = false
         this.reconnectAttempts.delete(account.accountId)
+        if (account.proxyUrl) {
+          this.handler({
+            kind: 'proxy_result',
+            accountId: account.accountId,
+            outcome: 'success',
+            reasonCategory: 'proxy_connected',
+            proxyFingerprint: proxyFingerprint(account.proxyUrl),
+          })
+        }
         const deviceJid = socket.user?.id ?? state.creds.me?.id ?? ''
         this.handler({ kind: 'connected', accountId: account.accountId, deviceJid })
       } else if (update.connection === 'close') {
@@ -490,35 +553,37 @@ export class BaileysEngine implements ProtocolEngine {
         if (this.sockets.get(account.accountId) === active) this.sockets.delete(account.accountId)
         proxyAgent?.destroy()
         const disconnectError = update.lastDisconnect?.error
+        this.reportProxyFailure(account, active, disconnectError)
         const statusCode = disconnectError instanceof Boom
           ? disconnectError.output.statusCode
           : new Boom(disconnectError).output.statusCode
         const providerCode = String(statusCode)
-        if (statusCode === DisconnectReason.loggedOut) {
+        if (statusCode === this.baileys.DisconnectReason.loggedOut) {
           void this.store.clearAuth(account.accountId)
           this.handler({ kind: 'logged_out', accountId: account.accountId, reasonCategory: 'logged_out', providerCode })
-        } else if (statusCode === DisconnectReason.forbidden) {
+        } else if (statusCode === this.baileys.DisconnectReason.forbidden) {
           this.handler({ kind: 'restricted', accountId: account.accountId, reasonCategory: 'restricted', providerCode })
-        } else if ([DisconnectReason.badSession, DisconnectReason.multideviceMismatch].includes(statusCode)) {
+        } else if ([this.baileys.DisconnectReason.badSession, this.baileys.DisconnectReason.multideviceMismatch].includes(statusCode)) {
           this.handler({
             kind: 'reauth_required',
             accountId: account.accountId,
-            reasonCategory: statusCode === DisconnectReason.badSession ? 'bad_session' : 'multidevice_mismatch',
+            reasonCategory: statusCode === this.baileys.DisconnectReason.badSession ? 'bad_session' : 'multidevice_mismatch',
             providerCode,
           })
         } else {
           const transient = [
-            DisconnectReason.restartRequired,
-            DisconnectReason.connectionLost,
-            DisconnectReason.connectionClosed,
-            DisconnectReason.timedOut,
-            DisconnectReason.unavailableService,
+            this.baileys.DisconnectReason.restartRequired,
+            this.baileys.DisconnectReason.connectionLost,
+            this.baileys.DisconnectReason.connectionClosed,
+            this.baileys.DisconnectReason.timedOut,
+            this.baileys.DisconnectReason.unavailableService,
           ].includes(statusCode)
           const hasLinkedIdentity = hasReconnectableIdentity(state.creds)
           const pairingRestart = isRequiredPairingRestart(
             statusCode,
             pairingConfigured,
             state.creds,
+            this.baileys.DisconnectReason.restartRequired,
           )
           if (pairingRestart && !this.blockedReconnect.has(account.accountId)) {
             // A 515 immediately after pair-success is the normal second half
@@ -577,7 +642,7 @@ export class BaileysEngine implements ProtocolEngine {
       for (const update of updates) {
         const id = update.key.id
         const status = update.update.status
-        if (id && status != null && status >= WAMessageStatus.DELIVERY_ACK) {
+        if (id && status != null && status >= this.baileys.WAMessageStatus.DELIVERY_ACK) {
           this.handler({ kind: 'delivered', accountId: account.accountId, providerMessageId: id })
         }
       }
@@ -594,6 +659,24 @@ export class BaileysEngine implements ProtocolEngine {
       if (!this.started || this.blockedReconnect.has(account.accountId) || this.sockets.has(account.accountId)) return
       void this.openSocket(account, false).catch(() => this.scheduleReconnect(account))
     }, delay).unref()
+  }
+
+  private reportProxyFailure(
+    account: EngineAccount,
+    active: ActiveSocket | undefined,
+    error: unknown,
+  ): void {
+    if (!account.proxyUrl || active?.proxyFailureReported) return
+    const reasonCategory = classifyProxyFailure(error)
+    if (!reasonCategory) return
+    if (active) active.proxyFailureReported = true
+    this.handler({
+      kind: 'proxy_result',
+      accountId: account.accountId,
+      outcome: 'failure',
+      reasonCategory,
+      proxyFingerprint: proxyFingerprint(account.proxyUrl),
+    })
   }
 }
 

@@ -857,6 +857,103 @@ class BaoTaClient:
             },
         )
 
+    def _nginx_firewall_rows(self) -> list[dict[str, object]]:
+        payload = self._post(
+            "/plugin?action=a&name=btwaf&s=get_site_config",
+            data={},
+        )
+        container = _mapping(payload)
+        values = container.get("data") if "data" in container else payload
+        return [_mapping(value) for value in _list(values) if _mapping(value)]
+
+    def nginx_firewall_plugin_available(self) -> bool:
+        """Return whether the optional BaoTa Nginx firewall API is available.
+
+        The firewall plugin is not required for BaoTa site management. A missing
+        plugin therefore remains a capability result instead of a connection
+        failure.
+        """
+
+        try:
+            self._nginx_firewall_rows()
+        except PlatformClientError:
+            return False
+        return True
+
+    @staticmethod
+    def _firewall_bool(value: object) -> bool:
+        return value is True or str(value or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _site_firewall_policy(self, site_name: str) -> dict[str, bool] | None:
+        normalized = site_name.strip().lower().rstrip(".")
+        try:
+            rows = self._nginx_firewall_rows()
+        except PlatformClientError:
+            return None
+        matches = [
+            row
+            for row in rows
+            if str(row.get("siteName") or "").strip().lower().rstrip(".")
+            == normalized
+        ]
+        if len(matches) != 1:
+            return None
+        row = matches[0]
+        cc = _mapping(row.get("cc"))
+        if "cdn" not in row or "drop_china" not in row or "open" not in cc:
+            return None
+        return {
+            "cdnEnabled": self._firewall_bool(row.get("cdn")),
+            "ccEnabled": self._firewall_bool(cc.get("open")),
+            "chinaBlocked": self._firewall_bool(row.get("drop_china")),
+        }
+
+    def ensure_site_firewall_policy(
+        self,
+        site_name: str,
+        *,
+        cdn_enabled: bool,
+        cc_enabled: bool,
+        china_blocked: bool,
+    ) -> bool:
+        """Apply the optional BaoTa firewall policy when the plugin is present.
+
+        ``False`` means the plugin or its site row is unavailable and the caller
+        should continue onboarding without firewall configuration.
+        """
+
+        policy = self._site_firewall_policy(site_name)
+        if policy is None:
+            return False
+        desired = {
+            "cdn": bool(cdn_enabled),
+            "cc": bool(cc_enabled),
+            "drop_china": bool(china_blocked),
+        }
+        keys = {
+            "cdn": "cdnEnabled",
+            "cc": "ccEnabled",
+            "drop_china": "chinaBlocked",
+        }
+        for setting, expected in desired.items():
+            if policy[keys[setting]] == expected:
+                continue
+            self._post(
+                "/plugin?action=a&name=btwaf&s=set_site_obj_open",
+                mutation=True,
+                data={"siteName": site_name, "obj": setting},
+            )
+            checked = self._site_firewall_policy(site_name)
+            if checked is None or checked[keys[setting]] != expected:
+                raise PlatformClientError("宝塔 Nginx 防火墙策略核对失败")
+            policy = checked
+        return True
+
     def find_site(self, name: str) -> dict[str, object] | None:
         payload = self._post(
             "/data?action=getData&table=sites",
