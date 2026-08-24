@@ -6,6 +6,8 @@ import {
   ListChecksIcon,
   LoaderCircleIcon,
   PlusIcon,
+  PowerIcon,
+  PowerOffIcon,
   RefreshCwIcon,
   SaveIcon,
   ShieldCheckIcon,
@@ -14,7 +16,12 @@ import {
   UnlinkIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { apiRequest, formatDateTime, unwrapList } from "../api/client";
+import {
+  apiNdjsonRequest,
+  apiRequest,
+  formatDateTime,
+  unwrapList,
+} from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import {
   ListPagination,
@@ -124,7 +131,7 @@ type AllocationPolicy = {
 };
 type BulkPreviewResult = {
   line: number;
-  status: "checked" | "duplicate" | "failed";
+  status: "checking" | "checked" | "duplicate" | "failed";
   reason?: string;
   protocol?: string;
   host?: string;
@@ -142,16 +149,39 @@ type BulkPreviewSummary = {
   duplicate: number;
   failed: number;
 };
+type BulkPreviewData = {
+  previewToken: string;
+  summary: BulkPreviewSummary;
+  results: BulkPreviewResult[];
+};
+type BulkPreviewStreamEvent =
+  | { type: "snapshot"; results: BulkPreviewResult[] }
+  | { type: "result"; result: BulkPreviewResult }
+  | { type: "complete"; data: BulkPreviewData }
+  | { type: "error"; status: number; detail: string };
 type BulkDetectionResult = {
   line: number;
   key: string;
   endpoint: string;
   countryCode: string;
   countryName: string;
-  status: "checking" | "healthy" | "unhealthy";
+  status: "checking" | "healthy" | "unhealthy" | "duplicate" | "failed";
   latencyMs?: number | null;
   error?: string;
 };
+
+function upsertBulkPreviewResult(
+  current: BulkPreviewResult[],
+  next: BulkPreviewResult,
+): BulkPreviewResult[] {
+  const index = current.findIndex((item) => item.line === next.line);
+  if (index < 0) {
+    return [...current, next].sort((left, right) => left.line - right.line);
+  }
+  const updated = [...current];
+  updated[index] = next;
+  return updated;
+}
 
 const defaultPolicy: AllocationPolicy = {
   allocationMode: "least_load",
@@ -425,6 +455,9 @@ export function IpManagementPage() {
     summary: BulkPreviewSummary;
     results: BulkPreviewResult[];
   } | null>(null);
+  const [bulkProgressResults, setBulkProgressResults] = useState<
+    BulkPreviewResult[]
+  >([]);
   const [bulkPreviewToken, setBulkPreviewToken] = useState("");
   const [bulkStage, setBulkStage] = useState<"importing" | "checking" | "">(
     "",
@@ -443,7 +476,9 @@ export function IpManagementPage() {
     enabled: true,
   });
   const [selectedProxyIds, setSelectedProxyIds] = useState<string[]>([]);
-  const [batchAction, setBatchAction] = useState<"test" | "delete" | "">("");
+  const [batchAction, setBatchAction] = useState<
+    "test" | "enable" | "disable" | "delete" | ""
+  >("");
   const [testingIds, setTestingIds] = useState<string[]>([]);
   const [accountId, setAccountId] = useState("");
   const [bindingPending, setBindingPending] = useState(false);
@@ -611,11 +646,20 @@ export function IpManagementPage() {
     [bulkText],
   );
   const bulkDetectionResults = useMemo<BulkDetectionResult[]>(() => {
-    if (!bulkResult) return [];
+    const sourceResults = bulkResult?.results || bulkProgressResults;
     const detected: BulkDetectionResult[] = [];
-    for (const item of bulkResult.results) {
-      if (item.status !== "checked") continue;
+    for (const item of sourceResults) {
       const countryCode = item.countryCode?.toUpperCase() || "";
+      const detectionStatus =
+        item.status === "checking"
+          ? "checking"
+          : item.status === "duplicate"
+          ? "duplicate"
+          : item.status === "failed"
+          ? "failed"
+          : item.healthStatus === "healthy"
+          ? "healthy"
+          : "unhealthy";
       detected.push({
         line: item.line,
         key: `preview-${item.line}`,
@@ -625,13 +669,13 @@ export function IpManagementPage() {
             : `第 ${item.line} 行`,
         countryCode,
         countryName: countryCode ? countryDisplayName(countryCode) : "",
-        status: item.healthStatus === "healthy" ? "healthy" : "unhealthy",
+        status: detectionStatus,
         latencyMs: item.latencyMs,
-        error: item.error,
+        error: item.error || item.reason,
       });
     }
     return detected;
-  }, [bulkResult]);
+  }, [bulkProgressResults, bulkResult]);
   const bulkPendingDetectionResults = useMemo<BulkDetectionResult[]>(() => {
     if (!bulkPending || bulkStage !== "checking" || bulkResult) return [];
     const pendingRows: BulkDetectionResult[] = [];
@@ -651,11 +695,29 @@ export function IpManagementPage() {
   }, [bulkPending, bulkResult, bulkStage, bulkText]);
   const isBulkChecking =
     bulkPending && bulkStage === "checking" && !bulkResult;
-  const visibleBulkDetectionResults = bulkResult
+  const visibleBulkDetectionResults = bulkResult || bulkProgressResults.length
     ? bulkDetectionResults
     : bulkPendingDetectionResults;
+  const bulkDetectionCounts = useMemo(
+    () =>
+      visibleBulkDetectionResults.reduce(
+        (counts, item) => {
+          counts[item.status] += 1;
+          return counts;
+        },
+        {
+          checking: 0,
+          healthy: 0,
+          unhealthy: 0,
+          duplicate: 0,
+          failed: 0,
+        },
+      ),
+    [visibleBulkDetectionResults],
+  );
   function openBulkCreate() {
     setBulkResult(null);
+    setBulkProgressResults([]);
     setBulkPreviewToken("");
     setBulkStage("");
     setBulkConfirmMode("");
@@ -724,36 +786,50 @@ export function IpManagementPage() {
     if (!bulkLineCount || bulkLineCount > 1000) return;
     const requestId = crypto.randomUUID();
     const controller = new AbortController();
+    const completion = { current: null as BulkPreviewData | null };
     bulkPreviewRequestRef.current = { requestId, controller };
     setBulkPending(true);
     setBulkStage("checking");
     setBulkResult(null);
+    setBulkProgressResults([]);
     setBulkPreviewToken("");
     try {
-      const payload = await apiRequest("/api/ip-proxies/import-preview", {
-        method: "POST",
-        body: JSON.stringify({
-          ...bulkImportRequestBody(),
-          requestId,
-        }),
-        signal: controller.signal,
-      });
-      const data = ((payload as { data?: Record<string, unknown> }).data ||
-        payload) as Record<string, unknown>;
-      const rawSummary = (data.summary || {}) as Record<string, unknown>;
-      const summary: BulkPreviewSummary = {
-        total: Number(rawSummary.total || 0),
-        candidates: Number(rawSummary.candidates || 0),
-        healthy: Number(rawSummary.healthy || 0),
-        unhealthy: Number(rawSummary.unhealthy || 0),
-        duplicate: Number(rawSummary.duplicate || 0),
-        failed: Number(rawSummary.failed || 0),
-      };
-      const results = Array.isArray(data.results)
-        ? (data.results as BulkPreviewResult[])
-        : [];
-      setBulkResult({ summary, results });
-      setBulkPreviewToken(text(data, "previewToken", "preview_token"));
+      await apiNdjsonRequest<BulkPreviewStreamEvent>(
+        "/api/ip-proxies/import-preview/stream",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            ...bulkImportRequestBody(),
+            requestId,
+          }),
+          signal: controller.signal,
+        },
+        (event) => {
+          if (bulkPreviewRequestRef.current?.requestId !== requestId) return;
+          if (event.type === "snapshot") {
+            setBulkProgressResults(event.results);
+            return;
+          }
+          if (event.type === "result") {
+            setBulkProgressResults((current) =>
+              upsertBulkPreviewResult(current, event.result),
+            );
+            return;
+          }
+          if (event.type === "error") {
+            throw new Error(event.detail || "代理检测失败");
+          }
+          completion.current = event.data;
+          setBulkProgressResults(event.data.results);
+          setBulkResult({
+            summary: event.data.summary,
+            results: event.data.results,
+          });
+          setBulkPreviewToken(event.data.previewToken);
+        },
+      );
+      if (!completion.current) throw new Error("代理检测连接提前结束");
+      const { summary } = completion.current;
       if (!summary.failed && !summary.duplicate && !summary.unhealthy) {
         toast.success(`检测完成：${summary.healthy} 条代理健康，等待确认导入`);
       } else {
@@ -785,6 +861,7 @@ export function IpManagementPage() {
     setBulkPending(false);
     setBulkStage("");
     setBulkResult(null);
+    setBulkProgressResults([]);
     setBulkPreviewToken("");
     try {
       await cancellation;
@@ -826,6 +903,7 @@ export function IpManagementPage() {
       setBulkDrawerOpen(false);
       setBulkText("");
       setBulkResult(null);
+      setBulkProgressResults([]);
       setBulkPreviewToken("");
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "确认导入失败");
@@ -896,6 +974,72 @@ export function IpManagementPage() {
       setTestingIds((current) =>
         current.filter((id) => !proxyIds.includes(id)),
       );
+      setBatchAction("");
+    }
+  }
+  async function batchSetEnabled(enabled: boolean) {
+    const action = enabled ? "启用" : "停用";
+    const batchActionName = enabled ? "enable" : "disable";
+    const selectedRowsById = new Map(rows.map((row) => [row.id, row]));
+    const proxyIds = selectedProxyIds.filter(
+      (id) => selectedRowsById.get(id)?.enabled !== enabled,
+    );
+    const skipped = selectedProxyIds.length - proxyIds.length;
+    if (!selectedProxyIds.length || batchAction) return;
+    if (!proxyIds.length) {
+      toast.info(`选中的代理已经全部${enabled ? "启用" : "停用"}`);
+      return;
+    }
+    if (
+      !enabled &&
+      !(await confirmAction({
+        title: `停用选中的 ${proxyIds.length} 条代理？`,
+        description: "停用后不会参与自动分配，已有账号绑定不会自动迁移。",
+        confirmText: "批量停用",
+      }))
+    )
+      return;
+    setBatchAction(batchActionName);
+    try {
+      const results = await Promise.allSettled(
+        proxyIds.map((id) =>
+          apiRequest(`/api/ip-proxies/${id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ enabled }),
+          }),
+        ),
+      );
+      const succeeded = results.filter(
+        (result) => result.status === "fulfilled",
+      ).length;
+      const failedResults = results.filter(
+        (result): result is PromiseRejectedResult =>
+          result.status === "rejected",
+      );
+      const failedReasons = Array.from(
+        new Set(
+          failedResults.map((result) =>
+            result.reason instanceof Error
+              ? result.reason.message
+              : "请求失败",
+          ),
+        ),
+      );
+      await load();
+      if (failedResults.length || skipped) {
+        const details = [
+          skipped ? `${skipped} 条状态未变化，已跳过` : "",
+          failedResults.length
+            ? `${failedResults.length} 条失败${failedReasons.length ? `：${failedReasons.slice(0, 2).join("；")}` : ""}`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("；");
+        toast.warning(`批量${action}完成：成功 ${succeeded} 条；${details}`);
+      } else {
+        toast.success(`已${action} ${succeeded} 条代理`);
+      }
+    } finally {
       setBatchAction("");
     }
   }
@@ -1173,6 +1317,18 @@ export function IpManagementPage() {
                     <DropdownMenuItem onSelect={() => void batchHealthTest()}>
                       <CircleGaugeIcon />
                       批量检测
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() => void batchSetEnabled(true)}
+                    >
+                      <PowerIcon />
+                      批量启用
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() => void batchSetEnabled(false)}
+                    >
+                      <PowerOffIcon />
+                      批量停用
                     </DropdownMenuItem>
                     <DropdownMenuItem
                       variant="destructive"
@@ -1734,6 +1890,24 @@ export function IpManagementPage() {
               </div>
             ) : null}
             <DrawerFormSection title="分配规则">
+              <DrawerFormField required label="国家匹配" hint={countryDescriptions[policy.countryMatch]}>
+                <SelectField
+                  ariaLabel="国家匹配策略"
+                  className="w-full"
+                  value={policy.countryMatch}
+                  disabled={!canManage || policySaving || Boolean(policyError)}
+                  onValueChange={(value) =>
+                    setPolicy((current) => ({
+                      ...current,
+                      countryMatch: value as CountryMatch,
+                    }))
+                  }
+                  options={[
+                    { value: "visitor_country", label: "访问国家优先（推荐）" },
+                    { value: "phone_country", label: "号码国家优先" },
+                  ]}
+                />
+              </DrawerFormField>
               <DrawerFormField required label="分配模式" hint={allocationDescriptions[policy.allocationMode]}>
                 <SelectField
                   ariaLabel="IP 分配模式"
@@ -1755,24 +1929,6 @@ export function IpManagementPage() {
                     { value: "tenant_reuse", label: "租户内复用" },
                     { value: "least_load", label: "低负载优先（推荐）" },
                     { value: "manual", label: "仅手动分配" },
-                  ]}
-                />
-              </DrawerFormField>
-              <DrawerFormField required label="国家匹配" hint={countryDescriptions[policy.countryMatch]}>
-                <SelectField
-                  ariaLabel="国家匹配策略"
-                  className="w-full"
-                  value={policy.countryMatch}
-                  disabled={!canManage || policySaving || Boolean(policyError)}
-                  onValueChange={(value) =>
-                    setPolicy((current) => ({
-                      ...current,
-                      countryMatch: value as CountryMatch,
-                    }))
-                  }
-                  options={[
-                    { value: "visitor_country", label: "访问国家（推荐）" },
-                    { value: "phone_country", label: "号码国家" },
                   ]}
                 />
               </DrawerFormField>
@@ -1894,6 +2050,7 @@ export function IpManagementPage() {
                   disabled={bulkPending}
                   onClick={() => {
                     setBulkResult(null);
+                    setBulkProgressResults([]);
                     setBulkPreviewToken("");
                   }}
                 >
@@ -1947,6 +2104,7 @@ export function IpManagementPage() {
               onChange={(event) => {
                 setBulkText(event.target.value);
                 setBulkResult(null);
+                setBulkProgressResults([]);
                 setBulkPreviewToken("");
               }}
               placeholder={[
@@ -2077,10 +2235,30 @@ export function IpManagementPage() {
                       <>
                         <Badge tone="warning">
                           <LoaderCircleIcon className="spin" size={12} />
-                          检测中 {visibleBulkDetectionResults.length}
+                          检测中 {bulkDetectionCounts.checking}
                         </Badge>
+                        {bulkDetectionCounts.healthy ? (
+                          <Badge tone="success">
+                            健康 {bulkDetectionCounts.healthy}
+                          </Badge>
+                        ) : null}
+                        {bulkDetectionCounts.unhealthy ? (
+                          <Badge tone="danger">
+                            异常 {bulkDetectionCounts.unhealthy}
+                          </Badge>
+                        ) : null}
+                        {bulkDetectionCounts.duplicate ? (
+                          <Badge tone="neutral">
+                            重复 {bulkDetectionCounts.duplicate}
+                          </Badge>
+                        ) : null}
+                        {bulkDetectionCounts.failed ? (
+                          <Badge tone="danger">
+                            格式失败 {bulkDetectionCounts.failed}
+                          </Badge>
+                        ) : null}
                         <span className="text-xs text-muted-foreground">
-                          检测结果会在当前列表中更新
+                          每条代理完成后会在当前列表中实时更新
                         </span>
                       </>
                     ) : bulkResult ? (
@@ -2150,6 +2328,8 @@ export function IpManagementPage() {
                                   ? "warning"
                                   : item.status === "healthy"
                                   ? "success"
+                                  : item.status === "duplicate"
+                                  ? "neutral"
                                   : "danger"
                               }
                             >
@@ -2160,7 +2340,11 @@ export function IpManagementPage() {
                                 ? "检测中"
                                 : item.status === "healthy"
                                 ? "健康"
-                                : "异常"}
+                                : item.status === "unhealthy"
+                                ? "异常"
+                                : item.status === "duplicate"
+                                ? "重复"
+                                : "格式失败"}
                             </Badge>
                             {item.latencyMs !== undefined &&
                             item.latencyMs !== null ? (

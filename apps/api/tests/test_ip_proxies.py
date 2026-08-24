@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
@@ -560,6 +561,62 @@ def test_two_stage_proxy_import_detects_before_writing_and_supports_both_modes(
     assert imported_by_host["203.0.113.33"]["healthStatus"] == "healthy"
     assert imported_by_host["203.0.113.34"]["healthStatus"] == "unhealthy"
     assert imported_by_host["203.0.113.34"]["lastError"] == "代理无法访问 WhatsApp Web"
+
+
+def test_proxy_import_preview_streams_each_completed_result(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
+    slow_probe_started = threading.Event()
+    release_slow_probe = threading.Event()
+
+    def probe(proxy: ProxyEndpoint) -> ProxyProbeResult:
+        if proxy.host.endswith("51"):
+            slow_probe_started.set()
+            assert release_slow_probe.wait(timeout=2)
+            time.sleep(0.05)
+            return ProxyProbeResult(healthy=True, latency_ms=91, country_code="US")
+        assert slow_probe_started.wait(timeout=2)
+        release_slow_probe.set()
+        return ProxyProbeResult(healthy=False, error="代理无法访问 WhatsApp Web")
+
+    monkeypatch.setattr("app.routers.ip_proxies.probe_proxy", probe)
+    body = {
+        "requestId": "proxy-preview-stream-test",
+        "lines": [
+            "203.0.113.51:8051:stream-user:stream-password",
+            "203.0.113.52:8052",
+        ],
+    }
+
+    with admin_client.stream(
+        "POST",
+        "/api/ip-proxies/import-preview/stream",
+        json=body,
+    ) as response:
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"].startswith("application/x-ndjson")
+        assert response.headers["x-accel-buffering"] == "no"
+        events = [json.loads(line) for line in response.iter_lines() if line]
+
+    assert [event["type"] for event in events] == [
+        "snapshot",
+        "result",
+        "result",
+        "complete",
+    ]
+    assert [item["status"] for item in events[0]["results"]] == [
+        "checking",
+        "checking",
+    ]
+    assert [event["result"]["line"] for event in events[1:3]] == [2, 1]
+    assert events[1]["result"]["healthStatus"] == "unhealthy"
+    assert events[2]["result"]["countryCode"] == "US"
+    assert events[-1]["data"]["summary"]["healthy"] == 1
+    assert events[-1]["data"]["summary"]["unhealthy"] == 1
+    serialized = json.dumps(events)
+    assert "stream-user" not in serialized
+    assert "stream-password" not in serialized
 
 
 def test_proxy_import_confirmation_rejects_changed_or_tampered_preview(

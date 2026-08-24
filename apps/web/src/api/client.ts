@@ -55,6 +55,56 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   return payload as T
 }
 
+export async function apiNdjsonRequest<T>(
+  path: string,
+  init: RequestInit,
+  onEvent: (event: T) => void | Promise<void>,
+): Promise<void> {
+  const headers = new Headers(init.headers)
+  if (typeof init.body === 'string' && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+  const response = await fetch(path, {
+    ...init,
+    credentials: 'include',
+    headers,
+  })
+
+  if (response.status === 401) {
+    window.dispatchEvent(new Event('parloq:unauthorized'))
+  }
+  if (!response.ok) {
+    const contentType = response.headers.get('content-type') || ''
+    const payload = contentType.includes('application/json') ? await response.json() : null
+    throw new Error(apiErrorMessage(payload, response.status))
+  }
+  if (!response.body) throw new Error('服务器未返回检测数据流')
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  async function consumeLine(line: string) {
+    const normalized = line.trim()
+    if (!normalized) return
+    await onEvent(JSON.parse(normalized) as T)
+  }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      buffer += decoder.decode(value, { stream: !done })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) await consumeLine(line)
+      if (done) break
+    }
+    await consumeLine(buffer)
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 export async function apiDownload(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers)
   if (typeof init.body === 'string' && !headers.has('Content-Type')) {

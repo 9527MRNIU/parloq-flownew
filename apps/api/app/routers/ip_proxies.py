@@ -8,12 +8,14 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -560,6 +562,56 @@ def preview_proxy_import(
         _finish_import_preview(admin.id, request_id, cancel_event)
 
 
+@router.post("/api/ip-proxies/import-preview/stream")
+def stream_proxy_import(
+    payload: ProxyEndpointImportPreview,
+    db: DbSession,
+    admin: AdminUser,
+) -> StreamingResponse:
+    request_id = payload.request_id or uuid4().hex
+    existing_keys = _proxy_import_existing_keys(db)
+    cancel_event = _register_import_preview(admin.id, request_id)
+
+    def event_stream() -> Iterator[str]:
+        try:
+            for event in _preview_proxy_import_events(
+                payload,
+                existing_keys,
+                admin.id,
+                cancel_event,
+            ):
+                yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+        except HTTPException as exc:
+            yield json.dumps(
+                {
+                    "type": "error",
+                    "status": exc.status_code,
+                    "detail": exc.detail,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ) + "\n"
+        except Exception:
+            logger.exception("Proxy import preview stream failed")
+            yield json.dumps(
+                {"type": "error", "status": 500, "detail": "代理检测失败"},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ) + "\n"
+        finally:
+            cancel_event.set()
+            _finish_import_preview(admin.id, request_id, cancel_event)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post("/api/ip-proxies/import-preview/{request_id}/cancel")
 def cancel_proxy_import_preview(request_id: str, admin: AdminUser) -> dict:
     if (
@@ -576,16 +628,19 @@ def cancel_proxy_import_preview(request_id: str, admin: AdminUser) -> dict:
     }
 
 
-def _preview_proxy_import(
-    payload: ProxyEndpointImportPreview,
-    db: DbSession,
-    admin: AdminUser,
-    cancel_event: threading.Event,
-) -> dict:
-    existing_keys = {
+def _proxy_import_existing_keys(db: DbSession) -> set[tuple[str, str, int]]:
+    return {
         (proxy.protocol.lower(), proxy.host.lower(), proxy.port)
         for proxy in db.scalars(select(ProxyEndpoint)).all()
     }
+
+
+def _preview_proxy_import_events(
+    payload: ProxyEndpointImportPreview,
+    existing_keys: set[tuple[str, str, int]],
+    admin_id: int,
+    cancel_event: threading.Event,
+) -> Iterator[dict]:
     seen_keys: set[tuple[str, str, int]] = set()
     results: list[dict] = []
     candidates: list[tuple[int, _ParsedProxyLine, ProxyEndpoint]] = []
@@ -609,6 +664,9 @@ def _preview_proxy_import(
                     "line": line_number,
                     "status": "duplicate",
                     "reason": "相同协议、主机和端口的代理已存在",
+                    "protocol": parsed.protocol,
+                    "host": parsed.host,
+                    "port": parsed.port,
                 }
             )
             continue
@@ -628,6 +686,11 @@ def _preview_proxy_import(
     if not results:
         raise HTTPException(status_code=422, detail="请至少填写一行代理配置")
 
+    yield {
+        "type": "snapshot",
+        "results": [dict(item) for item in results],
+    }
+
     probe_results: dict[int, ProxyProbeResult] = {}
     if candidates:
         if cancel_event.is_set():
@@ -645,8 +708,21 @@ def _preview_proxy_import(
             }
             for future in as_completed(future_items):
                 probe = future.result()
-                if probe is not None:
-                    probe_results[future_items[future]] = probe
+                if probe is None:
+                    continue
+                result_index = future_items[future]
+                probe_results[result_index] = probe
+                country_code = payload.country_code or probe.country_code
+                results[result_index].update(
+                    {
+                        "status": "checked",
+                        "healthStatus": "healthy" if probe.healthy else "unhealthy",
+                        "countryCode": country_code,
+                        "latencyMs": probe.latency_ms,
+                        "error": probe.error,
+                    }
+                )
+                yield {"type": "result", "result": dict(results[result_index])}
 
     if cancel_event.is_set():
         raise HTTPException(status_code=409, detail="代理检测已取消")
@@ -654,16 +730,7 @@ def _preview_proxy_import(
     signed_checks: list[dict] = []
     for result_index, parsed, _proxy in candidates:
         probe = probe_results[result_index]
-        country_code = payload.country_code or probe.country_code
-        results[result_index].update(
-            {
-                "status": "checked",
-                "healthStatus": "healthy" if probe.healthy else "unhealthy",
-                "countryCode": country_code,
-                "latencyMs": probe.latency_ms,
-                "error": probe.error,
-            }
-        )
+        country_code = results[result_index].get("countryCode")
         signed_checks.append(
             {
                 "line": results[result_index]["line"],
@@ -682,9 +749,10 @@ def _preview_proxy_import(
     unhealthy_count = sum(
         item.get("healthStatus") == "unhealthy" for item in results
     )
-    return {
+    yield {
+        "type": "complete",
         "data": {
-            "previewToken": _issue_import_preview_token(admin.id, signed_checks),
+            "previewToken": _issue_import_preview_token(admin_id, signed_checks),
             "results": results,
             "summary": {
                 "total": len(results),
@@ -696,6 +764,24 @@ def _preview_proxy_import(
             },
         }
     }
+
+
+def _preview_proxy_import(
+    payload: ProxyEndpointImportPreview,
+    db: DbSession,
+    admin: AdminUser,
+    cancel_event: threading.Event,
+) -> dict:
+    existing_keys = _proxy_import_existing_keys(db)
+    for event in _preview_proxy_import_events(
+        payload,
+        existing_keys,
+        admin.id,
+        cancel_event,
+    ):
+        if event.get("type") == "complete":
+            return {"data": event["data"]}
+    raise RuntimeError("proxy import preview ended without a completion event")
 
 
 @router.post("/api/ip-proxies/import-confirm", status_code=status.HTTP_201_CREATED)
