@@ -104,6 +104,12 @@ class PublicDataAccessScriptTests(unittest.TestCase):
         self.assertIn('PUBLIC_HOST="${PARLOQ_PUBLIC_HOST:-}"', self.script)
         self.assertIn("ip -4 route get 1.1.1.1", self.script)
         self.assertNotIn('PARLOQ_PUBLIC_HOST:-216.106.185.81', self.script)
+        detected = self._run_sourced(
+            "ip() { printf '1.1.1.1 via 203.0.113.1 dev eth0 src 203.0.113.25 uid 0\\n'; }; "
+            "PUBLIC_HOST=''; resolve_public_host"
+        )
+        self.assertEqual(detected.returncode, 0, detected.stderr)
+        self.assertEqual(detected.stdout, "203.0.113.25")
 
     def test_close_removes_owned_baota_rules_before_proxy(self) -> None:
         close_body = self.script.split("close_access() {", 1)[1].split("\n}", 1)[0]

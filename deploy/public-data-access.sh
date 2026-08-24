@@ -41,7 +41,7 @@ resolve_public_host() {
     return 0
   fi
   PUBLIC_HOST="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '
-    { for (index = 1; index <= NF; index++) if ($index == "src") { print $(index + 1); exit } }
+    { for (field = 1; field <= NF; field++) if ($field == "src") { print $(field + 1); exit } }
   ')"
   if [[ ! "${PUBLIC_HOST}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
     printf '无法自动识别公网主机地址，请设置 PARLOQ_PUBLIC_HOST。\n' >&2
