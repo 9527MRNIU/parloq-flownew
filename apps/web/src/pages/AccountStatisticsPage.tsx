@@ -18,6 +18,10 @@ import {
   YAxis,
 } from "recharts";
 import { apiRequest, formatLocalDateInput } from "../api/client";
+import {
+  CountryDisplay,
+  countryDisplayName,
+} from "../components/country-display";
 import { DatePickerField } from "../components/date-picker-field";
 import {
   ListTableCard,
@@ -316,7 +320,9 @@ export function AccountStatisticsPage() {
       .sort((left, right) => (right.total ?? 0) - (left.total ?? 0));
     const visible = sorted.slice(0, 8).map((row, index) => ({
       key: row.code || row.name || `country-${index}`,
-      name: row.name || row.code || "未知国家",
+      name: row.code
+        ? countryDisplayName(row.code)
+        : row.name || "未知国家",
       code: row.code,
       total: row.total ?? 0,
       color: countryColors[index],
@@ -465,10 +471,13 @@ export function AccountStatisticsPage() {
                 {countrySlices.map((row) => (
                   <div className="flex items-center gap-2 text-sm" key={row.key}>
                     <span className="size-2.5 shrink-0 rounded-full" style={{ backgroundColor: row.color }} />
-                    <span className="min-w-0 flex-1 truncate" title={row.name}>
-                      {row.name}
-                      {row.code && row.code !== row.name ? <span className="ml-1 text-muted-foreground">{row.code}</span> : null}
-                    </span>
+                    <div className="min-w-0 flex-1" title={row.name}>
+                      {row.code ? (
+                        <CountryDisplay code={row.code} className="justify-start" />
+                      ) : (
+                        <span>其他</span>
+                      )}
+                    </div>
                     <strong className="tabular-nums">{row.total.toLocaleString()}</strong>
                     <span className="w-12 text-right text-xs tabular-nums text-muted-foreground">
                       {countryTotal > 0 ? `${((row.total / countryTotal) * 100).toFixed(1)}%` : "-"}

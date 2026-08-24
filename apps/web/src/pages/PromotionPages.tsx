@@ -82,7 +82,10 @@ import {
   countryDisplayName,
 } from "../components/country-display";
 import { useAuth } from "../auth/AuthContext";
-import { countryOptions } from "../lib/countries";
+import {
+  GLOBAL_PROMOTION_COUNTRY,
+  promotionCountryOptions,
+} from "../lib/countries";
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
 import { formatPhoneDisplay } from "../lib/utils";
 import {
@@ -2363,7 +2366,7 @@ export function PromotionChannelsPage() {
   });
   const [form, setForm] = useState({
     name: "",
-    countryCode: "US",
+    countryCode: GLOBAL_PROMOTION_COUNTRY.value,
     templateId: "",
     accountGroupId: "",
     protocolRouteType: "node" as "node" | "pool",
@@ -2496,7 +2499,7 @@ export function PromotionChannelsPage() {
           }
         : {
             name: "",
-            countryCode: "US",
+            countryCode: GLOBAL_PROMOTION_COUNTRY.value,
             templateId: templates[0]?.id || "",
             accountGroupId: accountGroups[0]?.id || "",
             protocolRouteType: "node",
@@ -2861,7 +2864,7 @@ export function PromotionChannelsPage() {
         search={{
           value: keyword,
           onChange: setKeyword,
-          placeholder: "搜索渠道、国家、域名或 Slug",
+          placeholder: "搜索渠道、投放国家、域名或 Slug",
         }}
         filters={
           <div className="channel-data-bar">
@@ -2922,7 +2925,7 @@ export function PromotionChannelsPage() {
             <TableHeader>
               <TableRow>
                 <TableHead>渠道</TableHead>
-                <TableHead>国家</TableHead>
+                <TableHead>投放国家</TableHead>
                 <TableHead>平台</TableHead>
                 <TableHead>模板</TableHead>
                 <TableHead>账号入库分组</TableHead>
@@ -2949,7 +2952,7 @@ export function PromotionChannelsPage() {
                           : "渠道已停用，访问地址不应继续承接流量。",
                         tone: row.enabled ? "success" : "neutral",
                         details: [
-                          { label: "国家", value: row.countryCode || "-" },
+                          { label: "投放国家", value: countryDisplayName(row.countryCode) },
                           { label: "域名", value: row.hostname || "未绑定" },
                           { label: "模板", value: row.templateName || row.templateId || "-" },
                           { label: "入库分组", value: row.accountGroupName || "未配置" },
@@ -3112,7 +3115,7 @@ export function PromotionChannelsPage() {
         open={drawer}
         onClose={() => !pending && setDrawer(false)}
         title={editing ? "编辑推广渠道" : "新建推广渠道"}
-        description="一个渠道对应一个国家、访问路径和模板版本。"
+        description="一个渠道对应一个投放范围、访问路径和模板版本。"
         footer={
           <>
             <Button variant="outline" onClick={() => setDrawer(false)}>
@@ -3155,7 +3158,7 @@ export function PromotionChannelsPage() {
                 onValueChange={(value) =>
                   setForm({ ...form, countryCode: value })
                 }
-                options={countryOptions}
+                options={promotionCountryOptions}
                 placeholder="选择投放国家"
                 searchPlaceholder="搜索国家、地区或代码"
                 emptyText="没有匹配的国家或地区"

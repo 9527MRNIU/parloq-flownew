@@ -1,11 +1,11 @@
 import * as CountryFlags from "country-flag-icons/react/3x2";
 import { Globe2Icon } from "lucide-react";
 import type { ComponentType, SVGProps } from "react";
-import { countryOptions } from "../lib/countries";
+import { promotionCountryOptions } from "../lib/countries";
 import { cn } from "../lib/utils";
 
 const COUNTRY_NAME_BY_CODE = new Map(
-  countryOptions.map((option) => [
+  promotionCountryOptions.map((option) => [
     option.value,
     option.label.split(" · ")[0] || option.value,
   ]),

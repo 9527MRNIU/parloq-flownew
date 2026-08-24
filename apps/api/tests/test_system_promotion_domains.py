@@ -932,7 +932,6 @@ def test_promotion_data_center_aggregates_uv_costs_and_successes(
         "/api/promotion/channels",
         json={
             "name": "Analytics Channel",
-            "countryCode": "US",
             "templatePublicId": template["id"],
             "domainPublicId": domain["id"],
             "accountGroupId": account_group_id,
@@ -942,6 +941,7 @@ def test_promotion_data_center_aggregates_uv_costs_and_successes(
     )
     assert channel.status_code == 201, channel.text
     channel_data = channel.json()["data"]["channel"]
+    assert channel_data["countryCode"] == "WW"
     public = admin_client.get("/api/public/promotion/channels/analytics-channel").json()["data"]
     assert admin_client.get(
         "/api/public/promotion/channels/analytics-channel",
@@ -1035,7 +1035,7 @@ def test_promotion_data_center_aggregates_uv_costs_and_successes(
     assert result.status_code == 200, result.text
     row = result.json()["data"]["rows"][0]
     assert row["pageViews"] == 2
-    assert row["countryCode"] == "US"
+    assert row["countryCode"] == "WW"
     assert row["uv"] == 1
     assert row["submissions"] == 2
     assert row["leads"] == 1

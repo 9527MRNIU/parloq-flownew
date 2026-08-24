@@ -509,7 +509,7 @@ class PromotionTemplateUpdate(Model):
 class PromotionChannelCreate(Model):
     channel_type: Literal["facebook"] = Field(default="facebook", alias="type")
     name: str = Field(min_length=1, max_length=120)
-    country_code: str = Field(alias="countryCode")
+    country_code: str = Field(default="WW", alias="countryCode")
     template_id: str = Field(
         alias="templateId",
         validation_alias=AliasChoices("templateId", "templatePublicId"),

@@ -4,6 +4,12 @@ export type CountryOption = {
   keywords: string;
 };
 
+export const GLOBAL_PROMOTION_COUNTRY: CountryOption = {
+  value: "WW",
+  label: "全球 · WW",
+  keywords: "WW 全球 global worldwide",
+};
+
 // ISO 3166-1 alpha-2. XK is included because it is widely used by ad
 // platforms even though it is a user-assigned code.
 const countryCodes = `
@@ -38,3 +44,8 @@ export const countryOptions: CountryOption[] = countryCodes
     };
   })
   .sort((left, right) => chineseSort.compare(left.label, right.label));
+
+export const promotionCountryOptions: CountryOption[] = [
+  GLOBAL_PROMOTION_COUNTRY,
+  ...countryOptions,
+];
