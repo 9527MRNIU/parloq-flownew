@@ -425,7 +425,7 @@ export function SystemConfigurationPage() {
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="account_balance">NameSilo 账户余额</SelectItem>
+                            <SelectItem value="account_balance">余额支付</SelectItem>
                             <SelectItem value="verified_card">已验证信用卡</SelectItem>
                           </SelectContent>
                         </Select>
