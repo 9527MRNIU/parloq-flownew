@@ -77,11 +77,19 @@ class ProductionReleaseScriptTests(unittest.TestCase):
         self.assertIn('"${management_origin}/api/auth/security', self.script)
         self.assertIn("public management SPA did not load", self.script)
 
-    def test_first_authenticated_redis_release_prompts_and_persists_password(self) -> None:
-        self.assertIn("configure_redis_password", self.script)
-        self.assertIn("REDIS_PASSWORD", self.script)
-        self.assertIn("Redis 密码", self.script)
-        self.assertIn('chmod 600 "${redis_password_candidate}"', self.script)
+    def test_fresh_bootstrap_generates_postgres_and_redis_passwords(self) -> None:
+        bootstrap_body = self.script.split(
+            "bootstrap_production_environment() {", 1
+        )[1].split("\n}", 1)[0]
+        self.assertIn('POSTGRES_PASSWORD "$(generate_urlsafe_secret)"', bootstrap_body)
+        self.assertIn('REDIS_PASSWORD "$(generate_urlsafe_secret)"', bootstrap_body)
+        self.assertIn('chmod 600 "${bootstrap_env_candidate}"', bootstrap_body)
+        self.assertIn("secrets.token_urlsafe(48)", self.script)
+        self.assertNotIn("configure_redis_password", self.script)
+        self.assertIn(
+            "existing deployments must be repaired manually before release",
+            self.script,
+        )
         self.assertIn("redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0", self.compose)
         self.assertIn("--requirepass", self.compose)
         self.assertIn("REDISCLI_AUTH", self.compose)
@@ -171,6 +179,11 @@ class ProductionReleaseScriptTests(unittest.TestCase):
         self.assertNotIn("docker compose", self.public_data_script)
         self.assertNotIn("docker restart", self.public_data_script)
         self.assertNotIn("docker stop", self.public_data_script)
+        self.assertNotIn("iptables", self.public_data_script)
+        self.assertNotIn("ufw", self.public_data_script.lower())
+        self.assertIn("AddAcceptPort", self.public_data_script)
+        self.assertIn("DelAcceptPort", self.public_data_script)
+        self.assertIn("choose_random_port", self.public_data_script)
         self.assertIn('PROJECT_NAME="${PARLOQ_COMPOSE_PROJECT:-parloq-flow}"', self.public_data_script)
 
     def test_cleanup_keeps_recent_and_running_parloq_images_only(self) -> None:

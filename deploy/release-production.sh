@@ -189,6 +189,7 @@ PY
 }
 
 configure_bootstrap_turnstile() {
+  local target_file="$1"
   local site_key secret_key
   if ! IFS= read -r -p 'Turnstile Site Key: ' site_key; then
     printf '\n'
@@ -214,8 +215,8 @@ configure_bootstrap_turnstile() {
   case "${secret_key}" in
     *[[:space:]]*) unset site_key secret_key; die "Turnstile Secret Key must not contain whitespace" ;;
   esac
-  set_env_value_in_file "${ENV_FILE}" TURNSTILE_SITE_KEY "${site_key}"
-  set_env_value_in_file "${ENV_FILE}" TURNSTILE_SECRET_KEY "${secret_key}"
+  set_env_value_in_file "${target_file}" TURNSTILE_SITE_KEY "${site_key}"
+  set_env_value_in_file "${target_file}" TURNSTILE_SECRET_KEY "${secret_key}"
   unset site_key secret_key
 }
 
@@ -254,6 +255,7 @@ bootstrap_production_environment() {
   set_env_value_in_file "${bootstrap_env_candidate}" DATA_ENCRYPTION_KEYS \
     "{\"${encryption_key_id}\":\"${encryption_key}\"}"
   unset encryption_key
+  configure_bootstrap_turnstile "${bootstrap_env_candidate}"
   mv "${bootstrap_env_candidate}" "${ENV_FILE}"
   bootstrap_env_candidate=""
 
@@ -263,7 +265,6 @@ bootstrap_production_environment() {
   mv "${bootstrap_compose_candidate}" "${COMPOSE_FILE}"
   bootstrap_compose_candidate=""
 
-  configure_bootstrap_turnstile
   log "全新生产环境配置已初始化；内部密码和密钥只保存在 ${ENV_FILE}。"
 }
 
