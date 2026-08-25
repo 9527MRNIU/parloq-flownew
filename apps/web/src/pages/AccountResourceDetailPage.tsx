@@ -211,9 +211,9 @@ const accountTypeLabel = (value: string) =>
 
 const deviceOsLabel = (value: string) =>
   value === "android"
-    ? "Android"
+    ? "安卓"
     : value === "ios"
-      ? "iOS"
+      ? "苹果"
       : value === "other"
         ? "其他"
         : "-";

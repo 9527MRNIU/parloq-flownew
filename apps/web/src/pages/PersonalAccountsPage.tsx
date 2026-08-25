@@ -341,9 +341,9 @@ const accountTypeLabel = (value: string) =>
   value === "business" ? "商业版" : value === "personal" ? "个人版" : "-";
 const deviceOsLabel = (value: string) =>
   value === "android"
-    ? "Android"
+    ? "安卓"
     : value === "ios"
-      ? "iOS"
+      ? "苹果"
       : value === "other"
         ? "其他"
         : "-";
@@ -357,10 +357,10 @@ function DeviceOsDisplay({ value }: { value: string }) {
         ? IoLogoApple
         : SmartphoneIcon;
   return (
-    <div className="flex min-w-max items-center justify-center gap-2">
+    <div className="flex min-w-max items-center justify-center gap-[7px]">
       <span className="flex size-4 shrink-0 items-center justify-center">
         <Icon
-          className="size-4"
+          className="size-4 shrink-0 scale-[1.3334]"
           color={value === "android" ? "#3DDC84" : undefined}
           aria-hidden="true"
         />
