@@ -4,7 +4,7 @@ from copy import deepcopy
 from datetime import date, timedelta
 
 from fastapi import APIRouter, HTTPException, Query, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.business_schemas import (
@@ -266,6 +266,43 @@ def _list(db, model, user):
     return db.scalars(statement.order_by(model.created_at.desc())).all()
 
 
+def _paged_list(
+    db: DbSession,
+    model: type,
+    user,
+    *,
+    keyword: str,
+    page: int,
+    page_size: int,
+    search_columns: tuple,
+    extra_predicates: tuple = (),
+) -> tuple[list, int]:
+    statement = select(model)
+    if user.role != "admin":
+        statement = statement.where(model.created_by == user.id)
+    search = keyword.strip()
+    if search:
+        pattern = f"%{search}%"
+        statement = statement.where(
+            or_(
+                cast(model.id, String).ilike(pattern),
+                model.public_id.ilike(pattern),
+                *(column.ilike(pattern) for column in search_columns),
+            )
+        )
+    if extra_predicates:
+        statement = statement.where(*extra_predicates)
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    items = list(
+        db.scalars(
+            statement.order_by(model.created_at.desc(), model.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).all()
+    )
+    return items, total
+
+
 def _template_refs(db, user, material_id, promotion_id, current=None):
     mat=current.material_id if current else None; promo=current.promotion_channel_id if current else None
     if material_id is not None:
@@ -300,8 +337,37 @@ def _ensure_template_media(
 
 
 @router.get("/templates")
-def templates(db:DbSession,current_user:CurrentUser)->dict:
-    rows=[template_row(db,x) for x in _list(db,HyperlinkTemplate,current_user)];return {"data":{"rows":rows,"total":len(rows)}}
+def templates(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str = Query(default="", max_length=200),
+    enabled: bool | None = None,
+    header_type: str | None = Query(default=None, alias="headerType"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+) -> dict:
+    predicates = []
+    if enabled is not None:
+        predicates.append(HyperlinkTemplate.enabled.is_(enabled))
+    if header_type and header_type != "all":
+        predicates.append(
+            HyperlinkTemplate.content_json["header"]["type"].as_string()
+            == header_type
+        )
+    items, total = _paged_list(
+        db,
+        HyperlinkTemplate,
+        current_user,
+        keyword=keyword,
+        page=page,
+        page_size=page_size,
+        search_columns=(HyperlinkTemplate.name, cast(HyperlinkTemplate.content_json, String)),
+        extra_predicates=tuple(predicates),
+    )
+    return {"data":{"rows":[template_row(db,x) for x in items],"total":total,"page":page,"pageSize":page_size}}
+@router.get("/templates/options")
+def template_options(db:DbSession,current_user:CurrentUser)->dict:
+    items=_list(db,HyperlinkTemplate,current_user);rows=[template_row(db,x) for x in items];return {"data":{"rows":rows,"total":len(rows)}}
 @router.post("/templates",status_code=201)
 def create_template(p:HyperlinkTemplateCreate,db:DbSession,current_user:CurrentUser)->dict:
     mat,promo=_template_refs(db,current_user,p.material_id,p.promotion_channel_id)
@@ -334,8 +400,17 @@ def delete_template(pid:str,db:DbSession,current_user:CurrentUser)->dict:
 
 
 @router.get("/strategies")
-def strategies(db:DbSession,current_user:CurrentUser)->dict:
-    rows=[strategy_row(x) for x in _list(db,HyperlinkStrategy,current_user)];return {"data":{"rows":rows,"total":len(rows)}}
+def strategies(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str = Query(default="", max_length=200),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+) -> dict:
+    items,total=_paged_list(db,HyperlinkStrategy,current_user,keyword=keyword,page=page,page_size=page_size,search_columns=(HyperlinkStrategy.name,));return {"data":{"rows":[strategy_row(x) for x in items],"total":total,"page":page,"pageSize":page_size}}
+@router.get("/strategies/options")
+def strategy_options(db:DbSession,current_user:CurrentUser)->dict:
+    items=_list(db,HyperlinkStrategy,current_user);rows=[strategy_row(x) for x in items];return {"data":{"rows":rows,"total":len(rows)}}
 @router.post("/strategies",status_code=201)
 def create_strategy(p:StrategyCreate,db:DbSession,current_user:CurrentUser)->dict:
     rules = merge_strategy_rules(
@@ -420,8 +495,17 @@ def _add_recipients(db, package, values, *, bump_revision: bool = True):
 
 
 @router.get("/data-packages")
-def packages(db:DbSession,current_user:CurrentUser)->dict:
-    rows=[package_row(db,x) for x in _list(db,DataPackage,current_user)];return {"data":{"rows":rows,"total":len(rows)}}
+def packages(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str = Query(default="", max_length=200),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+) -> dict:
+    items,total=_paged_list(db,DataPackage,current_user,keyword=keyword,page=page,page_size=page_size,search_columns=(DataPackage.name,DataPackage.status));return {"data":{"rows":[package_row(db,x) for x in items],"total":total,"page":page,"pageSize":page_size}}
+@router.get("/data-packages/options")
+def package_options(db:DbSession,current_user:CurrentUser)->dict:
+    items=_list(db,DataPackage,current_user);rows=[package_row(db,x) for x in items];return {"data":{"rows":rows,"total":len(rows)}}
 @router.post("/data-packages",status_code=201)
 def create_package(p:DataPackageCreate,db:DbSession,current_user:CurrentUser)->dict:
     x=DataPackage(public_id=new_public_id("hpkg"),name=p.name,status="ready",revision=1,created_by=current_user.id);db.add(x);db.flush();_add_recipients(db,x,p.recipients,bump_revision=False);return {"data":{"dataPackage":package_row(db,x)}}
@@ -484,8 +568,50 @@ def _task_refs(db,p,user,current=None):
 
 
 @router.get("/tasks")
-def tasks(db:DbSession,current_user:CurrentUser)->dict:
-    items=_list(db,HyperlinkTask,current_user);rows=[task_row(db,x) for x in items];db.commit();return {"data":{"rows":rows,"total":len(rows)}}
+def tasks(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str = Query(default="", max_length=200),
+    task_status: str | None = Query(default=None, alias="status"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+) -> dict:
+    predicates=(HyperlinkTask.status==task_status,) if task_status and task_status!="all" else ()
+    items,total=_paged_list(db,HyperlinkTask,current_user,keyword=keyword,page=page,page_size=page_size,search_columns=(HyperlinkTask.name,HyperlinkTask.status,HyperlinkTask.channel),extra_predicates=predicates);rows=[task_row(db,x) for x in items];db.commit();return {"data":{"rows":rows,"total":total,"page":page,"pageSize":page_size}}
+
+
+@router.get("/tasks/summary")
+def task_summary(db: DbSession, current_user: CurrentUser) -> dict:
+    filters = () if current_user.role == "admin" else (
+        HyperlinkTask.created_by == current_user.id,
+    )
+    summary_rows = db.execute(
+        select(
+            HyperlinkTask.status,
+            func.count(HyperlinkTask.id),
+            func.sum(HyperlinkTask.queued_count),
+        )
+        .where(*filters)
+        .group_by(HyperlinkTask.status)
+    ).all()
+    recent = db.scalars(
+        select(HyperlinkTask)
+        .where(*filters)
+        .order_by(HyperlinkTask.created_at.desc(), HyperlinkTask.id.desc())
+        .limit(5)
+    ).all()
+    rows = [task_row(db, item) for item in recent]
+    db.commit()
+    return {
+        "data": {
+            "rows": rows,
+            "statusCounts": {
+                str(status_value): int(count)
+                for status_value, count, _ in summary_rows
+            },
+            "queuedTotal": sum(int(queued or 0) for _, _, queued in summary_rows),
+        }
+    }
 @router.post("/tasks",status_code=201)
 def create_task(p:TaskCreate,db:DbSession,current_user:CurrentUser)->dict:
     tpl,s,pkg,group_id=_task_refs(db,p,current_user);x=HyperlinkTask(public_id=new_public_id("htsk"),name=p.name,template_id=tpl,strategy_id=s,data_package_id=pkg,account_group_id=group_id,sender_mode="dynamic_group",account_public_ids=[],channel=p.channel,status="draft",created_by=current_user.id);db.add(x);db.commit();return {"data":{"task":task_row(db,x)}}

@@ -131,6 +131,8 @@ export function HomePage() {
   });
   const [daily, setDaily] = useState<AccountDaily[]>([]);
   const [tasks, setTasks] = useState<TaskRow[]>([]);
+  const [taskCounts, setTaskCounts] = useState<Record<string, number>>({});
+  const [queuedTotal, setQueuedTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
@@ -146,7 +148,7 @@ export function HomePage() {
         apiRequest(
           `/api/account-statistics/daily?${new URLSearchParams({ dateFrom, dateTo })}`,
         ),
-        apiRequest("/api/hyperlink/tasks"),
+        apiRequest("/api/hyperlink/tasks/summary"),
       ]);
       const overviewData = body(overviewPayload);
       const dailyData = body(dailyPayload);
@@ -176,6 +178,15 @@ export function HomePage() {
       );
       const taskRows = Array.isArray(tasksData.rows) ? tasksData.rows : [];
       setTasks(taskRows.map(normalizeTask));
+      const rawCounts = rowValue(tasksData, "statusCounts", "status_counts");
+      setTaskCounts(
+        rawCounts && typeof rawCounts === "object"
+          ? Object.fromEntries(
+              Object.entries(rawCounts as Record<string, unknown>).map(([key, count]) => [key, value(count)]),
+            )
+          : {},
+      );
+      setQueuedTotal(value(rowValue(tasksData, "queuedTotal", "queued_total")));
       setRefreshedAt(new Date());
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "首页数据加载失败");
@@ -189,9 +200,7 @@ export function HomePage() {
   }, [load]);
 
   const taskSummary = useMemo(() => {
-    const counts = new Map<string, number>();
-    tasks.forEach((task) => counts.set(task.status, (counts.get(task.status) || 0) + 1));
-    return Array.from(counts.entries())
+    return Object.entries(taskCounts)
       .map(([status, count]) => ({
         status,
         name: taskStatus[status]?.label || status,
@@ -199,12 +208,12 @@ export function HomePage() {
         color: taskStatus[status]?.color || "#94a3b8",
       }))
       .sort((left, right) => right.value - left.value);
-  }, [tasks]);
+  }, [taskCounts]);
 
-  const queued = tasks.reduce((sum, task) => sum + task.queued, 0);
-  const running = tasks.filter((task) => task.status === "running").length;
-  const paused = tasks.filter((task) => task.status === "paused").length;
-  const recentTasks = tasks.slice(0, 5);
+  const queued = queuedTotal;
+  const running = taskCounts.running || 0;
+  const paused = taskCounts.paused || 0;
+  const recentTasks = tasks;
   const cards = [
     {
       label: "绑定号码",

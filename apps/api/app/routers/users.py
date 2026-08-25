@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.deps import AdminUser, DbSession
-from app.models import AuthSession, UserAccount, UserGroup
+from app.models import AuthSession, UserAccount, UserGroup, UserMfaCredential
 from app.schemas import UserCreate, UserUpdate
 from app.security import hash_password, utcnow
 from app.serializers import user_row
@@ -32,10 +34,30 @@ def list_users(
     db: DbSession,
     _admin: AdminUser,
     keyword: str | None = None,
+    group_id: str | None = Query(default=None, alias="groupId"),
+    enabled: bool | None = None,
+    is_admin: bool | None = Query(default=None, alias="isAdmin"),
+    mfa_enabled: bool | None = Query(default=None, alias="mfaEnabled"),
+    sort_by: Literal[
+        "id",
+        "groupName",
+        "isAdmin",
+        "mfaEnabled",
+        "lastLoginAt",
+        "createdAt",
+        "updatedAt",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
 ) -> dict:
-    statement = select(UserAccount).join(UserGroup)
+    is_admin_expression = UserAccount.role == "admin"
+    mfa_enabled_expression = UserMfaCredential.enabled_at.is_not(None)
+    statement = (
+        select(UserAccount)
+        .join(UserGroup)
+        .outerjoin(UserMfaCredential, UserMfaCredential.user_id == UserAccount.id)
+    )
     if keyword and keyword.strip():
         pattern = f"%{keyword.strip()}%"
         statement = statement.where(
@@ -45,9 +67,41 @@ def list_users(
                 UserGroup.name.ilike(pattern),
             )
         )
+    if group_id:
+        try:
+            database_group_id = parse_snowflake_id(group_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="角色筛选值无效") from None
+        statement = statement.where(UserAccount.group_id == database_group_id)
+    if enabled is not None:
+        statement = statement.where(UserAccount.is_active.is_(enabled))
+    if is_admin is not None:
+        statement = statement.where(is_admin_expression.is_(is_admin))
+    if mfa_enabled is not None:
+        statement = statement.where(mfa_enabled_expression.is_(mfa_enabled))
+
+    sort_columns = {
+        "id": UserAccount.id,
+        "groupName": UserGroup.name,
+        "isAdmin": is_admin_expression,
+        "mfaEnabled": mfa_enabled_expression,
+        "lastLoginAt": UserAccount.last_login_at,
+        "createdAt": UserAccount.created_at,
+        "updatedAt": UserAccount.updated_at,
+    }
+    sort_column = sort_columns[sort_by]
+    order_by = (
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    )
+    tie_breaker = UserAccount.id.asc() if sort_order == "asc" else UserAccount.id.desc()
     total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    ordering = [order_by]
+    if sort_by != "id":
+        ordering.append(tie_breaker)
     users = db.scalars(
-        statement.order_by(UserAccount.updated_at.desc(), UserAccount.id.desc())
+        statement.order_by(*ordering)
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()

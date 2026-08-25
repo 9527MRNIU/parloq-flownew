@@ -403,16 +403,26 @@ def test_account_resources_are_upserted_scored_and_exposed(
 
     friends = admin_client.get(
         f"/api/personal-accounts/{account_id}/resources/contacts",
-        params={"source": "contacted"},
+        params={"source": "contacted", "sortBy": "phone", "sortOrder": "asc"},
     )
     assert friends.status_code == 200, friends.text
     assert friends.json()["data"]["total"] == 2
+    assert [row["phone"] for row in friends.json()["data"]["rows"]] == [
+        "+12025550102",
+        "+12025550103",
+    ]
     groups = admin_client.get(
         f"/api/personal-accounts/{account_id}/resources/groups",
-        params={"canSend": "true"},
+        params={
+            "canSend": "true",
+            "communityType": "group",
+            "sortBy": "size",
+            "sortOrder": "desc",
+        },
     )
     assert groups.status_code == 200, groups.text
     assert groups.json()["data"]["total"] == 3
+    assert [row["size"] for row in groups.json()["data"]["rows"]] == [8, 5, 4]
     assert groups.json()["data"]["rows"][0]["subject"] == "First group"
     returned_interaction = datetime.fromisoformat(
         groups.json()["data"]["rows"][0]["lastInteractionAt"]
@@ -420,6 +430,29 @@ def test_account_resources_are_upserted_scored_and_exposed(
     if returned_interaction.tzinfo is None:
         returned_interaction = returned_interaction.replace(tzinfo=UTC)
     assert returned_interaction == datetime.fromisoformat(synced_at)
+    sorted_accounts = admin_client.get(
+        "/api/personal-accounts",
+        params={
+            "accountType": "business",
+            "deviceOs": "ios",
+            "sortBy": "qualityScore",
+            "sortOrder": "desc",
+        },
+    )
+    assert sorted_accounts.status_code == 200, sorted_accounts.text
+    assert sorted_accounts.json()["data"]["rows"][0]["id"] == account_id
+    sorted_groups = admin_client.get(
+        "/api/account-groups",
+        params={"sortBy": "averageScore", "sortOrder": "desc"},
+    )
+    assert sorted_groups.status_code == 200, sorted_groups.text
+    matched_group = next(
+        row
+        for row in sorted_groups.json()["data"]["rows"]
+        if row["id"] == group["id"]
+    )
+    assert matched_group["averageScore"] == 17
+    assert matched_group["updatedAt"]
     deleted = admin_client.delete(f"/api/personal-accounts/{account_id}")
     assert deleted.status_code == 200, deleted.text
 
@@ -553,11 +586,19 @@ def test_import_group_statistics_and_export(
     )
 
     lifecycle = admin_client.get(
-        f"/api/personal-accounts/{account['id']}/lifecycle"
+        f"/api/personal-accounts/{account['id']}/lifecycle",
+        params={
+            "fromState": "__initial__",
+            "reason": "session_imported",
+            "sortBy": "toState",
+            "sortOrder": "asc",
+        },
     )
     assert lifecycle.status_code == 200, lifecycle.text
     lifecycle_data = lifecycle.json()["data"]
     assert lifecycle_data["total"] >= 1
+    assert lifecycle_data["rows"][0]["fromState"] is None
+    assert lifecycle_data["rows"][0]["reason"] == "session_imported"
     assert lifecycle_data["rows"][0]["toState"]
 
     monkeypatch.setattr(

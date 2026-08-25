@@ -33,7 +33,6 @@ const HyperlinkMarketInsightsPage = lazy(() => import("./pages/HyperlinkMarketIn
 const UserGroupsPage = lazy(() => import("./pages/UserGroupsPage").then((module) => ({ default: module.UserGroupsPage })));
 const UsersPage = lazy(() => import("./pages/UsersPage").then((module) => ({ default: module.UsersPage })));
 const SystemConfigurationPage = lazy(() => import("./pages/SystemConfigurationPage").then((module) => ({ default: module.SystemConfigurationPage })));
-const AccountExportPage = lazy(() => import("./pages/AccountCenterPages").then((module) => ({ default: module.AccountExportPage })));
 const AccountGroupsPage = lazy(() => import("./pages/AccountCenterPages").then((module) => ({ default: module.AccountGroupsPage })));
 const AccountIntakePage = lazy(() => import("./pages/AccountCenterPages").then((module) => ({ default: module.AccountIntakePage })));
 const AccountStatisticsPage = lazy(() => import("./pages/AccountStatisticsPage").then((module) => ({ default: module.AccountStatisticsPage })));
@@ -162,7 +161,6 @@ export default function App() {
             path="/resources/accounts/import"
             element={<Navigate to="/resources/accounts/manage?import=1" replace />}
           />
-          <Route path="/resources/accounts/export" element={<AccountExportPage />} />
           <Route path="/resources/accounts/manage" element={<PersonalAccountsPage />} />
           <Route path="/resources/accounts/manage/:accountId" element={<AccountResourceDetailPage />} />
           <Route path="/resources/accounts/groups" element={<AccountGroupsPage />} />

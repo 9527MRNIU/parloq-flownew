@@ -15,7 +15,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { apiRequest, unwrapList } from "../api/client";
+import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import {
   CountryDisplay,
@@ -41,10 +41,12 @@ import {
 } from "../components/ui";
 import {
   ListPagination,
+  ListSortableHead,
   ListTableCard,
   ListToolbar,
   StandardListPage,
   useClientPagination,
+  type ListSortOrder,
 } from "../components/list-page";
 import {
   ChartContainer,
@@ -58,6 +60,7 @@ type Channel = {
   readKey: string;
   name: string;
   countryCode: string;
+  channelType: string;
   templateId: string;
   templateName: string;
 };
@@ -87,10 +90,25 @@ type ReportRow = Channel & {
   fissionLoginRequestUv: number;
   fissionLoginSuccessCount: number;
   fissionLoginSuccessUv: number;
-  creatorId: string;
-  creatorName: string;
+  createdAt: string;
+  updatedAt: string;
   daily: Array<Record<string, number | string>>;
 };
+
+type ChannelSortBy =
+  | "id"
+  | "countryCode"
+  | "channelType"
+  | "loginRequestUv"
+  | "loginSuccessUv"
+  | "requestRate"
+  | "successRate"
+  | "visitorSuccessRate"
+  | "costPerSuccess"
+  | "fissionLoginSuccessUv"
+  | "templateName"
+  | "createdAt"
+  | "updatedAt";
 
 const record = (value: unknown) =>
   value && typeof value === "object" ? (value as Record<string, unknown>) : {};
@@ -128,6 +146,7 @@ function channelFrom(value: unknown): Channel {
     readKey: entityRowKey(row, id, "promotion-channel", `${text(row, "name")}:${text(row, "countryCode", "country_code")}`),
     name: text(row, "name"),
     countryCode: text(row, "countryCode", "country_code"),
+    channelType: text(row, "channelType", "channel_type"),
     templateId: snowflakeId(row, "templateId", "template_id"),
     templateName: text(row, "templateName"),
   };
@@ -150,6 +169,7 @@ function analyticsRow(value: unknown): ReportRow {
     ),
     name: text(row, "promotionChannelName", "name"),
     countryCode: text(row, "countryCode"),
+    channelType: text(row, "channelType", "channel_type"),
     templateId: snowflakeId(row, "templateId", "template_id"),
     templateName: text(row, "templateName"),
     spend: number(row.spend),
@@ -177,8 +197,8 @@ function analyticsRow(value: unknown): ReportRow {
     fissionLoginRequestUv: number(row.fissionLoginRequestUv),
     fissionLoginSuccessCount: number(row.fissionLoginSuccessCount),
     fissionLoginSuccessUv: number(row.fissionLoginSuccessUv),
-    creatorId: snowflakeId(row, "creatorId", "creator_id"),
-    creatorName: text(row, "creatorName"),
+    createdAt: text(row, "createdAt", "created_at"),
+    updatedAt: text(row, "updatedAt", "updated_at"),
     daily: Array.isArray(row.daily)
       ? row.daily.map((item) => {
           const value = record(item);
@@ -196,11 +216,26 @@ function analyticsRow(value: unknown): ReportRow {
   };
 }
 
-function usePromotionReport(mode: "channels" | "trends" = "channels", selectedChannelId = "all") {
+function usePromotionReport(
+  mode: "channels" | "trends" = "channels",
+  selectedChannelId = "all",
+  filters: {
+    keyword?: string;
+    channelId?: string;
+    templateId?: string;
+    countryCode?: string;
+    channelType?: string;
+    sortBy?: ChannelSortBy | "date";
+    sortOrder?: ListSortOrder;
+    page?: number;
+    pageSize?: number;
+  } = {},
+) {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [rows, setRows] = useState<ReportRow[]>([]);
   const [series, setSeries] = useState<Array<Record<string, string | number>>>([]);
   const [summary, setSummary] = useState<Record<string, unknown>>({});
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [dateFrom, setDateFrom] = useState(() => dateInput(-6));
   const [dateTo, setDateTo] = useState(() => dateInput());
@@ -217,14 +252,26 @@ function usePromotionReport(mode: "channels" | "trends" = "channels", selectedCh
         dateTo: appliedDates.dateTo,
       });
       if (selectedChannelId !== "all") params.set("channelIds", selectedChannelId);
+      if (mode === "channels") {
+        if (filters.keyword) params.set("keyword", filters.keyword);
+        if (filters.channelId && filters.channelId !== "all") params.set("channelIds", filters.channelId);
+        if (filters.templateId && filters.templateId !== "all") params.set("templateIds", filters.templateId);
+        if (filters.countryCode && filters.countryCode !== "all") params.set("countryCodes", filters.countryCode);
+        if (filters.channelType && filters.channelType !== "all") params.set("channelTypes", filters.channelType);
+        params.set("page", String(filters.page || 1));
+        params.set("pageSize", String(filters.pageSize || 20));
+      }
+      if (filters.sortBy) params.set("sortBy", filters.sortBy);
+      if (filters.sortOrder) params.set("sortOrder", filters.sortOrder);
       const [channelPayload, analyticsPayload] = await Promise.all([
-        apiRequest("/api/promotion/channels?pageSize=100"),
+        apiRequest("/api/promotion/channels/options"),
         apiRequest(`/api/promotion/data-center/${mode}?${params}`),
       ]);
       const nextChannels = unwrapList<unknown>(channelPayload).rows.map(channelFrom);
       const body = record(record(analyticsPayload).data ?? analyticsPayload);
       setChannels(nextChannels);
       setRows(Array.isArray(body.rows) ? body.rows.map(analyticsRow) : []);
+      setTotal(Number(body.total || 0));
       setSummary(record(body.summary));
       setSeries(Array.isArray(body.series) ? body.series.map((item) => {
         const value = record(item);
@@ -235,7 +282,20 @@ function usePromotionReport(mode: "channels" | "trends" = "channels", selectedCh
     } finally {
       setLoading(false);
     }
-  }, [appliedDates, mode, selectedChannelId]);
+  }, [
+    appliedDates,
+    filters.channelId,
+    filters.channelType,
+    filters.countryCode,
+    filters.keyword,
+    filters.page,
+    filters.pageSize,
+    filters.sortBy,
+    filters.sortOrder,
+    filters.templateId,
+    mode,
+    selectedChannelId,
+  ]);
 
   useEffect(() => {
     void load();
@@ -246,6 +306,8 @@ function usePromotionReport(mode: "channels" | "trends" = "channels", selectedCh
     loading,
     dateFrom,
     dateTo,
+    appliedDateFrom: appliedDates.dateFrom,
+    appliedDateTo: appliedDates.dateTo,
     setDateFrom,
     setDateTo,
     apply: () => setAppliedDates({ dateFrom, dateTo }),
@@ -257,6 +319,7 @@ function usePromotionReport(mode: "channels" | "trends" = "channels", selectedCh
     },
     refresh: load,
     rows,
+    total,
     series,
     summary,
   };
@@ -387,14 +450,29 @@ function DailyMetricEditor({
 export function PromotionChannelStatisticsPage() {
   const { can } = useAuth();
   const canEditMetrics = can("promotion.statistics.manage");
-  const report = usePromotionReport();
   const [channelId, setChannelId] = useState("all");
   const [templateId, setTemplateId] = useState("all");
   const [countryCode, setCountryCode] = useState("all");
-  const [creatorId, setCreatorId] = useState("all");
+  const [channelType, setChannelType] = useState("all");
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [expanded, setExpanded] = useState<string[]>([]);
-  const [visibleColumns, setVisibleColumns] = useState(["fission", "template", "creator"]);
+  const [visibleColumns, setVisibleColumns] = useState(["fission", "template"]);
+  const [sortBy, setSortBy] = useState<ChannelSortBy>("id");
+  const [sortOrder, setSortOrder] = useState<ListSortOrder>("desc");
+  const report = usePromotionReport("channels", "all", {
+    keyword: debouncedKeyword,
+    channelId,
+    templateId,
+    countryCode,
+    channelType,
+    sortBy,
+    sortOrder,
+    page,
+    pageSize,
+  });
   const templates = useMemo(
     () =>
       Array.from(new Map(report.channels.filter((row) => row.templateId).map((row) => [row.templateId, row])).values()),
@@ -404,37 +482,66 @@ export function PromotionChannelStatisticsPage() {
     () => Array.from(new Set(report.channels.map((row) => row.countryCode).filter(Boolean))),
     [report.channels],
   );
-  const creators = useMemo(
-    () => Array.from(new Map(report.rows.filter((row) => row.creatorId).map((row) => [row.creatorId, row.creatorName])).entries()),
-    [report.rows],
+  const channelTypes = useMemo(
+    () => Array.from(new Set(report.channels.map((row) => row.channelType).filter(Boolean))),
+    [report.channels],
   );
-  const rows = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    return report.rows.filter(
-      (row) =>
-        (channelId === "all" || row.id === channelId) &&
-        (templateId === "all" || row.templateId === templateId) &&
-        (countryCode === "all" || row.countryCode === countryCode) &&
-        (creatorId === "all" || row.creatorId === creatorId) &&
-        (!search || `${row.name} ${row.templateName}`.toLowerCase().includes(search)),
-    );
-  }, [channelId, countryCode, creatorId, keyword, report.rows, templateId]);
-  const pagination = useClientPagination(rows, {
-    resetKey: `${keyword}|${channelId}|${templateId}|${countryCode}|${creatorId}|${report.dateFrom}|${report.dateTo}`,
-  });
+  const rows = report.rows;
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+  useEffect(() => { setPage(1); }, [channelId, channelType, countryCode, templateId]);
   function resetFilters() {
     setKeyword("");
     setChannelId("all");
     setTemplateId("all");
     setCountryCode("all");
-    setCreatorId("all");
+    setChannelType("all");
+    setSortBy("id");
+    setSortOrder("desc");
+    setPage(1);
     report.reset();
   }
 
-  function exportRows() {
+  async function exportRows() {
+    const params = new URLSearchParams({
+      dateFrom: report.appliedDateFrom,
+      dateTo: report.appliedDateTo,
+      page: "1",
+      pageSize: "100",
+    });
+    if (debouncedKeyword) params.set("keyword", debouncedKeyword);
+    if (channelId !== "all") params.set("channelIds", channelId);
+    if (templateId !== "all") params.set("templateIds", templateId);
+    if (countryCode !== "all") params.set("countryCodes", countryCode);
+    if (channelType !== "all") params.set("channelTypes", channelType);
+    params.set("sortBy", sortBy);
+    params.set("sortOrder", sortOrder);
+    const exportRows: ReportRow[] = [];
+    try {
+      let exportPage = 1;
+      let exportTotal = 0;
+      do {
+        params.set("page", String(exportPage));
+        const payload = await apiRequest(`/api/promotion/data-center/channels?${params}`);
+        const list = unwrapList<unknown>(payload);
+        exportRows.push(...list.rows.map(analyticsRow));
+        exportTotal = list.total;
+        if (!list.rows.length) break;
+        exportPage += 1;
+      } while (exportRows.length < exportTotal);
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "渠道统计导出失败");
+      return;
+    }
     const header = [
       "渠道",
       "国家",
+      "平台",
       "登录请求次数",
       "登录请求人数",
       "登录成功次数",
@@ -448,13 +555,15 @@ export function PromotionChannelStatisticsPage() {
       "裂变登录成功次数",
       "裂变登录成功人数",
       "模板",
-      "创建人",
+      "创建时间",
+      "更新时间",
     ];
     const csv = [
       header,
-      ...rows.map((row) => [
+      ...exportRows.map((row) => [
         row.name,
         row.countryCode,
+        row.channelType,
         row.loginRequest,
         row.loginRequestUv,
         row.loginSuccessCount,
@@ -468,7 +577,8 @@ export function PromotionChannelStatisticsPage() {
         row.fissionLoginSuccessCount,
         row.fissionLoginSuccessUv,
         row.templateName,
-        row.creatorName,
+        formatDateTime(row.createdAt),
+        formatDateTime(row.updatedAt),
       ]),
     ]
       .map((line) => line.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(","))
@@ -478,7 +588,7 @@ export function PromotionChannelStatisticsPage() {
     );
     const link = document.createElement("a");
     link.href = url;
-    link.download = `渠道统计-${report.dateFrom}-${report.dateTo}.csv`;
+    link.download = `渠道统计-${report.appliedDateFrom}-${report.appliedDateTo}.csv`;
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -500,12 +610,15 @@ export function PromotionChannelStatisticsPage() {
               ]}
             />
             <SelectField
-              ariaLabel="创建人"
-              value={creatorId}
-              onValueChange={setCreatorId}
+              ariaLabel="平台"
+              value={channelType}
+              onValueChange={setChannelType}
               options={[
-                { value: "all", label: "全部创建人" },
-                ...creators.map(([value, label]) => ({ value, label: label || value })),
+                { value: "all", label: "全部平台" },
+                ...channelTypes.map((value) => ({
+                  value,
+                  label: value === "facebook" ? "Facebook" : value,
+                })),
               ]}
             />
             <SelectField
@@ -540,7 +653,6 @@ export function PromotionChannelStatisticsPage() {
               options={[
                 { value: "fission", label: "裂变数据" },
                 { value: "template", label: "模板" },
-                { value: "creator", label: "创建人" },
               ]}
             />
           </>
@@ -561,11 +673,11 @@ export function PromotionChannelStatisticsPage() {
         }
       />
       <ListPagination
-        page={pagination.page}
-        pageSize={pagination.pageSize}
-        total={pagination.total}
-        onPageChange={pagination.setPage}
-        onPageSizeChange={pagination.setPageSize}
+        page={page}
+        pageSize={pageSize}
+        total={report.total}
+        onPageChange={setPage}
+        onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
       />
       <ListTableCard>
         {report.loading ? (
@@ -576,21 +688,23 @@ export function PromotionChannelStatisticsPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead className="expand-column" />
-                  <TableHead adaptive>渠道</TableHead>
-                  <TableHead>国家</TableHead>
-                  <TableHead>登录请求（次数 / 人数）</TableHead>
-                  <TableHead>登录成功（次数 / 人数）</TableHead>
-                  <TableHead>请求登录率</TableHead>
-                  <TableHead>登录成功率</TableHead>
-                  <TableHead>访客上号率</TableHead>
-                  <TableHead>获号成本</TableHead>
-                  {visibleColumns.includes("fission") ? <TableHead>裂变（请求 / 成功）</TableHead> : null}
-                  {visibleColumns.includes("template") ? <TableHead>模板</TableHead> : null}
-                  {visibleColumns.includes("creator") ? <TableHead>创建人</TableHead> : null}
+                  <ListSortableHead sortKey="id" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }} adaptive>渠道</ListSortableHead>
+                  <ListSortableHead sortKey="countryCode" activeSortKey={sortBy} sortOrder={sortOrder} onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>国家</ListSortableHead>
+                  <ListSortableHead sortKey="channelType" activeSortKey={sortBy} sortOrder={sortOrder} onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>平台</ListSortableHead>
+                  <ListSortableHead sortKey="loginRequestUv" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>登录请求（次数 / 人数）</ListSortableHead>
+                  <ListSortableHead sortKey="loginSuccessUv" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>登录成功（次数 / 人数）</ListSortableHead>
+                  <ListSortableHead sortKey="requestRate" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>请求登录率</ListSortableHead>
+                  <ListSortableHead sortKey="successRate" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>登录成功率</ListSortableHead>
+                  <ListSortableHead sortKey="visitorSuccessRate" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>访客上号率</ListSortableHead>
+                  <ListSortableHead sortKey="costPerSuccess" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>获号成本</ListSortableHead>
+                  {visibleColumns.includes("fission") ? <ListSortableHead sortKey="fissionLoginSuccessUv" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>裂变（请求 / 成功）</ListSortableHead> : null}
+                  {visibleColumns.includes("template") ? <ListSortableHead sortKey="templateName" activeSortKey={sortBy} sortOrder={sortOrder} onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>模板</ListSortableHead> : null}
+                  <ListSortableHead sortKey="createdAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>创建时间</ListSortableHead>
+                  <ListSortableHead sortKey="updatedAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>更新时间</ListSortableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {pagination.rows.flatMap((row) => {
+                {rows.flatMap((row) => {
                   const open = expanded.includes(row.readKey);
                   const parent = (
                     <TableRow key={row.readKey}>
@@ -617,6 +731,7 @@ export function PromotionChannelStatisticsPage() {
                       <TableCell>
                         <CountryDisplay code={row.countryCode} />
                       </TableCell>
+                      <TableCell>{row.channelType === "facebook" ? "Facebook" : row.channelType || "-"}</TableCell>
                       <TableCell>
                         <div className="cell-main"><strong>{row.loginRequest.toLocaleString()} 次</strong><span>{row.loginRequestUv.toLocaleString()} 人</span></div>
                       </TableCell>
@@ -629,12 +744,13 @@ export function PromotionChannelStatisticsPage() {
                       <TableCell className="tabular-nums">{money(row.costPerSuccess)}</TableCell>
                       {visibleColumns.includes("fission") ? <TableCell><div className="cell-main"><strong>请求 {row.fissionLoginRequest} / {row.fissionLoginRequestUv} 人</strong><span>成功 {row.fissionLoginSuccessCount} / {row.fissionLoginSuccessUv} 人</span></div></TableCell> : null}
                       {visibleColumns.includes("template") ? <TableCell>{row.templateName || "-"}</TableCell> : null}
-                      {visibleColumns.includes("creator") ? <TableCell>{row.creatorName || "-"}</TableCell> : null}
+                      <TableCell>{formatDateTime(row.createdAt)}</TableCell>
+                      <TableCell>{formatDateTime(row.updatedAt)}</TableCell>
                     </TableRow>
                   );
                   const detail = open ? (
                     <TableRow key={`${row.readKey}-detail`} className="table-detail-row">
-                      <TableCell colSpan={9 + visibleColumns.length}>
+                      <TableCell colSpan={12 + visibleColumns.length}>
                         <div className="p-2">
                           <div className="mb-2 flex items-center justify-between"><strong>每日广告成本明细</strong><span className="text-xs text-muted-foreground">修改后 600ms 自动保存</span></div>
                           {row.daily.length ? row.daily.map((item) => (
@@ -717,7 +833,11 @@ function ConversionFunnelPanel({
 
 export function PromotionTrendPage() {
   const [channelId, setChannelId] = useState("all");
-  const report = usePromotionReport("trends", channelId);
+  const [sortOrder, setSortOrder] = useState<ListSortOrder>("asc");
+  const report = usePromotionReport("trends", channelId, {
+    sortBy: "date",
+    sortOrder,
+  });
   const daily: Array<{
     date: string;
     uv: number;
@@ -734,7 +854,7 @@ export function PromotionTrendPage() {
     successRate: number(row.successRate) * 100,
   }));
   const pagination = useClientPagination(daily, {
-    resetKey: `${channelId}|${report.dateFrom}|${report.dateTo}`,
+    resetKey: `${channelId}|${report.dateFrom}|${report.dateTo}|${sortOrder}`,
   });
   const totals = {
     uv: number(report.summary.uv),
@@ -761,7 +881,7 @@ export function PromotionTrendPage() {
         }
         actions={
           <>
-            <Button variant="outline" onClick={report.reset}>重置</Button>
+            <Button variant="outline" onClick={() => { setSortOrder("asc"); report.reset(); }}>重置</Button>
             <Button variant="outline" onClick={() => void report.refresh()}>
               <RefreshCwIcon size={16} className={report.loading ? "spin" : ""} />刷新
             </Button>
@@ -789,7 +909,7 @@ export function PromotionTrendPage() {
               <Table layout="list">
                 <TableHeader>
                   <TableRow>
-                    <TableHead adaptive>日期</TableHead>
+                    <ListSortableHead sortKey="date" activeSortKey="date" sortOrder={sortOrder} onSort={(_key, order) => setSortOrder(order)} adaptive>日期</ListSortableHead>
                     <TableHead>独立访客</TableHead>
                     <TableHead>号码提交</TableHead>
                     <TableHead>登录 / 配对成功</TableHead>

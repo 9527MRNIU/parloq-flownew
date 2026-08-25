@@ -27,7 +27,6 @@ import {
   ListTableCard,
   ListToolbar,
   StandardListPage,
-  useClientPagination,
 } from "../components/list-page";
 import {
   Badge,
@@ -494,6 +493,14 @@ export function MaterialsPage() {
   const [rows, setRows] = useState<MaterialRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
+  const [counts, setCounts] = useState<Record<MaterialType, number>>(
+    () => Object.fromEntries(MATERIAL_TYPES.map((item) => [item.value, 0])) as Record<MaterialType, number>,
+  );
+  const [textRoleCounts, setTextRoleCounts] = useState<Partial<Record<TextRole, number>>>({});
   const [activeType, setActiveType] = useState<MaterialType>("image");
   const [activeTextRole, setActiveTextRole] = useState<TextRoleFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -511,46 +518,46 @@ export function MaterialsPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await apiRequest("/api/materials?pageSize=100");
-      const normalized = unwrapList<unknown>(response).rows.map(normalize).filter((item): item is MaterialRow => Boolean(item));
+      const query = new URLSearchParams({
+        page: String(page),
+        pageSize: String(pageSize),
+        type: activeType,
+      });
+      if (debouncedKeyword) query.set("keyword", debouncedKeyword);
+      if (activeType === "text" && activeTextRole !== "all") query.set("textRole", activeTextRole);
+      if (statusFilter !== "all") query.set("status", statusFilter);
+      const response = await apiRequest(`/api/materials?${query}`);
+      const list = unwrapList<unknown>(response);
+      const normalized = list.rows.map(normalize).filter((item): item is MaterialRow => Boolean(item));
       setRows(normalized);
+      setTotal(list.total);
+      const data = (response as { data?: { typeCounts?: Partial<Record<MaterialType, number>>; textRoleCounts?: Partial<Record<TextRole, number>> } }).data;
+      setCounts((current) => ({ ...current, ...(data?.typeCounts || {}) }));
+      setTextRoleCounts(data?.textRoleCounts || {});
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "素材加载失败");
       setRows([]);
+      setTotal(0);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeTextRole, activeType, debouncedKeyword, page, pageSize, statusFilter]);
 
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => { setSelected(new Set()); }, [activeTextRole, activeType, statusFilter]);
-
-  const counts = useMemo(
-    () => rows.reduce<Record<MaterialType, number>>(
-      (result, row) => ({ ...result, [row.type]: result[row.type] + 1 }),
-      Object.fromEntries(MATERIAL_TYPES.map((item) => [item.value, 0])) as Record<MaterialType, number>,
-    ),
-    [rows],
-  );
-
-  const visible = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    return rows.filter((row) => {
-      const matchesStatus = statusFilter === "all"
-        || (statusFilter === "enabled" && row.enabled && ready(row))
-        || (statusFilter === "disabled" && !row.enabled && ready(row))
-        || (statusFilter === "missing" && !ready(row));
-      const matchesTextRole = activeType !== "text" || activeTextRole === "all" || row.textRole === activeTextRole;
-      return row.type === activeType && matchesTextRole && matchesStatus && (!search || `${row.name} ${row.id} ${materialContent(row)}`.toLowerCase().includes(search));
-    });
-  }, [activeTextRole, activeType, keyword, rows, statusFilter]);
-
-  const pagination = useClientPagination(visible, {
-    resetKey: `${keyword}|${activeType}|${activeTextRole}|${statusFilter}`,
-  });
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+  useEffect(() => {
+    setSelected(new Set());
+    setPage(1);
+  }, [activeTextRole, activeType, statusFilter]);
 
   const selectedRows = useMemo(() => rows.filter((row) => selected.has(row.id)), [rows, selected]);
-  const allVisibleSelected = Boolean(visible.length) && visible.every((row) => selected.has(row.id));
+  const allVisibleSelected = Boolean(rows.length) && rows.every((row) => selected.has(row.id));
   const existingMaterialNames = useMemo(() => new Set(rows.map((row) => row.name.trim().toLocaleLowerCase())), [rows]);
   const batchReadyCount = batchItems.filter((item) => item.status === "ready").length;
   const batchFailedCount = batchItems.filter((item) => item.status === "failed").length;
@@ -567,7 +574,7 @@ export function MaterialsPage() {
   function toggleAllVisible(checked: boolean) {
     setSelected((current) => {
       const next = new Set(current);
-      visible.forEach((row) => checked ? next.add(row.id) : next.delete(row.id));
+      rows.forEach((row) => checked ? next.add(row.id) : next.delete(row.id));
       return next;
     });
   }
@@ -843,7 +850,7 @@ export function MaterialsPage() {
       <ListToolbar
         search={{ value: keyword, onChange: setKeyword, placeholder: `搜索${definition(activeType).label}素材` }}
         filters={<SelectField value={statusFilter} onValueChange={(value) => setStatusFilter(value as StatusFilter)} className="w-32" ariaLabel="素材状态" options={[{ value: "all", label: "全部状态" }, { value: "enabled", label: "可用" }, { value: "disabled", label: "已停用" }, { value: "missing", label: "待上传" }]} />}
-        meta={`${visible.length} 条素材`}
+        meta={`${total} 条素材`}
         actions={
           <>
             {selected.size ? (
@@ -871,11 +878,11 @@ export function MaterialsPage() {
       />
 
       <ListPagination
-        page={pagination.page}
-        pageSize={pagination.pageSize}
-        total={pagination.total}
-        onPageChange={pagination.setPage}
-        onPageSizeChange={pagination.setPageSize}
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        onPageChange={setPage}
+        onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
       />
 
       <ListTableCard>
@@ -898,7 +905,7 @@ export function MaterialsPage() {
               ))}
             </div>
           </div>
-          {visible.length ? (
+          {rows.length ? (
             <label className="ml-auto flex shrink-0 cursor-pointer items-center gap-2 pl-4 text-xs text-muted-foreground">
               <Checkbox checked={allVisibleSelected} onCheckedChange={(checked) => toggleAllVisible(checked === true)} />全选
             </label>
@@ -910,7 +917,7 @@ export function MaterialsPage() {
             {TEXT_ROLE_FILTERS.map((item) => {
               const count = item.value === "all"
                 ? counts.text
-                : rows.filter((row) => row.type === "text" && row.textRole === item.value).length;
+                : textRoleCounts[item.value] || 0;
               return (
                 <button
                   key={item.value}
@@ -929,11 +936,11 @@ export function MaterialsPage() {
         ) : null}
 
         <div className="min-h-0 flex-1 overflow-y-auto bg-muted/[0.18]">
-          {loading ? <div className="loading-state h-full"><Spinner /></div> : !visible.length ? (
+          {loading ? <div className="loading-state h-full"><Spinner /></div> : !rows.length ? (
             <EmptyState title={`暂无${definition(activeType).label}素材`} description={`上传${definition(activeType).label}素材后即可在消息中复用。`} />
           ) : gridMode ? (
             <div className="grid grid-cols-2 gap-4 p-4 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
-              {pagination.rows.map((row) => {
+              {rows.map((row) => {
                 const item = definition(row.type);
                 const isSelected = selected.has(row.id);
                 const state = statusMeta(row);
@@ -997,7 +1004,7 @@ export function MaterialsPage() {
             </div>
           ) : (
             <div className="divide-y divide-border bg-background">
-              {pagination.rows.map((row) => {
+              {rows.map((row) => {
                 const item = definition(row.type);
                 const Icon = item.icon;
                 const url = previewUrl(row);

@@ -3,7 +3,7 @@ import {
   PlusIcon,
   RefreshCwIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
 import {
@@ -14,6 +14,7 @@ import {
   EmptyState,
   Input,
   MultiSelect,
+  SelectField,
   Spinner,
   Switch,
   Table,
@@ -27,10 +28,11 @@ import {
 } from "../components/ui";
 import {
   ListPagination,
+  ListSortableHead,
   ListTableCard,
   ListToolbar,
   StandardListPage,
-  useClientPagination,
+  type ListSortOrder,
 } from "../components/list-page";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
 import { DrawerFieldLabel } from "../components/drawer-form";
@@ -48,6 +50,8 @@ type GroupRow = {
   createdAt?: string;
   updatedAt?: string;
 };
+type RoleSortBy = "id" | "isBuiltin" | "userCount" | "createdAt" | "updatedAt";
+
 function normalize(input: unknown): GroupRow {
   const row = input as Record<string, unknown>;
   const id = snowflakeId(row, "id");
@@ -96,6 +100,14 @@ export function UserGroupsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [enabledFilter, setEnabledFilter] = useState("all");
+  const [sortBy, setSortBy] = useState<RoleSortBy>("id");
+  const [sortOrder, setSortOrder] = useState<ListSortOrder>("asc");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<GroupRow | null>(null);
   const [name, setName] = useState("");
@@ -110,11 +122,34 @@ export function UserGroupsPage() {
     setLoading(true);
     setError("");
     try {
-      const [payload, menuPayload] = await Promise.all([
-        apiRequest("/api/system/roles"),
-        apiRequest("/api/system/menus"),
-      ]);
-      setRows(unwrapList<unknown>(payload).rows.map(normalize));
+      const query = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+      if (debouncedKeyword) query.set("keyword", debouncedKeyword);
+      if (typeFilter !== "all") query.set("isBuiltin", typeFilter);
+      if (enabledFilter !== "all") query.set("enabled", enabledFilter);
+      query.set("sortBy", sortBy);
+      query.set("sortOrder", sortOrder);
+      const payload = await apiRequest(`/api/system/roles?${query}`);
+      const list = unwrapList<unknown>(payload);
+      setRows(list.rows.map(normalize));
+      setTotal(list.total);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "加载角色失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [debouncedKeyword, enabledFilter, page, pageSize, sortBy, sortOrder, typeFilter]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+  useEffect(() => {
+    void apiRequest("/api/system/menus").then((menuPayload) => {
       setMenus(
         unwrapList<Record<string, unknown>>(menuPayload).rows
           .map((row) => ({
@@ -123,24 +158,16 @@ export function UserGroupsPage() {
           }))
           .filter((row) => row.value),
       );
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "加载角色失败");
-    } finally {
-      setLoading(false);
-    }
+    }).catch((caught) => {
+      setMenus([]);
+      setError(caught instanceof Error ? caught.message : "加载权限菜单失败");
+    });
   }, []);
-  useEffect(() => {
-    void load();
-  }, [load]);
-  const visibleRows = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    return search
-      ? rows.filter((row) =>
-          `${row.name} ${row.description}`.toLowerCase().includes(search),
-        )
-      : rows;
-  }, [keyword, rows]);
-  const pagination = useClientPagination(visibleRows, { resetKey: keyword });
+  function changeSort(nextSortBy: RoleSortBy, nextSortOrder: ListSortOrder) {
+    setSortBy(nextSortBy);
+    setSortOrder(nextSortOrder);
+    setPage(1);
+  }
   function create() {
     setEditing(null);
     setName("");
@@ -217,7 +244,39 @@ export function UserGroupsPage() {
           onChange: setKeyword,
           placeholder: "搜索角色名称或备注",
         }}
-        meta={`${visibleRows.length} 个角色`}
+        filters={
+          <>
+            <SelectField
+              ariaLabel="角色类型筛选"
+              className="w-[145px]"
+              value={typeFilter}
+              onValueChange={(value) => {
+                setTypeFilter(value);
+                setPage(1);
+              }}
+              options={[
+                { value: "all", label: "全部角色类型" },
+                { value: "true", label: "系统内置" },
+                { value: "false", label: "自定义" },
+              ]}
+            />
+            <SelectField
+              ariaLabel="启停状态筛选"
+              className="w-[135px]"
+              value={enabledFilter}
+              onValueChange={(value) => {
+                setEnabledFilter(value);
+                setPage(1);
+              }}
+              options={[
+                { value: "all", label: "全部状态" },
+                { value: "true", label: "启用" },
+                { value: "false", label: "停用" },
+              ]}
+            />
+          </>
+        }
+        meta={`${total} 个角色`}
         actions={
           <>
             <Button
@@ -236,12 +295,12 @@ export function UserGroupsPage() {
         }
       />
       <ListPagination
-        page={pagination.page}
-        pageSize={pagination.pageSize}
-        total={pagination.total}
+        page={page}
+        pageSize={pageSize}
+        total={total}
         disabled={loading}
-        onPageChange={pagination.setPage}
-        onPageSizeChange={pagination.setPageSize}
+        onPageChange={setPage}
+        onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
       />
       <ListTableCard>
         {loading ? (
@@ -257,23 +316,62 @@ export function UserGroupsPage() {
               重试
             </Button>
           </div>
-        ) : visibleRows.length ? (
+        ) : rows.length ? (
           <div className="table-scroll">
             <Table layout="list">
               <TableHeader>
                 <TableRow>
-                  <TableHead>角色</TableHead>
-                  <TableHead>类型</TableHead>
-                  <TableHead>成员数</TableHead>
+                  <ListSortableHead
+                    sortKey="id"
+                    activeSortKey={sortBy}
+                    sortOrder={sortOrder}
+                    onSort={changeSort}
+                  >
+                    角色
+                  </ListSortableHead>
+                  <ListSortableHead
+                    sortKey="isBuiltin"
+                    activeSortKey={sortBy}
+                    sortOrder={sortOrder}
+                    defaultOrder="desc"
+                    onSort={changeSort}
+                  >
+                    类型
+                  </ListSortableHead>
+                  <ListSortableHead
+                    sortKey="userCount"
+                    activeSortKey={sortBy}
+                    sortOrder={sortOrder}
+                    defaultOrder="desc"
+                    onSort={changeSort}
+                  >
+                    成员数
+                  </ListSortableHead>
                   <TableHead adaptive>菜单 / 操作权限</TableHead>
                   <TableHead>备注</TableHead>
-                  <TableHead>创建时间</TableHead>
-                  <TableHead>更新时间</TableHead>
+                  <ListSortableHead
+                    sortKey="createdAt"
+                    activeSortKey={sortBy}
+                    sortOrder={sortOrder}
+                    defaultOrder="desc"
+                    onSort={changeSort}
+                  >
+                    创建时间
+                  </ListSortableHead>
+                  <ListSortableHead
+                    sortKey="updatedAt"
+                    activeSortKey={sortBy}
+                    sortOrder={sortOrder}
+                    defaultOrder="desc"
+                    onSort={changeSort}
+                  >
+                    更新时间
+                  </ListSortableHead>
                   <TableHead>操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {pagination.rows.map((row) => (
+                {rows.map((row) => (
                   <TableRow key={row.readKey}>
                     <TableCell>
                       <EntityPrimaryCell

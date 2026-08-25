@@ -1136,6 +1136,41 @@ class DomainOrder(Base, TimestampMixin):
     )
 
 
+class ProviderDomainCache(Base, TimestampMixin):
+    __tablename__ = "provider_domain_caches"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "hostname",
+            name="uq_provider_domain_cache_provider_hostname",
+        ),
+        Index(
+            "ix_provider_domain_caches_provider_id",
+            "provider",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=next_snowflake_id
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    hostname: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider_status: Mapped[str] = mapped_column(
+        String(32), default="unknown", nullable=False
+    )
+    provider_created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    provider_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    payload_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    refreshed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class PromotionTemplate(Base, TimestampMixin):
     __tablename__ = "promotion_templates"
 

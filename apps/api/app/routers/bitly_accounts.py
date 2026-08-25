@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import NoReturn
 
-from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import func, select
+from fastapi import APIRouter, HTTPException, Query, status
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
@@ -80,14 +80,74 @@ def _raise_service_error(error: BitlyServiceError) -> NoReturn:
     raise HTTPException(status_code=status_code, detail=str(error)) from None
 
 
+def _list_accounts_page(
+    db: DbSession,
+    *,
+    keyword: str | None,
+    page: int,
+    page_size: int,
+) -> dict:
+    statement = select(BitlyProviderAccount)
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        statement = statement.where(
+            or_(
+                BitlyProviderAccount.name.ilike(pattern),
+                BitlyProviderAccount.short_domain.ilike(pattern),
+                BitlyProviderAccount.status.ilike(pattern),
+            )
+        )
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    accounts = db.scalars(
+        statement.order_by(BitlyProviderAccount.id)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "data": {
+            "rows": [bitly_account_row(account) for account in accounts],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+    }
+
+
 @router.get("/api/bitly-accounts")
-def list_accounts(db: DbSession, _user: CurrentUser) -> dict:
-    rows = [bitly_account_row(account) for account in _list_accounts(db)]
-    return {"data": {"rows": rows, "total": len(rows)}}
+def list_accounts(
+    db: DbSession,
+    _user: CurrentUser,
+    keyword: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+) -> dict:
+    return _list_accounts_page(
+        db,
+        keyword=keyword,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.get("/api/direct-short-links/accounts")
-def list_accounts_compat(db: DbSession, _user: CurrentUser) -> dict:
+def list_accounts_compat(
+    db: DbSession,
+    _user: CurrentUser,
+    keyword: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+) -> dict:
+    return _list_accounts_page(
+        db,
+        keyword=keyword,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get("/api/bitly-accounts/options")
+@router.get("/api/direct-short-links/accounts/options")
+def list_account_options(db: DbSession, _user: CurrentUser) -> dict:
     rows = [bitly_account_row(account) for account in _list_accounts(db)]
     return {"data": {"rows": rows, "total": len(rows)}}
 

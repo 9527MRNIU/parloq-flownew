@@ -2,6 +2,7 @@ import {
   AlertTriangleIcon,
   CheckCheckIcon,
   ChevronDownIcon,
+  DownloadIcon,
   EyeIcon,
   FolderInputIcon,
   ListChecksIcon,
@@ -15,7 +16,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { IoLogoAndroid, IoLogoApple } from "react-icons/io";
 import { useSearchParams } from "react-router-dom";
-import { apiRequest, formatDateTime, unwrapList } from "../api/client";
+import { apiDownload, apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import {
   AccountStatusIndicator,
@@ -30,6 +31,8 @@ import {
 import { AccountResourceDetailDrawer } from "./AccountResourceDetailPage";
 import {
   ListPagination,
+  ListSortableHead,
+  type ListSortOrder,
   ListTableCard,
   ListToolbar,
   StandardListPage,
@@ -51,6 +54,7 @@ import {
   PopoverContent,
   PopoverTrigger,
   SelectField,
+  SearchableSelect,
   Spinner,
   Table,
   TableBody,
@@ -78,6 +82,7 @@ type Account = {
   status: string;
   connected: boolean;
   proxyId: string;
+  proxyCountryCode: string;
   source: string;
   sourceRefType: string;
   importFormat: string;
@@ -146,15 +151,18 @@ type ProxyRow = {
 function AccountProxyDisplay({
   proxyId,
   proxy,
+  countryCode,
 }: {
   proxyId: string;
   proxy?: ProxyRow;
+  countryCode?: string;
 }) {
+  const displayedCountry = proxy?.countryCode || countryCode;
   return (
     <div className="grid min-w-[180px] justify-items-center gap-1 text-center">
-      {proxy?.countryCode ? (
+      {displayedCountry ? (
         <CountryDisplay
-          code={proxy.countryCode}
+          code={displayedCountry}
           className="justify-center"
         />
       ) : (
@@ -179,6 +187,22 @@ type ImportProtocol = {
   supportedFormats: string[];
 };
 type FilterProtocol = { id: string; name: string; type: string };
+type AccountSortBy =
+  | "id"
+  | "countryCode"
+  | "visitorCountryCode"
+  | "proxyCountryCode"
+  | "accountType"
+  | "deviceOs"
+  | "source"
+  | "friendCount"
+  | "groupCount"
+  | "qualityScore"
+  | "groupName"
+  | "protocolId"
+  | "sentCount"
+  | "createdAt"
+  | "updatedAt";
 const val = (row: Record<string, unknown>, ...keys: string[]) => {
   for (const key of keys) if (row[key] != null) return String(row[key]);
   return "";
@@ -238,6 +262,7 @@ function accountRow(input: unknown): Account {
     proxyId:
       snowflakeId(row, "proxyId", "proxy_id") ||
       snowflakeId(proxy, "id", "proxyId", "proxy_id"),
+    proxyCountryCode: val(proxy, "countryCode", "country_code"),
     source: val(row, "source", "credentialSource", "credential_source"),
     sourceRefType: val(row, "sourceRefType", "source_ref_type"),
     importFormat: val(row, "importFormat", "import_format"),
@@ -376,6 +401,7 @@ export function PersonalAccountsPage() {
     can("resources.accounts.manage") ||
     can("business.personal_accounts.manage");
   const canImport = can("resources.accounts.import") || canManage;
+  const canExport = can("resources.accounts.export") || canManage;
   const [rows, setRows] = useState<Account[]>([]);
   const [proxies, setProxies] = useState<ProxyRow[]>([]);
   const [groups, setGroups] = useState<AccountGroup[]>([]);
@@ -389,11 +415,19 @@ export function PersonalAccountsPage() {
   );
   const [sourceFilter, setSourceFilter] = useState("all");
   const [countryFilter, setCountryFilter] = useState("");
+  const [visitorCountryFilter, setVisitorCountryFilter] = useState("");
+  const [proxyCountryFilter, setProxyCountryFilter] = useState("");
+  const [accountTypeFilter, setAccountTypeFilter] = useState("");
+  const [deviceOsFilter, setDeviceOsFilter] = useState("");
   const [protocolFilter, setProtocolFilter] = useState("");
   const [metadataFilter, setMetadataFilter] = useState("");
   const [qualityFilter, setQualityFilter] = useState("all");
   const [filterCountries, setFilterCountries] = useState<string[]>([]);
+  const [filterVisitorCountries, setFilterVisitorCountries] = useState<string[]>([]);
+  const [filterProxyCountries, setFilterProxyCountries] = useState<string[]>([]);
   const [filterProtocols, setFilterProtocols] = useState<FilterProtocol[]>([]);
+  const [sortBy, setSortBy] = useState<AccountSortBy>("id");
+  const [sortOrder, setSortOrder] = useState<ListSortOrder>("desc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState(0);
@@ -402,6 +436,7 @@ export function PersonalAccountsPage() {
   const [batchGroupDrawerOpen, setBatchGroupDrawerOpen] = useState(false);
   const [groupingIds, setGroupingIds] = useState<string[]>([]);
   const [operation, setOperation] = useState("");
+  const [exporting, setExporting] = useState("");
   const [detailAccount, setDetailAccount] = useState<Account | null>(null);
   const [importOpen, setImportOpen] = useState(
     searchParams.get("import") === "1",
@@ -433,11 +468,17 @@ export function PersonalAccountsPage() {
       if (sourceFilter !== "all") query.set("source", sourceFilter);
       if (groupFilter !== "all") query.set("groupId", groupFilter);
       if (countryFilter) query.set("countryCode", countryFilter);
+      if (visitorCountryFilter) query.set("visitorCountryCode", visitorCountryFilter);
+      if (proxyCountryFilter) query.set("proxyCountryCode", proxyCountryFilter);
+      if (accountTypeFilter) query.set("accountType", accountTypeFilter);
+      if (deviceOsFilter) query.set("deviceOs", deviceOsFilter);
       if (protocolFilter) query.set("protocolId", protocolFilter);
       if (metadataFilter) query.set("metadataStatus", metadataFilter);
       if (qualityFilter !== "all") {
         query.set("qualityKnown", qualityFilter === "known" ? "true" : "false");
       }
+      query.set("sortBy", sortBy);
+      query.set("sortOrder", sortOrder);
       const accountsPayload = await apiRequest(
         `/api/personal-accounts?${query.toString()}`,
       );
@@ -456,24 +497,30 @@ export function PersonalAccountsPage() {
       setLoading(false);
     }
   }, [
+    accountTypeFilter,
     countryFilter,
     debouncedKeyword,
+    deviceOsFilter,
     groupFilter,
     metadataFilter,
     page,
     pageSize,
     protocolFilter,
+    proxyCountryFilter,
     qualityFilter,
     sourceFilter,
+    sortBy,
+    sortOrder,
     statusFilter,
+    visitorCountryFilter,
   ]);
 
   const loadReferences = useCallback(async () => {
     try {
       const [groupsPayload, proxiesPayload, importOptionsPayload, filterPayload] =
         await Promise.all([
-        apiRequest("/api/account-groups?pageSize=100"),
-        apiRequest("/api/ip-proxies?pageSize=100").catch(() => null),
+        apiRequest("/api/account-groups/options"),
+        apiRequest("/api/ip-proxies/options").catch(() => null),
         apiRequest("/api/personal-accounts/import-options"),
         apiRequest("/api/personal-accounts/filter-options"),
       ]);
@@ -521,6 +568,16 @@ export function PersonalAccountsPage() {
           ? filterData.countries.map(String).filter(Boolean)
           : [],
       );
+      setFilterVisitorCountries(
+        Array.isArray(filterData.visitorCountries)
+          ? filterData.visitorCountries.map(String).filter(Boolean)
+          : [],
+      );
+      setFilterProxyCountries(
+        Array.isArray(filterData.proxyCountries)
+          ? filterData.proxyCountries.map(String).filter(Boolean)
+          : [],
+      );
       setFilterProtocols(
         Array.isArray(filterData.protocols)
           ? filterData.protocols
@@ -539,6 +596,8 @@ export function PersonalAccountsPage() {
       setGroups([]);
       setImportProtocols([]);
       setFilterCountries([]);
+      setFilterVisitorCountries([]);
+      setFilterProxyCountries([]);
       setFilterProtocols([]);
       toast.error(caught instanceof Error ? caught.message : "账号筛选项加载失败");
     }
@@ -585,6 +644,11 @@ export function PersonalAccountsPage() {
   const batchTargetValid =
     batchGroupId === "__ungrouped__" ||
     batchGroups.some((group) => group.id === batchGroupId);
+  function changeSort(nextSortBy: AccountSortBy, nextSortOrder: ListSortOrder) {
+    setSortBy(nextSortBy);
+    setSortOrder(nextSortOrder);
+    setPage(1);
+  }
   function openBatchGroupDrawer() {
     if (!selectedIds.length) return;
     setBatchGroupId("");
@@ -661,6 +725,36 @@ export function PersonalAccountsPage() {
       setSelectedIds([]);
       setBatchGroupDrawerOpen(false);
       setBatchGroupId("");
+    }
+  }
+  async function downloadBatch(format: "baileys_creds" | "native") {
+    if (!selectedIds.length || !canExport) return;
+    if (
+      !(await confirmAction({
+        title: `导出所选 ${selectedIds.length} 个账号？`,
+        description: "系统会生成一个 ZIP，包内 JSON 包含账号登录凭据，请仅保存到受控设备。",
+        confirmText: "确认导出",
+      }))
+    ) return;
+    setExporting(format);
+    try {
+      const response = await apiDownload("/api/personal-accounts/export/batch", {
+        method: "POST",
+        body: JSON.stringify({ accountIds: selectedIds, format }),
+      });
+      const url = URL.createObjectURL(response.blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = response.filename
+        ? decodeURIComponent(response.filename)
+        : `parloq-accounts-${format}.zip`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      toast.success(`已生成 ${selectedIds.length} 个账号的导出包`);
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "批量导出失败");
+    } finally {
+      setExporting("");
     }
   }
   function openImport() {
@@ -757,6 +851,10 @@ export function PersonalAccountsPage() {
   }
   const advancedFilterCount = [
     countryFilter,
+    visitorCountryFilter,
+    proxyCountryFilter,
+    accountTypeFilter,
+    deviceOsFilter,
     protocolFilter,
     metadataFilter,
     qualityFilter === "all" ? "" : qualityFilter,
@@ -847,14 +945,14 @@ export function PersonalAccountsPage() {
                   </p>
                 </div>
                 <SelectField
-                  ariaLabel="国家筛选"
+                  ariaLabel="号码国家筛选"
                   className="w-full"
                   value={countryFilter}
                   onValueChange={(value) => {
                     setCountryFilter(value);
                     setPage(1);
                   }}
-                  placeholder="全部国家"
+                  placeholder="全部号码国家"
                   clearable
                   options={filterCountries.map((country) => ({
                     value: country,
@@ -862,6 +960,69 @@ export function PersonalAccountsPage() {
                   }))}
                 />
                 <SelectField
+                  ariaLabel="访问国家筛选"
+                  className="w-full"
+                  value={visitorCountryFilter}
+                  onValueChange={(value) => {
+                    setVisitorCountryFilter(value);
+                    setPage(1);
+                  }}
+                  placeholder="全部访问国家"
+                  clearable
+                  options={filterVisitorCountries.map((country) => ({
+                    value: country,
+                    label: country,
+                  }))}
+                />
+                <SelectField
+                  ariaLabel="代理国家筛选"
+                  className="w-full"
+                  value={proxyCountryFilter}
+                  onValueChange={(value) => {
+                    setProxyCountryFilter(value);
+                    setPage(1);
+                  }}
+                  placeholder="全部代理国家"
+                  clearable
+                  options={filterProxyCountries.map((country) => ({
+                    value: country,
+                    label: country,
+                  }))}
+                />
+                <SelectField
+                  ariaLabel="账号类型筛选"
+                  className="w-full"
+                  value={accountTypeFilter}
+                  onValueChange={(value) => {
+                    setAccountTypeFilter(value);
+                    setPage(1);
+                  }}
+                  placeholder="全部账号类型"
+                  clearable
+                  options={[
+                    { value: "personal", label: "个人版" },
+                    { value: "business", label: "商业版" },
+                    { value: "unknown", label: "未知类型" },
+                  ]}
+                />
+                <SelectField
+                  ariaLabel="系统筛选"
+                  className="w-full"
+                  value={deviceOsFilter}
+                  onValueChange={(value) => {
+                    setDeviceOsFilter(value);
+                    setPage(1);
+                  }}
+                  placeholder="全部系统"
+                  clearable
+                  options={[
+                    { value: "android", label: "安卓" },
+                    { value: "ios", label: "苹果" },
+                    { value: "other", label: "其他" },
+                    { value: "unknown", label: "未知系统" },
+                  ]}
+                />
+                <SearchableSelect
                   ariaLabel="协议节点筛选"
                   className="w-full"
                   value={protocolFilter}
@@ -870,11 +1031,15 @@ export function PersonalAccountsPage() {
                     setPage(1);
                   }}
                   placeholder="全部协议"
-                  clearable
-                  options={filterProtocols.map((protocol) => ({
-                    value: protocol.id,
-                    label: `${protocol.name} · ${protocol.type || "未知类型"}`,
-                  }))}
+                  searchPlaceholder="搜索协议名称或 ID"
+                  options={[
+                    { value: "", label: "全部协议" },
+                    ...filterProtocols.map((protocol) => ({
+                      value: protocol.id,
+                      label: `${protocol.name} · ${protocol.id}`,
+                      keywords: protocol.type,
+                    })),
+                  ]}
                 />
                 <SelectField
                   ariaLabel="资料同步状态筛选"
@@ -914,6 +1079,10 @@ export function PersonalAccountsPage() {
                   disabled={!advancedFilterCount}
                   onClick={() => {
                     setCountryFilter("");
+                    setVisitorCountryFilter("");
+                    setProxyCountryFilter("");
+                    setAccountTypeFilter("");
+                    setDeviceOsFilter("");
                     setProtocolFilter("");
                     setMetadataFilter("");
                     setQualityFilter("all");
@@ -943,16 +1112,16 @@ export function PersonalAccountsPage() {
               <RefreshCwIcon size={16} className={loading ? "spin" : ""} />
               刷新
             </Button>
-            {canManage ? (
+            {canManage || canExport ? (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button
                     variant="outline"
                     disabled={
-                      !selectedIds.length || Boolean(groupingIds.length)
+                      !selectedIds.length || Boolean(groupingIds.length) || Boolean(exporting)
                     }
                   >
-                    {groupingIds.length ? (
+                    {groupingIds.length || exporting ? (
                       <Spinner />
                     ) : (
                       <ListChecksIcon data-icon="inline-start" />
@@ -964,10 +1133,24 @@ export function PersonalAccountsPage() {
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
                   <DropdownMenuGroup>
-                    <DropdownMenuItem onSelect={openBatchGroupDrawer}>
-                      <FolderInputIcon />
-                      批量改组
-                    </DropdownMenuItem>
+                    {canManage ? (
+                      <DropdownMenuItem onSelect={openBatchGroupDrawer}>
+                        <FolderInputIcon />
+                        批量改组
+                      </DropdownMenuItem>
+                    ) : null}
+                    {canExport ? (
+                      <>
+                        <DropdownMenuItem onSelect={() => void downloadBatch("baileys_creds")}>
+                          <DownloadIcon />
+                          导出兼容包
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => void downloadBatch("native")}>
+                          <DownloadIcon />
+                          导出完整包
+                        </DropdownMenuItem>
+                      </>
+                    ) : null}
                   </DropdownMenuGroup>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -1006,7 +1189,7 @@ export function PersonalAccountsPage() {
                   <Checkbox
                     aria-label="选择全部可见账号"
                     checked={allVisibleSelected}
-                    disabled={!canManage || !visibleIds.length}
+                    disabled={!(canManage || canExport) || !visibleIds.length}
                     onCheckedChange={(checked) =>
                       setSelectedIds((current) =>
                         checked
@@ -1016,19 +1199,22 @@ export function PersonalAccountsPage() {
                     }
                   />
                 </TableHead>
-                <TableHead adaptive>账号</TableHead>
-                <TableHead className="text-center">号码国家</TableHead>
-                <TableHead className="text-center">访问国家</TableHead>
-                <TableHead className="text-center">代理国家</TableHead>
+                <ListSortableHead sortKey="id" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort} adaptive>账号</ListSortableHead>
+                <ListSortableHead sortKey="countryCode" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>号码国家</ListSortableHead>
+                <ListSortableHead sortKey="visitorCountryCode" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>访问国家</ListSortableHead>
+                <ListSortableHead sortKey="proxyCountryCode" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>代理国家</ListSortableHead>
                 <TableHead className="text-center">头像</TableHead>
-                <TableHead className="text-center">类型</TableHead>
-                <TableHead className="text-center">系统</TableHead>
-                <TableHead className="text-center">来源</TableHead>
-                <TableHead className="text-center">好友数</TableHead>
-                <TableHead className="text-center">群组数</TableHead>
-                <TableHead className="text-center">评分</TableHead>
-                <TableHead>分组</TableHead>
-                <TableHead className="text-center">发送数据</TableHead>
+                <ListSortableHead sortKey="accountType" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>类型</ListSortableHead>
+                <ListSortableHead sortKey="deviceOs" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>系统</ListSortableHead>
+                <ListSortableHead sortKey="source" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>来源</ListSortableHead>
+                <ListSortableHead sortKey="friendCount" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>好友数</ListSortableHead>
+                <ListSortableHead sortKey="groupCount" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>群组数</ListSortableHead>
+                <ListSortableHead sortKey="qualityScore" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>评分</ListSortableHead>
+                <ListSortableHead sortKey="groupName" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>分组</ListSortableHead>
+                <ListSortableHead sortKey="protocolId" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>协议</ListSortableHead>
+                <ListSortableHead sortKey="sentCount" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>发送数据</ListSortableHead>
+                <ListSortableHead sortKey="createdAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>创建时间</ListSortableHead>
+                <ListSortableHead sortKey="updatedAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>更新时间</ListSortableHead>
                 <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
@@ -1039,7 +1225,7 @@ export function PersonalAccountsPage() {
                     <Checkbox
                       aria-label={`选择账号 ${row.phone || row.name || "待迁移账号"}`}
                       checked={Boolean(row.id) && selectedIds.includes(row.id)}
-                      disabled={!canManage || !row.id}
+                      disabled={!(canManage || canExport) || !row.id}
                       onCheckedChange={(checked) =>
                         row.id &&
                         setSelectedIds((current) =>
@@ -1089,6 +1275,7 @@ export function PersonalAccountsPage() {
                     <AccountProxyDisplay
                       proxyId={row.proxyId}
                       proxy={proxyById.get(row.proxyId)}
+                      countryCode={row.proxyCountryCode}
                     />
                   </TableCell>
                   <TableCell className="text-center align-middle">
@@ -1142,6 +1329,12 @@ export function PersonalAccountsPage() {
                       {row.groupName || "未分组"}
                     </strong>
                   </TableCell>
+                  <TableCell>
+                    <div className="cell-main min-w-[150px]">
+                      <strong>{row.protocolName || "协议不可用"}</strong>
+                      <span>{[row.protocolType, row.protocolId].filter(Boolean).join(" · ") || "-"}</span>
+                    </div>
+                  </TableCell>
                   <TableCell className="text-center align-middle">
                     <div className="cell-main mx-auto min-w-[160px] items-center text-center">
                       <div className="tick-stats">
@@ -1159,6 +1352,12 @@ export function PersonalAccountsPage() {
                       ) : null}
                       <span>最近连接 {formatDateTime(row.lastConnectedAt)}</span>
                     </div>
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    <span className="whitespace-nowrap">{formatDateTime(row.createdAt)}</span>
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    <span className="whitespace-nowrap">{formatDateTime(row.updatedAt)}</span>
                   </TableCell>
                   <TableCell className="sticky right-0 bg-background">
                     <div className="flex min-w-max items-center justify-end gap-2">

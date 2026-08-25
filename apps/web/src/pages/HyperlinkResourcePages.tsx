@@ -21,7 +21,6 @@ import {
   ListTableCard,
   ListToolbar,
   StandardListPage,
-  useClientPagination,
 } from "../components/list-page";
 import {
   EntityPrimaryCell,
@@ -483,12 +482,12 @@ function TaskAccountGroupCell({ row }: { row: AnyRow }) {
 }
 
 const optionEndpoints: Record<OptionSource, string> = {
-  materials: "/api/materials",
-  promotionChannels: "/api/promotion/channels",
-  templates: "/api/hyperlink/templates",
-  strategies: "/api/hyperlink/strategies",
-  packages: "/api/hyperlink/data-packages",
-  accountGroups: "/api/account-groups?pageSize=100",
+  materials: "/api/materials/options",
+  promotionChannels: "/api/promotion/channels/options",
+  templates: "/api/hyperlink/templates/options",
+  strategies: "/api/hyperlink/strategies/options",
+  packages: "/api/hyperlink/data-packages/options",
+  accountGroups: "/api/account-groups/options",
 };
 function optionLabel(source: OptionSource, row: Record<string, unknown>) {
   const name = String(
@@ -512,7 +511,11 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
   const [rows, setRows] = useState<AnyRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
   const [drawer, setDrawer] = useState(false);
   const [editing, setEditing] = useState<AnyRow | null>(null);
   const [form, setForm] = useState<Record<string, string>>(config.defaults);
@@ -533,38 +536,31 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
   const load = useCallback(async (showLoading = true) => {
     if (showLoading) setLoading(true);
     try {
-      const payload = await apiRequest(`${config.endpoint}?pageSize=100`);
-      setRows(unwrapList<unknown>(payload).rows.map(normalize));
+      const query = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+      if (debouncedKeyword) query.set("keyword", debouncedKeyword);
+      if (config.statusFilter && statusFilter !== "all") query.set("status", statusFilter);
+      const payload = await apiRequest(`${config.endpoint}?${query}`);
+      const list = unwrapList<unknown>(payload);
+      setRows(list.rows.map(normalize));
+      setTotal(list.total);
     } catch {
       setRows([]);
+      setTotal(0);
     } finally {
       if (showLoading) setLoading(false);
     }
-  }, [config.endpoint]);
+  }, [config.endpoint, config.statusFilter, debouncedKeyword, page, pageSize, statusFilter]);
   useEffect(() => {
     void load();
   }, [load]);
-  const visible = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    return rows.filter((row) => {
-      if (
-        statusFilter !== "all" &&
-        String(read(row, "status") || "") !== statusFilter
-      )
-        return false;
-      return (
-        !search ||
-        Object.values(row).some((value) =>
-          String(value || "")
-            .toLowerCase()
-            .includes(search),
-        )
-      );
-    });
-  }, [keyword, rows, statusFilter]);
-  const listPagination = useClientPagination(visible, {
-    resetKey: `${keyword}|${statusFilter}`,
-  });
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+  useEffect(() => { setPage(1); }, [statusFilter]);
   useEffect(() => {
     if (
       !config.taskActions ||
@@ -809,7 +805,7 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
             />
           ) : undefined
         }
-        meta={`${visible.length} 条记录`}
+        meta={`${total} 条记录`}
         actions={
           <>
             <Button variant="outline" onClick={() => void load()}>
@@ -826,19 +822,19 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
         }
       />
       <ListPagination
-        page={listPagination.page}
-        pageSize={listPagination.pageSize}
-        total={listPagination.total}
+        page={page}
+        pageSize={pageSize}
+        total={total}
         disabled={loading}
-        onPageChange={listPagination.setPage}
-        onPageSizeChange={listPagination.setPageSize}
+        onPageChange={setPage}
+        onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
       />
       <ListTableCard>
         {loading ? (
           <div className="loading-state">
             <Spinner />
           </div>
-        ) : visible.length ? (
+        ) : rows.length ? (
           <Table layout="list">
             <TableHeader>
               <TableRow>
@@ -856,7 +852,7 @@ function HyperlinkResourcePage({ config }: { config: ModuleConfig }) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {listPagination.rows.map((row) => (
+              {rows.map((row) => (
                 <TableRow key={row.readKey}>
                   {displayColumns.map((column, columnIndex) => (
                     <TableCell className={column.className} key={column.key}>

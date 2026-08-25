@@ -4,7 +4,8 @@ import json
 import logging
 import re
 import secrets
-from datetime import UTC, timedelta
+from datetime import UTC, date, datetime, timedelta
+from typing import Literal
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -12,7 +13,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, s
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from redis.exceptions import RedisError
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.business_schemas import (
@@ -32,6 +33,7 @@ from app.models import (
     DomainOrder,
     DomainQuote,
     DomainRecord,
+    ProviderDomainCache,
     PromotionChannel,
     PromotionIntegration,
     SystemCredential,
@@ -377,8 +379,23 @@ def _domain(db: DbSession, identifier: str, user) -> DomainRecord:
     return item
 
 
-def domain_row(db: DbSession, item: DomainRecord) -> dict:
-    count = int(db.scalar(select(func.count()).select_from(PromotionChannel).where(PromotionChannel.domain_id == item.id)) or 0)
+def domain_row(
+    db: DbSession,
+    item: DomainRecord,
+    bound_channel_count: int | None = None,
+) -> dict:
+    count = (
+        bound_channel_count
+        if bound_channel_count is not None
+        else int(
+            db.scalar(
+                select(func.count())
+                .select_from(PromotionChannel)
+                .where(PromotionChannel.domain_id == item.id)
+            )
+            or 0
+        )
+    )
     selectable = (
         item.enabled
         and item.registration_status == "active"
@@ -691,15 +708,201 @@ def _run_domain_search(
 
 
 @router.get("")
-def list_domains(db: DbSession, current_user: CurrentUser) -> dict:
+def list_domains(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str = Query(default="", max_length=200),
+    source: Literal["connected", "purchased"] | None = None,
+    ready: bool | None = None,
+    onboarding_status: Literal[
+        "idle", "running", "waiting", "failed", "completed"
+    ] | None = Query(default=None, alias="onboardingStatus"),
+    expires_before: date | None = Query(default=None, alias="expiresBefore"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id",
+        "source",
+        "ready",
+        "expiresAt",
+        "lastVerifiedAt",
+        "onboardingStatus",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
+) -> dict:
+    channel_counts = (
+        select(
+            PromotionChannel.domain_id.label("domain_id"),
+            func.count(PromotionChannel.id).label("bound_channel_count"),
+        )
+        .group_by(PromotionChannel.domain_id)
+        .subquery()
+    )
+    ready_expression = and_(
+        DomainRecord.enabled.is_(True),
+        DomainRecord.registration_status == "active",
+        DomainRecord.dns_status == "verified",
+        DomainRecord.ssl_status == "verified",
+        DomainRecord.hosting_status == "active",
+    )
+    statement = (
+        select(
+            DomainRecord,
+            func.coalesce(channel_counts.c.bound_channel_count, 0).label(
+                "bound_channel_count"
+            ),
+        )
+        .outerjoin(channel_counts, channel_counts.c.domain_id == DomainRecord.id)
+    )
+    if current_user.role != "admin":
+        statement = statement.where(DomainRecord.created_by == current_user.id)
+    search = keyword.strip()
+    if search:
+        statement = statement.where(DomainRecord.hostname.ilike(f"%{search}%"))
+    if source:
+        statement = statement.where(DomainRecord.acquisition_type == source)
+    if ready is not None:
+        statement = statement.where(ready_expression if ready else ~ready_expression)
+    if onboarding_status:
+        statement = statement.where(
+            DomainRecord.onboarding_status == onboarding_status
+        )
+    if expires_before:
+        statement = statement.where(
+            DomainRecord.expires_at.is_not(None),
+            DomainRecord.expires_at
+            < datetime.combine(expires_before, datetime.max.time(), tzinfo=UTC),
+        )
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    sort_columns = {
+        "id": DomainRecord.id,
+        "source": DomainRecord.acquisition_type,
+        "ready": case((ready_expression, 1), else_=0),
+        "expiresAt": DomainRecord.expires_at,
+        "lastVerifiedAt": DomainRecord.last_verified_at,
+        "onboardingStatus": DomainRecord.onboarding_status,
+    }
+    sort_column = sort_columns[sort_by]
+    ordering = [
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    ]
+    if sort_by != "id":
+        ordering.append(
+            DomainRecord.id.asc()
+            if sort_order == "asc"
+            else DomainRecord.id.desc()
+        )
+    items = db.execute(
+        statement.order_by(*ordering)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "data": {
+            "rows": [
+                domain_row(db, item, int(bound_channel_count))
+                for item, bound_channel_count in items
+            ],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+    }
+
+
+def _provider_datetime(value: object) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(raw[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+    return parsed.replace(tzinfo=parsed.tzinfo or UTC).astimezone(UTC)
+
+
+def _persist_provider_domains(
+    db: DbSession,
+    provider: Literal["cloudflare", "namesilo"],
+    rows: list[dict[str, object]],
+) -> None:
+    existing = {
+        item.hostname: item
+        for item in db.scalars(
+            select(ProviderDomainCache).where(
+                ProviderDomainCache.provider == provider
+            )
+        ).all()
+    }
+    seen: set[str] = set()
+    refreshed_at = utcnow()
+    for raw in rows:
+        hostname = str(raw.get("hostname") or raw.get("domain") or "").lower().rstrip(".")
+        if not hostname or hostname in seen:
+            continue
+        seen.add(hostname)
+        item = existing.get(hostname)
+        if item is None:
+            item = ProviderDomainCache(provider=provider, hostname=hostname)
+            db.add(item)
+        item.provider_status = str(
+            raw.get("providerStatus") or raw.get("status") or "unknown"
+        )
+        item.provider_created_at = _provider_datetime(
+            raw.get("providerCreatedAt") or raw.get("createdAt")
+        )
+        item.provider_updated_at = _provider_datetime(
+            raw.get("providerUpdatedAt") or raw.get("updatedAt")
+        )
+        item.payload_json = dict(raw)
+        item.refreshed_at = refreshed_at
+    stale = set(existing).difference(seen)
+    if stale:
+        db.execute(
+            delete(ProviderDomainCache).where(
+                ProviderDomainCache.provider == provider,
+                ProviderDomainCache.hostname.in_(stale),
+            )
+        )
+    db.commit()
+
+
+def _provider_inventory_sort(
+    rows: list[dict[str, object]],
+    sort_by: str,
+    sort_order: Literal["asc", "desc"],
+) -> list[dict[str, object]]:
+    def value(row: dict[str, object]):
+        if sort_by == "id":
+            return int(str(row.get("id") or 0))
+        if sort_by == "orderStatus":
+            return str(row.get("orderStatus") or "")
+        return row.get(sort_by)
+
+    present = [row for row in rows if value(row) not in {None, ""}]
+    missing = [row for row in rows if value(row) in {None, ""}]
+    present.sort(
+        key=lambda row: (value(row), int(str(row.get("id") or 0))),
+        reverse=sort_order == "desc",
+    )
+    return present + missing
+
+
+def _local_domains_by_hostname(db: DbSession, current_user) -> dict[str, DomainRecord]:
     statement = select(DomainRecord)
-    if current_user.role != "admin": statement = statement.where(DomainRecord.created_by == current_user.id)
-    items = db.scalars(statement.order_by(DomainRecord.created_at.desc())).all()
-    return {"data": {"rows": [domain_row(db, item) for item in items], "total": len(items)}}
+    if current_user.role != "admin":
+        statement = statement.where(DomainRecord.created_by == current_user.id)
+    return {
+        item.hostname.lower(): item for item in db.scalars(statement).all()
+    }
 
 
-@router.get("/cloudflare")
-def list_cloudflare_domains(db: DbSession, current_user: CurrentUser) -> dict:
+def _refresh_cloudflare_domains(db: DbSession) -> None:
     fixture_mode = _dev_provider_domain_fixtures_enabled()
     zones: list[dict[str, object]] = []
     try:
@@ -724,32 +927,18 @@ def list_cloudflare_domains(db: DbSession, current_user: CurrentUser) -> dict:
             ) from exc
         logger.warning("读取 Cloudflare 域名失败，开发环境仅展示模拟域名：%s", exc)
 
-    domain_statement = select(DomainRecord)
-    if current_user.role != "admin":
-        domain_statement = domain_statement.where(DomainRecord.created_by == current_user.id)
-    local_domains = db.scalars(domain_statement).all()
-    domains_by_hostname = {item.hostname.lower(): item for item in local_domains}
-
-    rows = []
+    rows: list[dict[str, object]] = []
     for zone in zones:
         hostname = str(zone.get("name") or "").lower().rstrip(".")
         meta = zone.get("meta") if isinstance(zone.get("meta"), dict) else {}
-        local_domain = domains_by_hostname.get(hostname)
-        source = "account_existing"
-        if local_domain is not None:
-            source = (
-                "system_purchase"
-                if local_domain.acquisition_type == "purchased"
-                else "system_import"
-            )
         rows.append(
             {
                 "hostname": hostname,
                 "status": str(zone.get("status") or "unknown"),
                 "paused": bool(zone.get("paused")),
                 "phishingDetected": bool(meta.get("phishing_detected")),
-                "source": source,
-                "systemDomainId": entity_id(local_domain) if local_domain else None,
+                "providerCreatedAt": zone.get("created_on"),
+                "providerUpdatedAt": zone.get("modified_on"),
             }
         )
     if fixture_mode:
@@ -759,8 +948,149 @@ def list_cloudflare_domains(db: DbSession, current_user: CurrentUser) -> dict:
             for row in _dev_cloudflare_domain_rows()
             if str(row["hostname"]).lower() not in existing_hostnames
         )
-    rows.sort(key=lambda row: row["hostname"])
-    return {"data": {"rows": rows, "total": len(rows)}}
+    _persist_provider_domains(db, "cloudflare", rows)
+
+
+def _cloudflare_inventory(
+    db: DbSession,
+    current_user,
+    *,
+    keyword: str,
+    source: str | None,
+    provider_status: str | None,
+    onboarding_status: str | None,
+    page: int,
+    page_size: int,
+    sort_by: str,
+    sort_order: Literal["asc", "desc"],
+) -> dict:
+    domains_by_hostname = _local_domains_by_hostname(db, current_user)
+    rows: list[dict[str, object]] = []
+    for item in db.scalars(
+        select(ProviderDomainCache).where(
+            ProviderDomainCache.provider == "cloudflare"
+        )
+    ).all():
+        payload = dict(item.payload_json or {})
+        local_domain = domains_by_hostname.get(item.hostname)
+        row_source = (
+            "system_purchase"
+            if local_domain and local_domain.acquisition_type == "purchased"
+            else "system_import"
+            if local_domain
+            else str(payload.get("source") or "account_existing")
+        )
+        system_domain_id = (
+            entity_id(local_domain)
+            if local_domain
+            else payload.get("systemDomainId")
+        )
+        rows.append(
+            {
+                "id": entity_id(item),
+                "hostname": item.hostname,
+                "status": item.provider_status,
+                "providerStatus": item.provider_status,
+                "paused": bool(payload.get("paused")),
+                "phishingDetected": bool(payload.get("phishingDetected")),
+                "source": row_source,
+                "onboardingStatus": "connected" if system_domain_id else "not_connected",
+                "systemDomainId": system_domain_id,
+                "createdAt": iso(item.provider_created_at or item.created_at),
+                "updatedAt": iso(item.provider_updated_at or item.updated_at),
+            }
+        )
+    search = keyword.strip().lower()
+    if search:
+        rows = [row for row in rows if search in str(row["hostname"]).lower()]
+    if source:
+        rows = [row for row in rows if row["source"] == source]
+    if provider_status:
+        rows = [row for row in rows if row["providerStatus"] == provider_status]
+    if onboarding_status:
+        rows = [
+            row for row in rows if row["onboardingStatus"] == onboarding_status
+        ]
+    rows = _provider_inventory_sort(rows, sort_by, sort_order)
+    total = len(rows)
+    start = (page - 1) * page_size
+    return {
+        "data": {
+            "rows": rows[start : start + page_size],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+    }
+
+
+@router.get("/cloudflare")
+def list_cloudflare_domains(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str = Query(default="", max_length=200),
+    source: Literal[
+        "system_purchase", "system_import", "account_existing"
+    ] | None = None,
+    provider_status: str | None = Query(default=None, alias="providerStatus"),
+    onboarding_status: Literal["connected", "not_connected"] | None = Query(
+        default=None,
+        alias="onboardingStatus",
+    ),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id", "source", "providerStatus", "onboardingStatus", "createdAt", "updatedAt"
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
+) -> dict:
+    return _cloudflare_inventory(
+        db,
+        current_user,
+        keyword=keyword,
+        source=source,
+        provider_status=provider_status,
+        onboarding_status=onboarding_status,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
+
+
+@router.post("/cloudflare/refresh")
+def refresh_cloudflare_domains(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str = Query(default="", max_length=200),
+    source: Literal[
+        "system_purchase", "system_import", "account_existing"
+    ] | None = None,
+    provider_status: str | None = Query(default=None, alias="providerStatus"),
+    onboarding_status: Literal["connected", "not_connected"] | None = Query(
+        default=None,
+        alias="onboardingStatus",
+    ),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id", "source", "providerStatus", "onboardingStatus", "createdAt", "updatedAt"
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
+) -> dict:
+    _refresh_cloudflare_domains(db)
+    return _cloudflare_inventory(
+        db,
+        current_user,
+        keyword=keyword,
+        source=source,
+        provider_status=provider_status,
+        onboarding_status=onboarding_status,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+    )
 
 
 def _recover_owned_namesilo_orders(
@@ -820,12 +1150,12 @@ def _recover_owned_namesilo_orders(
     return recovered_domains
 
 
-def _namesilo_domain_inventory(
+def _refresh_namesilo_domains(
     db: DbSession,
     current_user,
     *,
     recover_owned_orders: bool,
-) -> dict:
+) -> list[DomainRecord]:
     fixture_mode = _dev_provider_domain_fixtures_enabled()
     provider_domains: list[dict[str, object]] = []
     try:
@@ -847,25 +1177,41 @@ def _namesilo_domain_inventory(
             ) from exc
         logger.warning("读取 NameSilo 域名失败，开发环境仅展示模拟域名：%s", exc)
 
+    normalized_rows: list[dict[str, object]] = [
+        {
+            "hostname": str(provider_domain.get("domain") or "").lower(),
+            "source": "account_existing",
+            "providerOwned": True,
+            "providerStatus": "active",
+            "createdAt": provider_domain.get("created") or None,
+            "expiresAt": provider_domain.get("expires") or None,
+            "systemDomainId": None,
+            "order": None,
+        }
+        for provider_domain in provider_domains
+        if str(provider_domain.get("domain") or "").strip()
+    ]
+    if fixture_mode:
+        existing_hostnames = {str(row["hostname"]).lower() for row in normalized_rows}
+        normalized_rows.extend(
+            row
+            for row in _dev_namesilo_domain_rows()
+            if str(row["hostname"]).lower() not in existing_hostnames
+        )
     provider_hostnames = {
         str(provider_domain.get("domain") or "").strip().lower()
         for provider_domain in provider_domains
         if str(provider_domain.get("domain") or "").strip()
     }
     order_statement = select(DomainOrder).where(DomainOrder.provider == "namesilo")
-    domain_statement = select(DomainRecord)
     if current_user.role != "admin":
         order_statement = order_statement.where(DomainOrder.created_by == current_user.id)
-        domain_statement = domain_statement.where(DomainRecord.created_by == current_user.id)
     orders = db.scalars(
         order_statement.order_by(
             DomainOrder.created_at.desc(),
             DomainOrder.id.desc(),
         )
     ).all()
-    local_domains = db.scalars(domain_statement).all()
-    domains_by_hostname = {item.hostname.lower(): item for item in local_domains}
-
     orders_by_hostname: dict[str, list[DomainOrder]] = {}
     for order in orders:
         orders_by_hostname.setdefault(order.hostname.lower(), []).append(order)
@@ -884,18 +1230,50 @@ def _namesilo_domain_inventory(
                     DomainOrder.id.desc(),
                 )
             ).all()
-            local_domains = db.scalars(domain_statement).all()
-            domains_by_hostname = {
-                item.hostname.lower(): item for item in local_domains
-            }
             orders_by_hostname = {}
             for order in orders:
                 orders_by_hostname.setdefault(order.hostname.lower(), []).append(order)
+    _persist_provider_domains(db, "namesilo", normalized_rows)
+    return recovered_domains
+
+
+def _namesilo_domain_inventory(
+    db: DbSession,
+    current_user,
+    *,
+    keyword: str,
+    source: str | None,
+    provider_status: str | None,
+    order_status: str | None,
+    onboarding_status: str | None,
+    expires_before: date | None,
+    page: int,
+    page_size: int,
+    sort_by: str,
+    sort_order: Literal["asc", "desc"],
+    recovered_domains: list[DomainRecord] | None = None,
+) -> dict:
+    order_statement = select(DomainOrder).where(DomainOrder.provider == "namesilo")
+    if current_user.role != "admin":
+        order_statement = order_statement.where(DomainOrder.created_by == current_user.id)
+    orders = db.scalars(
+        order_statement.order_by(DomainOrder.created_at.desc(), DomainOrder.id.desc())
+    ).all()
+    domains_by_hostname = _local_domains_by_hostname(db, current_user)
+    orders_by_hostname: dict[str, list[DomainOrder]] = {}
+    for order in orders:
+        orders_by_hostname.setdefault(order.hostname.lower(), []).append(order)
 
     rows: list[dict[str, object]] = []
-    for provider_domain in provider_domains:
-        hostname = provider_domain["domain"].lower()
-        hostname_orders = orders_by_hostname.get(hostname, [])
+    cached_hostnames: set[str] = set()
+    for item in db.scalars(
+        select(ProviderDomainCache).where(
+            ProviderDomainCache.provider == "namesilo"
+        )
+    ).all():
+        cached_hostnames.add(item.hostname)
+        payload = dict(item.payload_json or {})
+        hostname_orders = orders_by_hostname.get(item.hostname, [])
         latest_order = hostname_orders[0] if hostname_orders else None
         purchase_order = next(
             (
@@ -905,72 +1283,197 @@ def _namesilo_domain_inventory(
             ),
             None,
         )
-        local_domain = domains_by_hostname.get(hostname)
+        local_domain = domains_by_hostname.get(item.hostname)
+        fixture_order = payload.get("order")
+        order_row = (
+            _order_row(db, latest_order)
+            if latest_order
+            else fixture_order
+            if isinstance(fixture_order, dict)
+            else None
+        )
+        provider_owned = bool(payload.get("providerOwned", True))
+        row_source = (
+            "system_purchase"
+            if purchase_order
+            else str(payload.get("source") or "account_existing")
+        )
+        created_at = item.provider_created_at or item.created_at
+        updated_at = item.provider_updated_at or item.updated_at
+        system_domain_id = (
+            entity_id(local_domain)
+            if local_domain
+            else payload.get("systemDomainId")
+        )
         rows.append(
             {
-                "hostname": hostname,
-                "source": "system_purchase" if purchase_order else "account_existing",
-                "providerOwned": True,
-                "providerStatus": "active",
-                "createdAt": provider_domain.get("created") or None,
-                "expiresAt": provider_domain.get("expires") or None,
-                "systemDomainId": entity_id(local_domain) if local_domain else None,
-                "order": _order_row(db, latest_order) if latest_order else None,
+                "id": entity_id(item),
+                "hostname": item.hostname,
+                "source": row_source,
+                "providerOwned": provider_owned,
+                "providerStatus": item.provider_status,
+                "createdAt": iso(created_at),
+                "updatedAt": iso(updated_at),
+                "expiresAt": payload.get("expiresAt") or None,
+                "systemDomainId": system_domain_id,
+                "onboardingStatus": "connected" if system_domain_id else "not_connected",
+                "orderStatus": order_row.get("status") if isinstance(order_row, dict) else None,
+                "order": order_row,
             }
         )
 
     for order in orders:
         hostname = order.hostname.lower()
-        if hostname in provider_hostnames:
+        if hostname in cached_hostnames:
             continue
         local_domain = domains_by_hostname.get(hostname)
         rows.append(
             {
+                "id": entity_id(order),
                 "hostname": hostname,
                 "source": "system_order",
                 "providerOwned": False,
                 "providerStatus": order.status,
-                "createdAt": None,
+                "createdAt": iso(order.created_at),
+                "updatedAt": iso(order.updated_at),
                 "expiresAt": None,
                 "systemDomainId": entity_id(local_domain) if local_domain else None,
+                "onboardingStatus": "connected" if local_domain else "not_connected",
+                "orderStatus": order.status,
                 "order": _order_row(db, order),
             }
         )
 
-    if fixture_mode:
-        existing_hostnames = {str(row["hostname"]).lower() for row in rows}
-        rows.extend(
+    search = keyword.strip().lower()
+    if search:
+        rows = [row for row in rows if search in str(row["hostname"]).lower()]
+    if source:
+        rows = [row for row in rows if row["source"] == source]
+    if provider_status:
+        rows = [row for row in rows if row["providerStatus"] == provider_status]
+    if order_status:
+        rows = [row for row in rows if row["orderStatus"] == order_status]
+    if onboarding_status:
+        rows = [
+            row for row in rows if row["onboardingStatus"] == onboarding_status
+        ]
+    if expires_before:
+        boundary = expires_before.isoformat()
+        rows = [
             row
-            for row in _dev_namesilo_domain_rows()
-            if str(row["hostname"]).lower() not in existing_hostnames
-        )
-    rows.sort(key=lambda row: str(row["hostname"]))
+            for row in rows
+            if row.get("expiresAt")
+            and str(row["expiresAt"])[:10] <= boundary
+        ]
+    rows = _provider_inventory_sort(rows, sort_by, sort_order)
+    total = len(rows)
+    start = (page - 1) * page_size
     return {
         "data": {
-            "rows": rows,
-            "total": len(rows),
+            "rows": rows[start : start + page_size],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
             "recoveredDomains": [
-                domain_row(db, domain) for domain in recovered_domains
+                domain_row(db, domain) for domain in (recovered_domains or [])
             ],
         }
     }
 
 
 @router.get("/namesilo")
-def list_namesilo_domains(db: DbSession, current_user: CurrentUser) -> dict:
+def list_namesilo_domains(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str = Query(default="", max_length=200),
+    source: Literal[
+        "system_purchase", "system_order", "account_existing"
+    ] | None = None,
+    provider_status: str | None = Query(default=None, alias="providerStatus"),
+    order_status: str | None = Query(default=None, alias="orderStatus"),
+    onboarding_status: Literal["connected", "not_connected"] | None = Query(
+        default=None,
+        alias="onboardingStatus",
+    ),
+    expires_before: date | None = Query(default=None, alias="expiresBefore"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id",
+        "source",
+        "providerStatus",
+        "createdAt",
+        "updatedAt",
+        "expiresAt",
+        "orderStatus",
+        "onboardingStatus",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
+) -> dict:
     return _namesilo_domain_inventory(
         db,
         current_user,
-        recover_owned_orders=False,
+        keyword=keyword,
+        source=source,
+        provider_status=provider_status,
+        order_status=order_status,
+        onboarding_status=onboarding_status,
+        expires_before=expires_before,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
     )
 
 
 @router.post("/namesilo/sync")
-def sync_namesilo_domains(db: DbSession, current_user: CurrentUser) -> dict:
-    return _namesilo_domain_inventory(
+def sync_namesilo_domains(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str = Query(default="", max_length=200),
+    source: Literal[
+        "system_purchase", "system_order", "account_existing"
+    ] | None = None,
+    provider_status: str | None = Query(default=None, alias="providerStatus"),
+    order_status: str | None = Query(default=None, alias="orderStatus"),
+    onboarding_status: Literal["connected", "not_connected"] | None = Query(
+        default=None,
+        alias="onboardingStatus",
+    ),
+    expires_before: date | None = Query(default=None, alias="expiresBefore"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id",
+        "source",
+        "providerStatus",
+        "createdAt",
+        "updatedAt",
+        "expiresAt",
+        "orderStatus",
+        "onboardingStatus",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
+) -> dict:
+    recovered_domains = _refresh_namesilo_domains(
         db,
         current_user,
         recover_owned_orders=True,
+    )
+    return _namesilo_domain_inventory(
+        db,
+        current_user,
+        keyword=keyword,
+        source=source,
+        provider_status=provider_status,
+        order_status=order_status,
+        onboarding_status=onboarding_status,
+        expires_before=expires_before,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        recovered_domains=recovered_domains,
     )
 
 

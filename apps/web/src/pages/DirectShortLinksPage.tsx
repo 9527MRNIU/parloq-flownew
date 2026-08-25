@@ -15,7 +15,6 @@ import {
   ListTableCard,
   ListToolbar,
   StandardListPage,
-  useClientPagination,
 } from "../components/list-page";
 import {
   EntityPrimaryCell,
@@ -160,6 +159,10 @@ export function DirectShortLinksPage() {
   const { user, can } = useAuth();
   const canManage = can("marketing.direct_short_links.manage");
   const [accounts, setAccounts] = useState<BitlyAccount[]>([]);
+  const [accountOptions, setAccountOptions] = useState<BitlyAccount[]>([]);
+  const [accountTotal, setAccountTotal] = useState(0);
+  const [accountPage, setAccountPage] = useState(1);
+  const [accountPageSize, setAccountPageSize] = useState(20);
   const [rows, setRows] = useState<DirectShortLink[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -193,13 +196,20 @@ export function DirectShortLinksPage() {
       return;
     }
     try {
-      const payload = await apiRequest("/api/direct-short-links/accounts");
+      const [payload, optionPayload] = await Promise.all([
+        apiRequest(`/api/direct-short-links/accounts?page=${accountPage}&pageSize=${accountPageSize}`),
+        apiRequest("/api/direct-short-links/accounts/options"),
+      ]);
       const list = unwrapList<unknown>(payload);
       setAccounts(list.rows.map(normalizeAccount));
+      setAccountTotal(list.total);
+      setAccountOptions(unwrapList<unknown>(optionPayload).rows.map(normalizeAccount));
     } catch {
       setAccounts([]);
+      setAccountOptions([]);
+      setAccountTotal(0);
     }
-  }, [user?.isAdmin]);
+  }, [accountPage, accountPageSize, user?.isAdmin]);
 
   const loadLinks = useCallback(async () => {
     setLoading(true);
@@ -233,12 +243,9 @@ export function DirectShortLinksPage() {
   }, [page, pageSize, total]);
 
   const selectedAccount = useMemo(
-    () => accounts.find((row) => row.id === accountId),
-    [accountId, accounts],
+    () => accountOptions.find((row) => row.id === accountId),
+    [accountId, accountOptions],
   );
-  const accountPagination = useClientPagination(accounts, {
-    resetKey: String(accountDrawer),
-  });
 
   function openCreate() {
     setEditing(null);
@@ -446,7 +453,7 @@ export function DirectShortLinksPage() {
               }}
               options={[
                 { value: "__all__", label: "全部 Bitly 账号" },
-                ...accounts.filter((account) => account.id).map((account) => ({
+                ...accountOptions.filter((account) => account.id).map((account) => ({
                   value: account.id,
                   label: account.name,
                 })),
@@ -479,8 +486,8 @@ export function DirectShortLinksPage() {
                 onClick={openCreate}
                 disabled={Boolean(
                   user?.isAdmin &&
-                  accounts.length > 0 &&
-                  !accounts.some((row) => row.enabled),
+                  accountOptions.length > 0 &&
+                  !accountOptions.some((row) => row.enabled),
                 )}
               >
                 <PlusIcon size={17} />
@@ -573,7 +580,7 @@ export function DirectShortLinksPage() {
                     </TableCell>
                     <TableCell>
                       {row.providerAccountName ||
-                        accounts.find(
+                        accountOptions.find(
                           (item) =>
                             String(item.id) === String(row.providerAccountId),
                         )?.name ||
@@ -680,7 +687,7 @@ export function DirectShortLinksPage() {
                 }
                 options={[
                   { value: "__auto__", label: "自动选择可用账号" },
-                  ...accounts
+                  ...accountOptions
                     .filter((row) => row.enabled && row.id)
                     .map((account) => ({
                       value: account.id,
@@ -795,19 +802,19 @@ export function DirectShortLinksPage() {
           </div>
           <div className="binding-list-header">
             <strong>账号池</strong>
-            <span>{accounts.length}</span>
+            <span>{accountTotal}</span>
           </div>
           <ListPagination
-            page={accountPagination.page}
-            pageSize={accountPagination.pageSize}
-            total={accountPagination.total}
-            onPageChange={accountPagination.setPage}
-            onPageSizeChange={accountPagination.setPageSize}
+            page={accountPage}
+            pageSize={accountPageSize}
+            total={accountTotal}
+            onPageChange={setAccountPage}
+            onPageSizeChange={(value) => { setAccountPageSize(value); setAccountPage(1); }}
             ariaLabel="Bitly 账号池分页"
           />
           {accounts.length ? (
             <div className="pixel-list">
-              {accountPagination.rows.map((row) => (
+              {accounts.map((row) => (
                 <div key={row.readKey}>
                   <div>
                     <strong>{row.name}</strong>

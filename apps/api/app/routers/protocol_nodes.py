@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import re
+from typing import Literal
 
-from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import delete, func, select
+from fastapi import APIRouter, HTTPException, Query, status
+from sqlalchemy import String, cast, delete, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.business_schemas import (
@@ -27,7 +28,9 @@ from app.models import (
 )
 from app.snowflake import new_public_id
 from app.services.protocol_nodes import (
+    ACTIVE_PAIRING_STATUSES,
     DEFAULT_SYNC_POLICY,
+    ONLINE_ACCOUNT_STATES,
     default_protocol_definition,
     ingress_unavailable_reason,
     normalized_rate_limit_policy,
@@ -35,6 +38,7 @@ from app.services.protocol_nodes import (
     protocol_capacity,
     select_ingress_protocol,
 )
+from app.security import utcnow
 from app.services.account_group_wakeups import (
     dispatch_group_wakeups_best_effort,
     record_group_wakeup,
@@ -229,7 +233,30 @@ def create_protocol_node(
 
 
 @router.get("")
-def list_protocol_nodes(db: DbSession, current_user: CurrentUser) -> dict:
+def list_protocol_nodes(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str = Query(default="", max_length=200),
+    protocol_definition_id: str | None = Query(
+        default=None,
+        alias="protocolDefinitionId",
+    ),
+    ingress_enabled: bool | None = Query(default=None, alias="ingressEnabled"),
+    marketing_enabled: bool | None = Query(default=None, alias="marketingEnabled"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id",
+        "protocolName",
+        "ingressEnabled",
+        "marketingEnabled",
+        "accountTotal",
+        "validAccounts",
+        "onlineAccounts",
+        "createdAt",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
+) -> dict:
     owner_has_node = db.scalar(
         select(ProtocolNode.id).where(
             ProtocolNode.created_by == current_user.id,
@@ -238,8 +265,94 @@ def list_protocol_nodes(db: DbSession, current_user: CurrentUser) -> dict:
     if current_user.role != "admin" and owner_has_node is None:
         select_ingress_protocol(db, current_user.id)
         db.commit()
-    statement = _scope(select(ProtocolNode), current_user)
-    items = db.scalars(statement.order_by(ProtocolNode.id)).all()
+    account_metrics = (
+        select(
+            PersonalAccount.protocol_id.label("protocol_id"),
+            func.count(PersonalAccount.id).label("account_total"),
+            func.count(PersonalAccount.id)
+            .filter(
+                PersonalAccount.validation_status == "ready",
+                PersonalAccount.status.not_in(_INVALID_STATES),
+            )
+            .label("valid_accounts"),
+            func.count(PersonalAccount.id)
+            .filter(
+                PersonalAccount.validation_status == "ready",
+                PersonalAccount.status.in_(_ONLINE_STATES),
+            )
+            .label("online_accounts"),
+        )
+        .where(
+            PersonalAccount.admission_status == "active",
+            PersonalAccount.deleted_at.is_(None),
+        )
+        .group_by(PersonalAccount.protocol_id)
+        .subquery()
+    )
+    statement = _scope(
+        select(ProtocolNode).join(
+            ProtocolDefinition,
+            ProtocolDefinition.id == ProtocolNode.protocol_definition_id,
+        ).outerjoin(
+            account_metrics,
+            account_metrics.c.protocol_id == ProtocolNode.id,
+        ),
+        current_user,
+    )
+    search = keyword.strip()
+    if search:
+        pattern = f"%{search}%"
+        statement = statement.where(
+            or_(
+                cast(ProtocolNode.id, String).ilike(pattern),
+                ProtocolNode.public_id.ilike(pattern),
+                ProtocolNode.name.ilike(pattern),
+                ProtocolNode.remark.ilike(pattern),
+                ProtocolNode.protocol_type.ilike(pattern),
+                ProtocolDefinition.name.ilike(pattern),
+                ProtocolDefinition.version.ilike(pattern),
+            )
+        )
+    if protocol_definition_id and protocol_definition_id != "all":
+        statement = statement.where(
+            identifier_filter(ProtocolDefinition, protocol_definition_id)
+        )
+    if ingress_enabled is not None:
+        statement = statement.where(
+            ProtocolNode.ingress_enabled.is_(ingress_enabled)
+        )
+    if marketing_enabled is not None:
+        statement = statement.where(
+            ProtocolNode.marketing_enabled.is_(marketing_enabled)
+        )
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    sort_columns = {
+        "id": ProtocolNode.id,
+        "protocolName": ProtocolDefinition.name,
+        "ingressEnabled": ProtocolNode.ingress_enabled,
+        "marketingEnabled": ProtocolNode.marketing_enabled,
+        "accountTotal": func.coalesce(account_metrics.c.account_total, 0),
+        "validAccounts": func.coalesce(account_metrics.c.valid_accounts, 0),
+        "onlineAccounts": func.coalesce(account_metrics.c.online_accounts, 0),
+        "createdAt": ProtocolNode.created_at,
+    }
+    sort_column = sort_columns[sort_by]
+    ordering = [
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    ]
+    if sort_by != "id":
+        ordering.append(
+            ProtocolNode.id.asc()
+            if sort_order == "asc"
+            else ProtocolNode.id.desc()
+        )
+    items = db.scalars(
+        statement.order_by(*ordering)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
     definition_ids = {item.protocol_definition_id for item in items}
     definitions = {
         item.id: item
@@ -259,9 +372,26 @@ def list_protocol_nodes(db: DbSession, current_user: CurrentUser) -> dict:
                 )
                 for item in items
             ],
-            "total": len(items),
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
         }
     }
+
+
+@router.get("/options")
+def list_protocol_node_options(
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    items = db.scalars(
+        _scope(select(ProtocolNode), current_user).order_by(
+            ProtocolNode.name,
+            ProtocolNode.id,
+        )
+    ).all()
+    rows = [_row(db, item) for item in items]
+    return {"data": {"rows": rows, "total": len(rows)}}
 
 
 @router.patch("/{protocol_id}")
@@ -770,16 +900,19 @@ def _pool_row(db: DbSession, item: ProtocolPool) -> dict:
     }
 
 
-def _replace_pool_members(db: DbSession, item: ProtocolPool, members) -> None:
+def _replace_pool_members(
+    db: DbSession,
+    item: ProtocolPool,
+    members,
+    current_user,
+) -> None:
     node_ids = [int(member.protocol_node_id) for member in members]
-    nodes = list(
-        db.scalars(
-            select(ProtocolNode).where(
-                ProtocolNode.id.in_(node_ids) if node_ids else False,
-                ProtocolNode.created_by == item.created_by,
-            )
-        ).all()
+    statement = select(ProtocolNode).where(
+        ProtocolNode.id.in_(node_ids) if node_ids else False,
     )
+    if current_user.role != "admin":
+        statement = statement.where(ProtocolNode.created_by == item.created_by)
+    nodes = list(db.scalars(statement).all())
     if len(nodes) != len(node_ids):
         raise HTTPException(status_code=404, detail="部分协议池成员节点不存在")
     existing = list(
@@ -804,18 +937,158 @@ def _replace_pool_members(db: DbSession, item: ProtocolPool, members) -> None:
 
 
 @pool_router.get("")
-def list_protocol_pools(db: DbSession, current_user: CurrentUser) -> dict:
+def list_protocol_pools(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str = Query(default="", max_length=200),
+    protocol_node_id: str | None = Query(default=None, alias="protocolNodeId"),
+    pool_status: Literal["available", "unavailable"] | None = Query(
+        default=None,
+        alias="status",
+    ),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal["id", "createdAt", "updatedAt"] = Query(
+        default="id",
+        alias="sortBy",
+    ),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
+) -> dict:
+    statement = _pool_scope(select(ProtocolPool), current_user)
+    search = keyword.strip()
+    if search:
+        pattern = f"%{search}%"
+        matching_node_pool_ids = select(ProtocolPoolMember.pool_id).join(
+            ProtocolNode,
+            ProtocolNode.id == ProtocolPoolMember.protocol_node_id,
+        ).where(ProtocolNode.name.ilike(pattern))
+        statement = statement.where(
+            or_(
+                cast(ProtocolPool.id, String).ilike(pattern),
+                ProtocolPool.public_id.ilike(pattern),
+                ProtocolPool.name.ilike(pattern),
+                ProtocolPool.remark.ilike(pattern),
+                ProtocolPool.id.in_(matching_node_pool_ids),
+            )
+        )
+    if protocol_node_id and protocol_node_id != "all":
+        matching_node_pool_ids = (
+            select(ProtocolPoolMember.pool_id)
+            .join(
+                ProtocolNode,
+                ProtocolNode.id == ProtocolPoolMember.protocol_node_id,
+            )
+            .where(identifier_filter(ProtocolNode, protocol_node_id))
+        )
+        statement = statement.where(ProtocolPool.id.in_(matching_node_pool_ids))
+
+    total_accounts = (
+        select(func.count(PersonalAccount.id))
+        .where(
+            PersonalAccount.protocol_id == ProtocolNode.id,
+            PersonalAccount.admission_status.in_(("reserved", "active")),
+            PersonalAccount.deleted_at.is_(None),
+        )
+        .correlate(ProtocolNode)
+        .scalar_subquery()
+    )
+    online_accounts = (
+        select(func.count(PersonalAccount.id))
+        .where(
+            PersonalAccount.protocol_id == ProtocolNode.id,
+            PersonalAccount.status.in_(ONLINE_ACCOUNT_STATES),
+            PersonalAccount.admission_status == "active",
+            PersonalAccount.deleted_at.is_(None),
+        )
+        .correlate(ProtocolNode)
+        .scalar_subquery()
+    )
+    active_pairings = (
+        select(func.count(AccountPairingAttempt.id))
+        .where(
+            AccountPairingAttempt.protocol_node_id == ProtocolNode.id,
+            AccountPairingAttempt.status.in_(ACTIVE_PAIRING_STATUSES),
+            AccountPairingAttempt.expires_at > utcnow(),
+        )
+        .correlate(ProtocolNode)
+        .scalar_subquery()
+    )
+    available_pool = exists(
+        select(ProtocolPoolMember.id)
+        .join(
+            ProtocolNode,
+            ProtocolNode.id == ProtocolPoolMember.protocol_node_id,
+        )
+        .where(
+            ProtocolPoolMember.pool_id == ProtocolPool.id,
+            ProtocolPoolMember.enabled.is_(True),
+            ProtocolNode.online_enabled.is_(True),
+            ProtocolNode.ingress_enabled.is_(True),
+            or_(
+                ProtocolNode.max_account_count.is_(None),
+                total_accounts < ProtocolNode.max_account_count,
+            ),
+            or_(
+                ProtocolNode.max_online_accounts.is_(None),
+                online_accounts < ProtocolNode.max_online_accounts,
+            ),
+            or_(
+                ProtocolNode.max_concurrent_pairings.is_(None),
+                active_pairings < ProtocolNode.max_concurrent_pairings,
+            ),
+        )
+    )
+    if pool_status == "available":
+        statement = statement.where(available_pool)
+    elif pool_status == "unavailable":
+        statement = statement.where(~available_pool)
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    sort_columns = {
+        "id": ProtocolPool.id,
+        "createdAt": ProtocolPool.created_at,
+        "updatedAt": ProtocolPool.updated_at,
+    }
+    sort_column = sort_columns[sort_by]
+    ordering = [
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    ]
+    if sort_by != "id":
+        ordering.append(
+            ProtocolPool.id.asc()
+            if sort_order == "asc"
+            else ProtocolPool.id.desc()
+        )
     items = list(
         db.scalars(
-            _pool_scope(
-                select(ProtocolPool),
-                current_user,
-            ).order_by(ProtocolPool.id)
+            statement.order_by(*ordering)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
         ).all()
     )
     return {
-        "data": {"rows": [_pool_row(db, item) for item in items], "total": len(items)}
+        "data": {
+            "rows": [_pool_row(db, item) for item in items],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
     }
+
+
+@pool_router.get("/options")
+def list_protocol_pool_options(db: DbSession, current_user: CurrentUser) -> dict:
+    items = list(
+        db.scalars(
+            _pool_scope(select(ProtocolPool), current_user).order_by(
+                ProtocolPool.name,
+                ProtocolPool.id,
+            )
+        ).all()
+    )
+    rows = [_pool_row(db, item) for item in items]
+    return {"data": {"rows": rows, "total": len(rows)}}
 
 
 @pool_router.post("", status_code=status.HTTP_201_CREATED)
@@ -833,7 +1106,7 @@ def create_protocol_pool(
     db.add(item)
     try:
         db.flush()
-        _replace_pool_members(db, item, payload.members)
+        _replace_pool_members(db, item, payload.members, current_user)
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -855,7 +1128,7 @@ def update_protocol_pool(
     if "remark" in payload.model_fields_set:
         item.remark = payload.remark
     if payload.members is not None:
-        _replace_pool_members(db, item, payload.members)
+        _replace_pool_members(db, item, payload.members, current_user)
     try:
         db.commit()
     except IntegrityError:

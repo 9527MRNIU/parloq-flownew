@@ -121,7 +121,7 @@ export function PhonePairingModal({
       setProxyId("");
       return;
     }
-    void apiRequest("/api/ip-proxies?enabled=true&pageSize=100")
+    void apiRequest("/api/ip-proxies/options")
       .then((payload) => {
         const options = unwrapList<Record<string, unknown>>(payload)
           .rows.filter((row) => row.enabled !== false)

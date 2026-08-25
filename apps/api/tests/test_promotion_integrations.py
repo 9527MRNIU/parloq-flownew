@@ -604,7 +604,28 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     assert events.status_code == 200, events.text
     event_data = events.json()["data"]
     assert event_data["total"] == 2
+    assert event_data["pageSize"] == 20
     assert event_data["summary"] == [{"eventType": "completed", "count": 2}]
+    assert event_data["filterOptions"]["eventTypes"] == ["completed"]
+    assert event_data["filterOptions"]["sources"] == ["direct"]
+    assert event_data["filterOptions"]["fingerprintQualities"] == ["high"]
+    assert event_data["filterOptions"]["channels"] == [
+        {"id": channel["id"], "name": "feedback-channel-v1"}
+    ]
+    filtered_events = admin_client.get(
+        f"/api/promotion/integrations/{integration['id']}/events",
+        params={
+            "eventType": "completed",
+            "channelId": channel["id"],
+            "source": "direct",
+            "fingerprintQuality": "high",
+            "page": 1,
+            "pageSize": 1,
+        },
+    )
+    assert filtered_events.status_code == 200, filtered_events.text
+    assert filtered_events.json()["data"]["total"] == 2
+    assert len(filtered_events.json()["data"]["rows"]) == 1
     event_row = next(row for row in event_data["rows"] if row["id"] == event_id)
     assert event_row["channelId"] == channel["id"]
     assert "metadata" not in event_row
@@ -644,6 +665,8 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
 
     monitoring = admin_client.get(
         f"/api/promotion/monitoring/records?integrationId={integration['id']}"
+        "&sourceIp=198.51.100&deviceType=desktop"
+        "&sortBy=integrationName&sortOrder=asc"
     )
     assert monitoring.status_code == 200, monitoring.text
     monitoring_data = monitoring.json()["data"]
@@ -659,6 +682,12 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
     assert monitored_record["networkSource"] == "cloudflare"
     assert monitored_record["device"]["browser"] == "Chrome"
     assert monitored_record["device"]["browserVersion"] == "151.0.0.0"
+    assert monitored_record["device"]["type"] == "desktop"
+    options = admin_client.get("/api/promotion/monitoring/options")
+    assert options.status_code == 200, options.text
+    assert integration["id"] in {
+        row["id"] for row in options.json()["data"]["integrations"]
+    }
     monitored_detail = admin_client.get(
         f"/api/promotion/monitoring/records/integration/{event_id}"
     )

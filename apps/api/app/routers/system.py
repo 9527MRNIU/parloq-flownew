@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from typing import Literal
 
-from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import func, select, update
+
+from fastapi import APIRouter, HTTPException, Query, status
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.deps import AdminUser, CurrentUser, DbSession
@@ -90,13 +92,20 @@ def _role(db: DbSession, role_id: str) -> UserGroup:
     return item
 
 
-def _role_row(db: DbSession, item: UserGroup) -> dict:
-    user_count = int(
-        db.scalar(
-            select(func.count()).select_from(UserAccount).where(UserAccount.group_id == item.id)
+def _role_row(
+    db: DbSession,
+    item: UserGroup,
+    user_count: int | None = None,
+) -> dict:
+    if user_count is None:
+        user_count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(UserAccount)
+                .where(UserAccount.group_id == item.id)
+            )
+            or 0
         )
-        or 0
-    )
     menu_ids = [
         entity_id(permission.menu)
         for permission in sorted(
@@ -170,11 +179,103 @@ def _replace_action_permissions(
 
 
 @router.get("/roles")
-def list_roles(db: DbSession, _admin: AdminUser) -> dict:
-    roles = db.scalars(
-        select(UserGroup).order_by(UserGroup.is_builtin.desc(), UserGroup.id)
+def list_roles(
+    db: DbSession,
+    _admin: AdminUser,
+    keyword: str | None = None,
+    is_builtin: bool | None = Query(default=None, alias="isBuiltin"),
+    enabled: bool | None = None,
+    sort_by: Literal[
+        "id",
+        "isBuiltin",
+        "userCount",
+        "createdAt",
+        "updatedAt",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="asc", alias="sortOrder"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+) -> dict:
+    conditions = []
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        conditions.append(
+            or_(
+                UserGroup.name.ilike(pattern),
+                UserGroup.description.ilike(pattern),
+            )
+        )
+    if is_builtin is not None:
+        conditions.append(UserGroup.is_builtin.is_(is_builtin))
+    if enabled is not None:
+        conditions.append(UserGroup.enabled.is_(enabled))
+
+    count_statement = select(UserGroup.id).where(*conditions)
+    total = int(
+        db.scalar(select(func.count()).select_from(count_statement.subquery())) or 0
+    )
+    user_count = func.count(UserAccount.id).label("user_count")
+    statement = (
+        select(UserGroup, user_count)
+        .outerjoin(UserAccount, UserAccount.group_id == UserGroup.id)
+        .where(*conditions)
+        .group_by(UserGroup.id)
+    )
+    sort_columns = {
+        "id": UserGroup.id,
+        "isBuiltin": UserGroup.is_builtin,
+        "userCount": user_count,
+        "createdAt": UserGroup.created_at,
+        "updatedAt": UserGroup.updated_at,
+    }
+    sort_column = sort_columns[sort_by]
+    order_by = (
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    )
+    ordering = [order_by]
+    if sort_by != "id":
+        ordering.append(
+            UserGroup.id.asc() if sort_order == "asc" else UserGroup.id.desc()
+        )
+    roles = db.execute(
+        statement.order_by(*ordering)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     ).all()
-    return {"data": {"rows": [_role_row(db, role) for role in roles], "total": len(roles)}}
+    return {
+        "data": {
+            "rows": [
+                _role_row(db, role, int(role_user_count))
+                for role, role_user_count in roles
+            ],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+    }
+
+
+@router.get("/roles/options")
+def list_role_options(db: DbSession, _admin: AdminUser) -> dict:
+    roles = db.scalars(
+        select(UserGroup)
+        .order_by(UserGroup.is_builtin.desc(), UserGroup.id)
+    ).all()
+    return {
+        "data": {
+            "rows": [
+                {
+                    "id": entity_id(role),
+                    "name": role.name,
+                    "systemKey": role.system_key,
+                }
+                for role in roles
+            ],
+            "total": len(roles),
+        }
+    }
 
 
 @router.post("/roles", status_code=status.HTTP_201_CREATED)

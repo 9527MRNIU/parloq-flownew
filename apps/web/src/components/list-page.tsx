@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
+  ArrowDownIcon,
+  ArrowUpIcon,
+  ChevronsUpDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   ChevronsLeftIcon,
@@ -7,7 +10,58 @@ import {
   SearchIcon,
 } from "lucide-react";
 import { cn } from "../lib/utils";
-import { Button, Input, SelectField } from "./ui";
+import { Button, Input, SelectField, TableHead } from "./ui";
+
+export type ListSortOrder = "asc" | "desc";
+
+export function ListSortableHead<TSortKey extends string>({
+  children,
+  sortKey,
+  activeSortKey,
+  sortOrder,
+  defaultOrder = "asc",
+  onSort,
+  adaptive = false,
+}: {
+  children: ReactNode;
+  sortKey: TSortKey;
+  activeSortKey: TSortKey;
+  sortOrder: ListSortOrder;
+  defaultOrder?: ListSortOrder;
+  onSort: (sortKey: TSortKey, sortOrder: ListSortOrder) => void;
+  adaptive?: boolean;
+}) {
+  const active = activeSortKey === sortKey;
+  const nextOrder = active
+    ? sortOrder === "asc"
+      ? "desc"
+      : "asc"
+    : defaultOrder;
+  const SortIcon = active
+    ? sortOrder === "asc"
+      ? ArrowUpIcon
+      : ArrowDownIcon
+    : ChevronsUpDownIcon;
+
+  return (
+    <TableHead
+      adaptive={adaptive}
+      aria-sort={active ? (sortOrder === "asc" ? "ascending" : "descending") : "none"}
+    >
+      <button
+        type="button"
+        className="-mx-2 inline-flex h-10 items-center gap-1.5 rounded-sm px-2 text-left hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        onClick={() => onSort(sortKey, nextOrder)}
+      >
+        {children}
+        <SortIcon
+          aria-hidden="true"
+          className={cn("size-3.5", active ? "text-primary" : "text-muted-foreground/70")}
+        />
+      </button>
+    </TableHead>
+  );
+}
 
 export function StandardListPage({
   children,

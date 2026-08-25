@@ -11,6 +11,8 @@ import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import {
   ListPagination,
+  ListSortableHead,
+  type ListSortOrder,
   ListTableCard,
   ListToolbar,
   StandardListPage,
@@ -41,6 +43,20 @@ import {
 import { formatPhoneDisplay } from "../lib/utils";
 
 type DetailTab = "overview" | "friends" | "groups" | "lifecycle";
+type DetailSortBy =
+  | "phone"
+  | "source"
+  | "lastInteractionAt"
+  | "syncedAt"
+  | "groupJid"
+  | "size"
+  | "communityType"
+  | "ownRole"
+  | "occurredAt"
+  | "fromState"
+  | "toState"
+  | "reason"
+  | "providerCode";
 
 type AccountDetail = {
   id: string;
@@ -236,6 +252,45 @@ const statusLabel = (value: unknown) => {
   return "等待同步";
 };
 
+const accountStateLabels: Record<string, string> = {
+  unpaired: "未配对",
+  pairing: "配对中",
+  linked_offline: "已绑定离线",
+  warming: "预热中",
+  online_idle: "在线空闲",
+  sending: "发送中",
+  draining: "排空中",
+  reauth_required: "需要重新认证",
+  restricted: "受限",
+  disabled: "已停用",
+  validating: "验证中",
+  deleted: "已删除",
+  failed: "失败",
+  logged_out: "已登出",
+  revoked: "已撤销",
+};
+const lifecycleReasonLabels: Record<string, string> = {
+  account_created: "创建账号",
+  session_imported: "导入会话",
+  landing_page_pairing: "落地页配对",
+  session_verified: "会话验证通过",
+  connected: "连接成功",
+  manual_disconnect: "手动断开",
+  manual_delete: "手动删除",
+  account_deleted: "账号已删除",
+  pairing_failed: "配对失败",
+  pairing_connection_lost: "配对连接中断",
+  pairing_expired: "配对码过期",
+  pairing_cancelled: "用户取消配对",
+  proxy_binding_missing: "缺少代理绑定",
+  stale_proxy_configuration: "代理配置已过期",
+  proxy_authentication_failed: "代理认证失败",
+};
+const lifecycleStateLabel = (value: string, empty = "初始") =>
+  value ? accountStateLabels[value] || value : empty;
+const lifecycleReasonLabel = (value: string) =>
+  value ? lifecycleReasonLabels[value] || value : "未记录";
+
 function resourceState(account: AccountDetail, key: "contacts" | "groups") {
   const value = account.resourceSync[key];
   return value && typeof value === "object"
@@ -274,6 +329,15 @@ function AccountResourceDetailContent({
   const [keyword, setKeyword] = useState("");
   const [appliedKeyword, setAppliedKeyword] = useState("");
   const [source, setSource] = useState("all");
+  const [canSend, setCanSend] = useState("");
+  const [communityType, setCommunityType] = useState("");
+  const [fromState, setFromState] = useState("");
+  const [toState, setToState] = useState("");
+  const [reason, setReason] = useState("");
+  const [sortBy, setSortBy] = useState<DetailSortBy>(() =>
+    tab === "lifecycle" ? "occurredAt" : "lastInteractionAt",
+  );
+  const [sortOrder, setSortOrder] = useState<ListSortOrder>("desc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [total, setTotal] = useState(0);
@@ -307,6 +371,8 @@ function AccountResourceDetailContent({
       const query = new URLSearchParams({
         page: String(page),
         pageSize: String(pageSize),
+        sortBy,
+        sortOrder,
       });
       let path = `/api/personal-accounts/${accountId}/lifecycle`;
       if (tab === "friends") {
@@ -316,6 +382,12 @@ function AccountResourceDetailContent({
       } else if (tab === "groups") {
         path = `/api/personal-accounts/${accountId}/resources/groups`;
         if (appliedKeyword) query.set("keyword", appliedKeyword);
+        if (canSend) query.set("canSend", canSend);
+        if (communityType) query.set("communityType", communityType);
+      } else {
+        if (fromState) query.set("fromState", fromState);
+        if (toState) query.set("toState", toState);
+        if (reason) query.set("reason", reason);
       }
       const payload = await apiRequest(`${path}?${query.toString()}`);
       const list = unwrapList<unknown>(payload);
@@ -334,7 +406,7 @@ function AccountResourceDetailContent({
     } finally {
       setLoadingRows(false);
     }
-  }, [accountId, appliedKeyword, page, pageSize, source, tab]);
+  }, [accountId, appliedKeyword, canSend, communityType, fromState, page, pageSize, reason, sortBy, sortOrder, source, tab, toState]);
 
   useEffect(() => void loadAccount(), [loadAccount]);
   useEffect(() => void loadRows(), [loadRows]);
@@ -344,6 +416,13 @@ function AccountResourceDetailContent({
     setPage(1);
     setKeyword("");
     setAppliedKeyword("");
+    setSortBy(value === "lifecycle" ? "occurredAt" : "lastInteractionAt");
+    setSortOrder("desc");
+  };
+  const changeSort = (nextSortBy: DetailSortBy, nextSortOrder: ListSortOrder) => {
+    setSortBy(nextSortBy);
+    setSortOrder(nextSortOrder);
+    setPage(1);
   };
 
   const sync = async () => {
@@ -548,7 +627,16 @@ function AccountResourceDetailContent({
         <>
           <ListToolbar
             search={tab === "lifecycle" ? undefined : { value: keyword, onChange: setKeyword, placeholder: tab === "friends" ? "搜索好友名称、手机号、JID" : "搜索群名称或群 JID", onSubmit: () => { setAppliedKeyword(keyword.trim()); setPage(1); } }}
-            filters={tab === "friends" ? <SelectField ariaLabel="好友来源" value={source} onValueChange={(value) => { setSource(value); setPage(1); }} options={[{ value: "all", label: "全部好友" }, { value: "saved", label: "通讯录联系人" }, { value: "contacted", label: "聊天记录" }]} className="w-[150px]" /> : null}
+            filters={tab === "friends" ? (
+              <SelectField ariaLabel="好友来源" value={source} onValueChange={(value) => { setSource(value); setPage(1); }} options={[{ value: "all", label: "全部好友" }, { value: "saved", label: "通讯录联系人" }, { value: "contacted", label: "聊天记录" }]} className="w-[150px]" />
+            ) : tab === "groups" ? (<>
+              <SelectField ariaLabel="可发送筛选" value={canSend} onValueChange={(value) => { setCanSend(value); setPage(1); }} placeholder="全部发送权限" clearable options={[{ value: "true", label: "可发送" }, { value: "false", label: "不可发送" }]} className="w-[150px]" />
+              <SelectField ariaLabel="群组类型筛选" value={communityType} onValueChange={(value) => { setCommunityType(value); setPage(1); }} placeholder="全部群组类型" clearable options={[{ value: "group", label: "普通群组" }, { value: "community", label: "社区" }, { value: "community_announcement", label: "社区公告" }]} className="w-[155px]" />
+            </>) : tab === "lifecycle" ? (<>
+              <SelectField ariaLabel="原状态筛选" value={fromState} onValueChange={(value) => { setFromState(value); setPage(1); }} placeholder="全部原状态" clearable options={[{ value: "__initial__", label: "初始" }, ...Object.entries(accountStateLabels).map(([value, label]) => ({ value, label }))]} className="w-[155px]" />
+              <SelectField ariaLabel="目标状态筛选" value={toState} onValueChange={(value) => { setToState(value); setPage(1); }} placeholder="全部目标状态" clearable options={Object.entries(accountStateLabels).map(([value, label]) => ({ value, label }))} className="w-[155px]" />
+              <SelectField ariaLabel="原因筛选" value={reason} onValueChange={(value) => { setReason(value); setPage(1); }} placeholder="全部原因" clearable options={Object.entries(lifecycleReasonLabels).map(([value, label]) => ({ value, label }))} className="w-[165px]" />
+            </>) : null}
             meta={`共 ${total.toLocaleString()} 条`}
             actions={<Button variant="outline" disabled={loadingRows} onClick={() => void loadRows()}><RefreshCwIcon size={16} className={loadingRows ? "spin" : ""} />刷新</Button>}
           />
@@ -556,7 +644,14 @@ function AccountResourceDetailContent({
           <ListTableCard>
             {loadingRows ? <div className="loading-state"><Spinner />正在加载资源清单…</div> : tab === "friends" && contactRows.length ? (
               <Table layout="list">
-                <TableHeader><TableRow><TableHead adaptive>好友</TableHead><TableHead>来源</TableHead><TableHead>身份标识</TableHead><TableHead>最近联系</TableHead><TableHead>同步时间</TableHead><TableHead>操作</TableHead></TableRow></TableHeader>
+                <TableHeader><TableRow>
+                  <ListSortableHead sortKey="phone" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort} adaptive>好友</ListSortableHead>
+                  <ListSortableHead sortKey="source" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>来源</ListSortableHead>
+                  <TableHead>身份标识</TableHead>
+                  <ListSortableHead sortKey="lastInteractionAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>最近联系</ListSortableHead>
+                  <ListSortableHead sortKey="syncedAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>同步时间</ListSortableHead>
+                  <TableHead>操作</TableHead>
+                </TableRow></TableHeader>
                 <TableBody>{contactRows.map((row) => {
                   const target = row.phone || row.jid;
                   return <TableRow key={row.id}><TableCell primary><div className="cell-main"><strong>{row.displayName || row.phone || row.contactId}</strong><span>{row.phone || "未解析手机号"}</span></div></TableCell><TableCell><div className="flex flex-wrap gap-1">{row.isSavedContact ? <Badge tone="neutral">通讯录</Badge> : null}{row.hasChatHistory ? <Badge tone="success">聊天记录</Badge> : null}</div></TableCell><TableCell><div className="cell-main max-w-[260px]"><span className="truncate" title={row.jid}>{row.jid || "无 JID"}</span><span className="truncate" title={row.lid}>{row.lid || "无 LID"}</span></div></TableCell><TableCell>{formatDateTime(row.lastInteractionAt)}</TableCell><TableCell>{formatDateTime(row.syncedAt)}</TableCell><TableCell><Button variant="outline" size="sm" disabled={!account.connected || !target} title={!account.connected ? "账号未上线" : !target ? "好友缺少可发送的号码或 JID" : undefined} onClick={() => openMessageTest(target)}><MessageSquareTextIcon size={14} />消息测试</Button></TableCell></TableRow>;
@@ -564,11 +659,25 @@ function AccountResourceDetailContent({
               </Table>
             ) : tab === "groups" && groupRows.length ? (
               <Table layout="list">
-                <TableHeader><TableRow><TableHead adaptive>群组</TableHead><TableHead>人数</TableHead><TableHead>类型</TableHead><TableHead>我的权限</TableHead><TableHead>最近联系</TableHead><TableHead>同步时间</TableHead><TableHead>操作</TableHead></TableRow></TableHeader>
+                <TableHeader><TableRow>
+                  <ListSortableHead sortKey="groupJid" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort} adaptive>群组</ListSortableHead>
+                  <ListSortableHead sortKey="size" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>人数</ListSortableHead>
+                  <ListSortableHead sortKey="communityType" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>类型</ListSortableHead>
+                  <ListSortableHead sortKey="ownRole" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>我的权限</ListSortableHead>
+                  <ListSortableHead sortKey="lastInteractionAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>最近联系</ListSortableHead>
+                  <ListSortableHead sortKey="syncedAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>同步时间</ListSortableHead>
+                  <TableHead>操作</TableHead>
+                </TableRow></TableHeader>
                 <TableBody>{groupRows.map((row) => <TableRow key={row.id}><TableCell primary><div className="cell-main"><strong>{row.subject || "未命名群组"}</strong><span>{row.groupJid}</span></div></TableCell><TableCell>{row.size}</TableCell><TableCell><Badge tone="neutral">{row.communityType === "community" ? "社区" : row.communityType === "community_announcement" ? "社区公告" : "普通群组"}</Badge></TableCell><TableCell><div className="cell-main mx-auto"><strong>{row.ownRole === "superadmin" ? "群主" : row.ownRole === "admin" ? "管理员" : "成员"}</strong><span>{row.canSend ? "可发送" : "不可发送"}{row.announce ? " · 仅管理员发言" : ""}</span></div></TableCell><TableCell>{formatDateTime(row.lastInteractionAt)}</TableCell><TableCell>{formatDateTime(row.syncedAt)}</TableCell><TableCell><Button variant="outline" size="sm" disabled={!account.connected || !row.canSend || !row.groupJid} title={!account.connected ? "账号未上线" : !row.canSend ? "当前账号无群消息发送权限" : !row.groupJid ? "群组缺少 JID" : undefined} onClick={() => openMessageTest(row.groupJid)}><MessageSquareTextIcon size={14} />消息测试</Button></TableCell></TableRow>)}</TableBody>
               </Table>
             ) : tab === "lifecycle" && lifecycleRows.length ? (
-              <Table layout="list"><TableHeader><TableRow><TableHead>发生时间</TableHead><TableHead>状态变化</TableHead><TableHead adaptive>原因</TableHead><TableHead>服务码</TableHead></TableRow></TableHeader><TableBody>{lifecycleRows.map((row) => <TableRow key={row.id}><TableCell>{formatDateTime(row.occurredAt)}</TableCell><TableCell><Badge tone="neutral">{row.fromState || "初始"} → {row.toState || "未知"}</Badge></TableCell><TableCell>{row.reason || "未记录"}</TableCell><TableCell>{row.providerCode || "-"}</TableCell></TableRow>)}</TableBody></Table>
+              <Table layout="list"><TableHeader><TableRow>
+                <ListSortableHead sortKey="occurredAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>发生时间</ListSortableHead>
+                <ListSortableHead sortKey="fromState" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>原状态</ListSortableHead>
+                <ListSortableHead sortKey="toState" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>目标状态</ListSortableHead>
+                <ListSortableHead sortKey="reason" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort} adaptive>原因</ListSortableHead>
+                <ListSortableHead sortKey="providerCode" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>服务码</ListSortableHead>
+              </TableRow></TableHeader><TableBody>{lifecycleRows.map((row) => <TableRow key={row.id}><TableCell>{formatDateTime(row.occurredAt)}</TableCell><TableCell><Badge tone="neutral">{lifecycleStateLabel(row.fromState)}</Badge></TableCell><TableCell><Badge tone="neutral">{lifecycleStateLabel(row.toState, "未知")}</Badge></TableCell><TableCell>{lifecycleReasonLabel(row.reason)}</TableCell><TableCell>{row.providerCode || "-"}</TableCell></TableRow>)}</TableBody></Table>
             ) : <EmptyState title={tab === "friends" ? "暂无好友资源" : tab === "groups" ? "暂无群组资源" : "暂无生命周期记录"} description={tab === "lifecycle" ? "发生账号状态变化后会在这里形成记录。" : "请确认协议节点已开启对应同步开关，并提交一次资料同步。"} />}
           </ListTableCard>
         </>

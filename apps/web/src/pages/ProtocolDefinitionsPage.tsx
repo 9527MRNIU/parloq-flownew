@@ -23,10 +23,11 @@ import {
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
 import {
   ListPagination,
+  ListSortableHead,
   ListTableCard,
   ListToolbar,
   StandardListPage,
-  useClientPagination,
+  type ListSortOrder,
 } from "../components/list-page";
 import {
   Badge,
@@ -88,6 +89,16 @@ type ProtocolDefinition = {
 };
 
 type VersionCategory = "stable" | "preview";
+
+type ProtocolDefinitionSortBy =
+  | "id"
+  | "packageName"
+  | "version"
+  | "remoteLatestVersion"
+  | "buildStatus"
+  | "nodeCount"
+  | "contractVersion"
+  | "createdAt";
 
 type AvailableVersion = {
   version: string;
@@ -195,6 +206,12 @@ export function ProtocolDefinitionsPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
+  const [sortBy, setSortBy] = useState<ProtocolDefinitionSortBy>("id");
+  const [sortOrder, setSortOrder] = useState<ListSortOrder>("desc");
   const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [availableVersions, setAvailableVersions] = useState<AvailableVersion[]>([]);
@@ -219,17 +236,24 @@ export function ProtocolDefinitionsPage({
       setError("");
     }
     try {
-      const payload = await apiRequest("/api/protocol-definitions");
-      setRows(unwrapList<unknown>(payload).rows.map(protocolDefinition));
+      const query = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+      if (debouncedKeyword) query.set("keyword", debouncedKeyword);
+      query.set("sortBy", sortBy);
+      query.set("sortOrder", sortOrder);
+      const payload = await apiRequest(`/api/protocol-definitions?${query}`);
+      const list = unwrapList<unknown>(payload);
+      setRows(list.rows.map(protocolDefinition));
+      setTotal(list.total);
     } catch (caught) {
       if (!silent) {
         setRows([]);
+        setTotal(0);
         setError(caught instanceof Error ? caught.message : "协议加载失败");
       }
     } finally {
       if (!silent) setLoading(false);
     }
-  }, []);
+  }, [debouncedKeyword, page, pageSize, sortBy, sortOrder]);
 
   useEffect(() => void load(), [load]);
 
@@ -303,16 +327,19 @@ export function ProtocolDefinitionsPage({
     [availableVersions, versionCategory],
   );
 
-  const visible = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    if (!search) return rows;
-    return rows.filter((row) =>
-      `${row.id} ${row.name} ${row.adapterKey} ${row.packageName} ${row.version} ${row.remoteLatestVersion} ${row.remark}`
-        .toLowerCase()
-        .includes(search),
-    );
-  }, [keyword, rows]);
-  const pagination = useClientPagination(visible, { resetKey: keyword });
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+
+  function changeSort(nextSortBy: ProtocolDefinitionSortBy, nextSortOrder: ListSortOrder) {
+    setSortBy(nextSortBy);
+    setSortOrder(nextSortOrder);
+    setPage(1);
+  }
 
   function openCreate() {
     setForm({
@@ -415,7 +442,7 @@ export function ProtocolDefinitionsPage({
           placeholder: "搜索协议、仓库、版本或 ID",
         }}
         filters={toolbarTabs}
-        meta={`${visible.length} 个协议`}
+        meta={`${total} 个协议`}
         actions={
           <>
             <Button disabled={!canManage} onClick={openCreate}>
@@ -429,12 +456,12 @@ export function ProtocolDefinitionsPage({
         }
       />
       <ListPagination
-        page={pagination.page}
-        pageSize={pagination.pageSize}
-        total={pagination.total}
+        page={page}
+        pageSize={pageSize}
+        total={total}
         disabled={loading}
-        onPageChange={pagination.setPage}
-        onPageSizeChange={pagination.setPageSize}
+        onPageChange={setPage}
+        onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
       />
       <ListTableCard>
         {loading ? (
@@ -444,24 +471,24 @@ export function ProtocolDefinitionsPage({
             <strong>协议加载失败</strong><span>{error}</span>
             <Button variant="outline" onClick={() => void load()}>重试</Button>
           </div>
-        ) : pagination.rows.length ? (
+        ) : rows.length ? (
           <Table layout="list">
             <TableHeader>
               <TableRow>
-                <TableHead>协议</TableHead>
-                <TableHead>实现仓库</TableHead>
-                <TableHead>当前版本</TableHead>
-                <TableHead>远程版本</TableHead>
-                <TableHead>构建状态</TableHead>
-                <TableHead>节点数</TableHead>
-                <TableHead>契约版本</TableHead>
+                <ListSortableHead sortKey="id" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>协议</ListSortableHead>
+                <ListSortableHead sortKey="packageName" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>实现仓库</ListSortableHead>
+                <ListSortableHead sortKey="version" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>当前版本</ListSortableHead>
+                <ListSortableHead sortKey="remoteLatestVersion" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>远程版本</ListSortableHead>
+                <ListSortableHead sortKey="buildStatus" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>构建状态</ListSortableHead>
+                <ListSortableHead sortKey="nodeCount" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>节点数</ListSortableHead>
+                <ListSortableHead sortKey="contractVersion" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>契约版本</ListSortableHead>
                 <TableHead adaptive>备注</TableHead>
-                <TableHead>创建时间</TableHead>
+                <ListSortableHead sortKey="createdAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>创建时间</ListSortableHead>
                 <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {pagination.rows.map((row) => (
+              {rows.map((row) => (
                 <TableRow key={row.readKey}>
                   <TableCell primary>
                     <EntityPrimaryCell

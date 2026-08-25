@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 from io import BytesIO
+from typing import Literal
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile, status
@@ -335,7 +336,12 @@ def _require_account_export(db: DbSession, user) -> None:
         raise HTTPException(status_code=403, detail="没有账号导出权限")
 
 
-def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
+def _group_metrics(
+    db: DbSession,
+    group_ids: list[int],
+    *,
+    include_average_score: bool = False,
+) -> dict[int, dict]:
     if not group_ids:
         return {}
     valid_condition = and_(
@@ -392,7 +398,7 @@ def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
         )
         .group_by(PersonalAccount.group_id)
     ).all()
-    return {
+    metrics = {
         int(group_id): {
             "accountCount": int(total or 0),
             "validAccountCount": int(valid or 0),
@@ -422,6 +428,27 @@ def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
         ) in rows
         if group_id is not None
     }
+    if not include_average_score:
+        return metrics
+    accounts = db.scalars(
+        select(PersonalAccount).where(
+            PersonalAccount.group_id.in_(group_ids),
+            PersonalAccount.admission_status == "active",
+            PersonalAccount.deleted_at.is_(None),
+        )
+    ).all()
+    score_metrics = _resource_score_metrics(db, [item.id for item in accounts])
+    scores_by_group: dict[int, list[float]] = {}
+    for item in accounts:
+        score = _account_score(item, score_metrics.get(item.id))["score"]
+        if item.group_id is not None and score is not None:
+            scores_by_group.setdefault(item.group_id, []).append(float(score))
+    for group_id in group_ids:
+        scores = scores_by_group.get(group_id, [])
+        metrics.setdefault(group_id, {})["averageScore"] = (
+            round(sum(scores) / len(scores), 2) if scores else None
+        )
+    return metrics
 
 
 def _group_row(
@@ -443,6 +470,7 @@ def _group_row(
         "accountCount": account_count,
         "validAccountCount": valid_count,
         "validRate": round(valid_count / account_count, 6) if account_count else None,
+        "averageScore": metrics.get("averageScore"),
         "onlineAccountCount": int(metrics.get("onlineAccountCount", 0)),
         "abnormalAccountCount": int(metrics.get("abnormalAccountCount", 0)),
         "pendingValidationCount": int(metrics.get("pendingValidationCount", 0)),
@@ -463,7 +491,89 @@ def _group_row(
 
 
 @group_router.get("")
-def list_account_groups(db: DbSession, current_user: CurrentUser) -> dict:
+def list_account_groups(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id",
+        "accountCount",
+        "validAccountCount",
+        "abnormalAccountCount",
+        "validRate",
+        "averageScore",
+        "createdAt",
+        "updatedAt",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
+) -> dict:
+    statement = select(AccountGroup)
+    if current_user.role != "admin":
+        statement = statement.where(AccountGroup.created_by == current_user.id)
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        statement = statement.where(
+            or_(
+                AccountGroup.name.ilike(pattern),
+                AccountGroup.description.ilike(pattern),
+            )
+        )
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    descending = sort_order == "desc"
+    direct_sort_columns = {
+        "id": AccountGroup.id,
+        "createdAt": AccountGroup.created_at,
+        "updatedAt": AccountGroup.updated_at,
+    }
+    if sort_by in direct_sort_columns:
+        sort_column = direct_sort_columns[sort_by]
+        ordering = [sort_column.desc() if descending else sort_column.asc()]
+        if sort_by != "id":
+            ordering.append(AccountGroup.id.desc() if descending else AccountGroup.id.asc())
+        items = db.scalars(
+            statement.order_by(*ordering)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).all()
+        metrics = _group_metrics(
+            db,
+            [item.id for item in items],
+            include_average_score=True,
+        )
+        paged_rows = [
+            _group_row(db, item, metrics.get(item.id, {})) for item in items
+        ]
+    else:
+        items = db.scalars(statement).all()
+        metrics = _group_metrics(
+            db,
+            [item.id for item in items],
+            include_average_score=True,
+        )
+        rows = [_group_row(db, item, metrics.get(item.id, {})) for item in items]
+        present = [row for row in rows if row.get(sort_by) is not None]
+        missing = [row for row in rows if row.get(sort_by) is None]
+        present.sort(
+            key=lambda row: (row[sort_by], int(row["id"])),
+            reverse=descending,
+        )
+        missing.sort(key=lambda row: int(row["id"]), reverse=descending)
+        start = (page - 1) * page_size
+        paged_rows = (present + missing)[start : start + page_size]
+    return {
+        "data": {
+            "rows": paged_rows,
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+    }
+
+
+@group_router.get("/options")
+def list_account_group_options(db: DbSession, current_user: CurrentUser) -> dict:
     statement = select(AccountGroup)
     if current_user.role != "admin":
         statement = statement.where(AccountGroup.created_by == current_user.id)
@@ -472,7 +582,12 @@ def list_account_groups(db: DbSession, current_user: CurrentUser) -> dict:
     return {
         "data": {
             "rows": [
-                _group_row(db, item, metrics.get(item.id, {})) for item in items
+                {
+                    "id": entity_id(item),
+                    "name": item.name,
+                    "accountCount": int(metrics.get(item.id, {}).get("accountCount", 0)),
+                }
+                for item in items
             ],
             "total": len(items),
         }
@@ -1113,6 +1228,49 @@ def _unified_status_predicate(status_key: str):
     return predicate
 
 
+def _account_visitor_country_expression():
+    return (
+        select(AccountPairingAttempt.visitor_country_code)
+        .where(
+            AccountPairingAttempt.account_id == PersonalAccount.id,
+            AccountPairingAttempt.visitor_country_code.is_not(None),
+        )
+        .order_by(
+            AccountPairingAttempt.created_at.desc(),
+            AccountPairingAttempt.id.desc(),
+        )
+        .limit(1)
+        .correlate(PersonalAccount)
+        .scalar_subquery()
+    )
+
+
+def _account_proxy_country_expression():
+    return (
+        select(ProxyEndpoint.country_code)
+        .join(
+            AccountProxyBinding,
+            AccountProxyBinding.proxy_id == ProxyEndpoint.id,
+        )
+        .where(AccountProxyBinding.account_public_id == PersonalAccount.public_id)
+        .limit(1)
+        .correlate(PersonalAccount)
+        .scalar_subquery()
+    )
+
+
+def _account_sent_count_expression():
+    return (
+        select(func.count(MessageDelivery.id))
+        .where(
+            MessageDelivery.account_id == PersonalAccount.id,
+            MessageDelivery.status.in_(("sent", "delivered")),
+        )
+        .correlate(PersonalAccount)
+        .scalar_subquery()
+    )
+
+
 @router.get("")
 def list_accounts(
     db: DbSession,
@@ -1128,16 +1286,66 @@ def list_accounts(
         max_length=2,
         pattern=r"^[A-Za-z]{2}$",
     ),
+    visitor_country_code: str | None = Query(
+        default=None,
+        alias="visitorCountryCode",
+        min_length=2,
+        max_length=2,
+        pattern=r"^[A-Za-z]{2}$",
+    ),
+    proxy_country_code: str | None = Query(
+        default=None,
+        alias="proxyCountryCode",
+        min_length=2,
+        max_length=2,
+        pattern=r"^[A-Za-z]{2}$",
+    ),
+    account_type: Literal["personal", "business", "unknown"] | None = Query(
+        default=None,
+        alias="accountType",
+    ),
+    device_os: Literal["android", "ios", "other", "unknown"] | None = Query(
+        default=None,
+        alias="deviceOs",
+    ),
     protocol_id: str | None = Query(default=None, alias="protocolId"),
     metadata_status: str | None = Query(default=None, alias="metadataStatus"),
     quality_known: bool | None = Query(default=None, alias="qualityKnown"),
+    connected: bool | None = None,
+    validation_status: str | None = Query(default=None, alias="validationStatus"),
+    exportable: bool | None = None,
     sync: bool = Query(default=False),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id",
+        "countryCode",
+        "visitorCountryCode",
+        "proxyCountryCode",
+        "accountType",
+        "deviceOs",
+        "source",
+        "friendCount",
+        "groupCount",
+        "qualityScore",
+        "groupName",
+        "protocolId",
+        "sentCount",
+        "createdAt",
+        "updatedAt",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
 ) -> dict:
-    statement = select(PersonalAccount).where(
-        PersonalAccount.admission_status == "active",
-        PersonalAccount.deleted_at.is_(None),
+    visitor_country_expression = _account_visitor_country_expression()
+    proxy_country_expression = _account_proxy_country_expression()
+    sent_count_expression = _account_sent_count_expression()
+    statement = (
+        select(PersonalAccount)
+        .outerjoin(AccountGroup, AccountGroup.id == PersonalAccount.group_id)
+        .where(
+            PersonalAccount.admission_status == "active",
+            PersonalAccount.deleted_at.is_(None),
+        )
     )
     if current_user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == current_user.id)
@@ -1150,6 +1358,7 @@ def list_accounts(
             PersonalAccount.country_code.ilike(pattern),
             PersonalAccount.source_ref_type.ilike(pattern),
             PersonalAccount.import_format.ilike(pattern),
+            AccountGroup.name.ilike(pattern),
         ]
         if normalized_keyword.isdigit():
             matches.append(PersonalAccount.id == int(normalized_keyword))
@@ -1173,6 +1382,18 @@ def list_accounts(
         statement = statement.where(
             PersonalAccount.country_code == country_code.upper()
         )
+    if visitor_country_code:
+        statement = statement.where(
+            visitor_country_expression == visitor_country_code.upper()
+        )
+    if proxy_country_code:
+        statement = statement.where(
+            proxy_country_expression == proxy_country_code.upper()
+        )
+    if account_type:
+        statement = statement.where(PersonalAccount.account_type == account_type)
+    if device_os:
+        statement = statement.where(PersonalAccount.device_os == device_os)
     if protocol_id:
         try:
             database_protocol_id = parse_snowflake_id(protocol_id)
@@ -1205,12 +1426,73 @@ def list_accounts(
                 PersonalAccount.group_count.is_(None),
             )
         )
+    if connected is not None:
+        connection_predicate = PersonalAccount.status.in_(ONLINE_ACCOUNT_STATES)
+        statement = statement.where(
+            connection_predicate if connected else ~connection_predicate
+        )
+    if validation_status:
+        statement = statement.where(
+            PersonalAccount.validation_status == validation_status
+        )
+    if exportable is True:
+        statement = statement.where(
+            PersonalAccount.validation_status == "ready",
+            PersonalAccount.status.not_in(
+                ("pairing", "warming", "online_idle", "sending", "draining")
+            ),
+        )
     total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
-    items = db.scalars(
-        statement.order_by(PersonalAccount.created_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-    ).all()
+    if sort_by == "qualityScore":
+        all_items = db.scalars(statement).all()
+        all_rows = account_rows(db, list(all_items))
+        present = [row for row in all_rows if row["quality"]["score"] is not None]
+        missing = [row for row in all_rows if row["quality"]["score"] is None]
+        descending = sort_order == "desc"
+        present.sort(
+            key=lambda row: (row["quality"]["score"], int(row["id"])),
+            reverse=descending,
+        )
+        missing.sort(key=lambda row: int(row["id"]), reverse=descending)
+        start = (page - 1) * page_size
+        paged_rows = (present + missing)[start : start + page_size]
+        items_by_id = {str(item.id): item for item in all_items}
+        items = [items_by_id[row["id"]] for row in paged_rows]
+    else:
+        sort_columns = {
+            "id": PersonalAccount.id,
+            "countryCode": PersonalAccount.country_code,
+            "visitorCountryCode": visitor_country_expression,
+            "proxyCountryCode": proxy_country_expression,
+            "accountType": PersonalAccount.account_type,
+            "deviceOs": PersonalAccount.device_os,
+            "source": PersonalAccount.source,
+            "friendCount": PersonalAccount.friend_count,
+            "groupCount": PersonalAccount.group_count,
+            "groupName": AccountGroup.name,
+            "protocolId": PersonalAccount.protocol_id,
+            "sentCount": sent_count_expression,
+            "createdAt": PersonalAccount.created_at,
+            "updatedAt": PersonalAccount.updated_at,
+        }
+        sort_column = sort_columns[sort_by]
+        primary_order = (
+            sort_column.asc().nullslast()
+            if sort_order == "asc"
+            else sort_column.desc().nullslast()
+        )
+        ordering = [primary_order]
+        if sort_by != "id":
+            ordering.append(
+                PersonalAccount.id.asc()
+                if sort_order == "asc"
+                else PersonalAccount.id.desc()
+            )
+        items = db.scalars(
+            statement.order_by(*ordering)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).all()
     if sync and items:
         try:
             gateway_accounts = {
@@ -1224,14 +1506,39 @@ def list_accounts(
             db.commit()
         except GatewayError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
+    if sort_by != "qualityScore" or sync:
+        paged_rows = account_rows(db, list(items))
     return {
         "data": {
-            "rows": account_rows(db, list(items)),
+            "rows": paged_rows,
             "total": total,
             "page": page,
             "pageSize": page_size,
         }
     }
+
+
+@router.get("/options")
+def account_options(db: DbSession, current_user: CurrentUser) -> dict:
+    statement = select(PersonalAccount).where(
+        PersonalAccount.admission_status == "active",
+        PersonalAccount.deleted_at.is_(None),
+    )
+    if current_user.role != "admin":
+        statement = statement.where(PersonalAccount.created_by == current_user.id)
+    items = db.scalars(
+        statement.order_by(PersonalAccount.name, PersonalAccount.id)
+    ).all()
+    rows = [
+        {
+            "id": entity_id(item),
+            "name": item.name,
+            "phone": item.phone_e164,
+            "status": item.status,
+        }
+        for item in items
+    ]
+    return {"data": {"rows": rows, "total": len(rows)}}
 
 
 @router.get("/filter-options")
@@ -1261,9 +1568,39 @@ def account_filter_options(db: DbSession, current_user: CurrentUser) -> dict:
         .where(ProtocolNode.id.in_(protocol_ids))
         .order_by(ProtocolNode.name, ProtocolNode.id)
     ).all()
+    account_ids = account_scope.with_only_columns(PersonalAccount.id)
+    account_public_ids = account_scope.with_only_columns(PersonalAccount.public_id)
+    visitor_countries = list(
+        db.scalars(
+            select(AccountPairingAttempt.visitor_country_code)
+            .where(
+                AccountPairingAttempt.account_id.in_(account_ids),
+                AccountPairingAttempt.visitor_country_code.is_not(None),
+            )
+            .distinct()
+            .order_by(AccountPairingAttempt.visitor_country_code)
+        ).all()
+    )
+    proxy_countries = list(
+        db.scalars(
+            select(ProxyEndpoint.country_code)
+            .join(
+                AccountProxyBinding,
+                AccountProxyBinding.proxy_id == ProxyEndpoint.id,
+            )
+            .where(
+                AccountProxyBinding.account_public_id.in_(account_public_ids),
+                ProxyEndpoint.country_code.is_not(None),
+            )
+            .distinct()
+            .order_by(ProxyEndpoint.country_code)
+        ).all()
+    )
     return {
         "data": {
             "countries": countries,
+            "visitorCountries": visitor_countries,
+            "proxyCountries": proxy_countries,
             "protocols": [
                 {
                     "id": str(item.id),
@@ -1642,19 +1979,57 @@ def account_lifecycle(
     current_user: CurrentUser,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, alias="pageSize", ge=1, le=100),
+    from_state: str | None = Query(default=None, alias="fromState", max_length=32),
+    to_state: str | None = Query(default=None, alias="toState", max_length=32),
+    reason: str | None = Query(default=None, max_length=64),
+    sort_by: Literal[
+        "occurredAt", "fromState", "toState", "reason", "providerCode"
+    ] = Query(default="occurredAt", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
 ) -> dict:
     item = _account(db, account_id, current_user)
     statement = select(AccountLifecycleEvent).where(
         AccountLifecycleEvent.account_id == item.id
     )
+    if from_state == "__initial__":
+        statement = statement.where(AccountLifecycleEvent.from_state.is_(None))
+    elif from_state:
+        statement = statement.where(AccountLifecycleEvent.from_state == from_state)
+    if to_state:
+        statement = statement.where(AccountLifecycleEvent.to_state == to_state)
+    if reason:
+        statement = statement.where(AccountLifecycleEvent.reason_category == reason)
     total = int(
         db.scalar(select(func.count()).select_from(statement.subquery())) or 0
     )
-    events = db.scalars(
-        statement.order_by(
-            AccountLifecycleEvent.occurred_at.desc(),
-            AccountLifecycleEvent.id.desc(),
+    sort_columns = {
+        "occurredAt": AccountLifecycleEvent.occurred_at,
+        "fromState": AccountLifecycleEvent.from_state,
+        "toState": AccountLifecycleEvent.to_state,
+        "reason": AccountLifecycleEvent.reason_category,
+        "providerCode": AccountLifecycleEvent.provider_code,
+    }
+    sort_column = sort_columns[sort_by]
+    primary_order = (
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    )
+    ordering = [primary_order]
+    if sort_by != "occurredAt":
+        ordering.append(
+            AccountLifecycleEvent.id.asc()
+            if sort_order == "asc"
+            else AccountLifecycleEvent.id.desc()
         )
+    else:
+        ordering.append(
+            AccountLifecycleEvent.id.asc()
+            if sort_order == "asc"
+            else AccountLifecycleEvent.id.desc()
+        )
+    events = db.scalars(
+        statement.order_by(*ordering)
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
@@ -1689,6 +2064,11 @@ def account_contacts(
     source: str = Query(default="all"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, alias="pageSize", ge=1, le=200),
+    sort_by: Literal["phone", "source", "lastInteractionAt", "syncedAt"] = Query(
+        default="lastInteractionAt",
+        alias="sortBy",
+    ),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
 ) -> dict:
     item = _account(db, account_id, current_user)
     if source not in {"all", "saved", "contacted"}:
@@ -1719,11 +2099,27 @@ def account_contacts(
             )
         )
     total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    source_expression = case(
+        (AccountContact.is_saved_contact.is_(True), 0),
+        (AccountContact.has_chat_history.is_(True), 1),
+        else_=2,
+    )
+    sort_columns = {
+        "phone": AccountContact.phone_e164,
+        "source": source_expression,
+        "lastInteractionAt": AccountContact.last_interaction_at,
+        "syncedAt": AccountContact.synced_at,
+    }
+    sort_column = sort_columns[sort_by]
+    primary_order = (
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    )
     rows = db.scalars(
         statement.order_by(
-            AccountContact.last_interaction_at.desc().nullslast(),
-            AccountContact.saved_name,
-            AccountContact.id,
+            primary_order,
+            AccountContact.id.asc() if sort_order == "asc" else AccountContact.id.desc(),
         )
         .offset((page - 1) * page_size)
         .limit(page_size)
@@ -1768,8 +2164,21 @@ def account_whatsapp_groups(
     current_user: CurrentUser,
     keyword: str = "",
     can_send: bool | None = Query(default=None, alias="canSend"),
+    community_type: Literal["group", "community", "community_announcement"] | None = Query(
+        default=None,
+        alias="communityType",
+    ),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, alias="pageSize", ge=1, le=200),
+    sort_by: Literal[
+        "groupJid",
+        "size",
+        "communityType",
+        "ownRole",
+        "lastInteractionAt",
+        "syncedAt",
+    ] = Query(default="lastInteractionAt", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
 ) -> dict:
     item = _account(db, account_id, current_user)
     statement = select(AccountWhatsappGroup).where(
@@ -1787,12 +2196,31 @@ def account_whatsapp_groups(
         )
     if can_send is not None:
         statement = statement.where(AccountWhatsappGroup.can_send.is_(can_send))
+    if community_type:
+        statement = statement.where(
+            AccountWhatsappGroup.community_type == community_type
+        )
     total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    sort_columns = {
+        "groupJid": AccountWhatsappGroup.group_jid,
+        "size": AccountWhatsappGroup.size,
+        "communityType": AccountWhatsappGroup.community_type,
+        "ownRole": AccountWhatsappGroup.own_role,
+        "lastInteractionAt": AccountWhatsappGroup.last_interaction_at,
+        "syncedAt": AccountWhatsappGroup.synced_at,
+    }
+    sort_column = sort_columns[sort_by]
+    primary_order = (
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    )
     rows = db.scalars(
         statement.order_by(
-            AccountWhatsappGroup.last_interaction_at.desc().nullslast(),
-            AccountWhatsappGroup.subject,
-            AccountWhatsappGroup.id,
+            primary_order,
+            AccountWhatsappGroup.id.asc()
+            if sort_order == "asc"
+            else AccountWhatsappGroup.id.desc(),
         )
         .offset((page - 1) * page_size)
         .limit(page_size)
@@ -1979,14 +2407,126 @@ def sync_all_accounts(db: DbSession, current_user: CurrentUser) -> dict:
     return {"data": {"queuedCount": queued, "total": len(items)}}
 
 
+@router.get("/intake/attempts/filter-options")
+def intake_attempt_filter_options(
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    scope = select(AccountPairingAttempt).join(
+        PersonalAccount,
+        PersonalAccount.id == AccountPairingAttempt.account_id,
+    )
+    if current_user.role != "admin":
+        scope = scope.where(PersonalAccount.created_by == current_user.id)
+    attempt_ids = scope.with_only_columns(AccountPairingAttempt.id)
+    group_ids = scope.with_only_columns(AccountPairingAttempt.account_group_id)
+    channel_ids = scope.with_only_columns(AccountPairingAttempt.channel_id)
+    protocol_ids = scope.with_only_columns(AccountPairingAttempt.protocol_node_id)
+    channels = db.scalars(
+        select(PromotionChannel)
+        .where(PromotionChannel.id.in_(channel_ids))
+        .order_by(PromotionChannel.name, PromotionChannel.id)
+    ).all()
+    template_ids = {item.template_id for item in channels}
+    templates = db.scalars(
+        select(PromotionTemplate)
+        .where(PromotionTemplate.id.in_(template_ids))
+        .order_by(PromotionTemplate.name, PromotionTemplate.id)
+    ).all() if template_ids else []
+    groups = db.scalars(
+        select(AccountGroup)
+        .where(AccountGroup.id.in_(group_ids))
+        .order_by(AccountGroup.name, AccountGroup.id)
+    ).all()
+    protocols = db.scalars(
+        select(ProtocolNode)
+        .where(ProtocolNode.id.in_(protocol_ids))
+        .order_by(ProtocolNode.name, ProtocolNode.id)
+    ).all()
+    country_codes = db.scalars(
+        select(PersonalAccount.country_code)
+        .join(
+            AccountPairingAttempt,
+            AccountPairingAttempt.account_id == PersonalAccount.id,
+        )
+        .where(
+            AccountPairingAttempt.id.in_(attempt_ids),
+            PersonalAccount.country_code.is_not(None),
+        )
+        .distinct()
+        .order_by(PersonalAccount.country_code)
+    ).all()
+    visitor_country_codes = db.scalars(
+        select(AccountPairingAttempt.visitor_country_code)
+        .where(
+            AccountPairingAttempt.id.in_(attempt_ids),
+            AccountPairingAttempt.visitor_country_code.is_not(None),
+        )
+        .distinct()
+        .order_by(AccountPairingAttempt.visitor_country_code)
+    ).all()
+    return {
+        "data": {
+            "groups": [{"id": str(item.id), "name": item.name} for item in groups],
+            "channels": [{"id": str(item.id), "name": item.name} for item in channels],
+            "templates": [{"id": str(item.id), "name": item.name} for item in templates],
+            "protocols": [{"id": str(item.id), "name": item.name} for item in protocols],
+            "countries": list(country_codes),
+            "visitorCountries": list(visitor_country_codes),
+        }
+    }
+
+
 @router.get("/intake/attempts")
 def list_intake_attempts(
     db: DbSession,
     current_user: CurrentUser,
     keyword: str | None = None,
     attempt_status: str | None = Query(default=None, alias="status"),
+    pairing_type: Literal["initial", "reauthentication"] | None = Query(
+        default=None,
+        alias="pairingType",
+    ),
+    group_id: str | None = Query(default=None, alias="groupId"),
+    channel_id: str | None = Query(default=None, alias="channelId"),
+    template_id: str | None = Query(default=None, alias="templateId"),
+    protocol_id: str | None = Query(default=None, alias="protocolId"),
+    source_ip: str | None = Query(default=None, alias="sourceIp", max_length=64),
+    country_code: str | None = Query(
+        default=None,
+        alias="countryCode",
+        min_length=2,
+        max_length=2,
+        pattern=r"^[A-Za-z]{2}$",
+    ),
+    visitor_country_code: str | None = Query(
+        default=None,
+        alias="visitorCountryCode",
+        min_length=2,
+        max_length=2,
+        pattern=r"^[A-Za-z]{2}$",
+    ),
+    admission_status: Literal["reserved", "active", "abandoned"] | None = Query(
+        default=None,
+        alias="admissionStatus",
+    ),
+    metadata_status: Literal[
+        "pending", "syncing", "ready", "failed", "unsupported"
+    ] | None = Query(default=None, alias="metadataStatus"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "accountId",
+        "status",
+        "pairingType",
+        "countryCode",
+        "visitorCountryCode",
+        "channelId",
+        "admissionStatus",
+        "metadataStatus",
+        "createdAt",
+    ] = Query(default="createdAt", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
 ) -> dict:
     statement = (
         select(AccountPairingAttempt, PersonalAccount)
@@ -1996,6 +2536,63 @@ def list_intake_attempts(
         statement = statement.where(PersonalAccount.created_by == current_user.id)
     if attempt_status and attempt_status != "all":
         statement = statement.where(AccountPairingAttempt.status == attempt_status)
+    if pairing_type:
+        statement = statement.where(
+            AccountPairingAttempt.attempt_type == pairing_type
+        )
+    if group_id:
+        if group_id == "__ungrouped__":
+            statement = statement.where(AccountPairingAttempt.account_group_id.is_(None))
+        else:
+            try:
+                database_group_id = parse_snowflake_id(group_id)
+            except ValueError:
+                raise HTTPException(status_code=422, detail="账号分组筛选无效") from None
+            statement = statement.where(
+                AccountPairingAttempt.account_group_id == database_group_id
+            )
+    if channel_id:
+        try:
+            database_channel_id = parse_snowflake_id(channel_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="渠道筛选无效") from None
+        statement = statement.where(AccountPairingAttempt.channel_id == database_channel_id)
+    if template_id:
+        try:
+            database_template_id = parse_snowflake_id(template_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="模板筛选无效") from None
+        statement = statement.where(
+            AccountPairingAttempt.channel_id.in_(
+                select(PromotionChannel.id).where(
+                    PromotionChannel.template_id == database_template_id
+                )
+            )
+        )
+    if protocol_id:
+        try:
+            database_protocol_id = parse_snowflake_id(protocol_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="协议筛选无效") from None
+        statement = statement.where(
+            AccountPairingAttempt.protocol_node_id == database_protocol_id
+        )
+    if source_ip:
+        statement = statement.where(
+            AccountPairingAttempt.source_ip.ilike(f"%{source_ip.strip()}%")
+        )
+    if country_code:
+        statement = statement.where(PersonalAccount.country_code == country_code.upper())
+    if visitor_country_code:
+        statement = statement.where(
+            AccountPairingAttempt.visitor_country_code == visitor_country_code.upper()
+        )
+    if admission_status:
+        statement = statement.where(PersonalAccount.admission_status == admission_status)
+    if metadata_status:
+        statement = statement.where(
+            PersonalAccount.metadata_sync_status == metadata_status
+        )
     if keyword:
         pattern = f"%{keyword.strip()}%"
         statement = statement.where(
@@ -2007,8 +2604,30 @@ def list_intake_attempts(
             )
         )
     total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    sort_columns = {
+        "accountId": PersonalAccount.id,
+        "status": AccountPairingAttempt.status,
+        "pairingType": AccountPairingAttempt.attempt_type,
+        "countryCode": PersonalAccount.country_code,
+        "visitorCountryCode": AccountPairingAttempt.visitor_country_code,
+        "channelId": AccountPairingAttempt.channel_id,
+        "admissionStatus": PersonalAccount.admission_status,
+        "metadataStatus": PersonalAccount.metadata_sync_status,
+        "createdAt": AccountPairingAttempt.created_at,
+    }
+    sort_column = sort_columns[sort_by]
+    primary_order = (
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    )
     rows = db.execute(
-        statement.order_by(AccountPairingAttempt.created_at.desc())
+        statement.order_by(
+            primary_order,
+            AccountPairingAttempt.id.asc()
+            if sort_order == "asc"
+            else AccountPairingAttempt.id.desc(),
+        )
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()

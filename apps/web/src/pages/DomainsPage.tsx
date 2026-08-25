@@ -5,16 +5,18 @@ import {
   ShieldCheckIcon,
   ShoppingCartIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import {
   Badge,
   Button,
   confirmAction,
   Drawer,
+  DatePickerField,
   EmptyState,
   Input,
   Modal,
+  SelectField,
   Spinner,
   Switch,
   Table,
@@ -27,10 +29,11 @@ import {
 } from "../components/ui";
 import {
   ListPagination,
+  ListSortableHead,
   ListTableCard,
   ListToolbar,
   StandardListPage,
-  useClientPagination,
+  type ListSortOrder,
 } from "../components/list-page";
 import { useAuth } from "../auth/AuthContext";
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
@@ -98,25 +101,55 @@ type DomainOrderRow = {
   updatedAt?: string;
 };
 type CloudflareDomainRow = {
+  id: string;
   readKey: string;
   hostname: string;
   status: string;
   paused: boolean;
   phishingDetected: boolean;
   source: "system_purchase" | "system_import" | "account_existing";
+  onboardingStatus: string;
   systemDomainId?: string;
+  createdAt?: string;
+  updatedAt?: string;
 };
 type NameSiloDomainRow = {
+  id: string;
   readKey: string;
   hostname: string;
   source: "system_purchase" | "system_order" | "account_existing";
   providerOwned: boolean;
   providerStatus: string;
+  onboardingStatus: string;
   createdAt?: string;
+  updatedAt?: string;
   expiresAt?: string;
   systemDomainId?: string;
   order?: DomainOrderRow;
 };
+type SystemDomainSortBy =
+  | "id"
+  | "source"
+  | "ready"
+  | "expiresAt"
+  | "lastVerifiedAt"
+  | "onboardingStatus";
+type CloudflareDomainSortBy =
+  | "id"
+  | "source"
+  | "providerStatus"
+  | "onboardingStatus"
+  | "createdAt"
+  | "updatedAt";
+type NameSiloDomainSortBy =
+  | "id"
+  | "source"
+  | "providerStatus"
+  | "createdAt"
+  | "updatedAt"
+  | "expiresAt"
+  | "orderStatus"
+  | "onboardingStatus";
 type DomainSearchOption = {
   domain: string;
   registrationPrice: number;
@@ -252,10 +285,12 @@ function normalizeOrder(input: unknown): DomainOrderRow {
 }
 function normalizeCloudflareDomain(input: unknown): CloudflareDomainRow {
   const row = input as Record<string, unknown>;
+  const id = snowflakeId(row, "id");
   const hostname = get(row, "hostname", "name");
   const source = get(row, "source");
   return {
-    readKey: `cloudflare:${hostname}`,
+    id,
+    readKey: entityRowKey(row, id, "cloudflare-domain", hostname),
     hostname,
     status: get(row, "status") || "unknown",
     paused: Boolean(row.paused),
@@ -265,15 +300,20 @@ function normalizeCloudflareDomain(input: unknown): CloudflareDomainRow {
       : source === "system_import"
         ? "system_import"
         : "account_existing",
+    onboardingStatus: get(row, "onboardingStatus", "onboarding_status"),
     systemDomainId: snowflakeId(row, "systemDomainId", "system_domain_id") || undefined,
+    createdAt: get(row, "createdAt", "created_at"),
+    updatedAt: get(row, "updatedAt", "updated_at"),
   };
 }
 function normalizeNameSiloDomain(input: unknown): NameSiloDomainRow {
   const row = input as Record<string, unknown>;
+  const id = snowflakeId(row, "id");
   const hostname = get(row, "hostname", "domain");
   const orderValue = row.order && typeof row.order === "object" ? row.order : null;
   return {
-    readKey: `namesilo:${hostname}`,
+    id,
+    readKey: entityRowKey(row, id, "namesilo-domain", hostname),
     hostname,
     source: row.source === "system_purchase"
       ? "system_purchase"
@@ -282,7 +322,9 @@ function normalizeNameSiloDomain(input: unknown): NameSiloDomainRow {
         : "account_existing",
     providerOwned: Boolean(row.providerOwned ?? row.provider_owned),
     providerStatus: get(row, "providerStatus", "provider_status") || "unknown",
+    onboardingStatus: get(row, "onboardingStatus", "onboarding_status"),
     createdAt: get(row, "createdAt", "created_at"),
+    updatedAt: get(row, "updatedAt", "updated_at"),
     expiresAt: get(row, "expiresAt", "expires_at"),
     systemDomainId: snowflakeId(row, "systemDomainId", "system_domain_id") || undefined,
     order: orderValue ? normalizeOrder(orderValue) : undefined,
@@ -476,6 +518,29 @@ export function DomainsPage() {
   const [loading, setLoading] = useState(true);
   const [activeList, setActiveList] = useState<"system" | "cloudflare" | "namesilo">("system");
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
+  const [systemSource, setSystemSource] = useState("all");
+  const [systemReady, setSystemReady] = useState("all");
+  const [systemOnboarding, setSystemOnboarding] = useState("all");
+  const [providerSource, setProviderSource] = useState("all");
+  const [providerStatus, setProviderStatus] = useState("all");
+  const [providerOnboarding, setProviderOnboarding] = useState("all");
+  const [orderStatus, setOrderStatus] = useState("all");
+  const [expiresBefore, setExpiresBefore] = useState("");
+  const [systemSortBy, setSystemSortBy] = useState<SystemDomainSortBy>("id");
+  const [systemSortOrder, setSystemSortOrder] = useState<ListSortOrder>("desc");
+  const [cloudflareSortBy, setCloudflareSortBy] =
+    useState<CloudflareDomainSortBy>("id");
+  const [cloudflareSortOrder, setCloudflareSortOrder] =
+    useState<ListSortOrder>("desc");
+  const [nameSiloSortBy, setNameSiloSortBy] =
+    useState<NameSiloDomainSortBy>("id");
+  const [nameSiloSortOrder, setNameSiloSortOrder] =
+    useState<ListSortOrder>("desc");
+  const autoRefreshedList = useRef("");
   const [drawer, setDrawer] = useState(false);
   const [editing, setEditing] = useState<DomainRow | null>(null);
   const [hostname, setHostname] = useState("");
@@ -501,76 +566,109 @@ export function DomainsPage() {
   const [baotaPolicyLoading, setBaoTaPolicyLoading] = useState(false);
   const [baotaPolicySaving, setBaoTaPolicySaving] = useState(false);
   const [baotaPolicyError, setBaoTaPolicyError] = useState("");
-  const load = useCallback(async () => {
-    setLoading(true);
-    const [systemResult, cloudflareResult, nameSiloResult] = await Promise.allSettled([
-      apiRequest("/api/domains?pageSize=100"),
-      apiRequest("/api/domains/cloudflare"),
-      apiRequest("/api/domains/namesilo/sync", { method: "POST" }),
-    ]);
-    const errors: Record<string, string> = {};
-    if (systemResult.status === "fulfilled") {
-      setRows(unwrapList<unknown>(systemResult.value).rows.map(normalize));
+  const load = useCallback(async (showLoading = true, refreshProvider = false) => {
+    if (showLoading) setLoading(true);
+    const query = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+    if (debouncedKeyword) query.set("keyword", debouncedKeyword);
+    if (expiresBefore) query.set("expiresBefore", expiresBefore);
+    if (activeList === "system") {
+      if (systemSource !== "all") query.set("source", systemSource);
+      if (systemReady !== "all") query.set("ready", systemReady);
+      if (systemOnboarding !== "all") query.set("onboardingStatus", systemOnboarding);
+      query.set("sortBy", systemSortBy);
+      query.set("sortOrder", systemSortOrder);
     } else {
-      setRows([]);
-      errors.system = systemResult.reason instanceof Error
-        ? systemResult.reason.message
-        : "系统域名读取失败";
-    }
-    if (cloudflareResult.status === "fulfilled") {
-      setCloudflareDomains(
-        unwrapList<unknown>(cloudflareResult.value).rows.map(normalizeCloudflareDomain),
-      );
-    } else {
-      setCloudflareDomains([]);
-      errors.cloudflare = cloudflareResult.reason instanceof Error
-        ? cloudflareResult.reason.message
-        : "Cloudflare 域名读取失败";
-    }
-    if (nameSiloResult.status === "fulfilled") {
-      setNameSiloDomains(
-        unwrapList<unknown>(nameSiloResult.value).rows.map(normalizeNameSiloDomain),
-      );
-      const recoveredValues = (nameSiloResult.value as {
-        data?: { recoveredDomains?: unknown[] };
-      }).data?.recoveredDomains;
-      if (Array.isArray(recoveredValues) && recoveredValues.length) {
-        const recoveredDomains = recoveredValues.map(normalize);
-        const recoveredHostnames = new Set(
-          recoveredDomains.map((domain) => domain.hostname),
-        );
-        setRows((current) => [
-          ...recoveredDomains,
-          ...current.filter((domain) => !recoveredHostnames.has(domain.hostname)),
-        ]);
-        toast.success(
-          `${recoveredDomains.length} 个 NameSilo 异常订单已自动确认并开始接入`,
-        );
+      if (providerSource !== "all") query.set("source", providerSource);
+      if (providerStatus !== "all") query.set("providerStatus", providerStatus);
+      if (providerOnboarding !== "all") query.set("onboardingStatus", providerOnboarding);
+      if (activeList === "namesilo" && orderStatus !== "all") {
+        query.set("orderStatus", orderStatus);
       }
-    } else {
-      setNameSiloDomains([]);
-      errors.namesilo = nameSiloResult.reason instanceof Error
-        ? nameSiloResult.reason.message
-        : "NameSilo 域名读取失败";
+      query.set(
+        "sortBy",
+        activeList === "cloudflare" ? cloudflareSortBy : nameSiloSortBy,
+      );
+      query.set(
+        "sortOrder",
+        activeList === "cloudflare" ? cloudflareSortOrder : nameSiloSortOrder,
+      );
     }
-    setExternalErrors(errors);
-    setLoading(false);
-  }, []);
+    const endpoint = activeList === "system"
+      ? `/api/domains?${query}`
+      : activeList === "cloudflare"
+        ? `/api/domains/cloudflare${refreshProvider ? "/refresh" : ""}?${query}`
+        : `/api/domains/namesilo${refreshProvider ? "/sync" : ""}?${query}`;
+    try {
+      const payload = await apiRequest(endpoint, {
+        method: activeList !== "system" && refreshProvider ? "POST" : "GET",
+      });
+      const list = unwrapList<unknown>(payload);
+      setTotal(list.total);
+      setExternalErrors((current) => ({ ...current, [activeList]: "" }));
+      if (activeList === "system") setRows(list.rows.map(normalize));
+      else if (activeList === "cloudflare") {
+        setCloudflareDomains(list.rows.map(normalizeCloudflareDomain));
+      } else {
+        setNameSiloDomains(list.rows.map(normalizeNameSiloDomain));
+        const recovered = (payload as { data?: { recoveredDomains?: unknown[] } }).data?.recoveredDomains;
+        if (Array.isArray(recovered) && recovered.length) {
+          toast.success(`${recovered.length} 个 NameSilo 异常订单已自动确认并开始接入`);
+        }
+      }
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : `${activeList} 域名读取失败`;
+      setExternalErrors((current) => ({ ...current, [activeList]: message }));
+      if (!refreshProvider) {
+        setTotal(0);
+        if (activeList === "system") setRows([]);
+        else if (activeList === "cloudflare") setCloudflareDomains([]);
+        else setNameSiloDomains([]);
+      } else {
+        toast.error(`刷新失败，继续显示上次缓存：${message}`);
+      }
+    } finally {
+      if (showLoading) setLoading(false);
+    }
+  }, [activeList, cloudflareSortBy, cloudflareSortOrder, debouncedKeyword, expiresBefore, nameSiloSortBy, nameSiloSortOrder, orderStatus, page, pageSize, providerOnboarding, providerSource, providerStatus, systemOnboarding, systemReady, systemSortBy, systemSortOrder, systemSource]);
   useEffect(() => {
-    void load();
+    let cancelled = false;
+    const run = async () => {
+      await load();
+      if (
+        !cancelled &&
+        activeList !== "system" &&
+        autoRefreshedList.current !== activeList
+      ) {
+        autoRefreshedList.current = activeList;
+        await load(false, true);
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
   }, [load]);
+  useEffect(() => {
+    if (activeList === "system") autoRefreshedList.current = "";
+  }, [activeList]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
   const hasActiveOnboarding = rows.some((row) =>
     ["idle", "running", "waiting"].includes(row.onboarding.status)
   );
   useEffect(() => {
-    if (!hasActiveOnboarding) return;
+    if (activeList !== "system" || !hasActiveOnboarding) return;
     let inFlight = false;
     const refresh = async () => {
       if (inFlight) return;
       inFlight = true;
       try {
-        const payload = await apiRequest("/api/domains?pageSize=100");
-        setRows(unwrapList<unknown>(payload).rows.map(normalize));
+        await load(false);
       } catch {
         // Keep the previous rows and retry on the next interval.
       } finally {
@@ -579,34 +677,7 @@ export function DomainsPage() {
     };
     const timer = window.setInterval(() => void refresh(), 5000);
     return () => window.clearInterval(timer);
-  }, [hasActiveOnboarding]);
-  const visible = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    return search
-      ? rows.filter((row) => row.hostname.toLowerCase().includes(search))
-      : rows;
-  }, [keyword, rows]);
-  const visibleCloudflareDomains = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    return search
-      ? cloudflareDomains.filter((row) => row.hostname.toLowerCase().includes(search))
-      : cloudflareDomains;
-  }, [cloudflareDomains, keyword]);
-  const visibleNameSiloDomains = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    return search
-      ? nameSiloDomains.filter((row) => row.hostname.toLowerCase().includes(search))
-      : nameSiloDomains;
-  }, [keyword, nameSiloDomains]);
-  const domainPagination = useClientPagination(visible, {
-    resetKey: `${activeList}|${keyword}`,
-  });
-  const cloudflarePagination = useClientPagination(visibleCloudflareDomains, {
-    resetKey: `${activeList}|${keyword}`,
-  });
-  const nameSiloPagination = useClientPagination(visibleNameSiloDomains, {
-    resetKey: `${activeList}|${keyword}`,
-  });
+  }, [activeList, hasActiveOnboarding, load]);
   const visibleDomainOptions = useMemo(() => {
     const search = resultKeyword.trim().toLowerCase();
     return (domainSearch?.options || []).filter((option) =>
@@ -968,6 +1039,21 @@ export function DomainsPage() {
       toast.error(caught instanceof Error ? caught.message : "删除失败");
     }
   }
+  function changeSystemSort(nextSortBy: SystemDomainSortBy, nextSortOrder: ListSortOrder) {
+    setSystemSortBy(nextSortBy);
+    setSystemSortOrder(nextSortOrder);
+    setPage(1);
+  }
+  function changeCloudflareSort(nextSortBy: CloudflareDomainSortBy, nextSortOrder: ListSortOrder) {
+    setCloudflareSortBy(nextSortBy);
+    setCloudflareSortOrder(nextSortOrder);
+    setPage(1);
+  }
+  function changeNameSiloSort(nextSortBy: NameSiloDomainSortBy, nextSortOrder: ListSortOrder) {
+    setNameSiloSortBy(nextSortBy);
+    setNameSiloSortOrder(nextSortOrder);
+    setPage(1);
+  }
   const waitingForDomainSearch = !purchaseHostname
     && domainSearch?.status === "running";
   return (
@@ -983,47 +1069,142 @@ export function DomainsPage() {
               : "搜索 NameSilo 域名",
         }}
         filters={
-          <div className="flex items-center gap-2">
-            <Button
-              variant={activeList === "system" ? "secondary" : "outline"}
-              aria-pressed={activeList === "system"}
-              onClick={() => {
-                setActiveList("system");
-                setKeyword("");
-              }}
-            >
-              系统域名
-            </Button>
-            <Button
-              variant={activeList === "cloudflare" ? "secondary" : "outline"}
-              aria-pressed={activeList === "cloudflare"}
-              onClick={() => {
-                setActiveList("cloudflare");
-                setKeyword("");
-              }}
-            >
-              Cloudflare 域名
-            </Button>
-            <Button
-              variant={activeList === "namesilo" ? "secondary" : "outline"}
-              aria-pressed={activeList === "namesilo"}
-              onClick={() => {
-                setActiveList("namesilo");
-                setKeyword("");
-              }}
-            >
-              NameSilo 域名
-            </Button>
-          </div>
+          <>
+            <div className="flex items-center gap-2">
+              <Button
+                variant={activeList === "system" ? "secondary" : "outline"}
+                aria-pressed={activeList === "system"}
+                onClick={() => {
+                  setActiveList("system");
+                  setKeyword("");
+                  setPage(1);
+                }}
+              >
+                系统域名
+              </Button>
+              <Button
+                variant={activeList === "cloudflare" ? "secondary" : "outline"}
+                aria-pressed={activeList === "cloudflare"}
+                onClick={() => {
+                  setActiveList("cloudflare");
+                  setKeyword("");
+                  setPage(1);
+                }}
+              >
+                Cloudflare 域名
+              </Button>
+              <Button
+                variant={activeList === "namesilo" ? "secondary" : "outline"}
+                aria-pressed={activeList === "namesilo"}
+                onClick={() => {
+                  setActiveList("namesilo");
+                  setKeyword("");
+                  setPage(1);
+                }}
+              >
+                NameSilo 域名
+              </Button>
+            </div>
+            {activeList === "system" ? (
+              <>
+                <SelectField
+                  value={systemSource}
+                  onValueChange={(value) => { setSystemSource(value); setPage(1); }}
+                  options={[
+                    { value: "all", label: "全部来源" },
+                    { value: "purchased", label: "平台购买" },
+                    { value: "connected", label: "外部接入" },
+                  ]}
+                />
+                <SelectField
+                  value={systemReady}
+                  onValueChange={(value) => { setSystemReady(value); setPage(1); }}
+                  options={[
+                    { value: "all", label: "全部就绪状态" },
+                    { value: "true", label: "可用于渠道" },
+                    { value: "false", label: "配置中" },
+                  ]}
+                />
+                <SelectField
+                  value={systemOnboarding}
+                  onValueChange={(value) => { setSystemOnboarding(value); setPage(1); }}
+                  options={[
+                    { value: "all", label: "全部接入状态" },
+                    { value: "idle", label: "未开始" },
+                    { value: "running", label: "进行中" },
+                    { value: "waiting", label: "等待中" },
+                    { value: "failed", label: "失败" },
+                    { value: "completed", label: "已完成" },
+                  ]}
+                />
+              </>
+            ) : (
+              <>
+                <SelectField
+                  value={providerSource}
+                  onValueChange={(value) => { setProviderSource(value); setPage(1); }}
+                  options={[
+                    { value: "all", label: "全部来源" },
+                    { value: "system_purchase", label: "系统购买" },
+                    ...(activeList === "cloudflare"
+                      ? [{ value: "system_import", label: "系统接入" }]
+                      : [{ value: "system_order", label: "系统订单" }]),
+                    { value: "account_existing", label: "账户已有" },
+                  ]}
+                />
+                <SelectField
+                  value={providerStatus}
+                  onValueChange={(value) => { setProviderStatus(value); setPage(1); }}
+                  options={[
+                    { value: "all", label: "全部服务商状态" },
+                    { value: "active", label: "正常" },
+                    { value: "pending", label: "待生效" },
+                    { value: "deactivated", label: "已停用" },
+                    { value: "failed", label: "失败" },
+                  ]}
+                />
+                {activeList === "namesilo" ? (
+                  <SelectField
+                    value={orderStatus}
+                    onValueChange={(value) => { setOrderStatus(value); setPage(1); }}
+                    options={[
+                      { value: "all", label: "全部订单状态" },
+                      { value: "pending_payment", label: "待支付" },
+                      { value: "purchase_ready", label: "待购买" },
+                      { value: "provisioning", label: "购买中" },
+                      { value: "unknown", label: "待确认" },
+                      { value: "completed", label: "已完成" },
+                      { value: "failed", label: "失败" },
+                      { value: "cancelled", label: "已取消" },
+                    ]}
+                  />
+                ) : null}
+                <SelectField
+                  value={providerOnboarding}
+                  onValueChange={(value) => { setProviderOnboarding(value); setPage(1); }}
+                  options={[
+                    { value: "all", label: "全部接入状态" },
+                    { value: "connected", label: "已接入" },
+                    { value: "not_connected", label: "未接入" },
+                  ]}
+                />
+              </>
+            )}
+            {activeList !== "cloudflare" ? (
+              <DatePickerField
+                ariaLabel="到期不晚于"
+                value={expiresBefore}
+                onValueChange={(value) => { setExpiresBefore(value); setPage(1); }}
+                placeholder="到期不晚于"
+                className="w-[148px]"
+              />
+            ) : null}
+          </>
         }
-        meta={activeList === "system"
-          ? `${visible.length} 个域名`
-          : activeList === "cloudflare"
-            ? `${visibleCloudflareDomains.length} 个域名`
-            : `${visibleNameSiloDomains.length} 个域名`}
+        meta={`${total} 个域名`}
         actions={
           <>
-            <Button variant="outline" onClick={() => void load()}>
+            <Button variant="outline" onClick={() => void load(true, activeList !== "system")}>
               <RefreshCwIcon size={16} />
               刷新
             </Button>
@@ -1052,62 +1233,40 @@ export function DomainsPage() {
           </>
         }
       />
-      {activeList === "system" ? (
-        <ListPagination
-          ariaLabel="系统域名分页"
-          page={domainPagination.page}
-          pageSize={domainPagination.pageSize}
-          total={domainPagination.total}
-          disabled={loading}
-          onPageChange={domainPagination.setPage}
-          onPageSizeChange={domainPagination.setPageSize}
-        />
-      ) : activeList === "cloudflare" ? (
-        <ListPagination
-          ariaLabel="Cloudflare 域名分页"
-          page={cloudflarePagination.page}
-          pageSize={cloudflarePagination.pageSize}
-          total={cloudflarePagination.total}
-          disabled={loading}
-          onPageChange={cloudflarePagination.setPage}
-          onPageSizeChange={cloudflarePagination.setPageSize}
-        />
-      ) : (
-        <ListPagination
-          ariaLabel="NameSilo 域名分页"
-          page={nameSiloPagination.page}
-          pageSize={nameSiloPagination.pageSize}
-          total={nameSiloPagination.total}
-          disabled={loading}
-          onPageChange={nameSiloPagination.setPage}
-          onPageSizeChange={nameSiloPagination.setPageSize}
-        />
-      )}
+      <ListPagination
+        ariaLabel={`${activeList} 域名分页`}
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        disabled={loading}
+        onPageChange={setPage}
+        onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
+      />
       {activeList === "system" ? (
         <ListTableCard>
         {loading ? (
           <div className="loading-state">
             <Spinner />
           </div>
-        ) : visible.length ? (
+        ) : rows.length ? (
           <div className="table-scroll">
             <Table layout="list">
               <TableHeader>
                 <TableRow>
-                  <TableHead adaptive>域名</TableHead>
-                  <TableHead>来源</TableHead>
+                  <ListSortableHead sortKey="id" activeSortKey={systemSortBy} sortOrder={systemSortOrder} defaultOrder="desc" onSort={changeSystemSort} adaptive>域名</ListSortableHead>
+                  <ListSortableHead sortKey="source" activeSortKey={systemSortBy} sortOrder={systemSortOrder} onSort={changeSystemSort}>来源</ListSortableHead>
                   <TableHead>托管</TableHead>
                   <TableHead>DNS / TLS</TableHead>
-                  <TableHead>就绪状态</TableHead>
-                  <TableHead>到期时间</TableHead>
+                  <ListSortableHead sortKey="ready" activeSortKey={systemSortBy} sortOrder={systemSortOrder} onSort={changeSystemSort}>就绪状态</ListSortableHead>
+                  <ListSortableHead sortKey="expiresAt" activeSortKey={systemSortBy} sortOrder={systemSortOrder} onSort={changeSystemSort}>到期时间</ListSortableHead>
                   <TableHead>绑定渠道</TableHead>
-                  <TableHead>最近验证</TableHead>
-                  <TableHead>接入状态</TableHead>
+                  <ListSortableHead sortKey="lastVerifiedAt" activeSortKey={systemSortBy} sortOrder={systemSortOrder} defaultOrder="desc" onSort={changeSystemSort}>最近验证</ListSortableHead>
+                  <ListSortableHead sortKey="onboardingStatus" activeSortKey={systemSortBy} sortOrder={systemSortOrder} onSort={changeSystemSort}>接入状态</ListSortableHead>
                   <TableHead>操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {domainPagination.rows.map((row) => (
+                {rows.map((row) => (
                   <TableRow key={row.readKey}>
                     <TableCell>
                       <EntityPrimaryCell
@@ -1225,20 +1384,22 @@ export function DomainsPage() {
         <ListTableCard>
         {loading ? (
           <div className="loading-state"><Spinner /></div>
-        ) : visibleCloudflareDomains.length ? (
+        ) : cloudflareDomains.length ? (
           <div className="table-scroll">
             <Table layout="list">
               <TableHeader>
                 <TableRow>
-                  <TableHead adaptive>域名</TableHead>
-                  <TableHead>来源</TableHead>
-                  <TableHead>Cloudflare 状态</TableHead>
-                  <TableHead>接入状态</TableHead>
+                  <ListSortableHead sortKey="id" activeSortKey={cloudflareSortBy} sortOrder={cloudflareSortOrder} defaultOrder="desc" onSort={changeCloudflareSort} adaptive>域名</ListSortableHead>
+                  <ListSortableHead sortKey="source" activeSortKey={cloudflareSortBy} sortOrder={cloudflareSortOrder} onSort={changeCloudflareSort}>来源</ListSortableHead>
+                  <ListSortableHead sortKey="providerStatus" activeSortKey={cloudflareSortBy} sortOrder={cloudflareSortOrder} onSort={changeCloudflareSort}>Cloudflare 状态</ListSortableHead>
+                  <ListSortableHead sortKey="onboardingStatus" activeSortKey={cloudflareSortBy} sortOrder={cloudflareSortOrder} onSort={changeCloudflareSort}>接入状态</ListSortableHead>
+                  <ListSortableHead sortKey="createdAt" activeSortKey={cloudflareSortBy} sortOrder={cloudflareSortOrder} defaultOrder="desc" onSort={changeCloudflareSort}>创建时间</ListSortableHead>
+                  <ListSortableHead sortKey="updatedAt" activeSortKey={cloudflareSortBy} sortOrder={cloudflareSortOrder} defaultOrder="desc" onSort={changeCloudflareSort}>更新时间</ListSortableHead>
                   <TableHead>操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {cloudflarePagination.rows.map((row) => {
+                {cloudflareDomains.map((row) => {
                   const currentSystemDomain = isCurrentSystemDomain(
                     row.hostname,
                     currentSystemHostname,
@@ -1248,8 +1409,7 @@ export function DomainsPage() {
                       <TableCell>
                         <EntityPrimaryCell
                           title={row.hostname}
-                          id={row.systemDomainId}
-                          idFallback="未接入，暂无系统 ID"
+                          id={row.id}
                           status={cloudflareDomainStatus(row)}
                         />
                       </TableCell>
@@ -1264,6 +1424,8 @@ export function DomainsPage() {
                         </Badge>
                       </TableCell>
                       <TableCell>{integrationStatusBadge(Boolean(row.systemDomainId))}</TableCell>
+                      <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
+                      <TableCell className="text-muted-foreground">{formatDateTime(row.updatedAt)}</TableCell>
                       <TableCell>
                         <div className="flex min-w-max items-center justify-end gap-2">
                           {currentSystemDomain ? <CurrentSystemDomainWarning /> : null}
@@ -1300,23 +1462,24 @@ export function DomainsPage() {
         <ListTableCard>
         {loading ? (
           <div className="loading-state"><Spinner /></div>
-        ) : visibleNameSiloDomains.length ? (
+        ) : nameSiloDomains.length ? (
           <div className="table-scroll">
             <Table layout="list">
               <TableHeader>
                 <TableRow>
-                  <TableHead adaptive>域名</TableHead>
-                  <TableHead>来源</TableHead>
-                  <TableHead>NameSilo 状态</TableHead>
-                  <TableHead>创建时间</TableHead>
-                  <TableHead>到期时间</TableHead>
-                  <TableHead>系统订单</TableHead>
-                  <TableHead>接入状态</TableHead>
+                  <ListSortableHead sortKey="id" activeSortKey={nameSiloSortBy} sortOrder={nameSiloSortOrder} defaultOrder="desc" onSort={changeNameSiloSort} adaptive>域名</ListSortableHead>
+                  <ListSortableHead sortKey="source" activeSortKey={nameSiloSortBy} sortOrder={nameSiloSortOrder} onSort={changeNameSiloSort}>来源</ListSortableHead>
+                  <ListSortableHead sortKey="providerStatus" activeSortKey={nameSiloSortBy} sortOrder={nameSiloSortOrder} onSort={changeNameSiloSort}>NameSilo 状态</ListSortableHead>
+                  <ListSortableHead sortKey="createdAt" activeSortKey={nameSiloSortBy} sortOrder={nameSiloSortOrder} defaultOrder="desc" onSort={changeNameSiloSort}>创建时间</ListSortableHead>
+                  <ListSortableHead sortKey="updatedAt" activeSortKey={nameSiloSortBy} sortOrder={nameSiloSortOrder} defaultOrder="desc" onSort={changeNameSiloSort}>更新时间</ListSortableHead>
+                  <ListSortableHead sortKey="expiresAt" activeSortKey={nameSiloSortBy} sortOrder={nameSiloSortOrder} onSort={changeNameSiloSort}>到期时间</ListSortableHead>
+                  <ListSortableHead sortKey="orderStatus" activeSortKey={nameSiloSortBy} sortOrder={nameSiloSortOrder} onSort={changeNameSiloSort}>系统订单</ListSortableHead>
+                  <ListSortableHead sortKey="onboardingStatus" activeSortKey={nameSiloSortBy} sortOrder={nameSiloSortOrder} onSort={changeNameSiloSort}>接入状态</ListSortableHead>
                   <TableHead>操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {nameSiloPagination.rows.map((row) => {
+                {nameSiloDomains.map((row) => {
                   const itemOrder = row.order;
                   const busy = Boolean(itemOrder?.id)
                     && orderPending.startsWith(`${itemOrder?.id}:`);
@@ -1339,8 +1502,7 @@ export function DomainsPage() {
                       <TableCell>
                         <EntityPrimaryCell
                           title={row.hostname}
-                          id={row.systemDomainId}
-                          idFallback="未接入，暂无系统 ID"
+                          id={row.id}
                           status={nameSiloDomainStatus(row)}
                           description={itemOrder?.failureReason ? (
                             <span className="text-destructive">{itemOrder.failureReason}</span>
@@ -1358,6 +1520,7 @@ export function DomainsPage() {
                         </Badge>
                       </TableCell>
                       <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
+                      <TableCell className="text-muted-foreground">{formatDateTime(row.updatedAt)}</TableCell>
                       <TableCell className="text-muted-foreground">{formatDateTime(row.expiresAt)}</TableCell>
                       <TableCell>
                         {itemOrder ? (

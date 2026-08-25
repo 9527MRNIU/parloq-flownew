@@ -3,7 +3,7 @@ from __future__ import annotations
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Response, UploadFile
-from sqlalchemy import func, select
+from sqlalchemy import String, and_, cast, func, or_, select
 
 from app.business_schemas import MaterialCreate, MaterialUpdate
 from app.deps import CurrentUser, DbSession
@@ -83,6 +83,10 @@ def list_materials(
     current_user: CurrentUser,
     material_type: str | None = Query(default=None, alias="type"),
     text_role: str | None = Query(default=None, alias="textRole"),
+    keyword: str | None = None,
+    material_status: str | None = Query(default=None, alias="status"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
 ) -> dict:
     statement = select(Material)
     if material_type:
@@ -97,9 +101,82 @@ def list_materials(
         )
     if current_user.role != "admin":
         statement = statement.where(Material.created_by == current_user.id)
-    items = db.scalars(statement.order_by(Material.created_at.desc())).all()
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        statement = statement.where(
+            or_(
+                Material.name.ilike(pattern),
+                Material.public_id.ilike(pattern),
+                Material.file_name.ilike(pattern),
+                cast(Material.content_json, String).ilike(pattern),
+            )
+        )
+    binary = Material.material_type.in_(tuple(BINARY_MATERIAL_TYPES))
+    ready = or_(
+        ~binary,
+        and_(Material.file_sha256.is_not(None), Material.file_size.is_not(None)),
+    )
+    if material_status == "enabled":
+        statement = statement.where(Material.enabled.is_(True), ready)
+    elif material_status == "disabled":
+        statement = statement.where(Material.enabled.is_(False), ready)
+    elif material_status == "missing":
+        statement = statement.where(binary, ~ready)
+    elif material_status not in {None, "", "all"}:
+        raise HTTPException(status_code=422, detail="素材状态筛选无效")
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    items = db.scalars(
+        statement.order_by(Material.created_at.desc(), Material.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
     rows = [material_row(item) for item in items]
-    return {"data": {"rows": rows, "total": len(rows)}}
+    count_statement = select(Material.material_type, func.count(Material.id)).group_by(
+        Material.material_type
+    )
+    if current_user.role != "admin":
+        count_statement = count_statement.where(Material.created_by == current_user.id)
+    type_counts = {str(key): int(count) for key, count in db.execute(count_statement).all()}
+    text_role_statement = (
+        select(Material.text_role, func.count(Material.id))
+        .where(Material.material_type == "text")
+        .group_by(Material.text_role)
+    )
+    if current_user.role != "admin":
+        text_role_statement = text_role_statement.where(
+            Material.created_by == current_user.id
+        )
+    text_role_counts = {
+        str(key): int(count)
+        for key, count in db.execute(text_role_statement).all()
+        if key
+    }
+    return {
+        "data": {
+            "rows": rows,
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+            "typeCounts": type_counts,
+            "textRoleCounts": text_role_counts,
+        }
+    }
+
+
+@router.get("/options")
+def material_options(db: DbSession, current_user: CurrentUser) -> dict:
+    statement = select(Material)
+    if current_user.role != "admin":
+        statement = statement.where(Material.created_by == current_user.id)
+    items = db.scalars(
+        statement.order_by(Material.name, Material.id)
+    ).all()
+    return {
+        "data": {
+            "rows": [material_row(item) for item in items],
+            "total": len(items),
+        }
+    }
 
 
 @router.get("/capabilities")

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.business_schemas import ProtocolDefinitionCreate
@@ -128,35 +130,134 @@ def _row(
 def list_protocol_definitions(
     db: DbSession,
     current_user: CurrentUser,
+    keyword: str = Query(default="", max_length=200),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id",
+        "packageName",
+        "version",
+        "remoteLatestVersion",
+        "buildStatus",
+        "nodeCount",
+        "contractVersion",
+        "createdAt",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
 ) -> dict:
     del current_user
-    items = db.scalars(
-        select(ProtocolDefinition).order_by(
-            ProtocolDefinition.is_builtin.desc(),
-            ProtocolDefinition.id,
+    node_counts = (
+        select(
+            ProtocolNode.protocol_definition_id.label("definition_id"),
+            func.count(ProtocolNode.id).label("node_count"),
         )
-    ).all()
+        .group_by(ProtocolNode.protocol_definition_id)
+        .subquery()
+    )
+    statement = select(ProtocolDefinition).outerjoin(
+        node_counts,
+        node_counts.c.definition_id == ProtocolDefinition.id,
+    )
+    search = keyword.strip()
+    if search:
+        pattern = f"%{search}%"
+        statement = statement.where(
+            or_(
+                cast(ProtocolDefinition.id, String).ilike(pattern),
+                ProtocolDefinition.public_id.ilike(pattern),
+                ProtocolDefinition.name.ilike(pattern),
+                ProtocolDefinition.adapter_key.ilike(pattern),
+                ProtocolDefinition.package_name.ilike(pattern),
+                ProtocolDefinition.version.ilike(pattern),
+                ProtocolDefinition.remark.ilike(pattern),
+            )
+        )
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    upstream_by_package: dict[str, dict[str, str | None]]
+    if sort_by == "remoteLatestVersion":
+        all_items = list(db.scalars(statement.order_by(ProtocolDefinition.id)).all())
+        upstream_by_package = {
+            package_name: npm_version_summary(package_name)
+            for package_name in {item.package_name for item in all_items}
+        }
+
+        def remote_version(item: ProtocolDefinition) -> str | None:
+            summary = upstream_by_package[item.package_name]
+            return summary.get(
+                "latestPreview"
+                if is_prerelease_version(item.version)
+                else "latestStable"
+            )
+
+        present = [item for item in all_items if remote_version(item)]
+        missing = [item for item in all_items if not remote_version(item)]
+        descending = sort_order == "desc"
+        present.sort(
+            key=lambda item: (str(remote_version(item)), item.id),
+            reverse=descending,
+        )
+        missing.sort(key=lambda item: item.id, reverse=descending)
+        start = (page - 1) * page_size
+        items = present[start : start + page_size]
+        if len(items) < page_size:
+            missing_start = max(0, start - len(present))
+            items.extend(missing[missing_start : missing_start + page_size - len(items)])
+    else:
+        sort_columns = {
+            "id": ProtocolDefinition.id,
+            "packageName": ProtocolDefinition.package_name,
+            "version": ProtocolDefinition.version,
+            "buildStatus": ProtocolDefinition.build_status,
+            "nodeCount": func.coalesce(node_counts.c.node_count, 0),
+            "contractVersion": ProtocolDefinition.contract_version,
+            "createdAt": ProtocolDefinition.created_at,
+        }
+        sort_column = sort_columns[sort_by]
+        ordering = [
+            sort_column.asc().nullslast()
+            if sort_order == "asc"
+            else sort_column.desc().nullslast()
+        ]
+        if sort_by != "id":
+            ordering.append(
+                ProtocolDefinition.id.asc()
+                if sort_order == "asc"
+                else ProtocolDefinition.id.desc()
+            )
+        items = list(
+            db.scalars(
+                statement.order_by(*ordering)
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            ).all()
+        )
+    item_ids = [item.id for item in items]
     counts = dict(
         db.execute(
             select(
                 ProtocolNode.protocol_definition_id,
                 func.count(ProtocolNode.id),
-            ).group_by(ProtocolNode.protocol_definition_id)
+            )
+            .where(ProtocolNode.protocol_definition_id.in_(item_ids))
+            .group_by(ProtocolNode.protocol_definition_id)
         ).all()
-    )
+    ) if item_ids else {}
     runtime = _runtime_info()
     latest_builds: dict[int, ProtocolBuildJob] = {}
     for job in db.scalars(
-        select(ProtocolBuildJob).order_by(
+        select(ProtocolBuildJob)
+        .where(ProtocolBuildJob.protocol_definition_id.in_(item_ids))
+        .order_by(
             ProtocolBuildJob.protocol_definition_id,
             ProtocolBuildJob.id.desc(),
         )
-    ).all():
+    ).all() if item_ids else []:
         latest_builds.setdefault(job.protocol_definition_id, job)
-    upstream_by_package = {
-        package_name: npm_version_summary(package_name)
-        for package_name in {item.package_name for item in items}
-    }
+    if sort_by != "remoteLatestVersion":
+        upstream_by_package = {
+            package_name: npm_version_summary(package_name)
+            for package_name in {item.package_name for item in items}
+        }
     return {
         "data": {
             "rows": [
@@ -169,7 +270,9 @@ def list_protocol_definitions(
                 )
                 for item in items
             ],
-            "total": len(items),
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
         }
     }
 

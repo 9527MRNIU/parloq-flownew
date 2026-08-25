@@ -2,19 +2,19 @@ import { PlusIcon, RefreshCwIcon } from "lucide-react";
 import {
   useCallback,
   useEffect,
-  useMemo,
   useState,
   type ReactNode,
 } from "react";
-import { apiRequest, unwrapList } from "../api/client";
+import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
 import {
   ListPagination,
+  ListSortableHead,
   ListTableCard,
   ListToolbar,
   StandardListPage,
-  useClientPagination,
+  type ListSortOrder,
 } from "../components/list-page";
 import { DrawerFieldLabel } from "../components/drawer-form";
 import { snowflakeId } from "../lib/entity-identifiers";
@@ -26,6 +26,7 @@ import {
   Drawer,
   EmptyState,
   Input,
+  SelectField,
   Spinner,
   Table,
   TableBody,
@@ -46,6 +47,8 @@ type ProtocolPool = {
   id: string;
   name: string;
   remark: string;
+  createdAt: string;
+  updatedAt: string;
   members: Array<{
     protocolNodeId: string;
     protocolNodeName: string;
@@ -53,6 +56,8 @@ type ProtocolPool = {
     available: boolean;
   }>;
 };
+
+type ProtocolPoolSortBy = "id" | "createdAt" | "updatedAt";
 
 function value(row: Record<string, unknown>, ...keys: string[]) {
   for (const key of keys) if (row[key] != null) return row[key];
@@ -91,6 +96,8 @@ function protocolPool(input: unknown): ProtocolPool {
     id: snowflakeId(row, "id"),
     name: text(row, "name"),
     remark: text(row, "remark"),
+    createdAt: text(row, "createdAt", "created_at"),
+    updatedAt: text(row, "updatedAt", "updated_at"),
     members: rawMembers.map((inputMember) => {
       const member = inputMember as Record<string, unknown>;
       return {
@@ -124,6 +131,14 @@ export function ProtocolRoutingPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
+  const [protocolNodeId, setProtocolNodeId] = useState("all");
+  const [status, setStatus] = useState("all");
+  const [sortBy, setSortBy] = useState<ProtocolPoolSortBy>("id");
+  const [sortOrder, setSortOrder] = useState<ListSortOrder>("desc");
   const [editing, setEditing] = useState<ProtocolPool | "new" | null>(null);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
@@ -136,41 +151,47 @@ export function ProtocolRoutingPage({
     setLoading(true);
     setError("");
     try {
+      const query = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+      if (debouncedKeyword) query.set("keyword", debouncedKeyword);
+      if (protocolNodeId !== "all") query.set("protocolNodeId", protocolNodeId);
+      if (status !== "all") query.set("status", status);
+      query.set("sortBy", sortBy);
+      query.set("sortOrder", sortOrder);
       const [nodePayload, poolPayload] = await Promise.all([
-        apiRequest("/api/protocol-nodes?pageSize=100"),
-        apiRequest("/api/protocol-pools?pageSize=100"),
+        apiRequest("/api/protocol-nodes/options"),
+        apiRequest(`/api/protocol-pools?${query}`),
       ]);
       setNodes(
         unwrapList<unknown>(nodePayload).rows.map(protocolNodeOption),
       );
-      setPools(unwrapList<unknown>(poolPayload).rows.map(protocolPool));
+      const poolList = unwrapList<unknown>(poolPayload);
+      setPools(poolList.rows.map(protocolPool));
+      setTotal(poolList.total);
     } catch (caught) {
       setNodes([]);
       setPools([]);
+      setTotal(0);
       setError(caught instanceof Error ? caught.message : "路由策略加载失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [debouncedKeyword, page, pageSize, protocolNodeId, sortBy, sortOrder, status]);
 
   useEffect(() => void load(), [load]);
 
-  const visiblePools = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    if (!search) return pools;
-    return pools.filter((pool) =>
-      [
-        pool.id,
-        pool.name,
-        pool.remark,
-        ...pool.members.map((member) => member.protocolNodeName),
-      ]
-        .join(" ")
-        .toLowerCase()
-        .includes(search),
-    );
-  }, [keyword, pools]);
-  const pagination = useClientPagination(visiblePools, { resetKey: keyword });
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+
+  function changeSort(nextSortBy: ProtocolPoolSortBy, nextSortOrder: ListSortOrder) {
+    setSortBy(nextSortBy);
+    setSortOrder(nextSortOrder);
+    setPage(1);
+  }
 
   function openPool(pool?: ProtocolPool) {
     setEditing(pool || "new");
@@ -241,8 +262,29 @@ export function ProtocolRoutingPage({
           onChange: setKeyword,
           placeholder: "搜索策略名称、ID、备注或协议节点",
         }}
-        filters={toolbarTabs}
-        meta={`${visiblePools.length} 个路由策略`}
+        filters={
+          <>
+            {toolbarTabs}
+            <SelectField
+              value={protocolNodeId}
+              onValueChange={(value) => { setProtocolNodeId(value); setPage(1); }}
+              options={[
+                { value: "all", label: "全部协议节点" },
+                ...nodes.map((node) => ({ value: node.id, label: `${node.name} · ${node.id}` })),
+              ]}
+            />
+            <SelectField
+              value={status}
+              onValueChange={(value) => { setStatus(value); setPage(1); }}
+              options={[
+                { value: "all", label: "全部可用状态" },
+                { value: "available", label: "可用" },
+                { value: "unavailable", label: "不可用" },
+              ]}
+            />
+          </>
+        }
+        meta={`${total} 个路由策略`}
         actions={
           <>
             <Button
@@ -260,12 +302,12 @@ export function ProtocolRoutingPage({
       />
       <ListPagination
         ariaLabel="路由策略分页"
-        page={pagination.page}
-        pageSize={pagination.pageSize}
-        total={pagination.total}
+        page={page}
+        pageSize={pageSize}
+        total={total}
         disabled={loading}
-        onPageChange={pagination.setPage}
-        onPageSizeChange={pagination.setPageSize}
+        onPageChange={setPage}
+        onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
       />
       <ListTableCard>
         {loading ? (
@@ -280,18 +322,20 @@ export function ProtocolRoutingPage({
               重试
             </Button>
           </div>
-        ) : visiblePools.length ? (
+        ) : pools.length ? (
           <Table layout="list">
             <TableHeader>
               <TableRow>
-                <TableHead>路由策略</TableHead>
+                <ListSortableHead sortKey="id" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>路由策略</ListSortableHead>
                 <TableHead adaptive>回退顺序</TableHead>
                 <TableHead>备注</TableHead>
+                <ListSortableHead sortKey="createdAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>创建时间</ListSortableHead>
+                <ListSortableHead sortKey="updatedAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>更新时间</ListSortableHead>
                 <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {pagination.rows.map((pool) => {
+              {pools.map((pool) => {
                 const available = pool.members.some(
                   (member) => member.available,
                 );
@@ -330,6 +374,12 @@ export function ProtocolRoutingPage({
                         {pool.remark || "-"}
                       </span>
                     </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {formatDateTime(pool.createdAt)}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {formatDateTime(pool.updatedAt)}
+                    </TableCell>
                     <TableCell>
                       <div className="flex min-w-max justify-end gap-2">
                         {canManage ? (
@@ -359,9 +409,9 @@ export function ProtocolRoutingPage({
           </Table>
         ) : (
           <EmptyState
-            title={keyword.trim() ? "没有符合条件的路由策略" : "暂无路由策略"}
+            title={keyword.trim() || protocolNodeId !== "all" || status !== "all" ? "没有符合条件的路由策略" : "暂无路由策略"}
             description={
-              keyword.trim()
+              keyword.trim() || protocolNodeId !== "all" || status !== "all"
                 ? "请调整搜索条件后重试。"
                 : "默认拒绝不可用节点；需要回退时再创建路由策略并绑定渠道。"
             }

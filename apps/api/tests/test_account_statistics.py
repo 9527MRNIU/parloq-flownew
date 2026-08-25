@@ -303,6 +303,18 @@ def test_account_statistics_are_event_based_and_tenant_scoped(
         assert event_row["postMarketingInvalidRate"] == 0.5
         assert event_row["netGrowth"] == -1
         assert event_row["overallInvalidRate"] == 1
+        descending = owner_client.get(
+            "/api/account-statistics/daily",
+            params={
+                "dateFrom": first_day.isoformat(),
+                "dateTo": today.isoformat(),
+                "sortBy": "date",
+                "sortOrder": "desc",
+            },
+        )
+        assert descending.status_code == 200, descending.text
+        descending_dates = [row["date"] for row in descending.json()["data"]["rows"]]
+        assert descending_dates == sorted(descending_dates, reverse=True)
 
         countries = owner_client.get("/api/account-statistics/countries")
         assert countries.status_code == 200

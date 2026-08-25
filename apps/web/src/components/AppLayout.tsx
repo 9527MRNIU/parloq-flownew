@@ -245,11 +245,6 @@ export const navigation: NavSection[] = [
             to: "/resources/accounts/intake",
             permissionKey: "resources.account_intake.read",
           },
-          {
-            label: "账号导出",
-            to: "/resources/accounts/export",
-            permissionKey: "resources.accounts.export",
-          },
         ],
       },
       {

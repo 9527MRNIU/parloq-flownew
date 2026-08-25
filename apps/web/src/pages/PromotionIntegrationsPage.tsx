@@ -14,10 +14,11 @@ import { DrawerFieldLabel } from "../components/drawer-form";
 import { RepositorySourceTabs } from "../components/repository-source-tabs";
 import {
   ListPagination,
+  ListSortableHead,
   ListTableCard,
   ListToolbar,
   StandardListPage,
-  useClientPagination,
+  type ListSortOrder,
 } from "../components/list-page";
 import {
   Badge,
@@ -26,6 +27,7 @@ import {
   EmptyState,
   Input,
   SearchableSelect,
+  SelectField,
   Spinner,
   Switch,
   Table,
@@ -48,6 +50,21 @@ import {
 } from "../lib/promotion-repository";
 
 type IntegrationType = "script" | "iframe";
+type PromotionIntegrationSortBy =
+  | "id"
+  | "integrationKey"
+  | "integrationType"
+  | "sourceDomainName"
+  | "assetCount"
+  | "templateCount"
+  | "eventCount"
+  | "createdAt"
+  | "updatedAt";
+type RepositoryIntegrationSortBy =
+  | "sequence"
+  | "integrationType"
+  | "assetCount"
+  | "localStatus";
 
 type PromotionIntegration = {
   id: string;
@@ -94,6 +111,12 @@ type IntegrationEvent = {
 type IntegrationEventSummary = {
   eventType: string;
   count: number;
+};
+type IntegrationEventFilterOptions = {
+  eventTypes: string[];
+  channels: Array<{ id: string; name: string }>;
+  sources: string[];
+  fingerprintQualities: string[];
 };
 
 type DomainOption = {
@@ -213,6 +236,21 @@ export default function PromotionIntegrationsPage() {
   const [domains, setDomains] = useState<DomainOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
+  const [repositoryPage, setRepositoryPage] = useState(1);
+  const [repositoryPageSize, setRepositoryPageSize] = useState(20);
+  const [repositoryTotal, setRepositoryTotal] = useState(0);
+  const [integrationType, setIntegrationType] = useState("all");
+  const [sourceDomainId, setSourceDomainId] = useState("all");
+  const [sortBy, setSortBy] = useState<PromotionIntegrationSortBy>("id");
+  const [sortOrder, setSortOrder] = useState<ListSortOrder>("desc");
+  const [repositoryIntegrationType, setRepositoryIntegrationType] = useState("all");
+  const [repositoryLocalStatus, setRepositoryLocalStatus] = useState("all");
+  const [repositorySortBy, setRepositorySortBy] = useState<RepositoryIntegrationSortBy>("sequence");
+  const [repositorySortOrder, setRepositorySortOrder] = useState<ListSortOrder>("asc");
   const [drawer, setDrawer] = useState(false);
   const [editing, setEditing] = useState<PromotionIntegration | null>(null);
   const [pending, setPending] = useState(false);
@@ -230,15 +268,34 @@ export default function PromotionIntegrationsPage() {
   const [eventsLoading, setEventsLoading] = useState(false);
   const [expandedEventId, setExpandedEventId] = useState("");
   const [eventDetailLoading, setEventDetailLoading] = useState("");
+  const [eventTypeFilter, setEventTypeFilter] = useState("all");
+  const [eventChannelFilter, setEventChannelFilter] = useState("all");
+  const [eventSourceFilter, setEventSourceFilter] = useState("all");
+  const [eventFingerprintFilter, setEventFingerprintFilter] = useState("all");
+  const [eventFilterOptions, setEventFilterOptions] =
+    useState<IntegrationEventFilterOptions>({
+      eventTypes: [],
+      channels: [],
+      sources: [],
+      fingerprintQualities: [],
+    });
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      const query = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+      if (debouncedKeyword) query.set("keyword", debouncedKeyword);
+      if (integrationType !== "all") query.set("integrationType", integrationType);
+      if (sourceDomainId !== "all") query.set("sourceDomainId", sourceDomainId);
+      query.set("sortBy", sortBy);
+      query.set("sortOrder", sortOrder);
       const [integrationPayload, domainPayload] = await Promise.all([
-        apiRequest("/api/promotion/integrations"),
+        apiRequest(`/api/promotion/integrations?${query}`),
         apiRequest("/api/domains/available-for-channels"),
       ]);
-      setRows(unwrapList<unknown>(integrationPayload).rows.map(integrationRow));
+      const list = unwrapList<unknown>(integrationPayload);
+      setRows(list.rows.map(integrationRow));
+      setTotal(list.total);
       setDomains(
         unwrapList<unknown>(domainPayload)
           .rows.map((input) => {
@@ -252,12 +309,13 @@ export default function PromotionIntegrationsPage() {
       );
     } catch (caught) {
       setRows([]);
+      setTotal(0);
       setDomains([]);
       toast.error(caught instanceof Error ? caught.message : "集成列表读取失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [debouncedKeyword, integrationType, page, pageSize, sortBy, sortOrder, sourceDomainId]);
 
   useEffect(() => {
     void load();
@@ -280,8 +338,14 @@ export default function PromotionIntegrationsPage() {
       setRepositoryError("");
     }
     try {
+      const query = new URLSearchParams({ page: String(repositoryPage), pageSize: String(repositoryPageSize) });
+      if (debouncedKeyword) query.set("keyword", debouncedKeyword);
+      if (repositoryIntegrationType !== "all") query.set("integrationType", repositoryIntegrationType);
+      if (repositoryLocalStatus !== "all") query.set("localStatus", repositoryLocalStatus);
+      query.set("sortBy", repositorySortBy);
+      query.set("sortOrder", repositorySortOrder);
       const payload = await apiRequest(
-        `/api/promotion/integrations/repository${refresh ? "/refresh" : ""}`,
+        `/api/promotion/integrations/repository${refresh ? "/refresh" : ""}?${query}`,
         {
           method: refresh ? "POST" : "GET",
         },
@@ -289,6 +353,7 @@ export default function PromotionIntegrationsPage() {
       const data = object(object(payload).data ?? payload);
       const nextRows = unwrapList<unknown>(payload).rows.map(remotePromotionArtifactRow);
       setRepositoryRows(nextRows);
+      setRepositoryTotal(unwrapList<unknown>(payload).total);
       setRepositoryError("");
       return { ok: true, cacheHit: data.cacheHit === true };
     } catch (caught) {
@@ -296,6 +361,7 @@ export default function PromotionIntegrationsPage() {
       if (preserve) toast.error(`仓库刷新失败，当前显示上次缓存：${message}`);
       else {
         setRepositoryRows([]);
+        setRepositoryTotal(0);
         setRepositoryError(message);
       }
       return { ok: false, cacheHit: false };
@@ -304,74 +370,92 @@ export default function PromotionIntegrationsPage() {
       if (preserve) setRepositoryRefreshing(false);
       else setRepositoryLoading(false);
     }
-  }, []);
+  }, [debouncedKeyword, repositoryIntegrationType, repositoryLocalStatus, repositoryPage, repositoryPageSize, repositorySortBy, repositorySortOrder]);
 
   function changeView(next: RepositoryView) {
     setView(next);
-    if (next !== "repository") return;
-    void (async () => {
-      const cached = await loadRepository({ preserve: repositoryRows.length > 0 });
-      if (!cached.ok || !cached.cacheHit) return;
-      const refreshed = await loadRepository({ refresh: true, preserve: true });
-      if (refreshed.ok) await load();
-    })();
   }
 
-  const loadEvents = useCallback(
-    async (row: PromotionIntegration, page: number, pageSize: number) => {
-      setEventsLoading(true);
-      try {
-        const payload = await apiRequest(
-          `/api/promotion/integrations/${row.id}/events?page=${page}&perPage=${pageSize}`,
-        );
-        const data = object(object(payload).data);
-        setEventRows(
-          (Array.isArray(data.rows) ? data.rows : []).map(eventRow),
-        );
-        setEventSummary(
-          (Array.isArray(data.summary) ? data.summary : []).map((input) => {
-            const summary = object(input);
-            return {
-              eventType: field(summary, "eventType", "event_type"),
-              count: Number(summary.count || 0),
-            };
-          }),
-        );
-        setEventTotal(Number(data.total || 0));
-      } catch (caught) {
-        setEventRows([]);
-        setEventSummary([]);
-        setEventTotal(0);
-        toast.error(caught instanceof Error ? caught.message : "回传记录读取失败");
-      } finally {
-        setEventsLoading(false);
-      }
-    },
-    [],
-  );
+  function changeSort(nextSortBy: PromotionIntegrationSortBy, nextSortOrder: ListSortOrder) {
+    setSortBy(nextSortBy);
+    setSortOrder(nextSortOrder);
+    setPage(1);
+  }
 
-  const visible = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    if (!search) return rows;
-    return rows.filter((row) =>
-      `${row.name} ${row.integrationKey} ${row.hostname} ${row.entryPaths.join(" ")} ${row.type}`
-        .toLowerCase()
-        .includes(search),
-    );
-  }, [keyword, rows]);
-  const pagination = useClientPagination(visible, { resetKey: keyword });
-  const repositoryVisible = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    if (!search) return repositoryRows;
-    return repositoryRows.filter((row) =>
-      `${row.sequence} ${row.name} ${row.description} ${row.slug} ${row.integrationKey} ${row.version}`
-        .toLowerCase()
-        .includes(search),
-    );
-  }, [keyword, repositoryRows]);
-  const repositoryPagination = useClientPagination(repositoryVisible, {
-    resetKey: keyword,
-  });
+  function changeRepositorySort(nextSortBy: RepositoryIntegrationSortBy, nextSortOrder: ListSortOrder) {
+    setRepositorySortBy(nextSortBy);
+    setRepositorySortOrder(nextSortOrder);
+    setRepositoryPage(1);
+  }
+
+  const loadEvents = useCallback(async () => {
+    if (!eventIntegration) return;
+    setEventsLoading(true);
+    try {
+      const query = new URLSearchParams({
+        page: String(eventPage),
+        pageSize: String(eventPageSize),
+      });
+      if (eventTypeFilter !== "all") query.set("eventType", eventTypeFilter);
+      if (eventChannelFilter !== "all") query.set("channelId", eventChannelFilter);
+      if (eventSourceFilter !== "all") query.set("source", eventSourceFilter);
+      if (eventFingerprintFilter !== "all") {
+        query.set("fingerprintQuality", eventFingerprintFilter);
+      }
+      const payload = await apiRequest(
+        `/api/promotion/integrations/${eventIntegration.id}/events?${query}`,
+      );
+      const data = object(object(payload).data);
+      setEventRows((Array.isArray(data.rows) ? data.rows : []).map(eventRow));
+      setEventSummary(
+        (Array.isArray(data.summary) ? data.summary : []).map((input) => {
+          const summary = object(input);
+          return {
+            eventType: field(summary, "eventType", "event_type"),
+            count: Number(summary.count || 0),
+          };
+        }),
+      );
+      const filterOptions = object(data.filterOptions ?? data.filter_options);
+      setEventFilterOptions({
+        eventTypes: stringList(filterOptions.eventTypes ?? filterOptions.event_types),
+        channels: (Array.isArray(filterOptions.channels) ? filterOptions.channels : [])
+          .map((input) => {
+            const row = object(input);
+            return { id: snowflakeId(row, "id"), name: field(row, "name") };
+          })
+          .filter((row) => row.id),
+        sources: stringList(filterOptions.sources),
+        fingerprintQualities: stringList(
+          filterOptions.fingerprintQualities ?? filterOptions.fingerprint_qualities,
+        ),
+      });
+      setEventTotal(Number(data.total || 0));
+    } catch (caught) {
+      setEventRows([]);
+      setEventSummary([]);
+      setEventTotal(0);
+      toast.error(caught instanceof Error ? caught.message : "回传记录读取失败");
+    } finally {
+      setEventsLoading(false);
+    }
+  }, [eventChannelFilter, eventFingerprintFilter, eventIntegration, eventPage, eventPageSize, eventSourceFilter, eventTypeFilter]);
+
+  useEffect(() => {
+    void loadEvents();
+  }, [loadEvents]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+      setPage(1);
+      setRepositoryPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+  useEffect(() => {
+    if (view === "repository") void loadRepository();
+  }, [loadRepository, view]);
 
   async function importRepositoryIntegration(
     row: Pick<RemotePromotionArtifact, "sequence">,
@@ -481,8 +565,11 @@ export default function PromotionIntegrationsPage() {
   function openEvents(row: PromotionIntegration) {
     setEventIntegration(row);
     setEventPage(1);
+    setEventTypeFilter("all");
+    setEventChannelFilter("all");
+    setEventSourceFilter("all");
+    setEventFingerprintFilter("all");
     setExpandedEventId("");
-    void loadEvents(row, 1, eventPageSize);
   }
 
   async function toggleEventDetail(event: IntegrationEvent) {
@@ -604,13 +691,59 @@ export default function PromotionIntegrationsPage() {
               : "搜索远程集成名称、编号或标识",
         }}
         filters={
-          <RepositorySourceTabs
-            value={view}
-            localLabel="本地集成"
-            onChange={changeView}
-          />
+          <>
+            <RepositorySourceTabs
+              value={view}
+              localLabel="本地集成"
+              onChange={changeView}
+            />
+            {view === "local" ? (
+              <>
+                <SelectField
+                  value={integrationType}
+                  onValueChange={(value) => { setIntegrationType(value); setPage(1); }}
+                  options={[
+                    { value: "all", label: "全部类型" },
+                    { value: "script", label: "JavaScript" },
+                    { value: "iframe", label: "iframe" },
+                  ]}
+                />
+                <SelectField
+                  value={sourceDomainId}
+                  onValueChange={(value) => { setSourceDomainId(value); setPage(1); }}
+                  options={[
+                    { value: "all", label: "全部源域名" },
+                    ...domains.map((domain) => ({ value: domain.id, label: domain.hostname })),
+                  ]}
+                />
+              </>
+            ) : (
+              <>
+                <SelectField
+                  value={repositoryIntegrationType}
+                  onValueChange={(value) => { setRepositoryIntegrationType(value); setRepositoryPage(1); }}
+                  options={[
+                    { value: "all", label: "全部类型" },
+                    { value: "script", label: "JavaScript" },
+                    { value: "iframe", label: "iframe" },
+                  ]}
+                />
+                <SelectField
+                  value={repositoryLocalStatus}
+                  onValueChange={(value) => { setRepositoryLocalStatus(value); setRepositoryPage(1); }}
+                  options={[
+                    { value: "all", label: "全部本地状态" },
+                    { value: "new", label: "未添加" },
+                    { value: "current", label: "已添加" },
+                    { value: "update", label: "可更新" },
+                    { value: "conflict", label: "版本冲突" },
+                  ]}
+                />
+              </>
+            )}
+          </>
         }
-        meta={`${view === "local" ? visible.length : repositoryVisible.length} 个集成`}
+        meta={`${view === "local" ? total : repositoryTotal} 个集成`}
         actions={
           <>
             <Button
@@ -637,12 +770,15 @@ export default function PromotionIntegrationsPage() {
         }
       />
       <ListPagination
-        page={view === "local" ? pagination.page : repositoryPagination.page}
-        pageSize={view === "local" ? pagination.pageSize : repositoryPagination.pageSize}
-        total={view === "local" ? pagination.total : repositoryPagination.total}
+        page={view === "local" ? page : repositoryPage}
+        pageSize={view === "local" ? pageSize : repositoryPageSize}
+        total={view === "local" ? total : repositoryTotal}
         disabled={view === "local" ? loading : repositoryLoading}
-        onPageChange={view === "local" ? pagination.setPage : repositoryPagination.setPage}
-        onPageSizeChange={view === "local" ? pagination.setPageSize : repositoryPagination.setPageSize}
+        onPageChange={view === "local" ? setPage : setRepositoryPage}
+        onPageSizeChange={(value) => {
+          if (view === "local") { setPageSize(value); setPage(1); }
+          else { setRepositoryPageSize(value); setRepositoryPage(1); }
+        }}
       />
       <ListTableCard>
         {view === "repository" ? (
@@ -655,22 +791,22 @@ export default function PromotionIntegrationsPage() {
               title="远程仓库暂不可用"
               description={repositoryError}
             />
-          ) : repositoryVisible.length ? (
+          ) : repositoryRows.length ? (
             <Table layout="list">
               <TableHeader>
                 <TableRow>
-                  <TableHead>远程集成</TableHead>
+                  <ListSortableHead sortKey="sequence" activeSortKey={repositorySortBy} sortOrder={repositorySortOrder} onSort={changeRepositorySort}>远程集成</ListSortableHead>
                   <TableHead adaptive>备注</TableHead>
-                  <TableHead>类型</TableHead>
+                  <ListSortableHead sortKey="integrationType" activeSortKey={repositorySortBy} sortOrder={repositorySortOrder} onSort={changeRepositorySort}>类型</ListSortableHead>
                   <TableHead>版本</TableHead>
                   <TableHead>源码目录</TableHead>
-                  <TableHead>资源</TableHead>
-                  <TableHead>本地状态</TableHead>
+                  <ListSortableHead sortKey="assetCount" activeSortKey={repositorySortBy} sortOrder={repositorySortOrder} defaultOrder="desc" onSort={changeRepositorySort}>资源</ListSortableHead>
+                  <ListSortableHead sortKey="localStatus" activeSortKey={repositorySortBy} sortOrder={repositorySortOrder} onSort={changeRepositorySort}>本地状态</ListSortableHead>
                   <TableHead>操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {repositoryPagination.rows.map((row) => (
+                {repositoryRows.map((row) => (
                   <TableRow key={row.id}>
                     <TableCell>
                       <EntityPrimaryCell
@@ -773,25 +909,25 @@ export default function PromotionIntegrationsPage() {
           <div className="loading-state">
             <Spinner />
           </div>
-        ) : visible.length ? (
+        ) : rows.length ? (
           <Table layout="list">
             <TableHeader>
               <TableRow>
-                <TableHead>集成</TableHead>
-                <TableHead>集成标识</TableHead>
-                <TableHead>类型</TableHead>
-                <TableHead>源域名</TableHead>
-                <TableHead>资源包</TableHead>
-                <TableHead>模板</TableHead>
-                <TableHead>回传</TableHead>
+                <ListSortableHead sortKey="id" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>集成</ListSortableHead>
+                <ListSortableHead sortKey="integrationKey" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>集成标识</ListSortableHead>
+                <ListSortableHead sortKey="integrationType" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>类型</ListSortableHead>
+                <ListSortableHead sortKey="sourceDomainName" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>源域名</ListSortableHead>
+                <ListSortableHead sortKey="assetCount" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>资源包</ListSortableHead>
+                <ListSortableHead sortKey="templateCount" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>模板</ListSortableHead>
+                <ListSortableHead sortKey="eventCount" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>回传</ListSortableHead>
                 <TableHead adaptive>备注</TableHead>
-                <TableHead>创建时间</TableHead>
-                <TableHead>更新时间</TableHead>
+                <ListSortableHead sortKey="createdAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>创建时间</ListSortableHead>
+                <ListSortableHead sortKey="updatedAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>更新时间</ListSortableHead>
                 <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {pagination.rows.map((row) => (
+              {rows.map((row) => (
                 <TableRow key={row.readKey}>
                   <TableCell>
                     <EntityPrimaryCell
@@ -1142,23 +1278,54 @@ export default function PromotionIntegrationsPage() {
               ))}
             </div>
           ) : null}
+          <div className="flex flex-wrap gap-2">
+            <SelectField
+              value={eventTypeFilter}
+              onValueChange={(value) => { setEventTypeFilter(value); setEventPage(1); }}
+              options={[
+                { value: "all", label: "全部事件类型" },
+                ...eventFilterOptions.eventTypes.map((value) => ({ value, label: value })),
+              ]}
+            />
+            <SelectField
+              value={eventChannelFilter}
+              onValueChange={(value) => { setEventChannelFilter(value); setEventPage(1); }}
+              options={[
+                { value: "all", label: "全部渠道" },
+                ...eventFilterOptions.channels.map((channel) => ({
+                  value: channel.id,
+                  label: `${channel.name} · ${channel.id}`,
+                })),
+              ]}
+            />
+            <SelectField
+              value={eventSourceFilter}
+              onValueChange={(value) => { setEventSourceFilter(value); setEventPage(1); }}
+              options={[
+                { value: "all", label: "全部来源" },
+                ...eventFilterOptions.sources.map((value) => ({
+                  value,
+                  label: value === "fission" ? "裂变" : "直接",
+                })),
+              ]}
+            />
+            <SelectField
+              value={eventFingerprintFilter}
+              onValueChange={(value) => { setEventFingerprintFilter(value); setEventPage(1); }}
+              options={[
+                { value: "all", label: "全部指纹" },
+                ...eventFilterOptions.fingerprintQualities.map((value) => ({ value, label: value })),
+              ]}
+            />
+          </div>
           <ListPagination
             page={eventPage}
             pageSize={eventPageSize}
             total={eventTotal}
             disabled={eventsLoading}
             ariaLabel="回传记录分页"
-            onPageChange={(page) => {
-              if (!eventIntegration) return;
-              setEventPage(page);
-              void loadEvents(eventIntegration, page, eventPageSize);
-            }}
-            onPageSizeChange={(pageSize) => {
-              if (!eventIntegration) return;
-              setEventPage(1);
-              setEventPageSize(pageSize);
-              void loadEvents(eventIntegration, 1, pageSize);
-            }}
+            onPageChange={setEventPage}
+            onPageSizeChange={(pageSize) => { setEventPage(1); setEventPageSize(pageSize); }}
           />
           <ListTableCard>
             {eventsLoading ? (
@@ -1183,6 +1350,7 @@ export default function PromotionIntegrationsPage() {
                       <TableCell>
                         <div className="cell-main">
                           <strong>{event.eventType}</strong>
+                          <span>{event.id}</span>
                           <span>v{event.integrationVersion}</span>
                         </div>
                       </TableCell>

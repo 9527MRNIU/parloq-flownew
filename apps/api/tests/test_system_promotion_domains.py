@@ -9,11 +9,17 @@ import hmac
 import json
 
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.database import SessionLocal
 from app.main import app
-from app.models import DomainOrder, DomainQuote, DomainRecord, UserAccount
+from app.models import (
+    DomainOrder,
+    DomainQuote,
+    DomainRecord,
+    ProviderDomainCache,
+    UserAccount,
+)
 from app.routers import domains as domains_router
 from app.security import utcnow
 from app.services.domain_registrar import (
@@ -155,6 +161,9 @@ def test_external_domain_inventories_and_namesilo_purchase_source(
 
     admin_client.delete("/api/system/configuration/cloudflare")
     admin_client.delete("/api/system/configuration/namesilo")
+    with SessionLocal() as db:
+        db.execute(delete(ProviderDomainCache))
+        db.commit()
     try:
         assert admin_client.put(
             "/api/system/configuration/cloudflare",
@@ -218,7 +227,7 @@ def test_external_domain_inventories_and_namesilo_purchase_source(
             db.add(order)
             db.commit()
 
-        cloudflare = admin_client.get("/api/domains/cloudflare")
+        cloudflare = admin_client.post("/api/domains/cloudflare/refresh")
         assert cloudflare.status_code == 200, cloudflare.text
         cloudflare_row = cloudflare.json()["data"]["rows"][0]
         assert cloudflare_row["hostname"] == "cloudflare-owned.example"
@@ -226,10 +235,18 @@ def test_external_domain_inventories_and_namesilo_purchase_source(
         assert cloudflare_row["phishingDetected"] is False
         assert "accountName" not in cloudflare_row
         assert "nameServers" not in cloudflare_row
-        assert "createdAt" not in cloudflare_row
+        assert cloudflare_row["id"].isdigit()
+        assert cloudflare_row["createdAt"].startswith("2026-01-01")
+        assert cloudflare_row["updatedAt"].startswith("2026-02-01")
         assert "expiresAt" not in cloudflare_row
+        cached_id = cloudflare_row["id"]
+        refreshed = admin_client.post(
+            "/api/domains/cloudflare/refresh?providerStatus=active&sortBy=createdAt&sortOrder=asc"
+        )
+        assert refreshed.status_code == 200, refreshed.text
+        assert refreshed.json()["data"]["rows"][0]["id"] == cached_id
 
-        namesilo = admin_client.get("/api/domains/namesilo")
+        namesilo = admin_client.post("/api/domains/namesilo/sync")
         assert namesilo.status_code == 200, namesilo.text
         rows = {row["hostname"]: row for row in namesilo.json()["data"]["rows"]}
         assert rows["system-bought.example"]["source"] == "system_purchase"
@@ -240,6 +257,7 @@ def test_external_domain_inventories_and_namesilo_purchase_source(
         admin_client.delete("/api/system/configuration/cloudflare")
         admin_client.delete("/api/system/configuration/namesilo")
         with SessionLocal() as db:
+            db.execute(delete(ProviderDomainCache))
             order = db.scalar(
                 select(DomainOrder).where(DomainOrder.hostname == "system-bought.example")
             )
@@ -729,6 +747,13 @@ def test_namesilo_sync_auto_recovers_failed_order_and_starts_onboarding(
     )
 
     admin_client.delete("/api/system/configuration/namesilo")
+    with SessionLocal() as db:
+        db.execute(
+            delete(ProviderDomainCache).where(
+                ProviderDomainCache.provider == "namesilo"
+            )
+        )
+        db.commit()
     try:
         configured = admin_client.put(
             "/api/system/configuration/namesilo",
@@ -838,6 +863,11 @@ def test_namesilo_sync_auto_recovers_failed_order_and_starts_onboarding(
     finally:
         admin_client.delete("/api/system/configuration/namesilo")
         with SessionLocal() as db:
+            db.execute(
+                delete(ProviderDomainCache).where(
+                    ProviderDomainCache.provider == "namesilo"
+                )
+            )
             orders = db.scalars(
                 select(DomainOrder).where(DomainOrder.hostname == hostname)
             ).all()
@@ -1381,12 +1411,24 @@ def test_promotion_data_center_aggregates_uv_costs_and_successes(
     assert row["requestRate"] == 1.0
     assert row["successRate"] == 1.0
     assert row["costPerSuccess"] == 80.0
+    assert row["channelType"] == "facebook"
+    assert row["createdAt"]
+    assert row["updatedAt"]
     assert any(detail["adMetricId"] for detail in row["daily"])
+    filtered = admin_client.get(
+        f"/api/promotion/data-center/channels?channelTypes=facebook"
+        f"&channelIds={channel_data['id']}&sortBy=loginSuccessUv&sortOrder=desc"
+    )
+    assert filtered.status_code == 200, filtered.text
+    assert filtered.json()["data"]["rows"][0]["promotionChannelId"] == channel_data["id"]
     trends = admin_client.get(
         f"/api/promotion/data-center/trends?channelIds={channel_data['id']}"
+        "&sortBy=date&sortOrder=desc"
     )
     assert trends.status_code == 200
-    assert any(point["uv"] == 1 for point in trends.json()["data"]["series"])
+    trend_rows = trends.json()["data"]["series"]
+    assert any(point["uv"] == 1 for point in trend_rows)
+    assert trend_rows[0]["date"] >= trend_rows[-1]["date"]
     legacy_summary = admin_client.get(
         f"/api/promotion/ad-metrics/summary?promotionChannelId={channel_data['id']}"
     )

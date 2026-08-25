@@ -37,7 +37,11 @@ def test_protocol_node_metrics_ingress_and_marketing_controls(
     assert disabled_ingress.status_code == 200, disabled_ingress.text
     blocked = admin_client.post(
         "/api/personal-accounts",
-        json={"name": "Blocked ingress", "phone": "+12025551981"},
+        json={
+            "name": "Blocked ingress",
+            "phone": "+12025551981",
+            "protocolId": node["id"],
+        },
     )
     assert blocked.status_code == 409
     assert "关闭进号" in blocked.json()["detail"]
@@ -189,7 +193,11 @@ def test_protocol_node_create_pool_and_template_contract(
     }
     assert updated_rate_policy["visitorCheck"]["maxRequests"] == 7
 
-    fallback = admin_client.get("/api/protocol-nodes").json()["data"]["rows"][0]
+    fallback = next(
+        row
+        for row in admin_client.get("/api/protocol-nodes").json()["data"]["rows"]
+        if row["id"] != node["id"]
+    )
     pool = admin_client.post(
         "/api/protocol-pools",
         json={
@@ -207,6 +215,42 @@ def test_protocol_node_create_pool_and_template_contract(
         node["id"],
         fallback["id"],
     ]
+    assert pool_row["createdAt"]
+    assert pool_row["updatedAt"]
+
+    filtered_nodes = admin_client.get(
+        "/api/protocol-nodes",
+        params={
+            "protocolDefinitionId": node["protocolDefinition"]["id"],
+            "ingressEnabled": True,
+            "marketingEnabled": True,
+            "sortBy": "createdAt",
+            "sortOrder": "desc",
+        },
+    )
+    assert filtered_nodes.status_code == 200, filtered_nodes.text
+    assert node["id"] in {
+        row["id"] for row in filtered_nodes.json()["data"]["rows"]
+    }
+
+    expected_pool_status = (
+        "available"
+        if any(member["available"] for member in pool_row["members"])
+        else "unavailable"
+    )
+    filtered_pools = admin_client.get(
+        "/api/protocol-pools",
+        params={
+            "protocolNodeId": node["id"],
+            "status": expected_pool_status,
+            "sortBy": "updatedAt",
+            "sortOrder": "desc",
+        },
+    )
+    assert filtered_pools.status_code == 200, filtered_pools.text
+    assert pool_row["id"] in {
+        row["id"] for row in filtered_pools.json()["data"]["rows"]
+    }
 
     spec = admin_client.get(
         f"/api/protocol-nodes/{node['id']}/integration-spec"
@@ -325,6 +369,42 @@ def test_protocol_nodes_are_tenant_scoped(admin_client: TestClient) -> None:
         first_node = first.get("/api/protocol-nodes").json()["data"]["rows"][0]
         second_node = second.get("/api/protocol-nodes").json()["data"]["rows"][0]
         assert first_node["id"] != second_node["id"]
+        cross_tenant_pool = first.post(
+            "/api/protocol-pools",
+            json={
+                "name": "cross-tenant-pool-denied",
+                "members": [{"protocolNodeId": second_node["id"]}],
+            },
+        )
+        assert cross_tenant_pool.status_code == 404, cross_tenant_pool.text
+        first_pool = first.post(
+            "/api/protocol-pools",
+            json={
+                "name": "tenant-owned-pool",
+                "members": [{"protocolNodeId": first_node["id"]}],
+            },
+        )
+        assert first_pool.status_code == 201, first_pool.text
+        admin_update = admin_client.patch(
+            f"/api/protocol-pools/{first_pool.json()['data']['pool']['id']}",
+            json={"members": [{"protocolNodeId": second_node["id"]}]},
+        )
+        assert admin_update.status_code == 200, admin_update.text
+        admin_pool = admin_client.post(
+            "/api/protocol-pools",
+            json={
+                "name": "admin-cross-tenant-pool",
+                "members": [
+                    {"protocolNodeId": first_node["id"], "priority": 100},
+                    {"protocolNodeId": second_node["id"], "priority": 200},
+                ],
+            },
+        )
+        assert admin_pool.status_code == 201, admin_pool.text
+        assert {
+            member["protocolNodeId"]
+            for member in admin_pool.json()["data"]["pool"]["members"]
+        } == {first_node["id"], second_node["id"]}
         assert first.patch(
             f"/api/protocol-nodes/{second_node['id']}",
             json={"name": "cross tenant"},

@@ -68,6 +68,7 @@ def test_promotion_monitoring_device_summary_includes_readable_versions() -> Non
     assert ios["system"] == "iOS"
     assert ios["systemVersion"] == "18.6"
     assert ios["viewport"] == [390, 844]
+    assert ios["type"] == "mobile"
 
     macos = _device_summary(
         {
@@ -948,6 +949,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     monitored = admin_client.get(
         f"/api/promotion/monitoring/records?channelId={channel_id}"
         "&eventType=phone_submit&visitorCountryCode=CA"
+        "&sourceIp=2001%3Adb8&deviceType=mobile&sortBy=channelName&sortOrder=asc"
     )
     assert monitored.status_code == 200, monitored.text
     monitored_data = monitored.json()["data"]
@@ -962,6 +964,7 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert monitored_record["device"]["browser"] == "Safari"
     assert monitored_record["device"]["browserVersion"] == "18.6"
     assert monitored_record["device"]["viewport"] == [390, 844]
+    assert monitored_record["device"]["type"] == "mobile"
     assert monitored_record["id"].isdigit()
     record_detail = admin_client.get(
         "/api/promotion/monitoring/records/server/"
@@ -2120,11 +2123,38 @@ def test_number_country_is_independent_from_channel_and_visit_country(
         "/api/personal-accounts/intake/attempts?keyword=8613187071551"
     ).json()["data"]
     assert intake["total"] == 1
-    assert intake["rows"][0]["account"]["countryCode"] == "CN"
-    assert intake["rows"][0]["visitorCountryCode"] == "US"
+    intake_row = intake["rows"][0]
+    assert intake_row["account"]["countryCode"] == "CN"
+    assert intake_row["visitorCountryCode"] == "US"
+    filtered_intake = admin_client.get(
+        "/api/personal-accounts/intake/attempts",
+        params={
+            "pairingType": intake_row["attemptType"],
+            "groupId": intake_row["group"]["id"],
+            "channelId": intake_row["channel"]["id"],
+            "templateId": intake_row["template"]["id"],
+            "protocolId": intake_row["protocol"]["id"],
+            "sourceIp": "203.0.113",
+            "countryCode": "CN",
+            "visitorCountryCode": "US",
+            "admissionStatus": intake_row["account"]["admissionStatus"],
+            "metadataStatus": intake_row["account"]["metadataSyncStatus"],
+            "sortBy": "channelId",
+            "sortOrder": "asc",
+        },
+    )
+    assert filtered_intake.status_code == 200, filtered_intake.text
+    assert filtered_intake.json()["data"]["total"] == 1
+    filter_options = admin_client.get(
+        "/api/personal-accounts/intake/attempts/filter-options"
+    )
+    assert filter_options.status_code == 200, filter_options.text
+    filter_data = filter_options.json()["data"]
+    assert "CN" in filter_data["countries"]
+    assert "US" in filter_data["visitorCountries"]
 
     accounts = admin_client.get(
-        "/api/personal-accounts?keyword=8613187071551"
+        "/api/personal-accounts?keyword=8613187071551&visitorCountryCode=US&sortBy=visitorCountryCode&sortOrder=asc"
     ).json()["data"]
     assert accounts["total"] == 1
     assert accounts["rows"][0]["countryCode"] == "CN"

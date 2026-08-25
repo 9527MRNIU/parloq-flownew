@@ -11,13 +11,14 @@ import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from typing import Literal
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
-from sqlalchemy import func, or_, select
+from sqlalchemy import String, case, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.deps import AdminUser, CurrentUser, DbSession
@@ -497,9 +498,22 @@ def list_proxies(
     current_user: CurrentUser,
     keyword: str | None = None,
     health_status: str | None = Query(default=None, alias="healthStatus"),
+    proxy_protocol: str | None = Query(default=None, alias="protocol"),
+    country_code: str | None = Query(default=None, alias="countryCode"),
+    provider: str | None = None,
     enabled: bool | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id",
+        "protocol",
+        "countryCode",
+        "provider",
+        "healthStatus",
+        "createdAt",
+        "updatedAt",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
 ) -> dict:
     statement = select(ProxyEndpoint)
     if current_user.role != "admin":
@@ -513,18 +527,63 @@ def list_proxies(
             or_(
                 ProxyEndpoint.name.ilike(pattern),
                 ProxyEndpoint.host.ilike(pattern),
+                cast(ProxyEndpoint.port, String).ilike(pattern),
+                ProxyEndpoint.protocol.ilike(pattern),
                 ProxyEndpoint.provider.ilike(pattern),
                 ProxyEndpoint.country_code.ilike(pattern),
             )
         )
     if health_status and health_status != "all":
-        statement = statement.where(ProxyEndpoint.health_status == health_status)
+        if health_status == "disabled":
+            statement = statement.where(ProxyEndpoint.enabled.is_(False))
+        elif health_status == "unknown":
+            statement = statement.where(
+                ProxyEndpoint.enabled.is_(True),
+                ProxyEndpoint.health_status.in_(("unknown", "untested")),
+            )
+        else:
+            statement = statement.where(
+                ProxyEndpoint.enabled.is_(True),
+                ProxyEndpoint.health_status == health_status,
+            )
     if enabled is not None:
         statement = statement.where(ProxyEndpoint.enabled.is_(enabled))
+    if proxy_protocol and proxy_protocol != "all":
+        statement = statement.where(ProxyEndpoint.protocol == proxy_protocol)
+    if country_code and country_code != "all":
+        statement = statement.where(ProxyEndpoint.country_code == country_code)
+    if provider and provider != "all":
+        statement = statement.where(ProxyEndpoint.provider == provider)
     total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    health_status_expression = case(
+        (ProxyEndpoint.enabled.is_(False), "disabled"),
+        (ProxyEndpoint.health_status == "untested", "unknown"),
+        else_=ProxyEndpoint.health_status,
+    )
+    sort_columns = {
+        "id": ProxyEndpoint.id,
+        "protocol": ProxyEndpoint.protocol,
+        "countryCode": ProxyEndpoint.country_code,
+        "provider": ProxyEndpoint.provider,
+        "healthStatus": health_status_expression,
+        "createdAt": ProxyEndpoint.created_at,
+        "updatedAt": ProxyEndpoint.updated_at,
+    }
+    sort_column = sort_columns[sort_by]
+    ordering = [
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    ]
+    if sort_by != "id":
+        ordering.append(
+            ProxyEndpoint.id.asc()
+            if sort_order == "asc"
+            else ProxyEndpoint.id.desc()
+        )
     proxies = list(
         db.scalars(
-            statement.order_by(ProxyEndpoint.created_at.desc())
+            statement.order_by(*ordering)
             .offset((page - 1) * page_size)
             .limit(page_size)
         ).all()
@@ -543,6 +602,72 @@ def list_proxies(
             "total": total,
             "page": page,
             "pageSize": page_size,
+        }
+    }
+
+
+def _proxy_option_statement(current_user):
+    statement = select(ProxyEndpoint)
+    if current_user.role != "admin":
+        statement = statement.join(AccountProxyBinding).join(
+            PersonalAccount,
+            PersonalAccount.public_id == AccountProxyBinding.account_public_id,
+        ).where(PersonalAccount.created_by == current_user.id).distinct()
+    return statement
+
+
+@router.get("/api/ip-proxies/options")
+def proxy_options(db: DbSession, current_user: CurrentUser) -> dict:
+    proxies = list(
+        db.scalars(
+            _proxy_option_statement(current_user).order_by(
+                ProxyEndpoint.name,
+                ProxyEndpoint.id,
+            )
+        ).all()
+    )
+    proxy_ids = [proxy.id for proxy in proxies]
+    counts = {
+        int(proxy_id): int(count)
+        for proxy_id, count in db.execute(
+            select(AccountProxyBinding.proxy_id, func.count(AccountProxyBinding.id))
+            .where(AccountProxyBinding.proxy_id.in_(proxy_ids))
+            .group_by(AccountProxyBinding.proxy_id)
+        ).all()
+    } if proxy_ids else {}
+    rows = [proxy_endpoint_row(proxy, counts.get(proxy.id, 0)) for proxy in proxies]
+    return {"data": {"rows": rows, "total": len(rows)}}
+
+
+@router.get("/api/ip-proxies/filter-options")
+def proxy_filter_options(db: DbSession, current_user: CurrentUser) -> dict:
+    scoped = _proxy_option_statement(current_user).subquery()
+    countries = list(
+        db.scalars(
+            select(scoped.c.country_code)
+            .where(scoped.c.country_code.is_not(None), scoped.c.country_code != "")
+            .distinct()
+            .order_by(scoped.c.country_code)
+        ).all()
+    )
+    protocols = list(
+        db.scalars(
+            select(scoped.c.protocol).distinct().order_by(scoped.c.protocol)
+        ).all()
+    )
+    providers = list(
+        db.scalars(
+            select(scoped.c.provider)
+            .where(scoped.c.provider.is_not(None), scoped.c.provider != "")
+            .distinct()
+            .order_by(scoped.c.provider)
+        ).all()
+    )
+    return {
+        "data": {
+            "countries": countries,
+            "protocols": protocols,
+            "providers": providers,
         }
     }
 
@@ -1492,7 +1617,10 @@ def list_bindings(
         )
     total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
     bindings = db.scalars(
-        statement.order_by(AccountProxyBinding.created_at.desc())
+        statement.order_by(
+            AccountProxyBinding.created_at.desc(),
+            AccountProxyBinding.id.desc(),
+        )
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()

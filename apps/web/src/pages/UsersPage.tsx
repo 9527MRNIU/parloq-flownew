@@ -27,9 +27,11 @@ import {
 } from "../components/ui";
 import {
   ListPagination,
+  ListSortableHead,
   ListTableCard,
   ListToolbar,
   StandardListPage,
+  type ListSortOrder,
 } from "../components/list-page";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
 import { DrawerFieldLabel } from "../components/drawer-form";
@@ -45,8 +47,17 @@ type UserRow = {
   mfaEnabled: boolean;
   lastLoginAt?: string;
   createdAt?: string;
+  updatedAt?: string;
 };
 type GroupRow = { id: string; readKey: string; name: string; systemKey?: string };
+type UserSortBy =
+  | "id"
+  | "groupName"
+  | "isAdmin"
+  | "mfaEnabled"
+  | "lastLoginAt"
+  | "createdAt"
+  | "updatedAt";
 
 function userRow(input: unknown): UserRow {
   const row = input as Record<string, unknown>;
@@ -66,6 +77,7 @@ function userRow(input: unknown): UserRow {
     mfaEnabled: Boolean(row.mfaEnabled ?? row.mfa_enabled),
     lastLoginAt: String(row.lastLoginAt || row.last_login_at || ""),
     createdAt: String(row.createdAt || row.created_at || ""),
+    updatedAt: String(row.updatedAt || row.updated_at || ""),
   };
 }
 
@@ -90,6 +102,12 @@ export function UsersPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState(0);
+  const [groupFilter, setGroupFilter] = useState("all");
+  const [enabledFilter, setEnabledFilter] = useState("all");
+  const [accountTypeFilter, setAccountTypeFilter] = useState("all");
+  const [mfaFilter, setMfaFilter] = useState("all");
+  const [sortBy, setSortBy] = useState<UserSortBy>("id");
+  const [sortOrder, setSortOrder] = useState<ListSortOrder>("desc");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<UserRow | null>(null);
   const [username, setUsername] = useState("");
@@ -107,9 +125,15 @@ export function UsersPage() {
         pageSize: String(pageSize),
       });
       if (query) params.set("keyword", query);
+      if (groupFilter !== "all") params.set("groupId", groupFilter);
+      if (enabledFilter !== "all") params.set("enabled", enabledFilter);
+      if (accountTypeFilter !== "all") params.set("isAdmin", accountTypeFilter);
+      if (mfaFilter !== "all") params.set("mfaEnabled", mfaFilter);
+      params.set("sortBy", sortBy);
+      params.set("sortOrder", sortOrder);
       const [usersPayload, groupsPayload] = await Promise.all([
         apiRequest(`/api/users?${params}`),
-        apiRequest("/api/system/roles"),
+        apiRequest("/api/system/roles/options"),
       ]);
       const users = unwrapList<unknown>(usersPayload);
       setRows(users.rows.map(userRow));
@@ -120,10 +144,15 @@ export function UsersPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, query]);
+  }, [accountTypeFilter, enabledFilter, groupFilter, mfaFilter, page, pageSize, query, sortBy, sortOrder]);
   useEffect(() => {
     void load();
   }, [load]);
+  function changeSort(nextSortBy: UserSortBy, nextSortOrder: ListSortOrder) {
+    setSortBy(nextSortBy);
+    setSortOrder(nextSortOrder);
+    setPage(1);
+  }
   function create() {
     const defaultGroup =
       groups.find((group) => group.systemKey === "operator") ??
@@ -221,6 +250,66 @@ export function UsersPage() {
             setQuery(keyword.trim());
           },
         }}
+        filters={
+          <>
+            <SelectField
+              ariaLabel="角色筛选"
+              className="w-[150px]"
+              value={groupFilter}
+              onValueChange={(value) => {
+                setGroupFilter(value);
+                setPage(1);
+              }}
+              options={[
+                { value: "all", label: "全部角色" },
+                ...groups.map((group) => ({ value: group.id, label: group.name })),
+              ]}
+            />
+            <SelectField
+              ariaLabel="启停状态筛选"
+              className="w-[135px]"
+              value={enabledFilter}
+              onValueChange={(value) => {
+                setEnabledFilter(value);
+                setPage(1);
+              }}
+              options={[
+                { value: "all", label: "全部状态" },
+                { value: "true", label: "正常" },
+                { value: "false", label: "已停用" },
+              ]}
+            />
+            <SelectField
+              ariaLabel="账号类型筛选"
+              className="w-[145px]"
+              value={accountTypeFilter}
+              onValueChange={(value) => {
+                setAccountTypeFilter(value);
+                setPage(1);
+              }}
+              options={[
+                { value: "all", label: "全部账号类型" },
+                { value: "true", label: "管理员" },
+                { value: "false", label: "普通用户" },
+              ]}
+            />
+            <SelectField
+              ariaLabel="二步验证筛选"
+              className="w-[155px]"
+              value={mfaFilter}
+              onValueChange={(value) => {
+                setMfaFilter(value);
+                setPage(1);
+              }}
+              options={[
+                { value: "all", label: "全部二步验证" },
+                { value: "true", label: "已开启" },
+                { value: "false", label: "未开启" },
+              ]}
+            />
+          </>
+        }
+        meta={`${total} 个用户`}
         actions={
           <>
             <Button
@@ -269,12 +358,69 @@ export function UsersPage() {
             <Table layout="list">
               <TableHeader>
                 <TableRow>
-                  <TableHead adaptive>用户</TableHead>
-                  <TableHead>角色</TableHead>
-                  <TableHead>账号类型</TableHead>
-                  <TableHead>二步验证</TableHead>
-                  <TableHead>最近登录</TableHead>
-                  <TableHead>创建时间</TableHead>
+                  <ListSortableHead
+                    adaptive
+                    sortKey="id"
+                    activeSortKey={sortBy}
+                    sortOrder={sortOrder}
+                    defaultOrder="desc"
+                    onSort={changeSort}
+                  >
+                    用户
+                  </ListSortableHead>
+                  <ListSortableHead
+                    sortKey="groupName"
+                    activeSortKey={sortBy}
+                    sortOrder={sortOrder}
+                    onSort={changeSort}
+                  >
+                    角色
+                  </ListSortableHead>
+                  <ListSortableHead
+                    sortKey="isAdmin"
+                    activeSortKey={sortBy}
+                    sortOrder={sortOrder}
+                    defaultOrder="desc"
+                    onSort={changeSort}
+                  >
+                    账号类型
+                  </ListSortableHead>
+                  <ListSortableHead
+                    sortKey="mfaEnabled"
+                    activeSortKey={sortBy}
+                    sortOrder={sortOrder}
+                    defaultOrder="desc"
+                    onSort={changeSort}
+                  >
+                    二步验证
+                  </ListSortableHead>
+                  <ListSortableHead
+                    sortKey="lastLoginAt"
+                    activeSortKey={sortBy}
+                    sortOrder={sortOrder}
+                    defaultOrder="desc"
+                    onSort={changeSort}
+                  >
+                    最近登录
+                  </ListSortableHead>
+                  <ListSortableHead
+                    sortKey="createdAt"
+                    activeSortKey={sortBy}
+                    sortOrder={sortOrder}
+                    defaultOrder="desc"
+                    onSort={changeSort}
+                  >
+                    创建时间
+                  </ListSortableHead>
+                  <ListSortableHead
+                    sortKey="updatedAt"
+                    activeSortKey={sortBy}
+                    sortOrder={sortOrder}
+                    defaultOrder="desc"
+                    onSort={changeSort}
+                  >
+                    更新时间
+                  </ListSortableHead>
                   <TableHead>操作</TableHead>
                 </TableRow>
               </TableHeader>
@@ -314,6 +460,9 @@ export function UsersPage() {
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatDateTime(row.createdAt)}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {formatDateTime(row.updatedAt)}
                     </TableCell>
                     <TableCell>
                       <div className="flex min-w-max items-center justify-end gap-2">

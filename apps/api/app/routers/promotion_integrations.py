@@ -6,6 +6,7 @@ import logging
 import re
 from datetime import timedelta
 from pathlib import PurePosixPath
+from typing import Literal
 
 from fastapi import (
     APIRouter,
@@ -20,7 +21,7 @@ from fastapi import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.business_schemas import (
@@ -273,28 +274,35 @@ def integration_row(
     db: DbSession,
     item: PromotionIntegration,
     repository_snapshot: GitHubRepositorySnapshot | None = None,
+    *,
+    domain: DomainRecord | None = None,
+    template_count: int | None = None,
+    event_count: int | None = None,
+    last_event_at=None,
 ) -> dict:
-    domain = db.get(DomainRecord, item.source_domain_id)
-    template_count = int(
-        db.scalar(
-            select(func.count())
-            .select_from(PromotionTemplateIntegration)
-            .where(
-                PromotionTemplateIntegration.integration_id == item.id,
-                PromotionTemplateIntegration.enabled.is_(True),
+    domain = domain or db.get(DomainRecord, item.source_domain_id)
+    if template_count is None:
+        template_count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(PromotionTemplateIntegration)
+                .where(
+                    PromotionTemplateIntegration.integration_id == item.id,
+                    PromotionTemplateIntegration.enabled.is_(True),
+                )
             )
+            or 0
         )
-        or 0
-    )
     entrypoints = item.entrypoints_json or []
     source_urls = integration_source_urls(item, domain) if domain else []
     feedback_enabled, feedback_events = integration_feedback_contract(item)
-    event_count, last_event_at = db.execute(
-        select(
-            func.count(PromotionIntegrationEvent.id),
-            func.max(PromotionIntegrationEvent.occurred_at),
-        ).where(PromotionIntegrationEvent.integration_id == item.id)
-    ).one()
+    if event_count is None:
+        event_count, last_event_at = db.execute(
+            select(
+                func.count(PromotionIntegrationEvent.id),
+                func.max(PromotionIntegrationEvent.occurred_at),
+            ).where(PromotionIntegrationEvent.integration_id == item.id)
+        ).one()
     return {
         "id": entity_id(item),
         "integrationKey": item.integration_key,
@@ -331,12 +339,124 @@ def integration_row(
 
 
 @router.get("")
-def list_integrations(db: DbSession, current_user: CurrentUser) -> dict:
-    statement = select(PromotionIntegration)
+def list_integrations(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str | None = None,
+    integration_type: Literal["script", "iframe"] | None = Query(
+        default=None,
+        alias="integrationType",
+    ),
+    source_domain_id: str | None = Query(default=None, alias="sourceDomainId"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id",
+        "integrationKey",
+        "integrationType",
+        "sourceDomainName",
+        "assetCount",
+        "templateCount",
+        "eventCount",
+        "createdAt",
+        "updatedAt",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
+) -> dict:
+    template_counts = (
+        select(
+            PromotionTemplateIntegration.integration_id.label("integration_id"),
+            func.count(PromotionTemplateIntegration.template_id).label(
+                "template_count"
+            ),
+        )
+        .where(PromotionTemplateIntegration.enabled.is_(True))
+        .group_by(PromotionTemplateIntegration.integration_id)
+        .subquery()
+    )
+    event_counts = (
+        select(
+            PromotionIntegrationEvent.integration_id.label("integration_id"),
+            func.count(PromotionIntegrationEvent.id).label("event_count"),
+            func.max(PromotionIntegrationEvent.occurred_at).label("last_event_at"),
+        )
+        .group_by(PromotionIntegrationEvent.integration_id)
+        .subquery()
+    )
+    statement = (
+        select(
+            PromotionIntegration,
+            DomainRecord,
+            func.coalesce(template_counts.c.template_count, 0).label(
+                "template_count"
+            ),
+            func.coalesce(event_counts.c.event_count, 0).label("event_count"),
+            event_counts.c.last_event_at,
+        )
+        .join(
+            DomainRecord,
+            DomainRecord.id == PromotionIntegration.source_domain_id,
+        )
+        .outerjoin(
+            template_counts,
+            template_counts.c.integration_id == PromotionIntegration.id,
+        )
+        .outerjoin(
+            event_counts,
+            event_counts.c.integration_id == PromotionIntegration.id,
+        )
+    )
     if current_user.role != "admin":
         statement = statement.where(PromotionIntegration.created_by == current_user.id)
-    items = db.scalars(
-        statement.order_by(PromotionIntegration.updated_at.desc())
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        statement = statement.where(
+            or_(
+                cast(PromotionIntegration.id, String).ilike(pattern),
+                PromotionIntegration.public_id.ilike(pattern),
+                PromotionIntegration.name.ilike(pattern),
+                PromotionIntegration.integration_key.ilike(pattern),
+                PromotionIntegration.integration_type.ilike(pattern),
+                DomainRecord.hostname.ilike(pattern),
+                cast(PromotionIntegration.entrypoints_json, String).ilike(pattern),
+            )
+        )
+    if integration_type and integration_type != "all":
+        statement = statement.where(
+            PromotionIntegration.integration_type == integration_type
+        )
+    if source_domain_id and source_domain_id != "all":
+        statement = statement.where(
+            identifier_filter(DomainRecord, source_domain_id)
+        )
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    sort_columns = {
+        "id": PromotionIntegration.id,
+        "integrationKey": PromotionIntegration.integration_key,
+        "integrationType": PromotionIntegration.integration_type,
+        "sourceDomainName": DomainRecord.hostname,
+        "assetCount": PromotionIntegration.asset_count,
+        "templateCount": func.coalesce(template_counts.c.template_count, 0),
+        "eventCount": func.coalesce(event_counts.c.event_count, 0),
+        "createdAt": PromotionIntegration.created_at,
+        "updatedAt": PromotionIntegration.updated_at,
+    }
+    sort_column = sort_columns[sort_by]
+    ordering = [
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    ]
+    if sort_by != "id":
+        ordering.append(
+            PromotionIntegration.id.asc()
+            if sort_order == "asc"
+            else PromotionIntegration.id.desc()
+        )
+    items = db.execute(
+        statement.order_by(*ordering)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     ).all()
     try:
         cached = cached_github_repository_snapshot(db, kind="integration")
@@ -345,7 +465,53 @@ def list_integrations(db: DbSession, current_user: CurrentUser) -> dict:
     snapshot = cached[0] if cached is not None else None
     return {
         "data": {
-            "rows": [integration_row(db, item, snapshot) for item in items],
+            "rows": [
+                integration_row(
+                    db,
+                    item,
+                    snapshot,
+                    domain=domain,
+                    template_count=int(template_count),
+                    event_count=int(event_count),
+                    last_event_at=last_event_at,
+                )
+                for item, domain, template_count, event_count, last_event_at in items
+            ],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+    }
+
+
+@router.get("/options")
+def list_integration_options(db: DbSession, current_user: CurrentUser) -> dict:
+    statement = select(PromotionIntegration, DomainRecord).join(
+        DomainRecord,
+        DomainRecord.id == PromotionIntegration.source_domain_id,
+    )
+    if current_user.role != "admin":
+        statement = statement.where(PromotionIntegration.created_by == current_user.id)
+    items = db.execute(
+        statement.order_by(PromotionIntegration.name, PromotionIntegration.id)
+    ).all()
+    return {
+        "data": {
+            "rows": [
+                {
+                    "id": entity_id(item),
+                    "name": item.name,
+                    "type": item.integration_type,
+                    "entryPaths": [
+                        str(entrypoint.get("path") or "")
+                        for entrypoint in (item.entrypoints_json or [])
+                        if entrypoint.get("path")
+                    ],
+                    "enabled": item.enabled,
+                    "domainReady": domain_is_ready(domain),
+                }
+                for item, domain in items
+            ],
             "total": len(items),
         }
     }
@@ -427,6 +593,13 @@ def _repository_integrations_response(
     refreshed_at,
     *,
     cache_hit: bool,
+    keyword: str | None,
+    integration_type: Literal["script", "iframe"] | None,
+    local_status: Literal["new", "current", "update", "conflict"] | None,
+    page: int,
+    page_size: int,
+    sort_by: Literal["sequence", "integrationType", "assetCount", "localStatus"],
+    sort_order: Literal["asc", "desc"],
 ) -> dict:
     rows = []
     for artifact in snapshot.artifacts:
@@ -444,10 +617,43 @@ def _repository_integrations_response(
                 "localVersion": item.version if item is not None else None,
             }
         )
+    if keyword and keyword.strip():
+        search = keyword.strip().lower()
+        rows = [
+            row
+            for row in rows
+            if search
+            in " ".join(
+                str(row.get(key) or "")
+                for key in (
+                    "sequence",
+                    "name",
+                    "description",
+                    "slug",
+                    "integrationKey",
+                    "version",
+                )
+            ).lower()
+        ]
+    if integration_type and integration_type != "all":
+        rows = [row for row in rows if row.get("type") == integration_type]
+    if local_status and local_status != "all":
+        rows = [row for row in rows if row.get("localStatus") == local_status]
+    sort_key = {
+        "sequence": lambda row: str(row.get("sequence") or ""),
+        "integrationType": lambda row: str(row.get("type") or ""),
+        "assetCount": lambda row: int(row.get("fileCount") or 0),
+        "localStatus": lambda row: str(row.get("localStatus") or ""),
+    }[sort_by]
+    rows.sort(key=sort_key, reverse=sort_order == "desc")
+    total = len(rows)
+    start = (page - 1) * page_size
     return {
         "data": {
-            "rows": rows,
-            "total": len(rows),
+            "rows": rows[start : start + page_size],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
             "repository": snapshot.repository,
             "ref": snapshot.ref,
             "commitSha": snapshot.commit_sha,
@@ -461,6 +667,24 @@ def _repository_integrations_response(
 def list_repository_integrations(
     db: DbSession,
     current_user: CurrentUser,
+    keyword: str | None = None,
+    integration_type: Literal["script", "iframe"] | None = Query(
+        default=None,
+        alias="integrationType",
+    ),
+    local_status: Literal["new", "current", "update", "conflict"] | None = Query(
+        default=None,
+        alias="localStatus",
+    ),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "sequence",
+        "integrationType",
+        "assetCount",
+        "localStatus",
+    ] = Query(default="sequence", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="asc", alias="sortOrder"),
 ) -> dict:
     try:
         cached = cached_github_repository_snapshot(db, kind="integration")
@@ -481,6 +705,13 @@ def list_repository_integrations(
         snapshot,
         refreshed_at,
         cache_hit=cache_hit,
+        keyword=keyword,
+        integration_type=integration_type,
+        local_status=local_status,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
     )
 
 
@@ -488,6 +719,24 @@ def list_repository_integrations(
 def refresh_repository_integrations(
     db: DbSession,
     current_user: CurrentUser,
+    keyword: str | None = None,
+    integration_type: Literal["script", "iframe"] | None = Query(
+        default=None,
+        alias="integrationType",
+    ),
+    local_status: Literal["new", "current", "update", "conflict"] | None = Query(
+        default=None,
+        alias="localStatus",
+    ),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "sequence",
+        "integrationType",
+        "assetCount",
+        "localStatus",
+    ] = Query(default="sequence", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="asc", alias="sortOrder"),
 ) -> dict:
     try:
         snapshot, refreshed_at = refresh_github_repository_snapshot(
@@ -502,6 +751,13 @@ def refresh_repository_integrations(
         snapshot,
         refreshed_at,
         cache_hit=False,
+        keyword=keyword,
+        integration_type=integration_type,
+        local_status=local_status,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
     )
 
 
@@ -621,16 +877,42 @@ def list_integration_events(
     integration_id: str,
     db: DbSession,
     current_user: CurrentUser,
+    event_type: str | None = Query(default=None, alias="eventType"),
+    channel_id: str | None = Query(default=None, alias="channelId"),
+    source: Literal["direct", "fission"] | None = None,
+    fingerprint_quality: str | None = Query(
+        default=None,
+        alias="fingerprintQuality",
+    ),
     page: int = Query(default=1, ge=1),
-    per_page: int = Query(default=20, alias="perPage", ge=1, le=100),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
 ) -> dict:
     item = _integration(db, integration_id, current_user)
+    conditions = [PromotionIntegrationEvent.integration_id == item.id]
+    if event_type and event_type != "all":
+        conditions.append(PromotionIntegrationEvent.event_type == event_type)
+    if channel_id and channel_id != "all":
+        conditions.append(identifier_filter(PromotionChannel, channel_id))
+    if source and source != "all":
+        conditions.append(PromotionIntegrationEvent.traffic_source == source)
+    if fingerprint_quality and fingerprint_quality != "all":
+        conditions.append(PromotionVisitor.fingerprint_quality == fingerprint_quality)
+
     grouped = db.execute(
         select(
             PromotionIntegrationEvent.event_type,
             func.count(PromotionIntegrationEvent.id),
         )
-        .where(PromotionIntegrationEvent.integration_id == item.id)
+        .join(
+            PromotionChannel,
+            PromotionChannel.id == PromotionIntegrationEvent.channel_id,
+        )
+        .outerjoin(
+            PromotionVisitor,
+            PromotionVisitor.id
+            == PromotionIntegrationEvent.promotion_visitor_id,
+        )
+        .where(*conditions)
         .group_by(PromotionIntegrationEvent.event_type)
         .order_by(func.count(PromotionIntegrationEvent.id).desc())
     ).all()
@@ -642,14 +924,59 @@ def list_integration_events(
             PromotionVisitor,
             PromotionVisitor.id == PromotionIntegrationEvent.promotion_visitor_id,
         )
-        .where(PromotionIntegrationEvent.integration_id == item.id)
+        .where(*conditions)
         .order_by(
             PromotionIntegrationEvent.occurred_at.desc(),
             PromotionIntegrationEvent.id.desc(),
         )
-        .offset((page - 1) * per_page)
-        .limit(per_page)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     ).all()
+    option_event_types = list(
+        db.scalars(
+            select(PromotionIntegrationEvent.event_type)
+            .where(PromotionIntegrationEvent.integration_id == item.id)
+            .distinct()
+            .order_by(PromotionIntegrationEvent.event_type)
+        ).all()
+    )
+    option_channels = [
+        {"id": entity_id(channel_id), "name": channel_slug}
+        for channel_id, channel_slug in db.execute(
+            select(PromotionChannel.id, PromotionChannel.slug)
+            .join(
+                PromotionIntegrationEvent,
+                PromotionIntegrationEvent.channel_id == PromotionChannel.id,
+            )
+            .where(PromotionIntegrationEvent.integration_id == item.id)
+            .distinct()
+            .order_by(PromotionChannel.slug, PromotionChannel.id)
+        ).all()
+    ]
+    option_sources = list(
+        db.scalars(
+            select(PromotionIntegrationEvent.traffic_source)
+            .where(PromotionIntegrationEvent.integration_id == item.id)
+            .distinct()
+            .order_by(PromotionIntegrationEvent.traffic_source)
+        ).all()
+    )
+    option_fingerprints = list(
+        db.scalars(
+            select(PromotionVisitor.fingerprint_quality)
+            .join(
+                PromotionIntegrationEvent,
+                PromotionIntegrationEvent.promotion_visitor_id
+                == PromotionVisitor.id,
+            )
+            .where(
+                PromotionIntegrationEvent.integration_id == item.id,
+                PromotionVisitor.fingerprint_quality.is_not(None),
+            )
+            .distinct()
+            .order_by(PromotionVisitor.fingerprint_quality)
+        ).all()
+    )
     return {
         "data": {
             "rows": [
@@ -667,7 +994,13 @@ def list_integration_events(
             ],
             "total": total,
             "page": page,
-            "perPage": per_page,
+            "pageSize": page_size,
+            "filterOptions": {
+                "eventTypes": option_event_types,
+                "channels": option_channels,
+                "sources": option_sources,
+                "fingerprintQualities": option_fingerprints,
+            },
         }
     }
 

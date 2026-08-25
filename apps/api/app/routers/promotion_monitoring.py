@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import BigInteger, String, case, cast, func, literal, or_, select, union_all
@@ -120,6 +120,15 @@ def _normalized_viewport(value: Any) -> list[int] | None:
         return None
 
 
+def _device_type(user_agent: str | None) -> str:
+    value = user_agent or ""
+    if "iPad" in value or "Tablet" in value:
+        return "tablet"
+    if "Mobile" in value or "iPhone" in value or "Android" in value:
+        return "mobile"
+    return "desktop"
+
+
 def _device_summary(metadata: dict | None) -> dict[str, Any]:
     request_context = (metadata or {}).get("requestContext")
     client_context = (metadata or {}).get("clientContext")
@@ -160,6 +169,7 @@ def _device_summary(metadata: dict | None) -> dict[str, Any]:
     else:
         system = "未知系统"
     return {
+        "type": _device_type(user_agent),
         "browser": browser,
         "browserVersion": browser_version,
         "system": system,
@@ -255,6 +265,24 @@ def _monitoring_sources(channel_ids: list[int], start: datetime, end: datetime):
         PromotionIntegrationEvent.occurred_at < end,
     )
     return union_all(landing, integration).subquery("promotion_monitoring_records")
+
+
+def _device_type_expression(user_agent):
+    return case(
+        (
+            or_(user_agent.ilike("%iPad%"), user_agent.ilike("%Tablet%")),
+            literal("tablet"),
+        ),
+        (
+            or_(
+                user_agent.ilike("%Mobile%"),
+                user_agent.ilike("%iPhone%"),
+                user_agent.ilike("%Android%"),
+            ),
+            literal("mobile"),
+        ),
+        else_=literal("desktop"),
+    )
 
 
 def _record_device(mapping) -> dict[str, Any]:
@@ -402,10 +430,27 @@ def list_records(
     channel_id: str | None = Query(default=None, alias="channelId"),
     template_id: str | None = Query(default=None, alias="templateId"),
     integration_id: str | None = Query(default=None, alias="integrationId"),
+    source_ip: str | None = Query(default=None, alias="sourceIp"),
+    device_type: Literal["all", "mobile", "tablet", "desktop"] = Query(
+        default="all", alias="deviceType"
+    ),
     date_from: date | None = Query(default=None, alias="dateFrom"),
     date_to: date | None = Query(default=None, alias="dateTo"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id",
+        "visitorCountryCode",
+        "eventType",
+        "source",
+        "channelName",
+        "templateName",
+        "integrationName",
+        "deviceType",
+        "trafficSource",
+        "occurredAt",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
 ) -> dict:
     if source not in {"all", *SOURCE_LABELS}:
         raise HTTPException(status_code=422, detail="记录来源无效")
@@ -424,6 +469,7 @@ def list_records(
         return {"data": {"rows": [], "total": 0, "page": page, "pageSize": page_size}}
 
     records = _monitoring_sources(channel_ids, start, end)
+    device_type_expression = _device_type_expression(records.c.user_agent)
     statement = (
         select(
             records,
@@ -467,6 +513,10 @@ def list_records(
         ):
             raise HTTPException(status_code=404, detail="推广集成不存在")
         statement = statement.where(records.c.integration_id == integration.id)
+    if source_ip and source_ip.strip():
+        statement = statement.where(records.c.source_ip.ilike(f"%{source_ip.strip()}%"))
+    if device_type != "all":
+        statement = statement.where(device_type_expression == device_type)
     if keyword and keyword.strip():
         pattern = f"%{keyword.strip()}%"
         statement = statement.where(
@@ -485,8 +535,31 @@ def list_records(
         )
 
     total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    sort_columns = {
+        "id": records.c.record_id,
+        "visitorCountryCode": records.c.visitor_country_code,
+        "eventType": records.c.event_type,
+        "source": records.c.record_source,
+        "channelName": PromotionChannel.name,
+        "templateName": PromotionTemplate.name,
+        "integrationName": PromotionIntegration.name,
+        "deviceType": device_type_expression,
+        "trafficSource": records.c.traffic_source,
+        "occurredAt": records.c.occurred_at,
+    }
+    sort_column = sort_columns[sort_by]
+    order_expression = (
+        sort_column.desc().nullslast()
+        if sort_order == "desc"
+        else sort_column.asc().nullslast()
+    )
     result = db.execute(
-        statement.order_by(records.c.occurred_at.desc(), records.c.record_id.desc())
+        statement.order_by(
+            order_expression,
+            records.c.record_id.asc()
+            if sort_order == "asc"
+            else records.c.record_id.desc(),
+        )
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
@@ -608,6 +681,16 @@ def monitoring_options(db: DbSession, current_user: CurrentUser) -> dict:
             .distinct()
         ).all()
     )
+    integration_ids = select(PromotionIntegrationEvent.integration_id).where(
+        PromotionIntegrationEvent.channel_id.in_(channel_ids)
+    )
+    integrations = list(
+        db.scalars(
+            select(PromotionIntegration)
+            .where(PromotionIntegration.id.in_(integration_ids))
+            .order_by(PromotionIntegration.name, PromotionIntegration.id)
+        ).all()
+    )
     event_types = sorted(landing_types | integration_types)
     country_rows = db.scalars(
         select(PromotionEvent.visitor_country_code)
@@ -639,6 +722,10 @@ def monitoring_options(db: DbSession, current_user: CurrentUser) -> dict:
             "eventTypes": [
                 {"value": value, "label": EVENT_LABELS.get(value, value)}
                 for value in event_types
+            ],
+            "integrations": [
+                {"id": entity_id(integration), "name": integration.name}
+                for integration in integrations
             ],
             "visitorCountries": sorted({str(value) for value in country_rows}),
         }

@@ -22,9 +22,11 @@ import {
 } from "../components/record-detail";
 import {
   ListPagination,
+  ListSortableHead,
   ListTableCard,
   ListToolbar,
   StandardListPage,
+  type ListSortOrder,
 } from "../components/list-page";
 import {
   Badge,
@@ -32,6 +34,7 @@ import {
   DatePickerField,
   Drawer,
   EmptyState,
+  Input,
   SelectField,
   Spinner,
   Table,
@@ -65,6 +68,7 @@ type MonitoringRecord = {
   networkSource?: string | null;
   device: {
     browser: string;
+    type: "mobile" | "tablet" | "desktop";
     browserVersion?: string | null;
     system: string;
     systemVersion?: string | null;
@@ -95,6 +99,17 @@ type MonitoringRecord = {
 
 type Option = { id: string; name: string; version?: string };
 type EventTypeOption = { value: string; label: string };
+type MonitoringSortBy =
+  | "id"
+  | "visitorCountryCode"
+  | "eventType"
+  | "source"
+  | "channelName"
+  | "templateName"
+  | "integrationName"
+  | "deviceType"
+  | "trafficSource"
+  | "occurredAt";
 
 const sourcePresentation: Record<
   RecordSource,
@@ -131,6 +146,10 @@ function networkSourceLabel(value?: string | null) {
     proxy: "反向代理",
     peer: "直接连接",
   }[value || ""] || "未采集";
+}
+
+function deviceTypeLabel(value?: string | null) {
+  return { mobile: "手机", tablet: "平板", desktop: "桌面设备" }[value || ""] || "未知设备";
 }
 
 function pairingFailureStageLabel(value: unknown) {
@@ -378,10 +397,11 @@ function RecordDetail({
 
 export default function PromotionMonitoringPage() {
   const [searchParams] = useSearchParams();
-  const integrationId = searchParams.get("integrationId") || "";
+  const initialIntegrationId = searchParams.get("integrationId") || "all";
   const [rows, setRows] = useState<MonitoringRecord[]>([]);
   const [channels, setChannels] = useState<Option[]>([]);
   const [templates, setTemplates] = useState<Option[]>([]);
+  const [integrations, setIntegrations] = useState<Option[]>([]);
   const [eventTypes, setEventTypes] = useState<EventTypeOption[]>([]);
   const [visitorCountries, setVisitorCountries] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -389,12 +409,16 @@ export default function PromotionMonitoringPage() {
   const [detail, setDetail] = useState<MonitoringRecord | null>(null);
   const [keyword, setKeyword] = useState("");
   const [query, setQuery] = useState("");
+  const [sourceIp, setSourceIp] = useState("");
+  const [appliedSourceIp, setAppliedSourceIp] = useState("");
   const [source, setSource] = useState("all");
   const [eventType, setEventType] = useState("all");
   const [trafficSource, setTrafficSource] = useState("all");
   const [visitorCountryCode, setVisitorCountryCode] = useState("all");
   const [channelId, setChannelId] = useState("all");
   const [templateId, setTemplateId] = useState("all");
+  const [integrationId, setIntegrationId] = useState(initialIntegrationId);
+  const [deviceType, setDeviceType] = useState("all");
   const [dateFrom, setDateFrom] = useState(() => dateInput(-6));
   const [dateTo, setDateTo] = useState(() => dateInput());
   const [appliedDates, setAppliedDates] = useState(() => ({
@@ -404,6 +428,8 @@ export default function PromotionMonitoringPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState(0);
+  const [sortBy, setSortBy] = useState<MonitoringSortBy>("id");
+  const [sortOrder, setSortOrder] = useState<ListSortOrder>("desc");
 
   const loadOptions = useCallback(async () => {
     try {
@@ -411,6 +437,7 @@ export default function PromotionMonitoringPage() {
       const data = record(record(payload).data ?? payload);
       setChannels(Array.isArray(data.channels) ? (data.channels as Option[]) : []);
       setTemplates(Array.isArray(data.templates) ? (data.templates as Option[]) : []);
+      setIntegrations(Array.isArray(data.integrations) ? (data.integrations as Option[]) : []);
       setEventTypes(
         Array.isArray(data.eventTypes) ? (data.eventTypes as EventTypeOption[]) : [],
       );
@@ -422,6 +449,7 @@ export default function PromotionMonitoringPage() {
     } catch {
       setChannels([]);
       setTemplates([]);
+      setIntegrations([]);
       setEventTypes([]);
       setVisitorCountries([]);
     }
@@ -439,11 +467,15 @@ export default function PromotionMonitoringPage() {
         eventType,
         trafficSource,
         visitorCountryCode,
+        deviceType,
+        sortBy,
+        sortOrder,
       });
       if (query) params.set("keyword", query);
+      if (appliedSourceIp) params.set("sourceIp", appliedSourceIp);
       if (channelId !== "all") params.set("channelId", channelId);
       if (templateId !== "all") params.set("templateId", templateId);
-      if (integrationId) params.set("integrationId", integrationId);
+      if (integrationId !== "all") params.set("integrationId", integrationId);
       const payload = await apiRequest(`/api/promotion/monitoring/records?${params}`);
       const list = unwrapList<MonitoringRecord>(payload);
       setRows(list.rows);
@@ -457,13 +489,17 @@ export default function PromotionMonitoringPage() {
     }
   }, [
     appliedDates,
+    appliedSourceIp,
     channelId,
     eventType,
+    deviceType,
     integrationId,
     page,
     pageSize,
     query,
     source,
+    sortBy,
+    sortOrder,
     templateId,
     trafficSource,
     visitorCountryCode,
@@ -506,6 +542,7 @@ export default function PromotionMonitoringPage() {
   function applyFilters() {
     setPage(1);
     setQuery(keyword.trim());
+    setAppliedSourceIp(sourceIp.trim());
     setAppliedDates({ dateFrom, dateTo });
   }
 
@@ -513,12 +550,18 @@ export default function PromotionMonitoringPage() {
     const next = { dateFrom: dateInput(-6), dateTo: dateInput() };
     setKeyword("");
     setQuery("");
+    setSourceIp("");
+    setAppliedSourceIp("");
     setSource("all");
     setEventType("all");
     setTrafficSource("all");
     setVisitorCountryCode("all");
     setChannelId("all");
     setTemplateId("all");
+    setIntegrationId("all");
+    setDeviceType("all");
+    setSortBy("id");
+    setSortOrder("desc");
     setDateFrom(next.dateFrom);
     setDateTo(next.dateTo);
     setAppliedDates(next);
@@ -550,6 +593,13 @@ export default function PromotionMonitoringPage() {
               to={dateTo}
               onFromChange={setDateFrom}
               onToChange={setDateTo}
+            />
+            <Input
+              className="w-[160px]"
+              aria-label="访问 IP"
+              value={sourceIp}
+              onChange={(event) => setSourceIp(event.target.value)}
+              placeholder="访问 IP"
             />
             <SelectField
               ariaLabel="记录来源"
@@ -632,6 +682,32 @@ export default function PromotionMonitoringPage() {
                 })),
               ]}
             />
+            <SelectField
+              ariaLabel="推广集成"
+              value={integrationId}
+              onValueChange={(value) => {
+                setPage(1);
+                setIntegrationId(value);
+              }}
+              options={[
+                { value: "all", label: "全部集成" },
+                ...integrations.map((row) => ({ value: row.id, label: row.name })),
+              ]}
+            />
+            <SelectField
+              ariaLabel="设备类型"
+              value={deviceType}
+              onValueChange={(value) => {
+                setPage(1);
+                setDeviceType(value);
+              }}
+              options={[
+                { value: "all", label: "全部设备" },
+                { value: "mobile", label: "手机" },
+                { value: "tablet", label: "平板" },
+                { value: "desktop", label: "桌面设备" },
+              ]}
+            />
           </>
         }
         meta={`${total} 条记录 · 当前页客户端 ${visibleSummary.client} · 服务端 ${visibleSummary.server} · 集成 ${visibleSummary.integration}`}
@@ -663,18 +739,18 @@ export default function PromotionMonitoringPage() {
           <Table layout="list">
             <TableHeader>
               <TableRow>
-                <TableHead className="text-center">访问ID/访客ID</TableHead>
-                <TableHead className="text-center">访问国家</TableHead>
+                <ListSortableHead sortKey="id" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>访问ID/访客ID</ListSortableHead>
+                <ListSortableHead sortKey="visitorCountryCode" activeSortKey={sortBy} sortOrder={sortOrder} onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>访问国家</ListSortableHead>
                 <TableHead className="text-center">访问 IP</TableHead>
-                <TableHead className="text-center">事件</TableHead>
-                <TableHead className="text-center">记录来源</TableHead>
+                <ListSortableHead sortKey="eventType" activeSortKey={sortBy} sortOrder={sortOrder} onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>事件</ListSortableHead>
+                <ListSortableHead sortKey="source" activeSortKey={sortBy} sortOrder={sortOrder} onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>记录来源</ListSortableHead>
                 <TableHead className="text-center" adaptive>落地页</TableHead>
-                <TableHead className="text-center">渠道</TableHead>
-                <TableHead className="text-center">模板</TableHead>
-                <TableHead className="text-center">集成</TableHead>
-                <TableHead className="text-center">设备</TableHead>
-                <TableHead className="text-center">流量来源</TableHead>
-                <TableHead className="text-center">记录时间</TableHead>
+                <ListSortableHead sortKey="channelName" activeSortKey={sortBy} sortOrder={sortOrder} onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>渠道</ListSortableHead>
+                <ListSortableHead sortKey="templateName" activeSortKey={sortBy} sortOrder={sortOrder} onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>模板</ListSortableHead>
+                <ListSortableHead sortKey="integrationName" activeSortKey={sortBy} sortOrder={sortOrder} onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>集成</ListSortableHead>
+                <ListSortableHead sortKey="deviceType" activeSortKey={sortBy} sortOrder={sortOrder} onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>设备</ListSortableHead>
+                <ListSortableHead sortKey="trafficSource" activeSortKey={sortBy} sortOrder={sortOrder} onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>流量来源</ListSortableHead>
+                <ListSortableHead sortKey="occurredAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>记录时间</ListSortableHead>
                 <TableHead className="text-center">操作</TableHead>
               </TableRow>
             </TableHeader>
@@ -737,7 +813,7 @@ export default function PromotionMonitoringPage() {
                     <div className="cell-main mx-auto min-w-[180px] justify-items-center text-center">
                       <strong>{versionedName(row.device.browser, row.device.browserVersion)}</strong>
                       <span>
-                        {versionedName(row.device.system, row.device.systemVersion)} ·{" "}
+                        {deviceTypeLabel(row.device.type)} · {versionedName(row.device.system, row.device.systemVersion)} ·{" "}
                         {viewportLabel(row.device.viewport)}
                       </span>
                     </div>

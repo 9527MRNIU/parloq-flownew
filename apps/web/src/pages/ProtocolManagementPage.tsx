@@ -8,7 +8,6 @@ import {
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -19,10 +18,11 @@ import { useAuth } from "../auth/AuthContext";
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
 import {
   ListPagination,
+  ListSortableHead,
   ListTableCard,
   ListToolbar,
   StandardListPage,
-  useClientPagination,
+  type ListSortOrder,
 } from "../components/list-page";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
 import {
@@ -82,6 +82,16 @@ type ProtocolNode = {
   rateLimitPolicy: RateLimitPolicy;
   createdAt: string;
 };
+
+type ProtocolNodeSortBy =
+  | "id"
+  | "protocolName"
+  | "ingressEnabled"
+  | "marketingEnabled"
+  | "accountTotal"
+  | "validAccounts"
+  | "onlineAccounts"
+  | "createdAt";
 
 type ProtocolDefinitionRef = {
   id: string;
@@ -311,6 +321,15 @@ export function ProtocolManagementPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
+  const [protocolDefinitionId, setProtocolDefinitionId] = useState("all");
+  const [ingressFilter, setIngressFilter] = useState("all");
+  const [marketingFilter, setMarketingFilter] = useState("all");
+  const [sortBy, setSortBy] = useState<ProtocolNodeSortBy>("id");
+  const [sortOrder, setSortOrder] = useState<ListSortOrder>("desc");
   const [selected, setSelected] = useState<string[]>([]);
   const [editing, setEditing] = useState<ProtocolNode | null>(null);
   const [creating, setCreating] = useState(false);
@@ -343,25 +362,34 @@ export function ProtocolManagementPage({
     setLoading(true);
     setError("");
     try {
+      const query = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+      if (debouncedKeyword) query.set("keyword", debouncedKeyword);
+      if (protocolDefinitionId !== "all") query.set("protocolDefinitionId", protocolDefinitionId);
+      if (ingressFilter !== "all") query.set("ingressEnabled", ingressFilter);
+      if (marketingFilter !== "all") query.set("marketingEnabled", marketingFilter);
+      query.set("sortBy", sortBy);
+      query.set("sortOrder", sortOrder);
       const [nodePayload, definitionPayload] = await Promise.all([
-        apiRequest("/api/protocol-nodes?pageSize=100"),
+        apiRequest(`/api/protocol-nodes?${query}`),
         apiRequest("/api/protocol-definitions/options"),
       ]);
-      const nextRows = unwrapList<unknown>(nodePayload).rows.map(protocolNode);
+      const nodeList = unwrapList<unknown>(nodePayload);
+      const nextRows = nodeList.rows.map(protocolNode);
       const nextDefinitions = unwrapList<unknown>(definitionPayload).rows.map(
         (item) => protocolDefinitionRef(item),
       );
       setRows(nextRows);
+      setTotal(nodeList.total);
       setDefinitions(nextDefinitions);
-      setSelected((current) => current.filter((id) => nextRows.some((row) => row.id === id)));
     } catch (caught) {
       setRows([]);
+      setTotal(0);
       setDefinitions([]);
       setError(caught instanceof Error ? caught.message : "节点加载失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [debouncedKeyword, ingressFilter, marketingFilter, page, pageSize, protocolDefinitionId, sortBy, sortOrder]);
   useEffect(() => void load(), [load]);
   useEffect(() => {
     if (
@@ -385,18 +413,20 @@ export function ProtocolManagementPage({
     return () => window.clearInterval(timer);
   }, [cooldownUntil]);
 
-  const visible = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    return search
-      ? rows.filter((row) =>
-          `${row.id} ${row.name} ${row.remark} ${row.protocolDefinition.name} ${row.protocolDefinition.version}`
-            .toLowerCase()
-            .includes(search),
-        )
-      : rows;
-  }, [keyword, rows]);
-  const nodePagination = useClientPagination(visible, { resetKey: keyword });
-  const visibleIds = visible.map((row) => row.id).filter(Boolean);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+
+  function changeSort(nextSortBy: ProtocolNodeSortBy, nextSortOrder: ListSortOrder) {
+    setSortBy(nextSortBy);
+    setSortOrder(nextSortOrder);
+    setPage(1);
+  }
+  const visibleIds = rows.map((row) => row.id).filter(Boolean);
   const allVisibleSelected = Boolean(visibleIds.length) && visibleIds.every((id) => selected.includes(id));
   const remainingSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
 
@@ -531,8 +561,38 @@ export function ProtocolManagementPage({
     <StandardListPage viewport>
       <ListToolbar
         search={{ value: keyword, onChange: setKeyword, placeholder: "搜索节点名称、ID、绑定协议或备注" }}
-        filters={toolbarTabs}
-        meta={selected.length ? `已选择 ${selected.length} 个节点` : `${visible.length} 个节点`}
+        filters={
+          <>
+            {toolbarTabs}
+            <SelectField
+              value={protocolDefinitionId}
+              onValueChange={(value) => { setProtocolDefinitionId(value); setPage(1); }}
+              options={[
+                { value: "all", label: "全部协议" },
+                ...definitions.map((item) => ({ value: item.id, label: `${item.name} · ${item.id}` })),
+              ]}
+            />
+            <SelectField
+              value={ingressFilter}
+              onValueChange={(value) => { setIngressFilter(value); setPage(1); }}
+              options={[
+                { value: "all", label: "全部进号状态" },
+                { value: "true", label: "进号已开启" },
+                { value: "false", label: "进号已关闭" },
+              ]}
+            />
+            <SelectField
+              value={marketingFilter}
+              onValueChange={(value) => { setMarketingFilter(value); setPage(1); }}
+              options={[
+                { value: "all", label: "全部营销状态" },
+                { value: "true", label: "营销已开启" },
+                { value: "false", label: "营销已关闭" },
+              ]}
+            />
+          </>
+        }
+        meta={selected.length ? `已选择 ${selected.length} 个节点` : `${total} 个节点`}
         actions={
           <>
             <Button disabled={!canManage || !definitions.length} onClick={() => openCreate()}>
@@ -563,23 +623,32 @@ export function ProtocolManagementPage({
         }
       />
       <ListPagination
-        page={nodePagination.page}
-        pageSize={nodePagination.pageSize}
-        total={nodePagination.total}
+        page={page}
+        pageSize={pageSize}
+        total={total}
         disabled={loading}
-        onPageChange={nodePagination.setPage}
-        onPageSizeChange={nodePagination.setPageSize}
+        onPageChange={setPage}
+        onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
       />
       <ListTableCard>
         {loading ? <div className="loading-state"><Spinner />正在加载节点…</div> : error ? (
           <div className="error-state"><strong>节点加载失败</strong><span>{error}</span><Button variant="outline" onClick={() => void load()}>重试</Button></div>
-        ) : visible.length ? (
+        ) : rows.length ? (
           <Table layout="list">
             <TableHeader><TableRow>
               <TableHead><Checkbox aria-label="选择全部节点" checked={allVisibleSelected} onCheckedChange={(checked) => setSelected(checked ? Array.from(new Set([...selected, ...visibleIds])) : selected.filter((id) => !visibleIds.includes(id)))} /></TableHead>
-              <TableHead>节点名称</TableHead><TableHead>绑定协议</TableHead><TableHead>进号开关</TableHead><TableHead>营销开关</TableHead><TableHead>账号总量</TableHead><TableHead>有效数 / 率</TableHead><TableHead>在线数 / 率</TableHead><TableHead adaptive>备注</TableHead><TableHead>创建时间</TableHead><TableHead>操作</TableHead>
+              <ListSortableHead sortKey="id" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>节点名称</ListSortableHead>
+              <ListSortableHead sortKey="protocolName" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>绑定协议</ListSortableHead>
+              <ListSortableHead sortKey="ingressEnabled" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>进号开关</ListSortableHead>
+              <ListSortableHead sortKey="marketingEnabled" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>营销开关</ListSortableHead>
+              <ListSortableHead sortKey="accountTotal" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>账号总量</ListSortableHead>
+              <ListSortableHead sortKey="validAccounts" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>有效数 / 率</ListSortableHead>
+              <ListSortableHead sortKey="onlineAccounts" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>在线数 / 率</ListSortableHead>
+              <TableHead adaptive>备注</TableHead>
+              <ListSortableHead sortKey="createdAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>创建时间</ListSortableHead>
+              <TableHead>操作</TableHead>
             </TableRow></TableHeader>
-            <TableBody>{nodePagination.rows.map((row) => <TableRow key={row.readKey}>
+            <TableBody>{rows.map((row) => <TableRow key={row.readKey}>
               <TableCell><Checkbox aria-label={`选择节点 ${row.name || "待迁移节点"}`} disabled={!row.id} checked={Boolean(row.id) && selected.includes(row.id)} onCheckedChange={(checked) => row.id && setSelected((current) => checked ? [...current, row.id] : current.filter((id) => id !== row.id))} /></TableCell>
               <TableCell primary>
                 <EntityPrimaryCell
