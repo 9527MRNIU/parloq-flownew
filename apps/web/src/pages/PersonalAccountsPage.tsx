@@ -7,6 +7,7 @@ import {
   MessageSquareTextIcon,
   RefreshCwIcon,
   SlidersHorizontalIcon,
+  Trash2Icon,
   UploadCloudIcon,
   UserRoundIcon,
 } from "lucide-react";
@@ -553,6 +554,34 @@ export function PersonalAccountsPage() {
       if (name === "sync") toast.success("资料同步任务已提交到后台");
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "操作失败");
+    } finally {
+      setOperation("");
+    }
+  }
+  async function deleteAccount(row: Account) {
+    if (!row.id) return;
+    const label = formatPhoneDisplay(row.phone) || row.name || row.id;
+    if (
+      !(await confirmAction({
+        title: `彻底删除账号 ${label}？`,
+        description:
+          "账号将从账号管理中移除，手机号会被释放，WhatsApp 凭证、代理绑定、头像和同步资料会被清除。已经产生的接入记录、访问监控、渠道统计、趋势数据和发送明细会继续保留。",
+        confirmText: "确认删除账号",
+        destructive: true,
+      }))
+    )
+      return;
+    setOperation(`${row.id}:delete`);
+    try {
+      await apiRequest(`/api/personal-accounts/${row.id}`, {
+        method: "DELETE",
+      });
+      if (detailAccount?.id === row.id) setDetailAccount(null);
+      setSelectedIds((current) => current.filter((id) => id !== row.id));
+      await Promise.all([loadAccounts(), loadReferences()]);
+      toast.success("账号已彻底删除，历史业务记录已保留");
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "账号删除失败");
     } finally {
       setOperation("");
     }
@@ -1239,6 +1268,19 @@ export function PersonalAccountsPage() {
                       >
                         {operation === `${row.id}:logout` ? <LoaderCircleIcon className="spin" size={16} /> : null}
                         登出解绑
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        disabled={!row.id || Boolean(operation)}
+                        onClick={() => void deleteAccount(row)}
+                      >
+                        {operation === `${row.id}:delete` ? (
+                          <LoaderCircleIcon className="spin" size={16} />
+                        ) : (
+                          <Trash2Icon size={16} />
+                        )}
+                        删除账号
                       </Button>
                       </> : null}
                     </div>

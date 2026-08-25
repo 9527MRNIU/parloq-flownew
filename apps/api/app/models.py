@@ -766,6 +766,7 @@ class PersonalAccount(Base, TimestampMixin):
     public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
     phone_e164: Mapped[str | None] = mapped_column(String(20), unique=True, index=True)
+    deleted_phone_e164: Mapped[str | None] = mapped_column(String(20), index=True)
     country_code: Mapped[str | None] = mapped_column(String(2), index=True)
     status: Mapped[str] = mapped_column(String(32), default="unpaired", index=True)
     source: Mapped[str] = mapped_column(
@@ -810,6 +811,14 @@ class PersonalAccount(Base, TimestampMixin):
     last_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sending_cooldown_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    deleted_by: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("user_accounts.id", ondelete="SET NULL"),
+        index=True,
     )
     created_by: Mapped[int] = mapped_column(BigInteger, ForeignKey("user_accounts.id", ondelete="RESTRICT"))
 

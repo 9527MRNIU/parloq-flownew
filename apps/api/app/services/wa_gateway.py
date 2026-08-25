@@ -341,6 +341,16 @@ class WaGatewayClient:
         value = self._post(f"/v1/accounts/{account_id}/logout")
         return value if isinstance(value, dict) else {}
 
+    def delete_account(self, account_id: str) -> dict[str, Any]:
+        if self.settings.wa_gateway_mock:
+            return {
+                "accountId": account_id,
+                "deleted": True,
+                "providerLogoutConfirmed": True,
+            }
+        value = self._request("DELETE", f"/v1/accounts/{account_id}")
+        return value if isinstance(value, dict) else {}
+
     def import_session(
         self,
         account_id: str,

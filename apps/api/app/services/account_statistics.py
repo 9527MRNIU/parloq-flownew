@@ -55,8 +55,10 @@ def _is_invalid_snapshot(point: LifecyclePoint | None) -> bool:
     return point is not None and _is_invalidation(point)
 
 
-def _scope_accounts(statement, user: UserAccount):
+def _scope_accounts(statement, user: UserAccount, *, include_deleted: bool = False):
     statement = statement.where(PersonalAccount.admission_status == "active")
+    if not include_deleted:
+        statement = statement.where(PersonalAccount.deleted_at.is_(None))
     if user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == user.id)
     return statement
@@ -100,7 +102,8 @@ def _snapshot_at(
 
 def _active_at(account: PersonalAccount, cutoff: datetime) -> bool:
     created_at = _as_utc(account.created_at)
-    return created_at < cutoff
+    deleted_at = _as_utc(account.deleted_at) if account.deleted_at else None
+    return created_at < cutoff and (deleted_at is None or deleted_at >= cutoff)
 
 
 def _collection_started_at(db: Session) -> datetime:
@@ -116,12 +119,20 @@ def _collection_started_at(db: Session) -> datetime:
 
 
 def _load_accounts(
-    db: Session, user: UserAccount, country_code: str | None = None
+    db: Session,
+    user: UserAccount,
+    country_code: str | None = None,
+    *,
+    include_deleted: bool = False,
 ) -> list[PersonalAccount]:
     statement = select(PersonalAccount)
     if country_code:
         statement = statement.where(PersonalAccount.country_code == country_code)
-    return list(db.scalars(_scope_accounts(statement, user)).all())
+    return list(
+        db.scalars(
+            _scope_accounts(statement, user, include_deleted=include_deleted)
+        ).all()
+    )
 
 
 def _load_lifecycle(
@@ -260,7 +271,12 @@ def daily(
     if effective_from > effective_to:
         return [], collection_start
 
-    accounts = _load_accounts(db, user, country_code)
+    accounts = _load_accounts(
+        db,
+        user,
+        country_code,
+        include_deleted=True,
+    )
     account_ids = [item.id for item in accounts]
     lifecycle = _load_lifecycle(db, account_ids)
     marketing = _load_successful_marketing(db, account_ids)

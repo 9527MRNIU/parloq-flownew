@@ -20,8 +20,10 @@ from app.models import (
     AccountProxyBinding,
     MessageDelivery,
     PersonalAccount,
+    PromotionChannel,
     PromotionEvent,
     PromotionLead,
+    PromotionTemplate,
     PromotionVisitor,
 )
 from app.routers import promotion as promotion_router
@@ -319,6 +321,245 @@ def test_interrupted_pairing_webhook_marks_account_retryable(
     assert account["status"] == "unpaired"
     assert account["validationStatus"] == "failed"
     assert account["lastError"] == "配对连接已中断，请重新获取配对码"
+
+
+def test_account_delete_releases_runtime_but_preserves_business_history(
+    admin_client: TestClient,
+) -> None:
+    phone = "+12025550773"
+    created = admin_client.post(
+        "/api/personal-accounts",
+        json={"name": "Delete history", "phone": phone},
+    )
+    assert created.status_code == 201, created.text
+    account_id = int(created.json()["data"]["account"]["id"])
+
+    with SessionLocal() as db:
+        account = db.get(PersonalAccount, account_id)
+        assert account is not None
+        template = PromotionTemplate(
+            public_id="ptpl_delete_history_test",
+            name="Delete history template",
+            version="1.0.0",
+            status="active",
+            manifest_json={},
+            index_html="<html></html>",
+            created_by=account.created_by,
+        )
+        db.add(template)
+        db.flush()
+        channel = PromotionChannel(
+            public_id="pch_delete_history_test",
+            name="Delete history channel",
+            country_code="US",
+            template_id=template.id,
+            slug="delete-history-test",
+            status="active",
+            protocol_node_id=account.protocol_id,
+            created_by=account.created_by,
+        )
+        db.add(channel)
+        db.flush()
+        attempt = AccountPairingAttempt(
+            public_id="pair_delete_history_test",
+            attempt_type="initial",
+            account_id=account.id,
+            channel_id=channel.id,
+            protocol_node_id=account.protocol_id,
+            route_version=1,
+            sync_policy_version=1,
+            sync_policy_json={},
+            request_context_json={},
+            status="verified",
+            expires_at=utcnow() + timedelta(minutes=3),
+            verified_at=utcnow(),
+            failure_detail_json={},
+        )
+        db.add(attempt)
+        db.add(
+            AccountMetadataSyncJob(
+                public_id="amsj_delete_history_test",
+                account_id=account.id,
+                protocol_node_id=account.protocol_id,
+                sync_policy_version=1,
+                sync_policy_json={},
+                status="pending",
+                active_key="account-delete-history-test",
+                created_by=account.created_by,
+            )
+        )
+        db.add(
+            PromotionEvent(
+                public_id="pevt_delete_history_test",
+                channel_id=channel.id,
+                event_type="pair_success",
+                idempotency_key="pair_success:delete_history_test",
+                occurred_at=utcnow(),
+                request_context_json={},
+                metadata_json={"accountId": str(account.id)},
+            )
+        )
+        account.avatar_content = b"avatar"
+        account.avatar_content_type = "image/jpeg"
+        account.avatar_size = 6
+        account.has_avatar = True
+        delivery = MessageDelivery(
+            public_id="msg_delete_history_test",
+            request_id="req_delete_history_test",
+            account_id=account.id,
+            recipient_e164="+12025550774",
+            status="delivered",
+            queued_at=utcnow(),
+            sent_at=utcnow(),
+            delivered_at=utcnow(),
+        )
+        db.add(delivery)
+        attempt_ids = list(
+            db.scalars(
+                select(AccountPairingAttempt.id).where(
+                    AccountPairingAttempt.account_id == account.id
+                )
+            ).all()
+        )
+        assert attempt_ids == [attempt.id]
+        event_ids = list(
+            db.scalars(
+                select(PromotionEvent.id).where(
+                    PromotionEvent.metadata_json["accountId"].as_string()
+                    == str(account.id)
+                )
+            ).all()
+        )
+        db.commit()
+
+    deleted = admin_client.delete(f"/api/personal-accounts/{account_id}")
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["data"] == {
+        "ok": True,
+        "accountId": str(account_id),
+        "providerLogoutConfirmed": True,
+        "businessHistoryPreserved": True,
+    }
+    assert admin_client.get(f"/api/personal-accounts/{account_id}").status_code == 404
+    managed = admin_client.get(
+        "/api/personal-accounts", params={"keyword": phone.lstrip("+")}
+    )
+    assert managed.status_code == 200
+    assert managed.json()["data"]["total"] == 0
+
+    intake = admin_client.get(
+        "/api/personal-accounts/intake/attempts",
+        params={"keyword": phone.lstrip("+")},
+    )
+    assert intake.status_code == 200, intake.text
+    assert intake.json()["data"]["total"] == 1
+    intake_account = intake.json()["data"]["rows"][0]["account"]
+    assert intake_account["id"] == str(account_id)
+    assert intake_account["phone"] == phone
+    assert intake_account["deleted"] is True
+
+    with SessionLocal() as db:
+        account = db.get(PersonalAccount, account_id)
+        assert account is not None
+        assert account.phone_e164 is None
+        assert account.deleted_phone_e164 == phone
+        assert account.deleted_at is not None
+        assert account.status == "deleted"
+        assert account.avatar_content is None
+        assert db.get(MessageDelivery, delivery.id) is not None
+        assert set(
+            db.scalars(
+                select(AccountPairingAttempt.id).where(
+                    AccountPairingAttempt.account_id == account.id
+                )
+            ).all()
+        ) == set(attempt_ids)
+        assert list(
+            db.scalars(
+                select(AccountMetadataSyncJob.id).where(
+                    AccountMetadataSyncJob.account_id == account.id
+                )
+            ).all()
+        ) == []
+        assert db.scalar(
+            select(AccountProxyBinding).where(
+                AccountProxyBinding.account_public_id == account.gateway_account_id
+            )
+        ) is None
+        assert db.scalar(
+            select(AccountLifecycleEvent).where(
+                AccountLifecycleEvent.account_id == account.id,
+                AccountLifecycleEvent.to_state == "deleted",
+            )
+        ) is not None
+        if event_ids:
+            assert set(
+                db.scalars(
+                    select(PromotionEvent.id).where(PromotionEvent.id.in_(event_ids))
+                ).all()
+            ) == set(event_ids)
+
+    recreated = admin_client.post(
+        "/api/personal-accounts",
+        json={"name": "Recreated after delete", "phone": phone},
+    )
+    assert recreated.status_code == 201, recreated.text
+    assert recreated.json()["data"]["account"]["id"] != str(account_id)
+
+
+def test_account_delete_rejects_an_in_flight_message(
+    admin_client: TestClient,
+) -> None:
+    created = admin_client.post(
+        "/api/personal-accounts",
+        json={"name": "Delete blocker", "phone": "+12025550775"},
+    )
+    assert created.status_code == 201, created.text
+    account_id = int(created.json()["data"]["account"]["id"])
+    with SessionLocal() as db:
+        db.add(
+            MessageDelivery(
+                public_id="msg_delete_blocker_test",
+                request_id="req_delete_blocker_test",
+                account_id=account_id,
+                recipient_e164="+12025550776",
+                status="queued",
+                queued_at=utcnow(),
+            )
+        )
+        db.commit()
+
+    deleted = admin_client.delete(f"/api/personal-accounts/{account_id}")
+    assert deleted.status_code == 409
+    assert "正在提交" in deleted.json()["detail"]
+    assert admin_client.get(f"/api/personal-accounts/{account_id}").status_code == 200
+
+
+def test_account_delete_maps_gateway_in_flight_conflict_and_restores_account(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
+    created = admin_client.post(
+        "/api/personal-accounts",
+        json={"name": "Delete gateway blocker", "phone": "+12025550777"},
+    )
+    assert created.status_code == 201, created.text
+    account_id = int(created.json()["data"]["account"]["id"])
+
+    def reject_delete(_client, _account_id: str):
+        raise GatewayError("gateway conflict", status_code=409)
+
+    monkeypatch.setattr(WaGatewayClient, "delete_account", reject_delete)
+    deleted = admin_client.delete(f"/api/personal-accounts/{account_id}")
+    assert deleted.status_code == 409
+    assert "发送中的消息" in deleted.json()["detail"]
+
+    with SessionLocal() as db:
+        account = db.get(PersonalAccount, account_id)
+        assert account is not None
+        assert account.deleted_at is None
+        assert account.enabled is True
+        assert account.marketing_eligible is True
 
 
 def test_promotion_zip_channel_tracking_leads_and_insights(

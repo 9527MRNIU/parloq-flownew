@@ -121,6 +121,7 @@ def _row(
             select(PersonalAccount.status, PersonalAccount.validation_status).where(
                 PersonalAccount.protocol_id == item.id,
                 PersonalAccount.admission_status == "active",
+                PersonalAccount.deleted_at.is_(None),
             )
         ).all()
     )

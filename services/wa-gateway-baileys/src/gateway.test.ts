@@ -65,6 +65,13 @@ class MemoryStore implements Store {
   }
   async listAccounts() { return [...this.accounts.values()] }
   async getAccount(id: string) { const value = this.accounts.get(id); if (!value) throw new GatewayError('not_found', 'missing'); return value }
+  async deleteAccount(id: string) {
+    const deleted = this.accounts.delete(id)
+    this.creds.delete(id)
+    for (const key of [...this.keys.keys()]) if (key.startsWith(`${id}:`)) this.keys.delete(key)
+    for (const [messageId, message] of this.messages) if (message.accountId === id) this.messages.delete(messageId)
+    return deleted
+  }
   async updateAccount(id: string, changes: Partial<Account>) { const current = await this.getAccount(id); const value = { ...current, ...changes, updatedAt: new Date() }; this.accounts.set(id, value); return value }
   async transitionAccount(id: string, state: AccountState, changes: Partial<Account>, reasonCategory: string, providerCode?: string) {
     const current = await this.getAccount(id)
@@ -237,6 +244,45 @@ describe('Baileys gateway HTTP contract', () => {
     expect(claimed.json().data).toMatchObject({ id: 'wa_orphan_new', state: 'unpaired', reasonCategory: 'orphan_reclaimed' })
     expect(store.accounts.has('wa_orphan_old')).toBe(false)
     expect(store.accounts.has('wa_orphan_new')).toBe(true)
+  })
+
+  it('deletes gateway runtime data idempotently and releases the phone number', async () => {
+    const headers = { authorization: `Bearer ${token}` }
+    await store.createAccount({ id: 'wa_delete', phoneE164: '+14155550145', proxyUrl: 'socks5://proxy.example:1080', state: 'unpaired' })
+    await store.setCreds('wa_delete', { registered: true })
+    await store.setKeys('wa_delete', [{ type: 'session', id: 'key-1', value: { value: true } }])
+    await store.createMessage({
+      messageId: 'delete-message',
+      accountId: 'wa_delete',
+      recipientE164: '+14155550146',
+      providerMessageId: '',
+      status: 'delivered',
+      errorCode: '',
+      queuedAt: new Date(),
+      sentAt: new Date(),
+      deliveredAt: new Date(),
+      updatedAt: new Date(),
+    })
+
+    const deleted = await app.inject({ method: 'DELETE', url: '/v1/accounts/wa_delete', headers })
+    expect(deleted.statusCode).toBe(200)
+    expect(deleted.json().data).toMatchObject({ accountId: 'wa_delete', deleted: true, providerLogoutConfirmed: true })
+    expect(store.accounts.has('wa_delete')).toBe(false)
+    expect(store.creds.has('wa_delete')).toBe(false)
+    expect(store.keys.size).toBe(0)
+    expect(store.messages.has('delete-message')).toBe(false)
+
+    const repeated = await app.inject({ method: 'DELETE', url: '/v1/accounts/wa_delete', headers })
+    expect(repeated.statusCode).toBe(200)
+    expect(repeated.json().data).toMatchObject({ accountId: 'wa_delete', deleted: false })
+
+    const recreated = await app.inject({
+      method: 'POST',
+      url: '/v1/accounts',
+      headers,
+      payload: { id: 'wa_delete_recreated', phoneE164: '+14155550145', proxyUrl: 'socks5://proxy.example:1080' },
+    })
+    expect(recreated.statusCode).toBe(201)
   })
 
   it('accepts an identical runtime configuration while active and rejects real route changes', async () => {

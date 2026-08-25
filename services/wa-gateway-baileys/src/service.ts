@@ -14,6 +14,7 @@ import type { FailureDiagnosis } from './domain.js'
 export interface CreateAccountRequest { id?: string; protocolDefinitionId?: string; protocolVersion?: string; phoneE164: string; proxyUrl?: string; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: SyncPolicy }
 export interface UpdateAccountRequest { phoneE164?: string; proxyUrl?: string; protocolDefinitionId?: string; protocolVersion?: string; autoConnect?: boolean; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: SyncPolicy }
 export interface MetadataSyncRequest { syncPolicy?: SyncPolicy }
+export interface DeleteAccountResult { accountId: string; deleted: boolean; providerLogoutConfirmed: boolean }
 
 function pairingCodeFromCreds(value: unknown): string | null {
   if (!value || typeof value !== 'object') return null
@@ -354,6 +355,45 @@ export class GatewayService {
     await this.store.clearAuth(id)
     this.clearPairingExpiry(id)
     return publicAccount(await this.transitionAccount(id, 'unpaired', { deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'idle', pairingExpiresAt: null }, 'manual_logout'))
+  }
+
+  async deleteAccount(id: string): Promise<DeleteAccountResult> {
+    let current: Account
+    try {
+      current = await this.store.getAccount(id)
+    } catch (error) {
+      if (error instanceof GatewayError && error.code === 'not_found') {
+        return { accountId: id, deleted: false, providerLogoutConfirmed: false }
+      }
+      throw error
+    }
+    if ((this.queueDepth.get(id) ?? 0) > 0) {
+      throw new GatewayError('conflict', 'account still has messages in flight')
+    }
+
+    this.clearPairingExpiry(id)
+    this.clearIdleDisconnect(id)
+    let providerLogoutConfirmed = false
+    const hasSession = Boolean(current.deviceJid || await this.store.getCreds(id))
+    if (hasSession) {
+      try {
+        await this.engine.logout(engineAccount(current))
+        providerLogoutConfirmed = true
+      } catch (error) {
+        this.logger.warn({ accountId: id, error: safeError(error) }, 'account_delete_provider_logout_failed')
+        try { await this.engine.disconnect(id) } catch { /* local purge remains authoritative */ }
+      }
+    } else {
+      try { await this.engine.disconnect(id) } catch { /* no persisted session to preserve */ }
+    }
+
+    await this.pendingEngineEvents.get(id)
+    const deleted = await this.store.deleteAccount(id)
+    this.queueDepth.delete(id)
+    this.queueTail.delete(id)
+    this.nextSendAt.delete(id)
+    this.pendingEngineEvents.delete(id)
+    return { accountId: id, deleted, providerLogoutConfirmed }
   }
 
   async importSession(

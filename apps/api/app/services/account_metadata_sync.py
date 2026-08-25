@@ -151,7 +151,7 @@ def _claim_jobs(limit: int) -> list[int]:
             job.last_error = None
             job.attempt_count = int(job.attempt_count or 0) + 1
             account = db.get(PersonalAccount, job.account_id)
-            if account is not None:
+            if account is not None and account.deleted_at is None:
                 account.metadata_sync_status = "syncing"
         db.commit()
         return [job.id for job in jobs]
@@ -170,7 +170,7 @@ def process_pending_account_metadata_sync_jobs(limit: int = 1) -> dict[str, int]
             if job is None:
                 continue
             try:
-                if account is None:
+                if account is None or account.deleted_at is not None:
                     raise GatewayError("账号已不存在")
                 if account.admission_status != "active":
                     raise GatewayError("账号尚未正式入池")
@@ -188,7 +188,7 @@ def process_pending_account_metadata_sync_jobs(limit: int = 1) -> dict[str, int]
             except GatewayError as exc:
                 job.status = "failed"
                 job.last_error = str(exc)[:2000]
-                if account is not None:
+                if account is not None and account.deleted_at is None:
                     account.metadata_sync_status = "failed"
                     account.last_error = str(exc)[:2000]
                 failed += 1

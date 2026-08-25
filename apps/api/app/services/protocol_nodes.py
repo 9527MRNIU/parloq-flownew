@@ -133,6 +133,7 @@ def protocol_capacity(db: Session, item: ProtocolNode) -> ProtocolCapacity:
             select(func.count(PersonalAccount.id)).where(
                 PersonalAccount.protocol_id == item.id,
                 PersonalAccount.admission_status.in_(("reserved", "active")),
+                PersonalAccount.deleted_at.is_(None),
             )
         )
         or 0
@@ -143,6 +144,7 @@ def protocol_capacity(db: Session, item: ProtocolNode) -> ProtocolCapacity:
                 PersonalAccount.protocol_id == item.id,
                 PersonalAccount.status.in_(ONLINE_ACCOUNT_STATES),
                 PersonalAccount.admission_status == "active",
+                PersonalAccount.deleted_at.is_(None),
             )
         )
         or 0

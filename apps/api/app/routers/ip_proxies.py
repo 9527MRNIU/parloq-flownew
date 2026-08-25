@@ -411,6 +411,7 @@ def _sync_account_proxy(db: DbSession, account_public_id: str) -> None:
     account = db.scalar(
         select(PersonalAccount).where(
             PersonalAccount.public_id == account_public_id,
+            PersonalAccount.deleted_at.is_(None),
         )
     )
     if account is None or not account.phone_e164:
@@ -450,11 +451,13 @@ def _binding_account(db: DbSession, identifier: str) -> PersonalAccount | None:
         return db.scalar(
             select(PersonalAccount).where(
                 PersonalAccount.public_id == identifier,
+                PersonalAccount.deleted_at.is_(None),
             )
         )
     return db.scalar(
         select(PersonalAccount).where(
             PersonalAccount.id == account_id,
+            PersonalAccount.deleted_at.is_(None),
         )
     )
 
@@ -463,6 +466,7 @@ def _binding_row(db: DbSession, binding: AccountProxyBinding) -> dict:
     account = db.scalar(
         select(PersonalAccount).where(
             PersonalAccount.public_id == binding.account_public_id,
+            PersonalAccount.deleted_at.is_(None),
         )
     )
     return account_proxy_binding_row(

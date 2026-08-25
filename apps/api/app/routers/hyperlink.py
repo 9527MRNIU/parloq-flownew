@@ -591,6 +591,7 @@ def _dynamic_eligible_accounts(db: DbSession, task: HyperlinkTask) -> list[Perso
                 PersonalAccount.group_id == task.account_group_id,
                 PersonalAccount.created_by == task.created_by,
                 PersonalAccount.enabled.is_(True),
+                PersonalAccount.deleted_at.is_(None),
                 PersonalAccount.admission_status == "active",
                 PersonalAccount.validation_status == "ready",
                 PersonalAccount.status.in_(("online_idle", "sending")),
@@ -625,7 +626,7 @@ def start_task(pid:str,db:DbSession,current_user:CurrentUser)->dict:
         for value in task.account_public_ids:
             try:account_ids.append(parse_snowflake_id(value))
             except ValueError:pass
-        accounts=list(db.scalars(select(PersonalAccount).join(ProtocolNode,ProtocolNode.id==PersonalAccount.protocol_id).where(PersonalAccount.id.in_(account_ids),PersonalAccount.created_by==task.created_by,PersonalAccount.status.in_(("online_idle","sending")),PersonalAccount.enabled.is_(True),PersonalAccount.admission_status=="active",ProtocolNode.marketing_enabled.is_(True),ProtocolNode.online_enabled.is_(True))).all())
+        accounts=list(db.scalars(select(PersonalAccount).join(ProtocolNode,ProtocolNode.id==PersonalAccount.protocol_id).where(PersonalAccount.id.in_(account_ids),PersonalAccount.created_by==task.created_by,PersonalAccount.status.in_(("online_idle","sending")),PersonalAccount.enabled.is_(True),PersonalAccount.deleted_at.is_(None),PersonalAccount.admission_status=="active",ProtocolNode.marketing_enabled.is_(True),ProtocolNode.online_enabled.is_(True))).all())
         if not accounts:raise HTTPException(409,"没有在线可发送的个人账号")
     else:
         if task.account_group_id is None:

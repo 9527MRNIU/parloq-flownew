@@ -189,6 +189,7 @@ def _dispatchable_account_filter(task: HyperlinkTask):
         PersonalAccount.created_by == task.created_by,
         PersonalAccount.enabled.is_(True),
         PersonalAccount.marketing_eligible.is_(True),
+        PersonalAccount.deleted_at.is_(None),
         PersonalAccount.admission_status == "active",
         PersonalAccount.validation_status == "ready",
         or_(
@@ -394,6 +395,7 @@ def _legacy_records(db, task: HyperlinkTask, policy: HyperlinkStrategyPolicy):
                 _pending_submission_filter(retry_ready_before),
                 PersonalAccount.enabled.is_(True),
                 PersonalAccount.marketing_eligible.is_(True),
+                PersonalAccount.deleted_at.is_(None),
                 PersonalAccount.admission_status == "active",
                 PersonalAccount.status.in_(("online_idle", "sending")),
                 ProtocolNode.marketing_enabled.is_(True),

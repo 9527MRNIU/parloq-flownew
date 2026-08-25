@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from io import BytesIO
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -37,6 +38,8 @@ from app.models import (
     ProtocolNode,
     RoleActionPermission,
     HyperlinkTask,
+    HyperlinkTaskAccountSlot,
+    HyperlinkTaskDelivery,
 )
 from app.security import utcnow
 from app.serializers import iso
@@ -199,6 +202,7 @@ def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
         .where(
             PersonalAccount.group_id.in_(group_ids),
             PersonalAccount.admission_status == "active",
+            PersonalAccount.deleted_at.is_(None),
         )
         .group_by(PersonalAccount.group_id)
     ).all()
@@ -371,7 +375,13 @@ def delete_account_group(
     return {"data": {"ok": True}}
 
 
-def _account(db: DbSession, account_id: str, user) -> PersonalAccount:
+def _account(
+    db: DbSession,
+    account_id: str,
+    user,
+    *,
+    for_update: bool = False,
+) -> PersonalAccount:
     try:
         database_id = parse_snowflake_id(account_id)
     except ValueError:
@@ -379,10 +389,11 @@ def _account(db: DbSession, account_id: str, user) -> PersonalAccount:
     statement = select(PersonalAccount).where(
         PersonalAccount.id == database_id,
         PersonalAccount.admission_status == "active",
+        PersonalAccount.deleted_at.is_(None),
         )
     if user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == user.id)
-    item = db.scalar(statement)
+    item = db.scalar(statement.with_for_update() if for_update else statement)
     if item is None:
         raise HTTPException(status_code=404, detail="个人账号不存在")
     return item
@@ -875,6 +886,7 @@ def list_accounts(
 ) -> dict:
     statement = select(PersonalAccount).where(
         PersonalAccount.admission_status == "active",
+        PersonalAccount.deleted_at.is_(None),
     )
     if current_user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == current_user.id)
@@ -973,6 +985,7 @@ def list_accounts(
 def account_filter_options(db: DbSession, current_user: CurrentUser) -> dict:
     account_scope = select(PersonalAccount).where(
         PersonalAccount.admission_status == "active",
+        PersonalAccount.deleted_at.is_(None),
     )
     if current_user.role != "admin":
         account_scope = account_scope.where(
@@ -1259,6 +1272,7 @@ def _unknown_aware_metric(values: list[object], predicate) -> dict:
 def account_statistics(db: DbSession, current_user: CurrentUser) -> dict:
     statement = select(PersonalAccount).where(
         PersonalAccount.admission_status == "active",
+        PersonalAccount.deleted_at.is_(None),
     )
     if current_user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == current_user.id)
@@ -1480,6 +1494,7 @@ def export_accounts_batch(
     statement = select(PersonalAccount).where(
         PersonalAccount.id.in_(database_ids),
         PersonalAccount.admission_status == "active",
+        PersonalAccount.deleted_at.is_(None),
     )
     if current_user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == current_user.id)
@@ -1554,6 +1569,7 @@ def export_accounts_batch(
 def sync_all_accounts(db: DbSession, current_user: CurrentUser) -> dict:
     statement = select(PersonalAccount).where(
         PersonalAccount.admission_status == "active",
+        PersonalAccount.deleted_at.is_(None),
     )
     if current_user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == current_user.id)
@@ -1591,6 +1607,7 @@ def list_intake_attempts(
             or_(
                 PersonalAccount.name.ilike(pattern),
                 PersonalAccount.phone_e164.ilike(pattern),
+                PersonalAccount.deleted_phone_e164.ilike(pattern),
                 AccountPairingAttempt.public_id.ilike(pattern),
             )
         )
@@ -1617,13 +1634,25 @@ def list_intake_attempts(
         if channel is not None and domain is not None:
             prefix = (channel.subdomain_prefix or "").strip().lower()
             hostname = f"{prefix}.{domain.hostname}" if prefix else domain.hostname
-        protocol = db.get(ProtocolNode, attempt.protocol_node_id)
-        group = db.get(AccountGroup, attempt.account_group_id)
-        latest_job = db.scalar(
-            select(AccountMetadataSyncJob)
-            .where(AccountMetadataSyncJob.account_id == account.id)
-            .order_by(AccountMetadataSyncJob.created_at.desc())
-            .limit(1)
+        protocol = (
+            db.get(ProtocolNode, attempt.protocol_node_id)
+            if attempt.protocol_node_id is not None
+            else None
+        )
+        group = (
+            db.get(AccountGroup, attempt.account_group_id)
+            if attempt.account_group_id is not None
+            else None
+        )
+        latest_job = (
+            db.scalar(
+                select(AccountMetadataSyncJob)
+                .where(AccountMetadataSyncJob.account_id == account.id)
+                .order_by(AccountMetadataSyncJob.created_at.desc())
+                .limit(1)
+            )
+            if account.deleted_at is None
+            else None
         )
         terminal_detail = attempt.terminal_reason or (
             attempt.status
@@ -1669,12 +1698,13 @@ def list_intake_attempts(
                 "account": {
                     "id": str(account.id),
                     "name": account.name,
-                    "phone": account.phone_e164,
+                    "phone": account.phone_e164 or account.deleted_phone_e164,
                     "countryCode": account.country_code,
                     "admissionStatus": account.admission_status,
                     "status": account.status,
                     "validationStatus": account.validation_status,
                     "metadataSyncStatus": account.metadata_sync_status,
+                    "deleted": account.deleted_at is not None,
                 },
                 "channel": (
                     {
@@ -1823,18 +1853,157 @@ def update_account(account_id: str, payload: PersonalAccountUpdate, db: DbSessio
 
 @router.delete("/{account_id}")
 def delete_account(account_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _account(db, account_id, current_user)
+    item = _account(db, account_id, current_user, for_update=True)
+    in_flight_message = db.scalar(
+        select(MessageDelivery.id)
+        .where(
+            MessageDelivery.account_id == item.id,
+            MessageDelivery.status == "queued",
+            MessageDelivery.queued_at >= utcnow() - timedelta(minutes=10),
+        )
+        .limit(1)
+    )
+    in_flight_task = db.scalar(
+        select(HyperlinkTaskDelivery.id)
+        .where(
+            HyperlinkTaskDelivery.account_id == item.id,
+            HyperlinkTaskDelivery.submission_status.in_(
+                ("leased", "submitting", "reconciling")
+            ),
+        )
+        .limit(1)
+    )
+    if in_flight_message is not None or in_flight_task is not None:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="账号仍有正在提交或等待网关回执的消息，请等待发送结束后再删除",
+        )
+
+    previous_enabled = item.enabled
+    previous_marketing_eligible = item.marketing_eligible
+    item.enabled = False
+    item.marketing_eligible = False
+    db.commit()
     try:
-        WaGatewayClient().logout(item.gateway_account_id)
+        gateway_result = WaGatewayClient().delete_account(item.gateway_account_id)
     except GatewayError as exc:
+        recoverable = db.scalar(
+            select(PersonalAccount)
+            .where(
+                PersonalAccount.id == item.id,
+                PersonalAccount.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+        if recoverable is not None:
+            recoverable.enabled = previous_enabled
+            recoverable.marketing_eligible = previous_marketing_eligible
+            db.commit()
+        if exc.status_code == 409:
+            raise HTTPException(
+                status_code=409,
+                detail="账号网关仍有发送中的消息，请等待发送结束后再删除",
+            ) from None
         raise HTTPException(status_code=502, detail=str(exc)) from None
-    binding = db.scalar(select(AccountProxyBinding).where(AccountProxyBinding.account_public_id == item.gateway_account_id))
+
+    item = db.scalar(
+        select(PersonalAccount)
+        .where(
+            PersonalAccount.id == item.id,
+            PersonalAccount.deleted_at.is_(None),
+        )
+        .with_for_update()
+    )
+    if item is None:
+        return {"data": {"ok": True, "alreadyDeleted": True}}
+    binding = db.scalar(
+        select(AccountProxyBinding).where(
+            AccountProxyBinding.account_public_id == item.gateway_account_id
+        )
+    )
     if binding:
         db.delete(binding)
-    db.execute(delete(MessageDelivery).where(MessageDelivery.account_id == item.id))
-    db.delete(item)
+    db.execute(
+        delete(AccountMetadataSyncJob).where(
+            AccountMetadataSyncJob.account_id == item.id
+        )
+    )
+    for slot in db.scalars(
+        select(HyperlinkTaskAccountSlot).where(
+            HyperlinkTaskAccountSlot.account_id == item.id
+        )
+    ).all():
+        slot.account_id = None
+        slot.status = "vacant" if slot.status != "released" else slot.status
+        slot.lease_token = None
+        slot.lease_expires_at = None
+        slot.released_at = utcnow()
+        slot.last_switch_reason = "account_deleted"
+        slot.last_error = None
+
+    now = utcnow()
+    previous_group_id = item.group_id
+    if previous_group_id is not None:
+        from app.services.account_group_wakeups import record_group_wakeup
+
+        record_group_wakeup(
+            db,
+            previous_group_id,
+            reason="account_deleted",
+            account_id=item.id,
+        )
+    db.add(
+        AccountLifecycleEvent(
+            public_id=f"deleted_{item.public_id}",
+            account_id=item.id,
+            from_state=item.status,
+            to_state="deleted",
+            reason_category="manual_delete",
+            occurred_at=now,
+        )
+    )
+    item.deleted_phone_e164 = item.phone_e164 or item.deleted_phone_e164
+    item.phone_e164 = None
+    item.group_id = None
+    item.status = "deleted"
+    item.validation_status = "failed"
+    item.metadata_sync_status = "unsupported"
+    item.has_avatar = None
+    item.avatar_source_url = None
+    item.avatar_content_type = None
+    item.avatar_size = None
+    item.avatar_sha256 = None
+    item.avatar_content = None
+    item.avatar_fetched_at = None
+    item.group_count = None
+    item.friend_count = None
+    item.mutual_contact_count = None
+    item.quality_synced_at = None
+    item.enabled = False
+    item.marketing_eligible = False
+    item.last_error = None
+    item.last_connected_at = None
+    item.sending_cooldown_until = None
+    item.deleted_at = now
+    item.deleted_by = current_user.id
     db.commit()
-    return {"data": {"ok": True}}
+    if previous_group_id is not None:
+        from app.services.account_group_wakeups import (
+            dispatch_group_wakeups_best_effort,
+        )
+
+        dispatch_group_wakeups_best_effort(previous_group_id)
+    return {
+        "data": {
+            "ok": True,
+            "accountId": str(item.id),
+            "providerLogoutConfirmed": bool(
+                gateway_result.get("providerLogoutConfirmed")
+            ),
+            "businessHistoryPreserved": True,
+        }
+    }
 
 
 @router.post("/{account_id}/pairing-code")

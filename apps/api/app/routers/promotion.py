@@ -3662,6 +3662,7 @@ def public_pairing_status(
         select(PersonalAccount).where(
             PersonalAccount.id == database_id,
             PersonalAccount.created_by == channel.created_by,
+            PersonalAccount.deleted_at.is_(None),
         )
     )
     if item is None:
@@ -3912,6 +3913,7 @@ def cancel_public_pairing(
         select(PersonalAccount).where(
             PersonalAccount.id == database_id,
             PersonalAccount.created_by == channel.created_by,
+            PersonalAccount.deleted_at.is_(None),
         )
     )
     if item is None:

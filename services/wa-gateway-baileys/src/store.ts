@@ -14,6 +14,7 @@ export interface Store {
   createImportedAccount(account: Pick<Account, 'id' | 'protocolDefinitionId' | 'protocolVersion' | 'phoneE164' | 'proxyUrl' | 'state' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>, auth: StoredAuth): Promise<Account>
   listAccounts(): Promise<Account[]>
   getAccount(id: string): Promise<Account>
+  deleteAccount(id: string): Promise<boolean>
   updateAccount(id: string, changes: Partial<Pick<Account, 'phoneE164' | 'proxyUrl' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'pairingStatus' | 'pairingExpiresAt' | 'metadataSyncStatus' | 'hasAvatar' | 'groupCount' | 'friendCount' | 'mutualContactCount' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy' | 'metadata'>>): Promise<Account>
   transitionAccount(id: string, state: AccountState, changes: Partial<Pick<Account, 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'pairingStatus' | 'pairingExpiresAt' | 'metadataSyncStatus'>>, reasonCategory: string, providerCode?: string): Promise<AccountStateTransition>
   createMessage(message: Message): Promise<{ message: Message; created: boolean }>
@@ -448,6 +449,14 @@ export class PostgresStore implements Store {
     const result = await this.pool.query<AccountRow>('SELECT * FROM wa_gateway_baileys.accounts WHERE id=$1', [id])
     if (!result.rows[0]) throw new GatewayError('not_found', 'account does not exist')
     return accountFromRow(result.rows[0])
+  }
+
+  async deleteAccount(id: string): Promise<boolean> {
+    const result = await this.pool.query(
+      'DELETE FROM wa_gateway_baileys.accounts WHERE id=$1 RETURNING id',
+      [id],
+    )
+    return Boolean(result.rowCount)
   }
 
   async updateAccount(id: string, changes: Partial<Pick<Account, 'phoneE164' | 'proxyUrl' | 'deviceJid' | 'autoConnect' | 'sessionStatus' | 'sessionCompleteness' | 'pairingStatus' | 'pairingExpiresAt' | 'metadataSyncStatus' | 'hasAvatar' | 'groupCount' | 'friendCount' | 'mutualContactCount' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy' | 'metadata'>>): Promise<Account> {
