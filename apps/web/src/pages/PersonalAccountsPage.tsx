@@ -20,6 +20,7 @@ import { useAuth } from "../auth/AuthContext";
 import {
   AccountStatusIndicator,
 } from "../components/account-status-indicator";
+import { CountryDisplay } from "../components/country-display";
 import { DrawerFieldLabel } from "../components/drawer-form";
 import {
   ListPagination,
@@ -64,6 +65,7 @@ type Account = {
   phone: string;
   name: string;
   countryCode: string;
+  visitorCountryCode: string;
   status: string;
   connected: boolean;
   proxyId: string;
@@ -188,6 +190,11 @@ function accountRow(input: unknown): Account {
       ? formatPhoneDisplay(rawName)
       : rawName,
     countryCode: val(row, "countryCode", "country_code"),
+    visitorCountryCode: val(
+      row,
+      "visitorCountryCode",
+      "visitor_country_code",
+    ),
     status,
     connected: Boolean(
       row.connected ??
@@ -1044,6 +1051,8 @@ export function PersonalAccountsPage() {
                   />
                 </TableHead>
                 <TableHead adaptive>账号</TableHead>
+                <TableHead className="text-center">号码国家</TableHead>
+                <TableHead className="text-center">访问国家</TableHead>
                 <TableHead className="text-center">头像</TableHead>
                 <TableHead className="text-center">类型</TableHead>
                 <TableHead className="text-center">系统</TableHead>
@@ -1095,6 +1104,20 @@ export function PersonalAccountsPage() {
                         )}
                       </div>
                     </div>
+                  </TableCell>
+                  <TableCell className="text-center align-middle">
+                    {row.countryCode ? (
+                      <CountryDisplay code={row.countryCode} />
+                    ) : (
+                      "-"
+                    )}
+                  </TableCell>
+                  <TableCell className="text-center align-middle">
+                    {row.visitorCountryCode ? (
+                      <CountryDisplay code={row.visitorCountryCode} />
+                    ) : (
+                      "-"
+                    )}
                   </TableCell>
                   <TableCell className="text-center align-middle">
                     <div className="flex justify-center">

@@ -2120,6 +2120,13 @@ def test_number_country_is_independent_from_channel_and_visit_country(
     assert intake["rows"][0]["account"]["countryCode"] == "CN"
     assert intake["rows"][0]["visitorCountryCode"] == "US"
 
+    accounts = admin_client.get(
+        "/api/personal-accounts?keyword=8613187071551"
+    ).json()["data"]
+    assert accounts["total"] == 1
+    assert accounts["rows"][0]["countryCode"] == "CN"
+    assert accounts["rows"][0]["visitorCountryCode"] == "US"
+
     with SessionLocal() as db:
         lead = db.scalar(
             select(PromotionLead).where(

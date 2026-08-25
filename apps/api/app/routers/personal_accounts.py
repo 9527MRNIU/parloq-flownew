@@ -451,12 +451,50 @@ def _proxy_url(db: DbSession, account_id: str) -> str | None:
     return gateway_proxy_url(db, account_id)
 
 
+def _latest_visitor_country_codes(
+    db: DbSession, account_ids: list[int]
+) -> dict[int, str]:
+    if not account_ids:
+        return {}
+    ranked = (
+        select(
+            AccountPairingAttempt.account_id.label("account_id"),
+            AccountPairingAttempt.visitor_country_code.label(
+                "visitor_country_code"
+            ),
+            func.row_number()
+            .over(
+                partition_by=AccountPairingAttempt.account_id,
+                order_by=(
+                    AccountPairingAttempt.created_at.desc(),
+                    AccountPairingAttempt.id.desc(),
+                ),
+            )
+            .label("position"),
+        )
+        .where(
+            AccountPairingAttempt.account_id.in_(account_ids),
+            AccountPairingAttempt.visitor_country_code.is_not(None),
+        )
+        .subquery()
+    )
+    return {
+        int(account_id): str(visitor_country_code)
+        for account_id, visitor_country_code in db.execute(
+            select(ranked.c.account_id, ranked.c.visitor_country_code).where(
+                ranked.c.position == 1
+            )
+        ).all()
+    }
+
+
 def _account_payload(
     item: PersonalAccount,
     *,
     bound: tuple[AccountProxyBinding, ProxyEndpoint] | None,
     group: AccountGroup | None,
     protocol: ProtocolNode | None,
+    visitor_country_code: str | None,
     sent_count: int,
     delivered_count: int,
 ) -> dict:
@@ -468,6 +506,7 @@ def _account_payload(
         "name": item.name,
         "phone": item.phone_e164,
         "countryCode": item.country_code,
+        "visitorCountryCode": visitor_country_code,
         "status": item.status,
         "source": item.source,
         "sourceRefType": item.source_ref_type,
@@ -562,6 +601,9 @@ def account_row(db: DbSession, item: PersonalAccount) -> dict:
         bound=_binding(db, item.gateway_account_id),
         group=db.get(AccountGroup, item.group_id) if item.group_id else None,
         protocol=db.get(ProtocolNode, item.protocol_id) if item.protocol_id else None,
+        visitor_country_code=_latest_visitor_country_codes(db, [item.id]).get(
+            item.id
+        ),
         sent_count=sent_count,
         delivered_count=delivered_count,
     )
@@ -613,6 +655,7 @@ def account_rows(db: DbSession, items: list[PersonalAccount]) -> list[dict]:
             .group_by(MessageDelivery.account_id)
         ).all()
     }
+    visitor_country_codes = _latest_visitor_country_codes(db, account_ids)
     rows = []
     for item in items:
         sent_count, delivered_count = deliveries.get(item.id, (0, 0))
@@ -622,6 +665,7 @@ def account_rows(db: DbSession, items: list[PersonalAccount]) -> list[dict]:
                 bound=bindings.get(item.gateway_account_id),
                 group=groups.get(item.group_id),
                 protocol=protocols.get(item.protocol_id),
+                visitor_country_code=visitor_country_codes.get(item.id),
                 sent_count=sent_count,
                 delivered_count=delivered_count,
             )
