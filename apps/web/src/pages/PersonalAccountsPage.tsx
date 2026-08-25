@@ -7,11 +7,13 @@ import {
   MessageSquareTextIcon,
   RefreshCwIcon,
   SlidersHorizontalIcon,
+  SmartphoneIcon,
   Trash2Icon,
   UploadCloudIcon,
   UserRoundIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { FaAndroid, FaApple } from "react-icons/fa6";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
@@ -303,6 +305,17 @@ const deviceOsLabel = (value: string) =>
       : value === "other"
         ? "其他"
         : "待识别";
+function DeviceOsDisplay({ value }: { value: string }) {
+  const label = deviceOsLabel(value);
+  const Icon =
+    value === "android" ? FaAndroid : value === "ios" ? FaApple : SmartphoneIcon;
+  return (
+    <div className="flex min-w-max items-center justify-center gap-2">
+      <Icon className="size-4 shrink-0" aria-hidden="true" />
+      <span>{label}</span>
+    </div>
+  );
+}
 const canSwitchProxy = (row: Account) =>
   ["linked_offline", "unpaired"].includes(row.status);
 
@@ -1028,12 +1041,15 @@ export function PersonalAccountsPage() {
                 </TableHead>
                 <TableHead adaptive>账号</TableHead>
                 <TableHead className="text-center">头像</TableHead>
-                <TableHead className="text-center">类型 / 系统</TableHead>
+                <TableHead className="text-center">类型</TableHead>
+                <TableHead className="text-center">系统</TableHead>
                 <TableHead className="text-center">来源</TableHead>
                 <TableHead>分组</TableHead>
                 <TableHead>代理</TableHead>
                 <TableHead className="text-center">发送数据</TableHead>
-                <TableHead className="text-center">资源概览</TableHead>
+                <TableHead className="text-center">好友数</TableHead>
+                <TableHead className="text-center">群组数</TableHead>
+                <TableHead className="text-center">评分</TableHead>
                 <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
@@ -1082,12 +1098,15 @@ export function PersonalAccountsPage() {
                     </div>
                   </TableCell>
                   <TableCell className="text-center align-middle">
-                    <div className="cell-main mx-auto min-w-[110px] items-center text-center">
-                      <strong>{accountTypeLabel(row.accountType)}</strong>
-                      <span title={row.waPlatformRaw || undefined}>
-                        {deviceOsLabel(row.deviceOs)}
-                      </span>
-                    </div>
+                    <strong className="min-w-[72px]">
+                      {accountTypeLabel(row.accountType)}
+                    </strong>
+                  </TableCell>
+                  <TableCell
+                    className="text-center align-middle"
+                    title={row.waPlatformRaw || undefined}
+                  >
+                    <DeviceOsDisplay value={row.deviceOs} />
                   </TableCell>
                   <TableCell className="text-center align-middle">
                     <div className="cell-main mx-auto min-w-[120px] items-center text-center">
@@ -1184,18 +1203,19 @@ export function PersonalAccountsPage() {
                     </div>
                   </TableCell>
                   <TableCell className="text-center align-middle">
-                    <div className="cell-main mx-auto min-w-[170px] items-center text-center">
-                      <strong>
-                        评分 {row.qualityScore == null ? "待同步" : `${row.qualityScore} 分`}
-                      </strong>
-                      <span>
-                        好友 {row.friendCount == null ? "未知" : row.friendCount}
-                        {" · "}群组 {row.groupCount == null ? "未知" : row.groupCount}
-                      </span>
-                      <span>
-                        去重群成员 {row.uniqueGroupMemberCount == null ? "未知" : row.uniqueGroupMemberCount}
-                      </span>
-                    </div>
+                    <strong className="tabular-nums">
+                      {row.friendCount == null ? "-" : row.friendCount}
+                    </strong>
+                  </TableCell>
+                  <TableCell className="text-center align-middle">
+                    <strong className="tabular-nums">
+                      {row.groupCount == null ? "-" : row.groupCount}
+                    </strong>
+                  </TableCell>
+                  <TableCell className="text-center align-middle">
+                    <strong className="tabular-nums">
+                      {row.qualityScore == null ? "待同步" : `${row.qualityScore} 分`}
+                    </strong>
                   </TableCell>
                   <TableCell className="sticky right-0 bg-background">
                     <div className="flex min-w-max items-center justify-end gap-2">
