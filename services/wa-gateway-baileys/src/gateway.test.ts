@@ -265,6 +265,9 @@ describe('Baileys gateway HTTP contract', () => {
       updatedAt: new Date(),
     })
 
+    const standaloneLogout = await app.inject({ method: 'POST', url: '/v1/accounts/wa_delete/logout', headers })
+    expect(standaloneLogout.statusCode).toBe(404)
+
     const deleted = await app.inject({ method: 'DELETE', url: '/v1/accounts/wa_delete', headers })
     expect(deleted.statusCode).toBe(200)
     expect(deleted.json().data).toMatchObject({ accountId: 'wa_delete', deleted: true, providerLogoutConfirmed: true })

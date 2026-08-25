@@ -62,10 +62,6 @@ export function buildServer(options: ServerOptions) {
     data: await options.service.disconnect(request.params.accountId),
     meta: { sessionPreserved: true, message: 'Disconnected. The saved session can reconnect without pairing again.' },
   }))
-  app.post<{ Params: { accountId: string } }>('/v1/accounts/:accountId/logout', async (request) => ({
-    data: await options.service.logout(request.params.accountId),
-    meta: { sessionPreserved: false, message: 'Logged out. The linked-device session was removed and pairing is required.' },
-  }))
   app.post<{ Params: { accountId: string }; Body: { session: unknown; proxyUrl?: string; protocolDefinitionId?: string; protocolVersion?: string } }>('/v1/accounts/:accountId/import-session', async (request) => {
     if (!request.body || !('session' in request.body)) throw new GatewayError('invalid_argument', 'session is required')
     const result = await options.service.importSession(

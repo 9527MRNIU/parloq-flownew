@@ -6,11 +6,9 @@ import {
   FolderInputIcon,
   ListChecksIcon,
   LoaderCircleIcon,
-  MessageSquareTextIcon,
   RefreshCwIcon,
   SlidersHorizontalIcon,
   SmartphoneIcon,
-  Trash2Icon,
   UploadCloudIcon,
   UserRoundIcon,
 } from "lucide-react";
@@ -49,7 +47,6 @@ import {
   DropdownMenuTrigger,
   EmptyState,
   Input,
-  Modal,
   Popover,
   PopoverContent,
   PopoverTrigger,
@@ -61,7 +58,6 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-  Textarea,
   toast,
 } from "../components/ui";
 import {
@@ -406,11 +402,6 @@ export function PersonalAccountsPage() {
   const [batchGroupDrawerOpen, setBatchGroupDrawerOpen] = useState(false);
   const [groupingIds, setGroupingIds] = useState<string[]>([]);
   const [operation, setOperation] = useState("");
-  const [testAccount, setTestAccount] = useState<Account | null>(null);
-  const [testTo, setTestTo] = useState("");
-  const [testText, setTestText] = useState("Parloq 连接测试消息");
-  const [testPending, setTestPending] = useState(false);
-  const [testResult, setTestResult] = useState("");
   const [detailAccount, setDetailAccount] = useState<Account | null>(null);
   const [importOpen, setImportOpen] = useState(
     searchParams.get("import") === "1",
@@ -601,25 +592,15 @@ export function PersonalAccountsPage() {
   }
   async function action(
     row: Account,
-    name: "connect" | "disconnect" | "logout" | "sync",
+    name: "connect" | "disconnect",
   ) {
     if (!row.id) return;
-    if (
-      name === "logout" &&
-      !(await confirmAction({
-        title: `登出 ${row.phone}？`,
-        description: "登出后需要重新配对设备，会话凭证将被清除。",
-        confirmText: "确认登出",
-      }))
-    )
-      return;
     setOperation(`${row.id}:${name}`);
     try {
       await apiRequest(`/api/personal-accounts/${row.id}/${name}`, {
         method: "POST",
       });
       await loadAccounts();
-      if (name === "sync") toast.success("资料同步任务已提交到后台");
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "操作失败");
     } finally {
@@ -680,36 +661,6 @@ export function PersonalAccountsPage() {
       setSelectedIds([]);
       setBatchGroupDrawerOpen(false);
       setBatchGroupId("");
-    }
-  }
-  async function sendTest() {
-    if (!testAccount?.id || !testTo.trim() || !testText.trim()) return;
-    setTestPending(true);
-    setTestResult("");
-    try {
-      const payload = await apiRequest(
-        `/api/personal-accounts/${testAccount.id}/send`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            to: testTo.trim(),
-            message: testText.trim(),
-            idempotencyKey: crypto.randomUUID(),
-          }),
-        },
-      );
-      const data = ((payload as { data?: Record<string, unknown> }).data ||
-        {}) as Record<string, unknown>;
-      const delivery = (data.messageDelivery ||
-        data.message_delivery ||
-        data) as Record<string, unknown>;
-      setTestResult(
-        val(delivery, "deliveryStatus", "status") || "server_accepted",
-      );
-    } catch (caught) {
-      setTestResult(caught instanceof Error ? caught.message : "发送失败");
-    } finally {
-      setTestPending(false);
     }
   }
   function openImport() {
@@ -1221,20 +1172,6 @@ export function PersonalAccountsPage() {
                         详情
                       </Button>
                       {canManage ? <>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={
-                          !row.id ||
-                          row.validationStatus !== "ready" ||
-                          ["pairing", "reauth_required", "restricted"].includes(row.status) ||
-                          Boolean(operation)
-                        }
-                        onClick={() => void action(row, "sync")}
-                      >
-                        {operation === `${row.id}:sync` ? <LoaderCircleIcon className="spin" size={16} /> : null}
-                        同步资料
-                      </Button>
                       {row.connected ? (
                         <Button
                           variant="outline"
@@ -1251,30 +1188,9 @@ export function PersonalAccountsPage() {
                           disabled={!row.id || Boolean(operation)}
                           onClick={() => void action(row, "connect")}
                         >
-                          连接
+                          登录上线
                         </Button>
                       )}
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={!row.id || !row.connected}
-                        onClick={() => {
-                          setTestAccount(row);
-                          setTestTo("");
-                          setTestResult("");
-                        }}
-                      >
-                        发测试消息
-                      </Button>
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        disabled={!row.id || Boolean(operation)}
-                        onClick={() => void action(row, "logout")}
-                      >
-                        {operation === `${row.id}:logout` ? <LoaderCircleIcon className="spin" size={16} /> : null}
-                        登出解绑
-                      </Button>
                       <Button
                         variant="destructive"
                         size="sm"
@@ -1283,9 +1199,7 @@ export function PersonalAccountsPage() {
                       >
                         {operation === `${row.id}:delete` ? (
                           <LoaderCircleIcon className="spin" size={16} />
-                        ) : (
-                          <Trash2Icon size={16} />
-                        )}
+                        ) : null}
                         删除账号
                       </Button>
                       </> : null}
@@ -1504,60 +1418,6 @@ export function PersonalAccountsPage() {
           </div>
         </div>
       </Drawer>
-      <Modal
-        open={Boolean(testAccount)}
-        onClose={() => !testPending && setTestAccount(null)}
-        title="发送测试消息"
-        description={`使用 ${testAccount?.phone || testAccount?.id || ""} 验证连接和送达状态。`}
-        footer={
-          <>
-            <Button variant="outline" onClick={() => setTestAccount(null)}>
-              关闭
-            </Button>
-            <Button
-              disabled={testPending || !testTo.trim() || !testText.trim()}
-              onClick={() => void sendTest()}
-            >
-              {testPending ? <Spinner /> : <MessageSquareTextIcon size={16} />}
-              发送
-            </Button>
-          </>
-        }
-      >
-        <label className="field">
-          <span>接收号码（含国家码）</span>
-          <Input
-            value={testTo}
-            onChange={(event) =>
-              setTestTo(event.target.value.replace(/\D/g, ""))
-            }
-            placeholder="例如：8613800000000"
-          />
-        </label>
-        <label className="field">
-          <span>测试内容</span>
-          <Textarea
-            rows={4}
-            value={testText}
-            onChange={(event) => setTestText(event.target.value)}
-          />
-        </label>
-        {testResult ? (
-          <div className="delivery-result">
-            <CheckCheckIcon size={18} />
-            <div>
-              <strong>
-                {testResult === "delivered"
-                  ? "双勾 · 已送达"
-                  : testResult === "server_accepted" || testResult === "sent"
-                    ? "单勾 · 服务端已接收"
-                    : testResult}
-              </strong>
-              <small>本系统不保存回复正文、已读状态或完整会话。</small>
-            </div>
-          </div>
-        ) : null}
-      </Modal>
     </StandardListPage>
   );
 }

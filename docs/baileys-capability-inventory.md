@@ -17,7 +17,7 @@
 | 连接与会话 | 连接状态与断线原因 | `connection.update` | 已接入 | 驱动账号状态机、断线重连和管理端在线/离线显示 |
 | 连接与会话 | 连接后向 WhatsApp 显示在线 | `markOnlineOnConnect` | 已接入，可配置 | 协议节点提供“关闭在线”开关且默认开启；开启时传 `false`，关闭该开关时传 `true`，不影响 Parloq 管理端判断连接状态 |
 | 连接与会话 | 主动发布在线、离线或输入状态 | `sendPresenceUpdate()` | 未直接接入 | Baileys 支持 `available`、`unavailable`、`composing`、`recording`、`paused` 等 Presence 状态 |
-| 连接与会话 | 主动登出 | `logout()` | 已接入 | 删除登录会话，需要重新配对 |
+| 连接与会话 | 主动登出 | `logout()` | 已接入删除链路 | 不单独暴露；删除账号时用于退出 WhatsApp 并清理登录会话 |
 | 连接与会话 | 关闭连接 | `end()` | 已接入 | 关闭 Socket，不等同于登出 |
 | 连接与会话 | 等待连接状态 | `waitForConnectionUpdate()` | 未直接调用 | 当前通过 `connection.update` 事件加 Promise、超时和配对稳定窗口实现扩展等待逻辑 |
 | 连接与会话 | 固定代理 | Socket `agent`、`fetchAgent` | 已接入 | Parloq 在 Baileys 之上增加代理分配和健康管理 |

@@ -1,5 +1,7 @@
 import {
   ArrowLeftIcon,
+  CheckCheckIcon,
+  MessageSquareTextIcon,
   RefreshCwIcon,
   UserRoundIcon,
 } from "lucide-react";
@@ -22,6 +24,8 @@ import {
   CardTitle,
   Drawer,
   EmptyState,
+  Input,
+  Modal,
   SelectField,
   Spinner,
   Table,
@@ -30,6 +34,7 @@ import {
   TableHead,
   TableHeader,
   TableRow,
+  Textarea,
   toast,
 } from "../components/ui";
 import { formatPhoneDisplay } from "../lib/utils";
@@ -41,6 +46,7 @@ type AccountDetail = {
   name: string;
   phone: string;
   status: string;
+  connected: boolean;
   source: string;
   accountType: string;
   deviceOs: string;
@@ -113,6 +119,7 @@ const number = (row: Record<string, unknown>, key: string) => {
 
 function accountDetail(input: unknown): AccountDetail {
   const row = input as Record<string, unknown>;
+  const status = text(row, "status");
   const quality = (row.quality || {}) as Record<string, unknown>;
   const group = (row.group || {}) as Record<string, unknown>;
   const protocol = (row.protocol || {}) as Record<string, unknown>;
@@ -121,7 +128,11 @@ function accountDetail(input: unknown): AccountDetail {
     id: text(row, "id"),
     name: text(row, "name"),
     phone: formatPhoneDisplay(text(row, "phone")),
-    status: text(row, "status"),
+    status,
+    connected: Boolean(
+      row.connected ??
+        ["connected", "online", "online_idle", "sending"].includes(status),
+    ),
     source: text(row, "source"),
     accountType: text(row, "accountType") || "unknown",
     deviceOs: text(row, "deviceOs") || "unknown",
@@ -239,6 +250,11 @@ function AccountResourceDetailContent({
   const [rows, setRows] = useState<Array<FriendRow | GroupRow | LifecycleRow>>([]);
   const [loadingRows, setLoadingRows] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [messageTestOpen, setMessageTestOpen] = useState(false);
+  const [testTo, setTestTo] = useState("");
+  const [testText, setTestText] = useState("Parloq 连接测试消息");
+  const [testPending, setTestPending] = useState(false);
+  const [testResult, setTestResult] = useState("");
   const [keyword, setKeyword] = useState("");
   const [appliedKeyword, setAppliedKeyword] = useState("");
   const [source, setSource] = useState("all");
@@ -330,6 +346,45 @@ function AccountResourceDetailContent({
     }
   };
 
+  const openMessageTest = () => {
+    setTestTo("");
+    setTestResult("");
+    setMessageTestOpen(true);
+  };
+
+  const sendTest = async () => {
+    if (!accountId || !testTo.trim() || !testText.trim()) return;
+    setTestPending(true);
+    setTestResult("");
+    try {
+      const payload = await apiRequest(
+        `/api/personal-accounts/${accountId}/send`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            to: testTo.trim(),
+            message: testText.trim(),
+            idempotencyKey: crypto.randomUUID(),
+          }),
+        },
+      );
+      const data = ((payload as { data?: Record<string, unknown> }).data ||
+        {}) as Record<string, unknown>;
+      const delivery = (data.messageDelivery ||
+        data.message_delivery ||
+        data) as Record<string, unknown>;
+      setTestResult(
+        text(delivery, "deliveryStatus") ||
+          text(delivery, "status") ||
+          "server_accepted",
+      );
+    } catch (caught) {
+      setTestResult(caught instanceof Error ? caught.message : "发送失败");
+    } finally {
+      setTestPending(false);
+    }
+  };
+
   if (loadingAccount) {
     return <div className="loading-state min-h-64"><Spinner />正在加载账号资源…</div>;
   }
@@ -385,6 +440,13 @@ function AccountResourceDetailContent({
           <span className="text-sm text-muted-foreground">资料更新 {formatDateTime(account.quality.syncedAt)}</span>
           <Button variant="outline" disabled={syncing} onClick={() => void sync()}>
             {syncing ? <Spinner /> : <RefreshCwIcon size={16} />}同步资料
+          </Button>
+          <Button
+            variant="outline"
+            disabled={!account.connected}
+            onClick={openMessageTest}
+          >
+            <MessageSquareTextIcon size={16} />消息测试
           </Button>
         </div>
       </div>
@@ -453,6 +515,65 @@ function AccountResourceDetailContent({
           </ListTableCard>
         </>
       )}
+
+      <Modal
+        open={messageTestOpen}
+        onClose={() => !testPending && setMessageTestOpen(false)}
+        title="消息测试"
+        description={`使用 ${account.phone || account.id} 验证连接和送达状态。`}
+        footer={
+          <>
+            <Button
+              variant="outline"
+              disabled={testPending}
+              onClick={() => setMessageTestOpen(false)}
+            >
+              关闭
+            </Button>
+            <Button
+              disabled={testPending || !testTo.trim() || !testText.trim()}
+              onClick={() => void sendTest()}
+            >
+              {testPending ? <Spinner /> : <MessageSquareTextIcon size={16} />}
+              发送
+            </Button>
+          </>
+        }
+      >
+        <label className="field">
+          <span>接收号码（含国家码）</span>
+          <Input
+            value={testTo}
+            onChange={(event) =>
+              setTestTo(event.target.value.replace(/\D/g, ""))
+            }
+            placeholder="例如：8613800000000"
+          />
+        </label>
+        <label className="field">
+          <span>测试内容</span>
+          <Textarea
+            rows={4}
+            value={testText}
+            onChange={(event) => setTestText(event.target.value)}
+          />
+        </label>
+        {testResult ? (
+          <div className="delivery-result">
+            <CheckCheckIcon size={18} />
+            <div>
+              <strong>
+                {testResult === "delivered"
+                  ? "双勾 · 已送达"
+                  : testResult === "server_accepted" || testResult === "sent"
+                    ? "单勾 · 服务端已接收"
+                    : testResult}
+              </strong>
+              <small>本系统不保存回复正文、已读状态或完整会话。</small>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
     </div>
   );
 }

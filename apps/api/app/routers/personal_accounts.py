@@ -1192,7 +1192,7 @@ def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: 
         db.rollback()
         if gateway_attempted:
             try:
-                client.logout(item.gateway_account_id)
+                client.delete_account(item.gateway_account_id)
             except GatewayError:
                 pass
         raise HTTPException(status_code=409, detail="手机号已被其他个人账号使用") from None
@@ -1202,7 +1202,7 @@ def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: 
         # Best-effort cleanup keeps a subsequent user retry from hitting 409.
         if gateway_attempted:
             try:
-                client.logout(item.gateway_account_id)
+                client.delete_account(item.gateway_account_id)
             except GatewayError:
                 pass
         raise HTTPException(status_code=502, detail=str(exc)) from None
@@ -2313,19 +2313,6 @@ def disconnect(account_id: str, db: DbSession, current_user: CurrentUser) -> dic
     except GatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from None
     _apply_gateway_account(item, result or {"state": "linked_offline"})
-    db.commit()
-    return {"data": {"account": account_row(db, item)}}
-
-
-@router.post("/{account_id}/logout")
-def logout(account_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _account(db, account_id, current_user)
-    try:
-        result = WaGatewayClient().logout(item.gateway_account_id)
-    except GatewayError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from None
-    _apply_gateway_account(item, result or {"state": "unpaired"})
-    item.last_connected_at = None
     db.commit()
     return {"data": {"account": account_row(db, item)}}
 

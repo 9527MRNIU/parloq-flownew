@@ -343,20 +343,6 @@ export class GatewayService {
     return publicAccount(await this.transitionAccount(id, state, { autoConnect: false }, 'manual_disconnect'))
   }
 
-  async logout(id: string): Promise<PublicAccount> {
-    const current = await this.store.getAccount(id)
-    if (!(await this.store.getCreds(id)) && !current.deviceJid) return publicAccount(current)
-    this.clearIdleDisconnect(id)
-    try { await this.engine.logout(engineAccount(current)) } catch (error) {
-      this.logger.warn({ accountId: id, error: safeError(error) }, 'account_logout_failed')
-      throw new GatewayError('protocol_error', 'WhatsApp did not confirm logout')
-    }
-    await this.pendingEngineEvents.get(id)
-    await this.store.clearAuth(id)
-    this.clearPairingExpiry(id)
-    return publicAccount(await this.transitionAccount(id, 'unpaired', { deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'idle', pairingExpiresAt: null }, 'manual_logout'))
-  }
-
   async deleteAccount(id: string): Promise<DeleteAccountResult> {
     let current: Account
     try {

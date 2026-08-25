@@ -432,6 +432,9 @@ def test_account_delete_releases_runtime_but_preserves_business_history(
         )
         db.commit()
 
+    assert admin_client.post(
+        f"/api/personal-accounts/{account_id}/logout"
+    ).status_code == 404
     deleted = admin_client.delete(f"/api/personal-accounts/{account_id}")
     assert deleted.status_code == 200, deleted.text
     assert deleted.json()["data"] == {
