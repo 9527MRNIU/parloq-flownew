@@ -349,6 +349,22 @@ def test_account_resources_are_upserted_scored_and_exposed(
                             "canSend": False,
                             "announce": True,
                         },
+                        {
+                            "groupJid": "120363003@g.us",
+                            "subject": "Third group",
+                            "size": 5,
+                            "communityType": "group",
+                            "ownRole": "member",
+                            "canSend": True,
+                        },
+                        {
+                            "groupJid": "120363004@g.us",
+                            "subject": "Fourth group",
+                            "size": 4,
+                            "communityType": "group",
+                            "ownRole": "superadmin",
+                            "canSend": True,
+                        },
                     ],
                     "groupsStatus": "complete",
                     "uniqueGroupMemberCount": 11,
@@ -363,7 +379,7 @@ def test_account_resources_are_upserted_scored_and_exposed(
         )
         db.commit()
         assert db.query(AccountContact).filter_by(account_id=item.id, active=True).count() == 3
-        assert db.query(AccountWhatsappGroup).filter_by(account_id=item.id, active=True).count() == 2
+        assert db.query(AccountWhatsappGroup).filter_by(account_id=item.id, active=True).count() == 4
 
     account = admin_client.get(f"/api/personal-accounts/{account_id}")
     assert account.status_code == 200, account.text
@@ -371,12 +387,18 @@ def test_account_resources_are_upserted_scored_and_exposed(
     assert body["accountType"] == "business"
     assert body["deviceOs"] == "ios"
     assert body["quality"]["friendCount"] == 3
-    assert body["quality"]["groupCount"] == 2
+    assert body["quality"]["groupCount"] == 4
     assert body["quality"]["uniqueGroupMemberCount"] == 11
-    assert body["quality"]["score"] == 10
+    assert body["quality"]["score"] == 40
     assert body["quality"]["avatarPoints"] == 5
-    assert body["quality"]["friendPoints"] == 3
-    assert body["quality"]["groupMemberPoints"] == 2
+    assert body["quality"]["savedContactCount"] == 2
+    assert body["quality"]["chatHistoryContactCount"] == 2
+    assert body["quality"]["savedContactPoints"] == 2
+    assert body["quality"]["chatHistoryPoints"] == 4
+    assert body["quality"]["friendPoints"] == 6
+    assert body["quality"]["adminGroupMemberPoints"] == 24
+    assert body["quality"]["memberGroupMemberPoints"] == 5
+    assert body["quality"]["groupMemberPoints"] == 29
 
     friends = admin_client.get(
         f"/api/personal-accounts/{account_id}/resources/contacts",
@@ -389,7 +411,7 @@ def test_account_resources_are_upserted_scored_and_exposed(
         params={"canSend": "true"},
     )
     assert groups.status_code == 200, groups.text
-    assert groups.json()["data"]["total"] == 1
+    assert groups.json()["data"]["total"] == 3
     assert groups.json()["data"]["rows"][0]["subject"] == "First group"
     returned_interaction = datetime.fromisoformat(
         groups.json()["data"]["rows"][0]["lastInteractionAt"]

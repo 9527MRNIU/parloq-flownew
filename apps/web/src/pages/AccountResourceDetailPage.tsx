@@ -70,6 +70,10 @@ type AccountDetail = {
     avatarPoints: number | null;
     friendPoints: number | null;
     groupMemberPoints: number | null;
+    savedContactPoints: number | null;
+    chatHistoryPoints: number | null;
+    adminGroupMemberPoints: number | null;
+    memberGroupMemberPoints: number | null;
     syncedAt: string;
   };
 };
@@ -160,6 +164,10 @@ function accountDetail(input: unknown): AccountDetail {
       avatarPoints: number(quality, "avatarPoints"),
       friendPoints: number(quality, "friendPoints"),
       groupMemberPoints: number(quality, "groupMemberPoints"),
+      savedContactPoints: number(quality, "savedContactPoints"),
+      chatHistoryPoints: number(quality, "chatHistoryPoints"),
+      adminGroupMemberPoints: number(quality, "adminGroupMemberPoints"),
+      memberGroupMemberPoints: number(quality, "memberGroupMemberPoints"),
       syncedAt: text(quality, "syncedAt"),
     },
   };
@@ -510,10 +518,10 @@ function AccountResourceDetailContent({
       {tab === "overview" ? (
         <div className="grid gap-4">
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <Card><CardHeader><CardDescription>账户评分</CardDescription><CardTitle className="text-2xl">{account.quality.score == null ? "待同步" : `${account.quality.score} 分`}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">头像 {account.quality.avatarPoints ?? "-"} + 好友 {account.quality.friendPoints ?? "-"} + 群成员 {account.quality.groupMemberPoints ?? "-"}</CardContent></Card>
-            <Card><CardHeader><CardDescription>好友数</CardDescription><CardTitle className="text-2xl">{account.quality.friendCount ?? "未知"}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">通讯录联系人与有过一对一联系的账号去重合并</CardContent></Card>
+            <Card><CardHeader><CardDescription>账户评分</CardDescription><CardTitle className="text-2xl">{account.quality.score == null ? "待同步" : `${account.quality.score} 分`}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">头像 {account.quality.avatarPoints ?? "-"} + 通讯录 {account.quality.savedContactPoints ?? "-"} + 聊天记录 {account.quality.chatHistoryPoints ?? "-"} + 群组 {account.quality.groupMemberPoints ?? "-"}</CardContent></Card>
+            <Card><CardHeader><CardDescription>好友数</CardDescription><CardTitle className="text-2xl">{account.quality.friendCount ?? "未知"}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">通讯录联系人与聊天记录联系人去重合并</CardContent></Card>
             <Card><CardHeader><CardDescription>群组数</CardDescription><CardTitle className="text-2xl">{account.quality.groupCount ?? "未知"}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">当前账号参与的有效群组</CardContent></Card>
-            <Card><CardHeader><CardDescription>去重群成员</CardDescription><CardTitle className="text-2xl">{account.quality.uniqueGroupMemberCount ?? "未知"}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">跨群去重后，每 5 人计 1 分</CardContent></Card>
+            <Card><CardHeader><CardDescription>群组评分</CardDescription><CardTitle className="text-2xl">{account.quality.groupMemberPoints == null ? "待同步" : `${account.quality.groupMemberPoints} 分`}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">管理员以上 {account.quality.adminGroupMemberPoints ?? "-"} 分 + 成员 {account.quality.memberGroupMemberPoints ?? "-"} 分；不可发送群不计分</CardContent></Card>
           </div>
           <div className="grid gap-4 lg:grid-cols-2">
             <Card>

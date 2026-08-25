@@ -56,7 +56,7 @@
 | 历史同步 | 请求完整历史 | `syncFullHistory` | 部分接入 | 作为 Parloq“好友同步” `contacts` 的内部取数机制；实际下发范围由 WhatsApp 决定 |
 | 历史同步 | 选择是否处理历史同步通知 | `shouldSyncHistoryMessage()` | 部分接入 | 与“好友同步” `contacts` 使用同一判断；处理联系人资源后丢弃聊天列表和消息正文 |
 | 历史同步 | 接收首次历史 | `messaging-history.set` | 部分接入 | 当前只统计聊天、联系人和历史消息数量 |
-| 历史同步 | 识别有过联系的对象 | 历史 `messages`、在线 `messages.upsert` | 未接入 | 只提取一对一联系对象和最后联系时间，不保存聊天列表或消息正文 |
+| 历史同步 | 识别聊天记录联系人 | 历史 `messages`、在线 `messages.upsert` | 未接入 | 只提取一对一联系对象和最后联系时间，不保存聊天列表或消息正文 |
 | 联系人 | 联系人新增/更新事件 | `contacts.upsert`、`contacts.update` | 部分接入 | 当前只统计联系人增量数量 |
 | 联系人 | 判断本账号已保存的联系人 | `Contact.name` | 未接入业务表 | `name` 是本账号保存的名称；`notify` 是对方自己的显示名，不能作为已保存好友的证据 |
 | 联系人 | 新增或修改联系人 | `addOrEditContact()` | 未接入 | Baileys 支持 |
@@ -87,7 +87,7 @@
 | 群组 | 查询单个群资料 | `groupMetadata()` | 未直接接入 | Baileys 支持 |
 | 群组 | 查询全部参与群 | `groupFetchAllParticipating()` | 已接入 | 用于群组详情，并直接计算群组数量 |
 | 群组 | 统计参与群数量 | `groupFetchAllParticipating()` | 已接入 | Parloq 计算并保存 `groupCount` |
-| 群组 | 跨群去重成员数 | 全部 `GroupMetadata.participants`、LID/JID 映射 | 未接入 | 排除本账号并归一身份，只保存去重后的聚合数量用于评分 |
+| 群组 | 跨群去重成员数 | 全部 `GroupMetadata.participants`、LID/JID 映射 | 未接入 | 排除本账号并归一身份，聚合数量仅作资源统计参考，不参与当前评分 |
 | 群组 | 保存群 ID、名称和人数 | `groupFetchAllParticipating()` | 部分接入 | 只存网关元数据，主系统未消费 |
 | 群组 | 创建/退出群组 | `groupCreate()`、`groupLeave()` | 未接入 | Baileys 支持 |
 | 群组 | 修改群名称/描述/设置 | `groupUpdateSubject()` 等 | 未接入 | Baileys 支持 |
@@ -119,7 +119,7 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | 头像 `avatar` | `profilePictureUrl(ownJid)` | `hasAvatar` | 是 | 低 | 开 | 保留，默认开启 |
 | 群组同步 `groupDetails` | `groupFetchAllParticipating()`、历史/实时聊天事件 | `groupCount`、群 ID、名称、人数、权限、最近联系时间、跨群去重成员数 | 是，明细已落主系统资源表 | 中，需要读取全部参与群和成员身份；最近联系时间不保存消息正文 | 开 | 已删除 `groupSummary`；服务概览、评分和后续群组营销 |
-| 好友同步 `contacts` | `syncFullHistory`、`shouldSyncHistoryMessage()`、历史包、联系人事件、LID/JID 映射、新消息事件 | 好友并集清单、来源、身份映射和最后联系时间 | 是，明细已落主系统资源表 | 中高，仅显式资料同步请求历史 | 开 | 好友为已保存联系人和有过一对一联系的对象并集；历史同步只作为内部实现 |
+| 好友同步 `contacts` | `syncFullHistory`、`shouldSyncHistoryMessage()`、历史包、联系人事件、LID/JID 映射、新消息事件 | 好友并集清单、来源、身份映射和最后联系时间 | 是，明细已落主系统资源表 | 中高，仅显式资料同步请求历史 | 开 | 好友为通讯录联系人和聊天记录联系人并集；历史同步只作为内部实现 |
 | 聊天列表 `chats` | 聊天历史事件 | 只统计数量 | 否 | 高 | 关 | 删除开关及配套，不建设聊天列表资源 |
 | 消息历史 `messageHistory` | 历史消息集合 | 只统计数量 | 否 | 很高 | 关 | 删除开关及配套，不保存消息正文 |
 

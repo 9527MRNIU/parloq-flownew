@@ -82,8 +82,97 @@ from app.validation import phone_country_code
 router = APIRouter(prefix="/api/personal-accounts", tags=["personal-accounts"])
 
 
-def _account_score(item: PersonalAccount) -> dict:
-    avatar_points = 5 if item.has_avatar is True else 0 if item.has_avatar is False else None
+def _resource_score_metrics(
+    db: DbSession, account_ids: list[int]
+) -> dict[int, dict[str, int]]:
+    if not account_ids:
+        return {}
+    metrics = {
+        account_id: {
+            "savedContactCount": 0,
+            "chatHistoryContactCount": 0,
+            "adminGroupMemberPoints": 0,
+            "memberGroupMemberPoints": 0,
+        }
+        for account_id in account_ids
+    }
+    for account_id, saved_count, chat_history_count in db.execute(
+        select(
+            AccountContact.account_id,
+            func.sum(
+                case((AccountContact.is_saved_contact.is_(True), 1), else_=0)
+            ),
+            func.sum(
+                case((AccountContact.has_chat_history.is_(True), 1), else_=0)
+            ),
+        )
+        .where(
+            AccountContact.account_id.in_(account_ids),
+            AccountContact.active.is_(True),
+        )
+        .group_by(AccountContact.account_id)
+    ).all():
+        saved = int(saved_count or 0)
+        chat_history = int(chat_history_count or 0)
+        metrics[int(account_id)].update(
+            {
+                "savedContactCount": saved,
+                "chatHistoryContactCount": chat_history,
+            }
+        )
+    for account_id, admin_points, member_points in db.execute(
+        select(
+            AccountWhatsappGroup.account_id,
+            func.sum(
+                case(
+                    (
+                        and_(
+                            AccountWhatsappGroup.can_send.is_(True),
+                            AccountWhatsappGroup.own_role.in_(
+                                ("admin", "superadmin")
+                            ),
+                        ),
+                        AccountWhatsappGroup.size * 2,
+                    ),
+                    else_=0,
+                )
+            ),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            AccountWhatsappGroup.can_send.is_(True),
+                            AccountWhatsappGroup.own_role == "member",
+                        ),
+                        AccountWhatsappGroup.size,
+                    ),
+                    else_=0,
+                )
+            ),
+        )
+        .where(
+            AccountWhatsappGroup.account_id.in_(account_ids),
+            AccountWhatsappGroup.active.is_(True),
+        )
+        .group_by(AccountWhatsappGroup.account_id)
+    ).all():
+        admin = int(admin_points or 0)
+        member = int(member_points or 0)
+        metrics[int(account_id)].update(
+            {
+                "adminGroupMemberPoints": admin,
+                "memberGroupMemberPoints": member,
+            }
+        )
+    return metrics
+
+
+def _account_score(
+    item: PersonalAccount, resource_metrics: dict[str, int] | None
+) -> dict:
+    avatar_points = (
+        5 if item.has_avatar is True else 0 if item.has_avatar is False else None
+    )
     resource_state = (
         item.resource_sync_state_json
         if isinstance(item.resource_sync_state_json, dict)
@@ -91,19 +180,47 @@ def _account_score(item: PersonalAccount) -> dict:
     )
     contacts_state = resource_state.get("contacts")
     groups_state = resource_state.get("groups")
-    contacts_incomplete = (
+    contacts_complete = (
         isinstance(contacts_state, dict)
-        and contacts_state.get("status") in {"pending", "partial", "failed"}
+        and contacts_state.get("status") == "complete"
+        and contacts_state.get("complete") is True
     )
-    group_identity_incomplete = (
+    groups_complete = (
         isinstance(groups_state, dict)
-        and groups_state.get("identityMappingComplete") is False
+        and groups_state.get("status") == "complete"
     )
-    friend_points = None if contacts_incomplete else item.friend_count
+    saved_contact_count = (
+        resource_metrics["savedContactCount"]
+        if contacts_complete and resource_metrics is not None
+        else None
+    )
+    chat_history_count = (
+        resource_metrics["chatHistoryContactCount"]
+        if contacts_complete and resource_metrics is not None
+        else None
+    )
+    saved_contact_points = saved_contact_count
+    chat_history_points = (
+        chat_history_count * 2 if chat_history_count is not None else None
+    )
+    friend_points = (
+        saved_contact_points + chat_history_points
+        if saved_contact_points is not None and chat_history_points is not None
+        else None
+    )
+    admin_group_points = (
+        resource_metrics["adminGroupMemberPoints"]
+        if groups_complete and resource_metrics is not None
+        else None
+    )
+    member_group_points = (
+        resource_metrics["memberGroupMemberPoints"]
+        if groups_complete and resource_metrics is not None
+        else None
+    )
     group_points = (
-        item.unique_group_member_count // 5
-        if item.unique_group_member_count is not None
-        and not group_identity_incomplete
+        admin_group_points + member_group_points
+        if admin_group_points is not None and member_group_points is not None
         else None
     )
     complete = all(
@@ -119,8 +236,16 @@ def _account_score(item: PersonalAccount) -> dict:
         "avatarPoints": avatar_points,
         "friendPoints": friend_points,
         "groupMemberPoints": group_points,
+        "savedContactCount": saved_contact_count,
+        "chatHistoryContactCount": chat_history_count,
+        "savedContactPoints": saved_contact_points,
+        "chatHistoryPoints": chat_history_points,
+        "adminGroupMemberPoints": admin_group_points,
+        "memberGroupMemberPoints": member_group_points,
         "uniqueGroupMemberCount": item.unique_group_member_count,
     }
+
+
 group_router = APIRouter(prefix="/api/account-groups", tags=["account-groups"])
 
 GATEWAY_ACCOUNT_STATES = {
@@ -215,7 +340,7 @@ def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
     profile_known_condition = and_(
         PersonalAccount.has_avatar.is_not(None),
         PersonalAccount.friend_count.is_not(None),
-        PersonalAccount.unique_group_member_count.is_not(None),
+        PersonalAccount.group_count.is_not(None),
     )
     profile_complete_condition = and_(
         PersonalAccount.has_avatar.is_(True),
@@ -224,7 +349,7 @@ def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
     profile_unknown_condition = or_(
         PersonalAccount.has_avatar.is_(None),
         PersonalAccount.friend_count.is_(None),
-        PersonalAccount.unique_group_member_count.is_(None),
+        PersonalAccount.group_count.is_(None),
     )
     rows = db.execute(
         select(
@@ -491,6 +616,7 @@ def _latest_visitor_country_codes(
 def _account_payload(
     item: PersonalAccount,
     *,
+    resource_score_metrics: dict[str, int] | None,
     bound: tuple[AccountProxyBinding, ProxyEndpoint] | None,
     group: AccountGroup | None,
     protocol: ProtocolNode | None,
@@ -499,7 +625,7 @@ def _account_payload(
     delivered_count: int,
 ) -> dict:
     proxy = bound[1] if bound else None
-    score = _account_score(item)
+    score = _account_score(item, resource_score_metrics)
     return {
         "id": str(item.id),
         "createdBy": str(item.created_by),
@@ -598,6 +724,7 @@ def account_row(db: DbSession, item: PersonalAccount) -> dict:
     )
     return _account_payload(
         item,
+        resource_score_metrics=_resource_score_metrics(db, [item.id]).get(item.id),
         bound=_binding(db, item.gateway_account_id),
         group=db.get(AccountGroup, item.group_id) if item.group_id else None,
         protocol=db.get(ProtocolNode, item.protocol_id) if item.protocol_id else None,
@@ -656,12 +783,14 @@ def account_rows(db: DbSession, items: list[PersonalAccount]) -> list[dict]:
         ).all()
     }
     visitor_country_codes = _latest_visitor_country_codes(db, account_ids)
+    score_metrics = _resource_score_metrics(db, account_ids)
     rows = []
     for item in items:
         sent_count, delivered_count = deliveries.get(item.id, (0, 0))
         rows.append(
             _account_payload(
                 item,
+                resource_score_metrics=score_metrics.get(item.id),
                 bound=bindings.get(item.gateway_account_id),
                 group=groups.get(item.group_id),
                 protocol=protocols.get(item.protocol_id),
@@ -1047,14 +1176,14 @@ def list_accounts(
         statement = statement.where(
             PersonalAccount.has_avatar.is_not(None),
             PersonalAccount.friend_count.is_not(None),
-            PersonalAccount.unique_group_member_count.is_not(None),
+            PersonalAccount.group_count.is_not(None),
         )
     elif quality_known is False:
         statement = statement.where(
             or_(
                 PersonalAccount.has_avatar.is_(None),
                 PersonalAccount.friend_count.is_(None),
-                PersonalAccount.unique_group_member_count.is_(None),
+                PersonalAccount.group_count.is_(None),
             )
         )
     total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
@@ -1382,6 +1511,7 @@ def account_statistics(db: DbSession, current_user: CurrentUser) -> dict:
     if current_user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == current_user.id)
     items = list(db.scalars(statement).all())
+    score_metrics = _resource_score_metrics(db, [item.id for item in items])
     validation = {
         key: sum(1 for item in items if item.validation_status == key)
         for key in ("pending", "validating", "ready", "failed")
@@ -1389,7 +1519,10 @@ def account_statistics(db: DbSession, current_user: CurrentUser) -> dict:
     scores = [
         score["score"]
         for item in items
-        if (score := _account_score(item))["score"] is not None
+        if (
+            score := _account_score(item, score_metrics.get(item.id))
+        )["score"]
+        is not None
     ]
     quality = {
         "noAvatar": _unknown_aware_metric(
@@ -1409,7 +1542,7 @@ def account_statistics(db: DbSession, current_user: CurrentUser) -> dict:
     }
     rows = []
     for item in items:
-        score = _account_score(item)
+        score = _account_score(item, score_metrics.get(item.id))
         rows.append(
             {
                 "accountId": str(item.id),

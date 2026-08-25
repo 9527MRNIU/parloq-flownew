@@ -681,7 +681,7 @@ export function ProtocolManagementPage({
               ["closeOnline", "关闭在线", "连接后不向 WhatsApp 发布在线状态"],
               ["avatar", "头像同步", "获取当前账号头像并下载缓存"],
               ["groupDetails", "群组同步", "同步完整群列表、权限和群组数量"],
-              ["contacts", "好友同步", "同步已保存联系人和有过一对一联系的对象"],
+              ["contacts", "好友同步", "同步通讯录联系人和聊天记录联系人"],
             ] as Array<[keyof SyncPolicy, string, string]>).map(([key, label, description]) => (
               <DrawerFormField key={key} label={label} hint={description}>
                 <Switch checked={form.syncPolicy[key]} onCheckedChange={(checked) => setForm((current) => ({ ...current, syncPolicy: { ...current.syncPolicy, [key]: checked } }))} aria-label={label} />
