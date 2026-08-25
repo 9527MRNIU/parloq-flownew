@@ -85,9 +85,9 @@ DOC_SECTIONS = (
             },
             {
                 "slug": "menu-promotion-trends",
-                "title": "趋势图",
+                "title": "趋势图表",
                 "summary": "查看访问、号码提交和配对成功的每日趋势。",
-                "menuPath": "推广 / 数据中心 / 趋势图",
+                "menuPath": "推广 / 数据中心 / 趋势图表",
                 "routePath": "/promotion/trends",
                 "keywords": ("漏斗", "趋势", "UV", "转化"),
             },
@@ -193,9 +193,9 @@ DOC_SECTIONS = (
             },
             {
                 "slug": "menu-materials",
-                "title": "素材库",
+                "title": "素材中心",
                 "summary": "统一管理文本、图片、视频、文件和联系人素材。",
-                "menuPath": "资源 / 素材库",
+                "menuPath": "资源 / 素材中心",
                 "routePath": "/resources/materials",
                 "keywords": ("文本", "图片", "视频", "文件", "联系人"),
             },

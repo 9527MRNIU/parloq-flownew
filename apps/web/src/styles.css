@@ -694,10 +694,11 @@ body {
 /*
  * Shared operational-list geometry. Each page declares exactly one adaptive
  * column. Other columns size themselves from their content; the adaptive
- * column keeps a usable minimum and absorbs whatever horizontal room remains.
+ * column shrinks to its content under horizontal pressure and absorbs any
+ * horizontal room that remains.
  */
 .standard-list-table {
-  --list-adaptive-min-width: 360px;
+  --list-adaptive-min-width: 0px;
   min-width: 100%;
   table-layout: auto;
 }

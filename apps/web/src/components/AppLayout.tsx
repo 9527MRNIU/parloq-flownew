@@ -121,7 +121,7 @@ export const navigation: NavSection[] = [
             permissionKey: "promotion.statistics.read",
           },
           {
-            label: "趋势图",
+            label: "趋势图表",
             to: "/promotion/trends",
             permissionKey: "promotion.trends.read",
           },
@@ -247,7 +247,7 @@ export const navigation: NavSection[] = [
         ],
       },
       {
-        label: "素材库",
+        label: "素材中心",
         to: "/resources/materials",
         icon: ImagesIcon,
         permissionKey: "resources.materials.read",

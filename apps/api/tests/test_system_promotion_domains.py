@@ -425,7 +425,8 @@ def test_system_roles_menus_and_backend_permission(admin_client: TestClient) -> 
     assert all("publicId" not in row for row in rows)
     by_route = {row["routePath"]: row for row in rows if row["routePath"]}
     assert by_route["/promotion/statistics"]["name"] == "渠道统计"
-    assert by_route["/promotion/trends"]["name"] == "趋势图"
+    assert by_route["/promotion/trends"]["name"] == "趋势图表"
+    assert by_route["/resources/materials"]["name"] == "素材中心"
     assert "/personal-accounts" not in by_route
     assert "/resources/accounts/import" in by_route
     assert "/resources/accounts/export" in by_route

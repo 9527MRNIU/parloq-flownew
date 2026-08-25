@@ -86,7 +86,7 @@ const actionPermissionOptions = [
   { value: "marketing.data_packages.manage", label: "管理数据包" },
   { value: "marketing.hyperlink_templates.manage", label: "管理超链模板" },
   { value: "marketing.hyperlink_strategies.manage", label: "管理超链策略" },
-  { value: "resources.materials.manage", label: "管理素材库" },
+  { value: "resources.materials.manage", label: "管理素材中心" },
   { value: "marketing.direct_short_links.manage", label: "管理直接短链" },
   { value: "resources.ip.manage", label: "管理 IP 资源" },
 ];
