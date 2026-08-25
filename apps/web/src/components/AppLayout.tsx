@@ -164,7 +164,7 @@ export const navigation: NavSection[] = [
         ],
       },
       {
-        label: "拉群营销",
+        label: "群组营销",
         icon: UsersRoundIcon,
         children: [
           {
@@ -203,6 +203,12 @@ export const navigation: NavSection[] = [
             permissionKey: "marketing.group_market_analysis.read",
           },
         ],
+      },
+      {
+        label: "好友营销",
+        to: "/contact-marketing",
+        icon: BookUserIcon,
+        permissionKey: "marketing.contact_marketing.read",
       },
       {
         label: "直接短链",

@@ -1758,3 +1758,64 @@ def test_account_avatar_cache_columns_are_reversible(tmp_path: Path) -> None:
         {column["name"] for column in sa.inspect(engine).get_columns("personal_accounts")}
     )
     engine.dispose()
+
+
+def test_marketing_navigation_migration_is_reversible(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'marketing-navigation.db'}"
+    _alembic(database_url, "0073_account_retirement")
+    _alembic(database_url, "head")
+
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        menu = connection.execute(
+            sa.text(
+                "SELECT child.name, child.route_path, child.permission_key, "
+                "child.sort_order, parent.public_id AS parent_public_id "
+                "FROM system_menus AS child "
+                "JOIN system_menus AS parent ON parent.id = child.parent_id "
+                "WHERE child.public_id = 'menu_marketing_contact'"
+            )
+        ).one()
+        assert menu == (
+            "好友营销",
+            "/contact-marketing",
+            "marketing.contact_marketing.read",
+            240,
+            "menu_marketing",
+        )
+        group_name = connection.execute(
+            sa.text(
+                "SELECT name FROM system_menus "
+                "WHERE public_id = 'menu_marketing_group'"
+            )
+        ).scalar_one()
+        assert group_name == "群组营销"
+        assigned_roles = connection.execute(
+            sa.text(
+                "SELECT role.system_key "
+                "FROM role_menu_permissions AS permission "
+                "JOIN user_groups AS role ON role.id = permission.role_id "
+                "JOIN system_menus AS menu ON menu.id = permission.menu_id "
+                "WHERE menu.public_id = 'menu_marketing_contact' "
+                "ORDER BY role.system_key"
+            )
+        ).scalars().all()
+        assert assigned_roles == ["admin"]
+    engine.dispose()
+
+    _alembic_downgrade(database_url, "0073_account_retirement")
+    engine = sa.create_engine(database_url)
+    with engine.connect() as connection:
+        assert connection.execute(
+            sa.text(
+                "SELECT 1 FROM system_menus "
+                "WHERE public_id = 'menu_marketing_contact'"
+            )
+        ).scalar_one_or_none() is None
+        assert connection.execute(
+            sa.text(
+                "SELECT name FROM system_menus "
+                "WHERE public_id = 'menu_marketing_group'"
+            )
+        ).scalar_one() == "拉群营销"
+    engine.dispose()

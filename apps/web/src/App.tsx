@@ -209,6 +209,10 @@ export default function App() {
             path="/direct-short-links"
             element={<DirectShortLinksPage />}
           />
+          <Route
+            path="/contact-marketing"
+            element={<GroupMarketingConstructionPage title="好友营销" />}
+          />
           {groupMarketingPages.map((page) => (
             <Route
               key={page.path}
