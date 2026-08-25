@@ -196,7 +196,7 @@ function lifecycleRow(input: unknown): LifecycleRow {
 }
 
 const accountTypeLabel = (value: string) =>
-  value === "business" ? "商业版" : value === "personal" ? "个人版" : "待识别";
+  value === "business" ? "商业版" : value === "personal" ? "个人版" : "-";
 
 const deviceOsLabel = (value: string) =>
   value === "android"
@@ -205,7 +205,7 @@ const deviceOsLabel = (value: string) =>
       ? "iOS"
       : value === "other"
         ? "其他"
-        : "待识别";
+        : "-";
 
 const statusLabel = (value: unknown) => {
   const status = typeof value === "string" ? value : "pending";

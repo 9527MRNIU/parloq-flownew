@@ -13,7 +13,7 @@ import {
   UserRoundIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { SiAndroid, SiApple } from "react-icons/si";
+import { IoLogoAndroid, IoLogoApple } from "react-icons/io";
 import { useSearchParams } from "react-router-dom";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
@@ -304,7 +304,7 @@ function sourceBadge(row: Account) {
   return <Badge tone="neutral">待识别</Badge>;
 }
 const accountTypeLabel = (value: string) =>
-  value === "business" ? "商业版" : value === "personal" ? "个人版" : "待识别";
+  value === "business" ? "商业版" : value === "personal" ? "个人版" : "-";
 const deviceOsLabel = (value: string) =>
   value === "android"
     ? "Android"
@@ -312,11 +312,16 @@ const deviceOsLabel = (value: string) =>
       ? "iOS"
       : value === "other"
         ? "其他"
-        : "待识别";
+        : "-";
 function DeviceOsDisplay({ value }: { value: string }) {
+  if (!value || value === "unknown") return <span>-</span>;
   const label = deviceOsLabel(value);
   const Icon =
-    value === "android" ? SiAndroid : value === "ios" ? SiApple : SmartphoneIcon;
+    value === "android"
+      ? IoLogoAndroid
+      : value === "ios"
+        ? IoLogoApple
+        : SmartphoneIcon;
   return (
     <div className="flex min-w-max items-center justify-center gap-2">
       <Icon
