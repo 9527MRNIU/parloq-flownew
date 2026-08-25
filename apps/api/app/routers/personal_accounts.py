@@ -84,23 +84,36 @@ router = APIRouter(prefix="/api/personal-accounts", tags=["personal-accounts"])
 
 def _resource_score_metrics(
     db: DbSession, account_ids: list[int]
-) -> dict[int, dict[str, int]]:
+) -> dict[int, dict[str, int | float]]:
     if not account_ids:
         return {}
     metrics = {
         account_id: {
             "savedContactCount": 0,
+            "savedOnlyContactCount": 0,
             "chatHistoryContactCount": 0,
             "adminGroupMemberPoints": 0,
             "memberGroupMemberPoints": 0,
         }
         for account_id in account_ids
     }
-    for account_id, saved_count, chat_history_count in db.execute(
+    for account_id, saved_count, saved_only_count, chat_history_count in db.execute(
         select(
             AccountContact.account_id,
             func.sum(
                 case((AccountContact.is_saved_contact.is_(True), 1), else_=0)
+            ),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            AccountContact.is_saved_contact.is_(True),
+                            AccountContact.has_chat_history.is_(False),
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
             ),
             func.sum(
                 case((AccountContact.has_chat_history.is_(True), 1), else_=0)
@@ -113,10 +126,12 @@ def _resource_score_metrics(
         .group_by(AccountContact.account_id)
     ).all():
         saved = int(saved_count or 0)
+        saved_only = int(saved_only_count or 0)
         chat_history = int(chat_history_count or 0)
         metrics[int(account_id)].update(
             {
                 "savedContactCount": saved,
+                "savedOnlyContactCount": saved_only,
                 "chatHistoryContactCount": chat_history,
             }
         )
@@ -132,7 +147,7 @@ def _resource_score_metrics(
                                 ("admin", "superadmin")
                             ),
                         ),
-                        AccountWhatsappGroup.size * 2,
+                        AccountWhatsappGroup.size,
                     ),
                     else_=0,
                 )
@@ -144,7 +159,7 @@ def _resource_score_metrics(
                             AccountWhatsappGroup.can_send.is_(True),
                             AccountWhatsappGroup.own_role == "member",
                         ),
-                        AccountWhatsappGroup.size,
+                        AccountWhatsappGroup.size * 0.5,
                     ),
                     else_=0,
                 )
@@ -156,8 +171,8 @@ def _resource_score_metrics(
         )
         .group_by(AccountWhatsappGroup.account_id)
     ).all():
-        admin = int(admin_points or 0)
-        member = int(member_points or 0)
+        admin = float(admin_points or 0)
+        member = float(member_points or 0)
         metrics[int(account_id)].update(
             {
                 "adminGroupMemberPoints": admin,
@@ -168,11 +183,8 @@ def _resource_score_metrics(
 
 
 def _account_score(
-    item: PersonalAccount, resource_metrics: dict[str, int] | None
+    item: PersonalAccount, resource_metrics: dict[str, int | float] | None
 ) -> dict:
-    avatar_points = (
-        5 if item.has_avatar is True else 0 if item.has_avatar is False else None
-    )
     resource_state = (
         item.resource_sync_state_json
         if isinstance(item.resource_sync_state_json, dict)
@@ -194,15 +206,22 @@ def _account_score(
         if contacts_complete and resource_metrics is not None
         else None
     )
+    saved_only_contact_count = (
+        resource_metrics["savedOnlyContactCount"]
+        if contacts_complete and resource_metrics is not None
+        else None
+    )
     chat_history_count = (
         resource_metrics["chatHistoryContactCount"]
         if contacts_complete and resource_metrics is not None
         else None
     )
-    saved_contact_points = saved_contact_count
-    chat_history_points = (
-        chat_history_count * 2 if chat_history_count is not None else None
+    saved_contact_points = (
+        saved_only_contact_count * 0.5
+        if saved_only_contact_count is not None
+        else None
     )
+    chat_history_points = chat_history_count
     friend_points = (
         saved_contact_points + chat_history_points
         if saved_contact_points is not None and chat_history_points is not None
@@ -224,19 +243,19 @@ def _account_score(
         else None
     )
     complete = all(
-        value is not None for value in (avatar_points, friend_points, group_points)
+        value is not None for value in (friend_points, group_points)
     )
     return {
         "score": (
-            int(avatar_points or 0) + int(friend_points or 0) + int(group_points or 0)
+            float(friend_points or 0) + float(group_points or 0)
             if complete
             else None
         ),
         "complete": complete,
-        "avatarPoints": avatar_points,
         "friendPoints": friend_points,
         "groupMemberPoints": group_points,
         "savedContactCount": saved_contact_count,
+        "savedOnlyContactCount": saved_only_contact_count,
         "chatHistoryContactCount": chat_history_count,
         "savedContactPoints": saved_contact_points,
         "chatHistoryPoints": chat_history_points,
@@ -616,7 +635,7 @@ def _latest_visitor_country_codes(
 def _account_payload(
     item: PersonalAccount,
     *,
-    resource_score_metrics: dict[str, int] | None,
+    resource_score_metrics: dict[str, int | float] | None,
     bound: tuple[AccountProxyBinding, ProxyEndpoint] | None,
     group: AccountGroup | None,
     protocol: ProtocolNode | None,

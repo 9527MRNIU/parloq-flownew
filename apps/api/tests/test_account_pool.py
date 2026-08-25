@@ -389,16 +389,17 @@ def test_account_resources_are_upserted_scored_and_exposed(
     assert body["quality"]["friendCount"] == 3
     assert body["quality"]["groupCount"] == 4
     assert body["quality"]["uniqueGroupMemberCount"] == 11
-    assert body["quality"]["score"] == 40
-    assert body["quality"]["avatarPoints"] == 5
+    assert body["quality"]["score"] == 17
+    assert "avatarPoints" not in body["quality"]
     assert body["quality"]["savedContactCount"] == 2
+    assert body["quality"]["savedOnlyContactCount"] == 1
     assert body["quality"]["chatHistoryContactCount"] == 2
-    assert body["quality"]["savedContactPoints"] == 2
-    assert body["quality"]["chatHistoryPoints"] == 4
-    assert body["quality"]["friendPoints"] == 6
-    assert body["quality"]["adminGroupMemberPoints"] == 24
-    assert body["quality"]["memberGroupMemberPoints"] == 5
-    assert body["quality"]["groupMemberPoints"] == 29
+    assert body["quality"]["savedContactPoints"] == 0.5
+    assert body["quality"]["chatHistoryPoints"] == 2
+    assert body["quality"]["friendPoints"] == 2.5
+    assert body["quality"]["adminGroupMemberPoints"] == 12
+    assert body["quality"]["memberGroupMemberPoints"] == 2.5
+    assert body["quality"]["groupMemberPoints"] == 14.5
 
     friends = admin_client.get(
         f"/api/personal-accounts/{account_id}/resources/contacts",

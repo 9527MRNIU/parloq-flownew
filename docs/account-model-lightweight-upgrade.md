@@ -22,7 +22,7 @@
 | 开关 | 开关名称 | 默认值 | 对应 Baileys 6.7.24 能力 | 当前/后续用途 |
 | --- | --- | --- | --- | --- |
 | `closeOnline` | 关闭在线 | 开 | `markOnlineOnConnect: !closeOnline` | 控制 Socket 连接后是否向 WhatsApp 发布在线状态；保持现有实现 |
-| `avatar` | 头像同步 | 开 | `profilePictureUrl(ownJid, "image")` | 同步本账号头像，用于账户展示和评分 |
+| `avatar` | 头像同步 | 开 | `profilePictureUrl(ownJid, "image")` | 同步本账号头像，用于账户展示，不参与评分 |
 | `groupDetails` | 群组同步 | 开 | `groupFetchAllParticipating()`、历史/实时聊天事件 | 同步群 JID、名称、人数、权限等详情，合并已下发范围内的最近联系时间，并直接计算 `groupCount`；用于账户概览、评分和群组营销 |
 | `contacts` | 好友同步 | 开 | `syncFullHistory`、`shouldSyncHistoryMessage()`、历史包、`contacts.upsert/update`、`chats.phoneNumberShare`、`messages.upsert` | 接收必要的历史资源包，分类并保存好友资源、LID/JID 映射和最后联系时间；不保存聊天列表或消息正文 |
 
@@ -43,7 +43,7 @@ needHistorySync = contacts && explicitMetadataSyncRun
 | 超链营销 | 不新增资源要求；各开关维持节点默认 | 无任务专属开关 |
 | 群组营销 | `groupDetails=true`；其他开关按节点默认 | 无任务专属开关 |
 | 好友营销 | `contacts=true` | 无独立历史、聊天或消息开关 |
-| 账户完整评分 | `avatar=true`、`groupDetails=true`、`contacts=true` | 无独立历史、聊天或消息开关 |
+| 账户完整评分 | `groupDetails=true`、`contacts=true` | 头像不参与评分；无独立历史、聊天或消息开关 |
 
 好友同步开启后，网关会临时扫描历史包里的聊天对象和消息元数据，把通讯录联系人和聊天记录联系人合并为好友。处理完成后丢弃聊天列表和消息正文。
 
@@ -294,32 +294,30 @@ Baileys 只能处理 WhatsApp 实际下发的历史包，不能保证每个旧�
 
 评分与任务准入分开。账户有效、允许营销、资源已同步、未处于冷却期属于硬条件；评分只用于可用账户之间排序。
 
-按当前讨论的加法规则计算，暂不封顶。好友数量仍按通讯录与聊天记录来源并集去重，但评分按两个来源分别计算，同一联系人同时满足两种来源时可以重复得分：
+按当前讨论的加法规则计算，暂不封顶。头像不参与评分。好友数量仍按通讯录与聊天记录来源并集去重；评分对每个联系人只取较高的一档，不重复计分：
 
 | 评分项 | 分数 | 数据来源 |
 | --- | --- | --- |
-| 头像 | 有头像加 5 分 | `profilePictureUrl()` 的同步结果 |
-| 通讯录联系人 | 每个加 1 分 | `account_contacts.is_saved_contact=true` 的有效联系人 |
-| 聊天记录联系人 | 每个加 2 分 | `account_contacts.has_chat_history=true` 的有效联系人 |
-| 管理员以上且可发送的群 | 群人数每人加 2 分 | 群 `size`，且 `own_role` 为 `admin`/`superadmin`、`can_send=true` |
-| 普通成员且可发送的群 | 群人数每人加 1 分 | 群 `size`，且 `own_role=member`、`can_send=true` |
+| 聊天记录联系人 | 每个加 1 分 | `account_contacts.has_chat_history=true` 的有效联系人 |
+| 仅保存联系人 | 每个加 0.5 分 | `is_saved_contact=true AND has_chat_history=false` 的有效联系人 |
+| 管理员以上且可发送的群 | 群人数每人加 1 分 | 群 `size`，且 `own_role` 为 `admin`/`superadmin`、`can_send=true` |
+| 普通成员且可发送的群 | 群人数每人加 0.5 分 | 群 `size`，且 `own_role=member`、`can_send=true` |
 | 不可发送的群 | 0 分 | `can_send=false`，不论当前角色 |
 
 公式为：
 
 ```text
-账户评分 = (有头像 ? 5 : 0)
-         + 通讯录联系人数量
-         + 聊天记录联系人数量 × 2
-         + Σ(管理员或群主且可发送的群人数 × 2)
-         + Σ(普通成员且可发送的群人数)
+账户评分 = 聊天记录联系人数量
+         + 仅保存联系人数量 × 0.5
+         + Σ(管理员或群主且可发送的群人数)
+         + Σ(普通成员且可发送的群人数 × 0.5)
 ```
 
 群组评分按群分别累计，直接使用 WhatsApp 返回的群总人数；不可发送的群统一计 0 分。跨群去重成员数继续保留为资源概览统计，但不参与评分。
 
-后端直接从好友与群组资源表批量聚合并即时计算。列表和详情接口返回总分，以及头像、通讯录、聊天记录、管理员群和成员群分项；不建立评分历史表，也不单独保存可即时计算出的总分。
+后端直接从好友与群组资源表批量聚合并即时计算。列表和详情接口返回总分，以及仅保存联系人、聊天记录联系人、管理员群和成员群分项；不建立评分历史表，也不单独保存可即时计算出的总分。
 
-只有头像、好友和群组都同步成功后，评分才标记为完整。缺少任一数据时可以展示已知分项，但总分旁必须标记“待补全”，未知项不能按 0 分参与正式排序。
+只有好友和群组都同步成功后，评分才标记为完整。缺少任一数据时可以展示已知分项，但总分旁必须标记“待补全”，未知项不能按 0 分参与正式排序。
 
 ## 10. 同步时机
 
