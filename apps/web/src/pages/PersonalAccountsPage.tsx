@@ -1,8 +1,10 @@
 import {
   AlertTriangleIcon,
   CheckCheckIcon,
+  ChevronDownIcon,
   EyeIcon,
   FolderInputIcon,
+  ListChecksIcon,
   LoaderCircleIcon,
   MessageSquareTextIcon,
   RefreshCwIcon,
@@ -21,7 +23,12 @@ import {
   AccountStatusIndicator,
 } from "../components/account-status-indicator";
 import { CountryDisplay } from "../components/country-display";
-import { DrawerFieldLabel } from "../components/drawer-form";
+import {
+  DrawerFieldLabel,
+  DrawerFormField,
+  DrawerFormLayout,
+  DrawerFormSection,
+} from "../components/drawer-form";
 import { AccountResourceDetailDrawer } from "./AccountResourceDetailPage";
 import {
   ListPagination,
@@ -35,6 +42,11 @@ import {
   Checkbox,
   confirmAction,
   Drawer,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
   EmptyState,
   Input,
   Modal,
@@ -392,6 +404,7 @@ export function PersonalAccountsPage() {
   const [total, setTotal] = useState(0);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [batchGroupId, setBatchGroupId] = useState("");
+  const [batchGroupDrawerOpen, setBatchGroupDrawerOpen] = useState(false);
   const [groupingIds, setGroupingIds] = useState<string[]>([]);
   const [operation, setOperation] = useState("");
   const [testAccount, setTestAccount] = useState<Account | null>(null);
@@ -582,6 +595,11 @@ export function PersonalAccountsPage() {
   const batchTargetValid =
     batchGroupId === "__ungrouped__" ||
     batchGroups.some((group) => group.id === batchGroupId);
+  function openBatchGroupDrawer() {
+    if (!selectedIds.length) return;
+    setBatchGroupId("");
+    setBatchGroupDrawerOpen(true);
+  }
   async function action(
     row: Account,
     name: "connect" | "disconnect" | "logout" | "sync",
@@ -661,6 +679,8 @@ export function PersonalAccountsPage() {
     } else {
       toast.success(`已更新 ${targetIds.length} 个账号的分组`);
       setSelectedIds([]);
+      setBatchGroupDrawerOpen(false);
+      setBatchGroupId("");
     }
   }
   async function sendTest() {
@@ -963,38 +983,6 @@ export function PersonalAccountsPage() {
         }
         actions={
           <>
-            {canManage && selectedIds.length ? (
-              <>
-                <SelectField
-                  ariaLabel="批量设置账号分组"
-                  className="w-[170px]"
-                  value={batchGroupId}
-                  onValueChange={setBatchGroupId}
-                  placeholder="选择目标分组"
-                  options={[
-                    { value: "__ungrouped__", label: "移出所有分组" },
-                    ...batchGroups.map((group) => ({
-                      value: group.id,
-                      label: user?.isAdmin
-                        ? `${group.name} · 客户 #${group.ownerId}`
-                        : group.name,
-                    })),
-                  ]}
-                />
-                <Button
-                  variant="outline"
-                  disabled={
-                    !batchGroupId ||
-                    !batchTargetValid ||
-                    Boolean(groupingIds.length)
-                  }
-                  onClick={() => void batchChangeGroup()}
-                >
-                  {groupingIds.length ? <Spinner /> : <FolderInputIcon size={16} />}
-                  批量改组
-                </Button>
-              </>
-            ) : null}
             <Button
               variant="outline"
               onClick={() =>
@@ -1005,6 +993,35 @@ export function PersonalAccountsPage() {
               <RefreshCwIcon size={16} className={loading ? "spin" : ""} />
               刷新
             </Button>
+            {canManage ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="outline"
+                    disabled={
+                      !selectedIds.length || Boolean(groupingIds.length)
+                    }
+                  >
+                    {groupingIds.length ? (
+                      <Spinner />
+                    ) : (
+                      <ListChecksIcon data-icon="inline-start" />
+                    )}
+                    批量操作
+                    {selectedIds.length ? ` (${selectedIds.length})` : ""}
+                    <ChevronDownIcon data-icon="inline-end" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuGroup>
+                    <DropdownMenuItem onSelect={openBatchGroupDrawer}>
+                      <FolderInputIcon />
+                      批量改组
+                    </DropdownMenuItem>
+                  </DropdownMenuGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
             {canImport ? (
               <Button onClick={openImport}>
                 <UploadCloudIcon size={16} />
@@ -1291,6 +1308,72 @@ export function PersonalAccountsPage() {
         accountLabel={detailAccount?.phone || detailAccount?.name || ""}
         onClose={() => setDetailAccount(null)}
       />
+
+      <Drawer
+        open={batchGroupDrawerOpen}
+        onClose={() => {
+          if (!groupingIds.length) setBatchGroupDrawerOpen(false);
+        }}
+        title="批量修改账号分组"
+        description={`已选择 ${selectedIds.length} 个账号。`}
+        footer={
+          <>
+            <Button
+              variant="outline"
+              disabled={Boolean(groupingIds.length)}
+              onClick={() => setBatchGroupDrawerOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              disabled={
+                !selectedIds.length ||
+                !batchGroupId ||
+                !batchTargetValid ||
+                Boolean(groupingIds.length)
+              }
+              onClick={() => void batchChangeGroup()}
+            >
+              {groupingIds.length ? <Spinner /> : <FolderInputIcon size={16} />}
+              确认改组
+            </Button>
+          </>
+        }
+      >
+        <DrawerFormLayout>
+          <DrawerFormSection
+            title="目标分组"
+            description="所选账号会统一移动到目标分组，账号的连接、资料和任务数据不会改变。"
+          >
+            <DrawerFormField required label="账号分组" align="start">
+              <div className="grid min-w-0 gap-2">
+                <SelectField
+                  ariaLabel="批量设置账号分组"
+                  className="w-full"
+                  value={batchGroupId}
+                  onValueChange={setBatchGroupId}
+                  placeholder="选择目标分组"
+                  disabled={Boolean(groupingIds.length)}
+                  options={[
+                    { value: "__ungrouped__", label: "移出所有分组" },
+                    ...batchGroups.map((group) => ({
+                      value: group.id,
+                      label: user?.isAdmin
+                        ? `${group.name} · 客户 #${group.ownerId}`
+                        : group.name,
+                    })),
+                  ]}
+                />
+                <p className="text-xs leading-5 text-muted-foreground">
+                  {selectedOwnerIds.size > 1
+                    ? "跨客户账号只能统一移出分组；选择同一客户的账号后可移动到该客户的其他分组。"
+                    : "只显示所选账号所属客户的可用分组。"}
+                </p>
+              </div>
+            </DrawerFormField>
+          </DrawerFormSection>
+        </DrawerFormLayout>
+      </Drawer>
 
       <Drawer
         open={importOpen}
