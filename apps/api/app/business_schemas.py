@@ -105,17 +105,18 @@ class AccountGroupUpdate(Model):
 class ProtocolSyncPolicy(Model):
     close_online: bool = Field(default=True, alias="closeOnline")
     avatar: bool = True
-    group_summary: bool = Field(default=True, alias="groupSummary")
-    group_details: bool = Field(default=False, alias="groupDetails")
-    contacts: bool = False
-    chats: bool = False
-    message_history: bool = Field(default=False, alias="messageHistory")
+    group_details: bool = Field(default=True, alias="groupDetails")
+    contacts: bool = True
 
-    @model_validator(mode="after")
-    def group_details_include_summary(self):
-        if self.group_details:
-            self.group_summary = True
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_group_summary(cls, value):
+        if not isinstance(value, dict) or "groupDetails" in value or "group_details" in value:
+            return value
+        legacy = value.get("groupSummary", value.get("group_summary"))
+        if not isinstance(legacy, bool):
+            return value
+        return {**value, "groupDetails": legacy}
 
 
 class ProtocolRateLimitRule(Model):

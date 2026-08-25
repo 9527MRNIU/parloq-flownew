@@ -23,14 +23,16 @@
 | --- | --- | --- | --- | --- |
 | `closeOnline` | 关闭在线 | 开 | `markOnlineOnConnect: !closeOnline` | 控制 Socket 连接后是否向 WhatsApp 发布在线状态；保持现有实现 |
 | `avatar` | 头像同步 | 开 | `profilePictureUrl(ownJid, "image")` | 同步本账号头像，用于账户展示和评分 |
-| `groupDetails` | 群组同步 | 开 | `groupFetchAllParticipating()`、`groupMetadata()` | 同步群 JID、名称、人数、权限等详情，并直接计算 `groupCount`；用于账户概览、评分和群组营销 |
+| `groupDetails` | 群组同步 | 开 | `groupFetchAllParticipating()` | 同步群 JID、名称、人数、权限等详情，并直接计算 `groupCount`；用于账户概览、评分和群组营销 |
 | `contacts` | 好友同步 | 开 | `syncFullHistory`、`shouldSyncHistoryMessage()`、历史包、`contacts.upsert/update`、`chats.phoneNumberShare`、`messages.upsert` | 接收必要的历史资源包，分类并保存好友资源、LID/JID 映射和最后联系时间；不保存聊天列表或消息正文 |
 
 `contacts` 是 Parloq 自己封装的业务同步策略，不是 Baileys 原生开关，Baileys 也没有统一的 `syncContacts()` 接口。网关根据这个开关编排历史同步配置和多个增量事件。外部不再暴露“历史同步”开关；内部直接按下面的规则派生：
 
 ```text
-needHistorySync = contacts
+needHistorySync = contacts && explicitMetadataSyncRun
 ```
+
+也就是说，`contacts=true` 表示允许并处理好友资源，但日常连接和发信重连不会反复请求完整历史。只有首次资料同步、手动“同步资料”或节点策略变更触发的后台资料任务，才临时带上 `requestContactsHistory=true` 受控重建 Socket；完成后立即清除该临时参数。
 
 群组同步通过独立群组接口获取数据，不依赖历史同步，也不再设置独立的群组概览开关。第一期不增加“账号资源同步”之类的冗余总开关。
 
@@ -104,7 +106,7 @@ sendMessage(groupJid, content)
 
 ### 4.1 首次联系人同步
 
-开启“好友同步” `contacts` 后，Socket 创建时直接使用：
+开启“好友同步” `contacts` 后，资料同步任务创建的临时 Socket 使用：
 
 ```text
 syncFullHistory: true
@@ -175,13 +177,13 @@ sendMessage(contactJid, content)
 
 1. 协议节点开关进入配对任务快照和网关账户实际策略；
 2. 网关通过 Baileys 执行首次资源查询或首次历史同步；
-3. 网关监听 Baileys 增量事件并更新资源；
+3. 网关在本次 Socket 生命周期内监听 Baileys 增量事件并归并资源；
 4. 主系统 API 接收标准化资源并写入业务表；
 5. 前端能查看资源数量、同步状态、更新时间和失败原因；
 6. 营销任务从已同步资源中选择真实目标，并实际调用 Baileys 发送；
 7. 发送、送达、失败和账户异常进入现有统计链路。
 
-当前群组详情只在网关 `metadata.groups` 中保存群 ID、名称和人数，主系统尚未消费；现有 `contacts` 也只累计数量，没有保存联系人明细。当前 Socket 的 `shouldSyncHistoryMessage()` 只读取准备删除的 `messageHistory`，所以单独开启 `contacts` 仍会跳过首次历史同步。改造时应让“好友同步” `contacts` 同时控制 `syncFullHistory`、`shouldSyncHistoryMessage()`、联系人分类和落库。后续重点是补齐这两条真实资源链路，而不是只增加页面和任务外壳。
+当前账户模型升级已接通群组与好友的真实资源链路：网关返回标准化清单，主系统分别写入 `account_whatsapp_groups` 和 `account_contacts`，账号列表展示聚合数量和评分，单账号详情页可以查看真实清单。群组营销与好友营销的任务编排、发送前刷新和长期增量刷新仍属于后续任务开发范围，不能因为已有资源表和页面就视为营销任务已经完成。
 
 ## 6. 账户类型和系统类型
 
@@ -202,7 +204,7 @@ Baileys 自带的 `isWABusinessPlatform(platform)` 明确把 `smba`、`smbi` 判
 
 ## 7. 轻量数据模型
 
-继续保留现有 `personal_accounts`，并保留 `has_avatar`、`group_count`、`friend_count` 等字段；删除不再使用的 `mutual_contact_count`。主表只补充：
+继续保留现有 `personal_accounts`，并保留 `has_avatar`、`group_count`、`friend_count` 等字段。产品、API 和前端删除“双向互动”概念；旧库中的 `mutual_contact_count` 暂时仅作为滚动升级兼容列保留，不再读取、写入或参与评分，待确认所有环境升级完成后再单独删列。主表只补充：
 
 - `wa_platform_raw`：Baileys 原始平台值；
 - `account_type`：`personal`、`business`、`unknown`；
@@ -310,7 +312,7 @@ Baileys 只能处理 WhatsApp 实际下发的历史包，不能保证每个旧�
 
 同一个人即使出现在多个群里也只计算一次。本账号的手机号 JID、LID 及已知映射都必须从成员集合中排除；无法完成 JID/LID 归一的成员按原始 ID 去重，并将评分数据标记为可能待补全。
 
-当前后端的评分只是“头像 + 是否有群”的 0/50/100 临时值，上线本规则时应直接替换。列表和详情接口返回总分及头像、好友、群成员三项明细；不建立评分历史表，也不单独保存可即时计算出的总分。
+后端直接按本规则即时计算。列表和详情接口返回总分及头像、好友、群成员三项明细；不建立评分历史表，也不单独保存可即时计算出的总分。
 
 只有头像、好友和群组都同步成功后，评分才标记为完整。缺少任一数据时可以展示已知分项，但总分旁必须标记“待补全”，未知项不能按 0 分参与正式排序。
 
@@ -318,7 +320,7 @@ Baileys 只能处理 WhatsApp 实际下发的历史包，不能保证每个旧�
 
 1. 账户配对或导入验证成功后，按配对任务快照执行首次同步。
 2. `avatar`、`groupDetails` 和 `contacts` 默认开启；`groupDetails` 同步并落库群详情，同时计算 `groupCount` 和 `uniqueGroupMemberCount`，不触发历史同步。
-3. “好友同步” `contacts` 在 Socket 创建时内部启用历史同步配置，接收首次历史资源包并分类落库联系人；对已经在线的旧账户新开启该开关时，受控重建 Socket。
+3. “好友同步” `contacts` 只在显式资料同步任务创建 Socket 时临时启用历史同步配置，接收历史资源包并分类落库联系人；对已经在线的账户执行资料同步时，受控重建一次 Socket，日常发信连接不请求完整历史。
 4. `contacts` 只聚合历史包中的联系人来源和最后联系时间，在线期间通过联系人和消息事件继续更新。
 5. 在线期间通过群组和联系人事件增量更新。
 6. 创建营销任务时检查对应资源同步状态；数据过期则先刷新，刷新成功后再启动任务。
@@ -329,7 +331,7 @@ Baileys 只能处理 WhatsApp 实际下发的历史包，不能保证每个旧�
 ## 11. 实施顺序
 
 1. 删除冗余的 `groupSummary`，将原开关值迁移到“群组同步” `groupDetails`；群组数量改为由群组同步结果直接聚合。
-2. 删除 `chats`、`messageHistory`、`mutual_contact_count` 及配套代码；保留现有 `contacts` 字段并将产品名称改为“好友同步”，历史同步改为网关内部实现。
+2. 删除 `chats`、`messageHistory` 及配套代码，删除“双向互动”的产品/API/前端语义；旧 `mutual_contact_count` 暂留为不使用的滚动兼容列；保留现有 `contacts` 字段并将产品名称改为“好友同步”，历史同步改为网关内部实现。
 3. 完成群详情落库、群成员跨群去重聚合、群组增量事件接入和账号详情“群组”页签。
 4. 开发群组营销任务。
 5. 完成好友明细落库、联系人增量事件接入和账号详情“好友”页签。

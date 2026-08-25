@@ -12,7 +12,7 @@ import {
   UserRoundIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import {
@@ -83,8 +83,11 @@ type Account = {
   avatarFetchedAt: string;
   groupCount: number | null;
   friendCount: number | null;
-  mutualContactCount: number | null;
+  uniqueGroupMemberCount: number | null;
   qualityScore: number | null;
+  accountType: string;
+  deviceOs: string;
+  waPlatformRaw: string;
   qualitySyncedAt: string;
   enabled: boolean;
   marketingEligible: boolean;
@@ -137,14 +140,6 @@ type ImportProtocol = {
   supportedFormats: string[];
 };
 type FilterProtocol = { id: string; name: string; type: string };
-type LifecycleEvent = {
-  id: string;
-  fromState: string;
-  toState: string;
-  reason: string;
-  providerCode: string;
-  occurredAt: string;
-};
 const val = (row: Record<string, unknown>, ...keys: string[]) => {
   for (const key of keys) if (row[key] != null) return String(row[key]);
   return "";
@@ -246,12 +241,15 @@ function accountRow(input: unknown): Account {
     avatarFetchedAt: val(quality, "avatarFetchedAt", "avatar_fetched_at"),
     groupCount: optionalNumber(quality, "groupCount", "group_count"),
     friendCount: optionalNumber(quality, "friendCount", "friend_count"),
-    mutualContactCount: optionalNumber(
+    uniqueGroupMemberCount: optionalNumber(
       quality,
-      "mutualContactCount",
-      "mutual_contact_count",
+      "uniqueGroupMemberCount",
+      "unique_group_member_count",
     ),
     qualityScore: optionalNumber(quality, "score"),
+    accountType: val(row, "accountType", "account_type") || "unknown",
+    deviceOs: val(row, "deviceOs", "device_os") || "unknown",
+    waPlatformRaw: val(row, "waPlatformRaw", "wa_platform_raw"),
     qualitySyncedAt: val(quality, "syncedAt", "synced_at"),
     enabled: Boolean(row.enabled ?? true),
     marketingEligible: Boolean(
@@ -263,17 +261,6 @@ function accountRow(input: unknown): Account {
   };
 }
 
-function lifecycleEvent(input: unknown): LifecycleEvent {
-  const row = input as Record<string, unknown>;
-  return {
-    id: snowflakeId(row, "id", "eventId", "event_id"),
-    fromState: val(row, "fromState", "from_state"),
-    toState: val(row, "toState", "to_state"),
-    reason: val(row, "reason", "reasonCategory", "reason_category"),
-    providerCode: val(row, "providerCode", "provider_code"),
-    occurredAt: val(row, "occurredAt", "occurred_at"),
-  };
-}
 function proxyRow(input: unknown): ProxyRow {
   const row = input as Record<string, unknown>;
   const id = snowflakeId(row, "id", "proxyId", "proxy_id");
@@ -306,11 +293,22 @@ function sourceBadge(row: Account) {
     return <Badge tone="neutral">会话包导入</Badge>;
   return <Badge tone="neutral">待识别</Badge>;
 }
+const accountTypeLabel = (value: string) =>
+  value === "business" ? "商业版" : value === "personal" ? "个人版" : "待识别";
+const deviceOsLabel = (value: string) =>
+  value === "android"
+    ? "Android"
+    : value === "ios"
+      ? "iOS"
+      : value === "other"
+        ? "其他"
+        : "待识别";
 const canSwitchProxy = (row: Account) =>
   ["linked_offline", "unpaired"].includes(row.status);
 
 export function PersonalAccountsPage() {
   const { user, can } = useAuth();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const canManage =
     can("resources.accounts.manage") ||
@@ -359,9 +357,6 @@ export function PersonalAccountsPage() {
   const [importGroupId, setImportGroupId] = useState("");
   const [importProtocolId, setImportProtocolId] = useState("");
   const [importProxyId, setImportProxyId] = useState("");
-  const [detailAccount, setDetailAccount] = useState<Account | null>(null);
-  const [detailEvents, setDetailEvents] = useState<LifecycleEvent[]>([]);
-  const [detailLoading, setDetailLoading] = useState(false);
   const proxyEndpointById = useMemo(
     () => new Map(proxies.map((proxy) => [proxy.id, proxy.endpoint])),
     [proxies],
@@ -576,7 +571,6 @@ export function PersonalAccountsPage() {
       await apiRequest(`/api/personal-accounts/${row.id}`, {
         method: "DELETE",
       });
-      if (detailAccount?.id === row.id) setDetailAccount(null);
       setSelectedIds((current) => current.filter((id) => id !== row.id));
       await Promise.all([loadAccounts(), loadReferences()]);
       toast.success("账号已彻底删除，历史业务记录已保留");
@@ -674,22 +668,6 @@ export function PersonalAccountsPage() {
       setTestResult(caught instanceof Error ? caught.message : "发送失败");
     } finally {
       setTestPending(false);
-    }
-  }
-  async function openDetails(row: Account) {
-    if (!row.id) return;
-    setDetailAccount(row);
-    setDetailEvents([]);
-    setDetailLoading(true);
-    try {
-      const payload = await apiRequest(
-        `/api/personal-accounts/${row.id}/lifecycle?pageSize=100`,
-      );
-      setDetailEvents(unwrapList<unknown>(payload).rows.map(lifecycleEvent));
-    } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "生命周期加载失败");
-    } finally {
-      setDetailLoading(false);
     }
   }
   function openImport() {
@@ -1050,10 +1028,12 @@ export function PersonalAccountsPage() {
                 </TableHead>
                 <TableHead adaptive>账号</TableHead>
                 <TableHead className="text-center">头像</TableHead>
+                <TableHead className="text-center">类型 / 系统</TableHead>
                 <TableHead className="text-center">来源</TableHead>
                 <TableHead>分组</TableHead>
                 <TableHead>代理</TableHead>
-                <TableHead className="text-center">账号数据</TableHead>
+                <TableHead className="text-center">发送数据</TableHead>
+                <TableHead className="text-center">资源概览</TableHead>
                 <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
@@ -1099,6 +1079,14 @@ export function PersonalAccountsPage() {
                   <TableCell className="text-center align-middle">
                     <div className="flex justify-center">
                       <AccountAvatar account={row} />
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-center align-middle">
+                    <div className="cell-main mx-auto min-w-[110px] items-center text-center">
+                      <strong>{accountTypeLabel(row.accountType)}</strong>
+                      <span title={row.waPlatformRaw || undefined}>
+                        {deviceOsLabel(row.deviceOs)}
+                      </span>
                     </div>
                   </TableCell>
                   <TableCell className="text-center align-middle">
@@ -1178,19 +1166,11 @@ export function PersonalAccountsPage() {
                     )}
                   </TableCell>
                   <TableCell className="text-center align-middle">
-                    <div className="cell-main mx-auto min-w-[210px] max-w-[240px] items-center text-center">
+                    <div className="cell-main mx-auto min-w-[160px] items-center text-center">
                       <div className="tick-stats">
                         <span><CheckCheckIcon size={14} />单勾 {row.accepted == null ? "-" : row.accepted}</span>
                         <span><CheckCheckIcon size={14} />双勾 {row.delivered == null ? "-" : row.delivered}</span>
                       </div>
-                      <span>
-                        头像 {row.hasAvatar == null ? "未知" : row.hasAvatar ? "有" : "无"}
-                        {" · "}群组 {row.groupCount == null ? "未知" : row.groupCount}
-                      </span>
-                      <span>
-                        好友 {row.friendCount == null ? "未知" : row.friendCount}
-                        {" · "}双向 {row.mutualContactCount == null ? "未知" : row.mutualContactCount}
-                      </span>
                       {row.lastError ? (
                         <span
                           className="flex items-center gap-1 truncate text-destructive"
@@ -1203,13 +1183,27 @@ export function PersonalAccountsPage() {
                       <span>最近连接 {formatDateTime(row.lastConnectedAt)}</span>
                     </div>
                   </TableCell>
+                  <TableCell className="text-center align-middle">
+                    <div className="cell-main mx-auto min-w-[170px] items-center text-center">
+                      <strong>
+                        评分 {row.qualityScore == null ? "待同步" : `${row.qualityScore} 分`}
+                      </strong>
+                      <span>
+                        好友 {row.friendCount == null ? "未知" : row.friendCount}
+                        {" · "}群组 {row.groupCount == null ? "未知" : row.groupCount}
+                      </span>
+                      <span>
+                        去重群成员 {row.uniqueGroupMemberCount == null ? "未知" : row.uniqueGroupMemberCount}
+                      </span>
+                    </div>
+                  </TableCell>
                   <TableCell className="sticky right-0 bg-background">
                     <div className="flex min-w-max items-center justify-end gap-2">
                       <Button
                         variant="outline"
                         size="sm"
                         disabled={!row.id}
-                        onClick={() => void openDetails(row)}
+                        onClick={() => navigate(`/resources/accounts/manage/${row.id}`)}
                       >
                         <EyeIcon size={16} />
                         详情
@@ -1296,112 +1290,6 @@ export function PersonalAccountsPage() {
           />
         )}
       </ListTableCard>
-      <Drawer
-        wide
-        open={Boolean(detailAccount)}
-        onClose={() => setDetailAccount(null)}
-        title="账号详情"
-        description="集中查看接入资源、资料完整度、当前状态和生命周期。"
-      >
-        {detailAccount ? (
-          <div className="grid gap-6 pb-6">
-            <section className="grid gap-3">
-              <div>
-                <h3 className="text-sm font-semibold">基本信息</h3>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  账号身份、归属和进入账号池的来源。
-                </p>
-              </div>
-              <div className="grid gap-3 rounded-xl border p-4 sm:grid-cols-2">
-                <div className="flex items-center gap-3">
-                  <AccountAvatar account={detailAccount} large />
-                  <div className="cell-main min-w-0">
-                    <span>账号</span>
-                    <strong>{detailAccount.phone || detailAccount.name || "账号待迁移"}</strong>
-                    <span>{detailAccount.avatarFetchedAt ? `头像拉取于 ${formatDateTime(detailAccount.avatarFetchedAt)}` : "暂无已拉取头像"}</span>
-                  </div>
-                </div>
-                <div className="cell-main"><span>ID</span><strong>{detailAccount.id}</strong></div>
-                <div className="cell-main"><span>来源</span><strong>{detailAccount.source === "json_import" ? "会话包导入" : detailAccount.source === "landing_page" ? "落地页链接" : detailAccount.source || "待识别"}</strong></div>
-                <div className="cell-main"><span>导入格式</span><strong>{detailAccount.importFormat || detailAccount.sourceRefType || "-"}</strong></div>
-                <div className="cell-main"><span>账号分组</span><strong>{detailAccount.groupName || "未分组"}</strong></div>
-                <div className="cell-main"><span>创建时间</span><strong>{formatDateTime(detailAccount.createdAt)}</strong></div>
-              </div>
-            </section>
-
-            <section className="grid gap-3">
-              <h3 className="text-sm font-semibold">接入资源</h3>
-              <div className="grid gap-3 rounded-xl border p-4 sm:grid-cols-2">
-                <div className="cell-main"><span>协议节点</span><strong>{detailAccount.protocolName || "未识别"}</strong><span>{detailAccount.protocolType || "协议类型未知"}</span></div>
-                <div className="cell-main"><span>隔离代理</span><strong>{detailAccount.proxyId ? proxyEndpointById.get(detailAccount.proxyId) || "已绑定固定代理" : "系统自动分配"}</strong></div>
-              </div>
-            </section>
-
-            <section className="grid gap-3">
-              <h3 className="text-sm font-semibold">当前状态</h3>
-              <div className="flex items-start gap-3 rounded-xl border p-4">
-                <AccountStatusIndicator
-                  status={detailAccount.status}
-                  connected={detailAccount.connected}
-                  validationStatus={detailAccount.validationStatus}
-                  metadataSyncStatus={detailAccount.metadataSyncStatus}
-                  lastError={detailAccount.lastError}
-                />
-                <div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-2">
-                  <div className="cell-main"><span>验证状态</span><strong>{detailAccount.validationStatus || "-"}</strong></div>
-                  <div className="cell-main"><span>资料同步</span><strong>{detailAccount.metadataSyncStatus || "-"}</strong></div>
-                  <div className="cell-main"><span>最近连接</span><strong>{formatDateTime(detailAccount.lastConnectedAt)}</strong></div>
-                  <div className="cell-main"><span>最新异常</span><strong className={detailAccount.lastError ? "text-destructive" : ""}>{detailAccount.lastError || "无异常"}</strong></div>
-                </div>
-              </div>
-            </section>
-
-            <section className="grid gap-3">
-              <div>
-                <h3 className="text-sm font-semibold">基础资料</h3>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  未同步的数据保持“未知”，不会当作 0 处理。
-                </p>
-              </div>
-              <div className="grid gap-3 rounded-xl border p-4 sm:grid-cols-2 lg:grid-cols-4">
-                <div className="cell-main"><span>头像</span><strong>{detailAccount.hasAvatar == null ? "未知" : detailAccount.hasAvatar ? detailAccount.avatarUrl ? "已拉取" : "等待下载" : "无"}</strong></div>
-                <div className="cell-main"><span>群组</span><strong>{detailAccount.groupCount == null ? "未知" : detailAccount.groupCount}</strong></div>
-                <div className="cell-main"><span>好友</span><strong>{detailAccount.friendCount == null ? "未知" : detailAccount.friendCount}</strong></div>
-                <div className="cell-main"><span>双向联系人</span><strong>{detailAccount.mutualContactCount == null ? "未知" : detailAccount.mutualContactCount}</strong></div>
-              </div>
-              <span className="text-xs text-muted-foreground">资料更新时间 {formatDateTime(detailAccount.qualitySyncedAt)}</span>
-            </section>
-
-            <section className="grid gap-3">
-              <div>
-                <h3 className="text-sm font-semibold">生命周期</h3>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  按发生时间倒序记录账号状态变更及原因。
-                </p>
-              </div>
-              {detailLoading ? (
-                <div className="loading-state"><Spinner />正在加载生命周期…</div>
-              ) : detailEvents.length ? (
-                <div className="overflow-hidden rounded-xl border">
-                  <Table>
-                    <TableHeader><TableRow><TableHead>发生时间</TableHead><TableHead>状态变化</TableHead><TableHead adaptive>原因</TableHead><TableHead>服务码</TableHead></TableRow></TableHeader>
-                    <TableBody>{detailEvents.map((event) => (
-                      <TableRow key={event.id}>
-                        <TableCell className="text-muted-foreground">{formatDateTime(event.occurredAt)}</TableCell>
-                        <TableCell><Badge tone="neutral">{event.fromState || "初始"} → {event.toState || "未知"}</Badge></TableCell>
-                        <TableCell>{event.reason || "未记录"}</TableCell>
-                        <TableCell className="text-muted-foreground">{event.providerCode || "-"}</TableCell>
-                      </TableRow>
-                    ))}</TableBody>
-                  </Table>
-                </div>
-              ) : (
-                <EmptyState title="暂无生命周期记录" description="发生状态变化后会在这里形成可追溯记录。" />
-              )}
-            </section>
-          </div>
-        ) : null}
-      </Drawer>
       <Drawer
         open={importOpen}
         onClose={closeImport}

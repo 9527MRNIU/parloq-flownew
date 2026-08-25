@@ -18,21 +18,15 @@ export type MessageStatus = 'queued' | 'sent' | 'delivered' | 'failed'
 export interface SyncPolicy {
   closeOnline: boolean
   avatar: boolean
-  groupSummary: boolean
   groupDetails: boolean
   contacts: boolean
-  chats: boolean
-  messageHistory: boolean
 }
 
 export const defaultSyncPolicy: SyncPolicy = {
   closeOnline: true,
   avatar: true,
-  groupSummary: true,
-  groupDetails: false,
-  contacts: false,
-  chats: false,
-  messageHistory: false,
+  groupDetails: true,
+  contacts: true,
 }
 
 export interface AccountAvatar {
@@ -49,8 +43,71 @@ export function normalizeSyncPolicy(value: unknown): SyncPolicy {
   for (const key of Object.keys(result) as Array<keyof SyncPolicy>) {
     if (typeof input[key] === 'boolean') result[key] = input[key]
   }
-  if (result.groupDetails) result.groupSummary = true
+  if (typeof input.groupDetails !== 'boolean' && typeof input.groupSummary === 'boolean') {
+    result.groupDetails = input.groupSummary
+  }
   return result
+}
+
+export type ResourceSyncStatus = 'disabled' | 'pending' | 'partial' | 'complete' | 'failed'
+
+export interface SyncedContact {
+  contactId: string
+  jid: string | null
+  lid: string | null
+  phoneE164: string | null
+  savedName: string | null
+  notifyName: string | null
+  verifiedName: string | null
+  imageState: string | null
+  profileStatus: string | null
+  sourceMask: number
+  isSavedContact: boolean
+  hasChatHistory: boolean
+  lastInteractionAt: string | null
+}
+
+export interface SyncedGroup {
+  groupJid: string
+  subject: string
+  size: number
+  announce: boolean
+  restrict: boolean
+  communityType: 'group' | 'community' | 'community_announcement'
+  addressingMode: string | null
+  linkedParentJid: string | null
+  ownRole: 'member' | 'admin' | 'superadmin'
+  canSend: boolean
+}
+
+export interface AccountResourceSnapshot {
+  contacts: SyncedContact[]
+  groups: SyncedGroup[]
+  contactsStatus: ResourceSyncStatus
+  groupsStatus: ResourceSyncStatus
+  contactsComplete: boolean
+  identityMappingComplete: boolean
+  uniqueGroupMemberCount: number | null
+  platformRaw: string | null
+  accountType: 'personal' | 'business' | 'unknown'
+  deviceOs: 'android' | 'ios' | 'other' | 'unknown'
+  syncedAt: string
+}
+
+export function emptyAccountResources(): AccountResourceSnapshot {
+  return {
+    contacts: [],
+    groups: [],
+    contactsStatus: 'disabled',
+    groupsStatus: 'disabled',
+    contactsComplete: false,
+    identityMappingComplete: true,
+    uniqueGroupMemberCount: null,
+    platformRaw: null,
+    accountType: 'unknown',
+    deviceOs: 'unknown',
+    syncedAt: new Date(0).toISOString(),
+  }
 }
 
 export interface Account {
@@ -123,18 +180,18 @@ export interface ProxyHealthWebhookEvent {
   occurredAt: Date
 }
 
-export interface PublicAccount extends Omit<Account, 'proxyUrl'> {
+export interface PublicAccount extends Omit<Account, 'proxyUrl' | 'mutualContactCount'> {
   proxy: string
   quality: {
     hasAvatar: boolean | null
     groupCount: number | null
     friendCount: number | null
-    mutualContactCount: number | null
   }
 }
 
 export type MetadataSyncResponse = PublicAccount & {
   avatar?: AccountAvatar | null
+  resources?: AccountResourceSnapshot
 }
 
 export interface Message {
@@ -179,7 +236,7 @@ export class GatewayError extends Error {
 }
 
 export function publicAccount(account: Account): PublicAccount {
-  const { proxyUrl, ...safe } = account
+  const { proxyUrl, mutualContactCount: _legacyMutualContactCount, ...safe } = account
   return {
     ...safe,
     proxy: maskProxy(proxyUrl),
@@ -187,7 +244,6 @@ export function publicAccount(account: Account): PublicAccount {
       hasAvatar: account.hasAvatar,
       groupCount: account.groupCount,
       friendCount: account.friendCount,
-      mutualContactCount: account.mutualContactCount,
     },
   }
 }

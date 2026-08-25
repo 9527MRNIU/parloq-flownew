@@ -15,6 +15,7 @@ const LoginPage = lazy(() => import("./pages/LoginPage").then((module) => ({ def
 const AccountSecurityPage = lazy(() => import("./pages/AccountSecurityPage").then((module) => ({ default: module.AccountSecurityPage })));
 const IpManagementPage = lazy(() => import("./pages/IpManagementPage").then((module) => ({ default: module.IpManagementPage })));
 const PersonalAccountsPage = lazy(() => import("./pages/PersonalAccountsPage").then((module) => ({ default: module.PersonalAccountsPage })));
+const AccountResourceDetailPage = lazy(() => import("./pages/AccountResourceDetailPage").then((module) => ({ default: module.AccountResourceDetailPage })));
 const PromotionTemplatePreviewPage = lazy(() => import("./pages/PromotionPages").then((module) => ({ default: module.PromotionTemplatePreviewPage })));
 const PromotionChannelsPage = lazy(() => import("./pages/PromotionPages").then((module) => ({ default: module.PromotionChannelsPage })));
 const PromotionTemplatesPage = lazy(() => import("./pages/PromotionPages").then((module) => ({ default: module.PromotionTemplatesPage })));
@@ -163,6 +164,7 @@ export default function App() {
           />
           <Route path="/resources/accounts/export" element={<AccountExportPage />} />
           <Route path="/resources/accounts/manage" element={<PersonalAccountsPage />} />
+          <Route path="/resources/accounts/manage/:accountId" element={<AccountResourceDetailPage />} />
           <Route path="/resources/accounts/groups" element={<AccountGroupsPage />} />
           <Route path="/resources/accounts/intake" element={<AccountIntakePage />} />
           <Route path="/resources/accounts/statistics" element={<AccountStatisticsPage />} />

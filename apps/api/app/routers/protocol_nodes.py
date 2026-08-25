@@ -43,6 +43,7 @@ from app.services.gateway_account_configuration import (
     ensure_gateway_account_configuration,
 )
 from app.services.wa_gateway import GatewayError, WaGatewayClient
+from app.services.account_metadata_sync import enqueue_account_metadata_sync
 
 
 router = APIRouter(prefix="/api/protocol-nodes", tags=["protocol-nodes"])
@@ -272,6 +273,7 @@ def update_protocol_node(
 ) -> dict:
     item = _node(db, protocol_id, current_user)
     marketing_was_enabled = item.marketing_enabled
+    sync_policy_changed = False
     selected_definition: ProtocolDefinition | None = None
     if "protocol_definition_id" in payload.model_fields_set:
         if payload.protocol_definition_id is None:
@@ -324,6 +326,7 @@ def update_protocol_node(
         if normalized_sync_policy(item.sync_policy_json) != next_policy:
             item.sync_policy_json = next_policy
             item.sync_policy_version = int(item.sync_policy_version or 1) + 1
+            sync_policy_changed = True
     if payload.rate_limit_policy is not None:
         next_rate_policy = normalized_rate_limit_policy(
             item.rate_limit_policy_json
@@ -343,6 +346,21 @@ def update_protocol_node(
             ).model_dump(by_alias=True)
         item.rate_limit_policy_json = next_rate_policy
     wakeup_group_ids: set[int] = set()
+    if sync_policy_changed:
+        accounts = db.scalars(
+            select(PersonalAccount).where(
+                PersonalAccount.protocol_id == item.id,
+                PersonalAccount.admission_status == "active",
+                PersonalAccount.deleted_at.is_(None),
+            )
+        ).all()
+        for account in accounts:
+            enqueue_account_metadata_sync(
+                db,
+                account,
+                sync_policy=item.sync_policy_json,
+                sync_policy_version=item.sync_policy_version,
+            )
     if (
         not marketing_was_enabled
         and item.marketing_enabled

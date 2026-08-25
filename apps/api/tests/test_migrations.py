@@ -1218,6 +1218,82 @@ def test_unused_metadata_sync_policy_fields_are_pruned(tmp_path: Path) -> None:
     )
 
 
+def test_account_resource_sync_migration_rewrites_policy_and_is_reversible(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'account-resource-sync.db'}"
+    _alembic(database_url, "0074_marketing_navigation")
+    engine = sa.create_engine(database_url)
+    with engine.begin() as connection:
+        protocol_id = connection.execute(
+            sa.text("SELECT id FROM protocol_nodes ORDER BY id LIMIT 1")
+        ).scalar_one()
+        connection.execute(
+            sa.text(
+                "UPDATE protocol_nodes SET sync_policy_json=:policy "
+                "WHERE id=:protocol_id"
+            ),
+            {
+                "policy": json.dumps(
+                    {
+                        "closeOnline": False,
+                        "avatar": True,
+                        "groupSummary": True,
+                        "groupDetails": False,
+                        "contacts": False,
+                        "chats": True,
+                        "messageHistory": True,
+                    }
+                ),
+                "protocol_id": protocol_id,
+            },
+        )
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    assert {"account_contacts", "account_whatsapp_groups"}.issubset(
+        set(inspector.get_table_names())
+    )
+    personal_columns = {
+        column["name"] for column in inspector.get_columns("personal_accounts")
+    }
+    assert {
+        "unique_group_member_count",
+        "wa_platform_raw",
+        "account_type",
+        "device_os",
+        "resource_sync_state_json",
+    }.issubset(personal_columns)
+    with engine.connect() as connection:
+        stored = connection.execute(
+            sa.text(
+                "SELECT sync_policy_json FROM protocol_nodes "
+                "WHERE id=:protocol_id"
+            ),
+            {"protocol_id": protocol_id},
+        ).scalar_one()
+    engine.dispose()
+    decoded = json.loads(stored) if isinstance(stored, str) else stored
+    assert decoded == {
+        "closeOnline": False,
+        "avatar": True,
+        "groupDetails": True,
+        "contacts": False,
+    }
+
+    _alembic_downgrade(database_url, "0074_marketing_navigation")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    assert "account_contacts" not in inspector.get_table_names()
+    assert "account_whatsapp_groups" not in inspector.get_table_names()
+    assert "unique_group_member_count" not in {
+        column["name"] for column in inspector.get_columns("personal_accounts")
+    }
+    engine.dispose()
+
+
 def test_sticky_delivery_schema_repair_fills_columns_after_stamped_drift(
     tmp_path: Path,
 ) -> None:

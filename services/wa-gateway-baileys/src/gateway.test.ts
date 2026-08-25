@@ -2,7 +2,7 @@ import { BufferJSON, initAuthCreds } from '@whiskeysockets/baileys'
 import { createHmac } from 'node:crypto'
 import pino from 'pino'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { GatewayError, type Account, type AccountState, type Message, type StoredAuth, type StoredKey } from './domain.js'
+import { emptyAccountResources, GatewayError, type Account, type AccountState, type Message, type StoredAuth, type StoredKey } from './domain.js'
 import { MockEngine, type AccountQuality, type EngineAccount, type EngineEvent, type PairResult, type ProtocolEngine } from './engine.js'
 import { buildServer } from './http.js'
 import { GatewayService } from './service.js'
@@ -22,7 +22,7 @@ class MemoryStore implements Store {
       throw new GatewayError('conflict', 'duplicate')
     }
     const now = new Date()
-    const account: Account = { ...input, protocolDefinitionId: input.protocolDefinitionId ?? '0', protocolVersion: input.protocolVersion ?? '6.7.24', deviceJid: '', autoConnect: false, connectionPolicy: 'on_demand', idleDisconnectSeconds: 600, postVerifyGraceSeconds: 120, syncPolicy: { closeOnline: true, avatar: true, groupSummary: true, groupDetails: false, contacts: false, chats: false, messageHistory: false }, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'idle', pairingExpiresAt: null, metadataSyncStatus: 'pending', hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {}, stateChangedAt: now, invalidatedAt: null, reasonCategory: 'created', providerCode: null, createdAt: now, updatedAt: now }
+    const account: Account = { ...input, protocolDefinitionId: input.protocolDefinitionId ?? '0', protocolVersion: input.protocolVersion ?? '6.7.24', deviceJid: '', autoConnect: false, connectionPolicy: 'on_demand', idleDisconnectSeconds: 600, postVerifyGraceSeconds: 120, syncPolicy: { closeOnline: true, avatar: true, groupDetails: true, contacts: true }, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'idle', pairingExpiresAt: null, metadataSyncStatus: 'pending', hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {}, stateChangedAt: now, invalidatedAt: null, reasonCategory: 'created', providerCode: null, createdAt: now, updatedAt: now }
     this.accounts.set(account.id, account)
     return account
   }
@@ -43,7 +43,7 @@ class MemoryStore implements Store {
       connectionPolicy: 'on_demand',
       idleDisconnectSeconds: 600,
       postVerifyGraceSeconds: 120,
-      syncPolicy: { closeOnline: true, avatar: true, groupSummary: true, groupDetails: false, contacts: false, chats: false, messageHistory: false },
+      syncPolicy: { closeOnline: true, avatar: true, groupDetails: true, contacts: true },
       pairingStatus: 'idle',
       pairingExpiresAt: null,
       metadataSyncStatus: 'pending',
@@ -128,7 +128,7 @@ class TerminalConnectEngine implements ProtocolEngine {
   async disconnect(_accountId: string): Promise<void> {}
   async logout(_account: EngineAccount): Promise<void> {}
   async send(_accountId: string, _toE164: string, _message: import('./message-content.js').OutboundMessage): Promise<string> { throw new Error('not implemented') }
-  async getQuality(_accountId: string): Promise<AccountQuality> { return { hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {} } }
+  async getQuality(_accountId: string): Promise<AccountQuality> { return { hasAvatar: null, groupCount: null, friendCount: null, metadata: {}, resources: emptyAccountResources() } }
   isOnline(_accountId: string): boolean { return false }
 }
 
@@ -152,7 +152,7 @@ class InterruptedPairingEngine implements ProtocolEngine {
   async disconnect(_accountId: string): Promise<void> {}
   async logout(_account: EngineAccount): Promise<void> {}
   async send(_accountId: string, _toE164: string, _message: import('./message-content.js').OutboundMessage): Promise<string> { throw new Error('not implemented') }
-  async getQuality(_accountId: string): Promise<AccountQuality> { return { hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {} } }
+  async getQuality(_accountId: string): Promise<AccountQuality> { return { hasAvatar: null, groupCount: null, friendCount: null, metadata: {}, resources: emptyAccountResources() } }
   isOnline(_accountId: string): boolean { return false }
 }
 
@@ -176,7 +176,7 @@ class RestartingPairingEngine implements ProtocolEngine {
   async disconnect(_accountId: string): Promise<void> {}
   async logout(_account: EngineAccount): Promise<void> {}
   async send(_accountId: string, _toE164: string, _message: import('./message-content.js').OutboundMessage): Promise<string> { throw new Error('not implemented') }
-  async getQuality(_accountId: string): Promise<AccountQuality> { return { hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {} } }
+  async getQuality(_accountId: string): Promise<AccountQuality> { return { hasAvatar: null, groupCount: null, friendCount: null, metadata: {}, resources: emptyAccountResources() } }
   isOnline(_accountId: string): boolean { return false }
 }
 
@@ -224,6 +224,7 @@ describe('Baileys gateway HTTP contract', () => {
     const created = await app.inject({ method: 'POST', url: '/v1/accounts', headers, payload: { id: 'wa_test', phoneE164: '+14155550123', proxyUrl: 'socks5://user:secret@proxy.example:1080' } })
     expect(created.statusCode).toBe(201)
     expect(created.body).not.toContain('secret')
+    expect(created.body).not.toContain('mutualContactCount')
     const paired = await app.inject({ method: 'POST', url: '/v1/accounts/wa_test/pairing-code', headers, payload: {} })
     expect(paired.statusCode).toBe(200)
     expect(paired.json().data.code).toBe('0000-0000')
@@ -471,6 +472,7 @@ describe('Baileys gateway HTTP contract', () => {
 
   it('runs metadata collection only through the explicit background-task endpoint', async () => {
     const headers = { authorization: `Bearer ${token}` }
+    const connect = vi.spyOn(engine, 'connect')
     await app.inject({ method: 'POST', url: '/v1/accounts', headers, payload: { id: 'wa_metadata', phoneE164: '+14155550137' } })
     await app.inject({ method: 'POST', url: '/v1/accounts/wa_metadata/pairing-code', headers, payload: {} })
     await new Promise((resolve) => setTimeout(resolve, 0))
@@ -480,11 +482,15 @@ describe('Baileys gateway HTTP contract', () => {
       method: 'POST',
       url: '/v1/accounts/wa_metadata/metadata-sync',
       headers,
-      payload: { syncPolicy: { contacts: false, groupSummary: true } },
+      payload: { syncPolicy: { contacts: true, groupSummary: true } },
     })
     expect(synced.statusCode).toBe(200)
     expect(synced.json().data.metadataSyncStatus).toBe('ready')
     expect((await store.getAccount('wa_metadata')).metadataSyncStatus).toBe('ready')
+    expect(connect).toHaveBeenCalledTimes(2)
+    expect(connect.mock.calls[0]?.[0].metadata?.requestContactsHistory).toBe(true)
+    expect(connect.mock.calls[1]?.[0].metadata?.requestContactsHistory).toBeUndefined()
+    expect(engine.isOnline('wa_metadata')).toBe(true)
   })
 
   it('returns downloaded avatars transiently without storing Base64 in the gateway account', async () => {
@@ -500,8 +506,8 @@ describe('Baileys gateway HTTP contract', () => {
       },
       groupCount: null,
       friendCount: null,
-      mutualContactCount: null,
       metadata: {},
+      resources: emptyAccountResources(),
     })
     await app.inject({ method: 'POST', url: '/v1/accounts', headers, payload: { id: 'wa_avatar', phoneE164: '+14155550138' } })
     await app.inject({ method: 'POST', url: '/v1/accounts/wa_avatar/pairing-code', headers, payload: {} })

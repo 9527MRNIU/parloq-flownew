@@ -95,11 +95,8 @@ type ProtocolDefinitionRef = {
 type SyncPolicy = {
   closeOnline: boolean;
   avatar: boolean;
-  groupSummary: boolean;
   groupDetails: boolean;
   contacts: boolean;
-  chats: boolean;
-  messageHistory: boolean;
 };
 
 type RateLimitRule = {
@@ -127,11 +124,8 @@ type RateLimitPolicyForm = {
 const DEFAULT_SYNC_POLICY: SyncPolicy = {
   closeOnline: true,
   avatar: true,
-  groupSummary: true,
-  groupDetails: false,
-  contacts: false,
-  chats: false,
-  messageHistory: false,
+  groupDetails: true,
+  contacts: true,
 };
 
 const DEFAULT_RATE_LIMIT_POLICY: RateLimitPolicy = {
@@ -252,12 +246,17 @@ function protocolNode(input: unknown): ProtocolNode {
     connectionPolicy: (text(row, "connectionPolicy", "connection_policy") || "on_demand") as ProtocolNode["connectionPolicy"],
     idleDisconnectSeconds: number(row, "idleDisconnectSeconds", "idle_disconnect_seconds") || 600,
     postVerifyGraceSeconds: number(row, "postVerifyGraceSeconds", "post_verify_grace_seconds") ?? 120,
-    syncPolicy: Object.fromEntries(
-      Object.entries(DEFAULT_SYNC_POLICY).map(([key, fallback]) => [
-        key,
-        typeof rawSync[key] === "boolean" ? rawSync[key] : fallback,
-      ]),
-    ) as SyncPolicy,
+    syncPolicy: {
+      closeOnline: typeof rawSync.closeOnline === "boolean" ? rawSync.closeOnline : true,
+      avatar: typeof rawSync.avatar === "boolean" ? rawSync.avatar : true,
+      groupDetails:
+        typeof rawSync.groupDetails === "boolean"
+          ? rawSync.groupDetails
+          : typeof rawSync.groupSummary === "boolean"
+            ? rawSync.groupSummary
+            : true,
+      contacts: typeof rawSync.contacts === "boolean" ? rawSync.contacts : true,
+    },
     rateLimitPolicy: Object.fromEntries(
       Object.entries(DEFAULT_RATE_LIMIT_POLICY).map(([key, fallback]) => {
         const rawRule = (rawRatePolicy[key] || {}) as Record<string, unknown>;
@@ -680,15 +679,12 @@ export function ProtocolManagementPage({
           <DrawerFormSection title="绑定后同步范围" description="账号基础身份始终同步；以下选项会在创建配对任务时快照，之后修改不改变进行中的配对。">
             {([
               ["closeOnline", "关闭在线", "连接后不向 WhatsApp 发布在线状态"],
-              ["avatar", "拉取头像", "获取当前账号头像链接并下载缓存"],
-              ["groupSummary", "群组概览", "同步参与群数量"],
-              ["groupDetails", "群组详情", "读取群组元数据；开启时自动包含群组概览"],
-              ["contacts", "联系人", "监听并同步联系人更新"],
-              ["chats", "聊天列表", "接收聊天列表同步"],
-              ["messageHistory", "消息历史", "接收历史消息同步，资源开销较高"],
+              ["avatar", "头像同步", "获取当前账号头像并下载缓存"],
+              ["groupDetails", "群组同步", "同步完整群列表、权限和群组数量"],
+              ["contacts", "好友同步", "同步已保存联系人和有过一对一联系的对象"],
             ] as Array<[keyof SyncPolicy, string, string]>).map(([key, label, description]) => (
               <DrawerFormField key={key} label={label} hint={description}>
-                <Switch checked={form.syncPolicy[key]} onCheckedChange={(checked) => setForm((current) => ({ ...current, syncPolicy: { ...current.syncPolicy, [key]: checked, ...(key === "groupDetails" && checked ? { groupSummary: true } : {}) } }))} aria-label={key === "closeOnline" || key === "avatar" ? label : `同步${label}`} />
+                <Switch checked={form.syncPolicy[key]} onCheckedChange={(checked) => setForm((current) => ({ ...current, syncPolicy: { ...current.syncPolicy, [key]: checked } }))} aria-label={label} />
               </DrawerFormField>
             ))}
           </DrawerFormSection>

@@ -1009,11 +1009,12 @@ def main() -> None:
         except Exception:
             logger.exception("account_group_wakeup_dispatch_failed")
         try:
-            metadata_result = process_pending_account_metadata_sync_jobs(limit=1)
-            if metadata_result["claimed"]:
-                logger.info(
-                    "account_metadata_sync_processed", extra=metadata_result
-                )
+            if client.llen(QUEUE_KEY) == 0:
+                metadata_result = process_pending_account_metadata_sync_jobs(limit=1)
+                if metadata_result["claimed"]:
+                    logger.info(
+                        "account_metadata_sync_processed", extra=metadata_result
+                    )
         except Exception:
             logger.exception("account_metadata_sync_failed")
         if time.monotonic() - last_recovery >= RECOVERY_INTERVAL_SECONDS:

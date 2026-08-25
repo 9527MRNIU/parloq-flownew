@@ -310,5 +310,6 @@ export function engineAccount(account: Account): EngineAccount {
     phoneE164: account.phoneE164,
     proxyUrl: account.proxyUrl,
     syncPolicy: account.syncPolicy,
+    metadata: account.metadata,
   }
 }

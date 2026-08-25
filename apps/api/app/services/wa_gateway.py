@@ -304,7 +304,6 @@ class WaGatewayClient:
                     "hasAvatar": None,
                     "groupCount": None,
                     "friendCount": None,
-                    "mutualContactCount": None,
                 },
             }
         value = self._post(

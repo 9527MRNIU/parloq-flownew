@@ -1,9 +1,12 @@
 import { Boom } from '@hapi/boom'
 import * as BuiltinBaileys from '@whiskeysockets/baileys'
 import type {
+  Contact,
   proto,
   ConnectionState,
+  GroupMetadata,
   WASocket,
+  WAMessage,
 } from '@whiskeysockets/baileys'
 import { get as httpsGet, type Agent } from 'node:https'
 import { createHash } from 'node:crypto'
@@ -13,7 +16,15 @@ import { loadAuthState, mergeCreds, type BaileysRuntimeModule } from './auth-sto
 import type { Store } from './store.js'
 import { WaWebVersionResolver } from './wa-version.js'
 import type { ManagedMediaReference, MessageButton, OutboundMessage } from './message-content.js'
-import type { AccountAvatar, SyncPolicy } from './domain.js'
+import type {
+  AccountAvatar,
+  AccountResourceSnapshot,
+  ResourceSyncStatus,
+  SyncedContact,
+  SyncedGroup,
+  SyncPolicy,
+} from './domain.js'
+import { emptyAccountResources } from './domain.js'
 import { classifyProxyFailure, proxyFingerprint } from './proxy-health.js'
 import { diagnosePairingFailure } from './failure-diagnosis.js'
 import type { FailureDiagnosis } from './domain.js'
@@ -33,14 +44,15 @@ export interface EngineAccount {
   phoneE164: string
   proxyUrl: string
   syncPolicy: SyncPolicy
+  metadata?: Record<string, unknown>
 }
 export interface AccountQuality {
   hasAvatar: boolean | null
   avatar?: AccountAvatar | null
   groupCount: number | null
   friendCount: number | null
-  mutualContactCount: number | null
   metadata: Record<string, unknown>
+  resources: AccountResourceSnapshot
 }
 
 const MAX_PROFILE_AVATAR_BYTES = 2 * 1024 * 1024
@@ -165,9 +177,274 @@ export interface ProtocolEngine {
 interface ActiveSocket {
   socket: WASocket
   online: boolean
+  resources: ResourceAccumulator
   intentionalClose?: boolean
   proxyAgent?: ProxyAgent
   proxyFailureReported?: boolean
+}
+
+interface ResourceAccumulator {
+  contacts: Map<string, SyncedContact>
+  aliases: Map<string, string>
+  historyRequested: boolean
+  historyReceived: boolean
+  historyComplete: boolean
+  historyWaiters: Set<() => void>
+  platformRaw: string | null
+}
+
+const CONTACT_SOURCE_SAVED = 1
+const CONTACT_SOURCE_HISTORY = 2
+const CONTACT_SOURCE_MESSAGE = 4
+const CONTACT_SOURCE_REALTIME = 8
+
+function nullableString(value: unknown, maxLength = 512): string | null {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim()
+  return normalized ? normalized.slice(0, maxLength) : null
+}
+
+function phoneFromJid(value: string | null | undefined): string | null {
+  if (!value?.endsWith('@s.whatsapp.net')) return null
+  const digits = value.split('@', 1)[0]?.split(':', 1)[0]
+  return digits && /^\d{7,15}$/.test(digits) ? `+${digits}` : null
+}
+
+function latestTimestamp(first: string | null, second: string | null): string | null {
+  if (!first) return second
+  if (!second) return first
+  return first >= second ? first : second
+}
+
+function messageTimestamp(value: WAMessage): string | null {
+  const raw = value.messageTimestamp
+  if (raw == null) return null
+  const seconds = Number(raw)
+  if (!Number.isFinite(seconds) || seconds <= 0) return null
+  return new Date(seconds * 1_000).toISOString()
+}
+
+function normalizePlatform(platform: string | null): {
+  platformRaw: string | null
+  accountType: 'personal' | 'business' | 'unknown'
+  deviceOs: 'android' | 'ios' | 'other' | 'unknown'
+} {
+  const platformRaw = nullableString(platform, 32)?.toLowerCase() ?? null
+  if (!platformRaw) return { platformRaw: null, accountType: 'unknown', deviceOs: 'unknown' }
+  if (platformRaw === 'smba') return { platformRaw, accountType: 'business', deviceOs: 'android' }
+  if (platformRaw === 'smbi') return { platformRaw, accountType: 'business', deviceOs: 'ios' }
+  if (['android', 'android_phone', 'android_tablet'].includes(platformRaw)) {
+    return { platformRaw, accountType: 'personal', deviceOs: 'android' }
+  }
+  if (['iphone', 'ios', 'ipad'].includes(platformRaw)) {
+    return { platformRaw, accountType: 'personal', deviceOs: 'ios' }
+  }
+  return { platformRaw, accountType: 'unknown', deviceOs: 'other' }
+}
+
+function mergeContact(
+  accumulator: ResourceAccumulator,
+  value: Partial<Contact> & { id?: string },
+  options: {
+    sourceMask: number
+    hasChatHistory?: boolean
+    lastInteractionAt?: string | null
+  },
+): void {
+  const rawId = nullableString(value.id, 191)
+  const jid = nullableString(value.jid, 191) ?? (rawId?.endsWith('@s.whatsapp.net') ? rawId : null)
+  const lid = nullableString(value.lid, 191) ?? (rawId?.endsWith('@lid') ? rawId : null)
+  const identities = [...new Set([rawId, jid, lid].filter((item): item is string => Boolean(item)))]
+  if (!identities.length) return
+
+  const matchedIds = new Set(
+    identities
+      .map((identity) => accumulator.aliases.get(identity))
+      .filter((identity): identity is string => Boolean(identity)),
+  )
+  const preferredId = jid ?? [...matchedIds][0] ?? lid ?? rawId!
+  let merged: SyncedContact = {
+    contactId: preferredId,
+    jid: null,
+    lid: null,
+    phoneE164: null,
+    savedName: null,
+    notifyName: null,
+    verifiedName: null,
+    imageState: null,
+    profileStatus: null,
+    sourceMask: 0,
+    isSavedContact: false,
+    hasChatHistory: false,
+    lastInteractionAt: null,
+  }
+  for (const matchedId of matchedIds) {
+    const existing = accumulator.contacts.get(matchedId)
+    if (!existing) continue
+    merged = {
+      ...merged,
+      ...existing,
+      contactId: preferredId,
+      jid: merged.jid ?? existing.jid,
+      lid: merged.lid ?? existing.lid,
+      phoneE164: merged.phoneE164 ?? existing.phoneE164,
+      savedName: merged.savedName ?? existing.savedName,
+      notifyName: merged.notifyName ?? existing.notifyName,
+      verifiedName: merged.verifiedName ?? existing.verifiedName,
+      imageState: merged.imageState ?? existing.imageState,
+      profileStatus: merged.profileStatus ?? existing.profileStatus,
+      sourceMask: merged.sourceMask | existing.sourceMask,
+      isSavedContact: merged.isSavedContact || existing.isSavedContact,
+      hasChatHistory: merged.hasChatHistory || existing.hasChatHistory,
+      lastInteractionAt: latestTimestamp(merged.lastInteractionAt, existing.lastInteractionAt),
+    }
+    accumulator.contacts.delete(matchedId)
+    for (const [alias, target] of accumulator.aliases) {
+      if (target === matchedId) accumulator.aliases.set(alias, preferredId)
+    }
+  }
+
+  const savedName = nullableString(value.name, 255)
+  merged = {
+    ...merged,
+    contactId: preferredId,
+    jid: jid ?? merged.jid,
+    lid: lid ?? merged.lid,
+    phoneE164: phoneFromJid(jid) ?? merged.phoneE164,
+    savedName: savedName ?? merged.savedName,
+    notifyName: nullableString(value.notify, 255) ?? merged.notifyName,
+    verifiedName: nullableString(value.verifiedName, 255) ?? merged.verifiedName,
+    imageState: value.imgUrl === null ? 'none' : nullableString(value.imgUrl, 255) ?? merged.imageState,
+    profileStatus: nullableString(value.status, 512) ?? merged.profileStatus,
+    sourceMask: merged.sourceMask | options.sourceMask,
+    isSavedContact: merged.isSavedContact || Boolean(savedName),
+    hasChatHistory: merged.hasChatHistory || options.hasChatHistory === true,
+    lastInteractionAt: latestTimestamp(
+      merged.lastInteractionAt,
+      options.lastInteractionAt ?? null,
+    ),
+  }
+  accumulator.contacts.set(preferredId, merged)
+  for (const identity of [...identities, preferredId]) accumulator.aliases.set(identity, preferredId)
+}
+
+function registerPhoneShare(accumulator: ResourceAccumulator, lid: string, jid: string): void {
+  mergeContact(accumulator, { id: jid, jid, lid }, { sourceMask: CONTACT_SOURCE_HISTORY })
+}
+
+function contactFromMessage(
+  accumulator: ResourceAccumulator,
+  message: WAMessage,
+  realtime: boolean,
+  baileys: BaileysRuntimeModule,
+): void {
+  const remoteJid = nullableString(message.key.remoteJid, 191)
+  if (!remoteJid || (!baileys.isJidUser(remoteJid) && !baileys.isLidUser(remoteJid))) return
+  const participantJid = nullableString(message.key.senderPn, 191)
+  const participantLid = nullableString(message.key.senderLid, 191)
+  mergeContact(
+    accumulator,
+    {
+      id: remoteJid,
+      ...(remoteJid.endsWith('@s.whatsapp.net') || participantJid
+        ? { jid: remoteJid.endsWith('@s.whatsapp.net') ? remoteJid : participantJid! }
+        : {}),
+      ...(remoteJid.endsWith('@lid') || participantLid
+        ? { lid: remoteJid.endsWith('@lid') ? remoteJid : participantLid! }
+        : {}),
+      ...(nullableString(message.pushName, 255)
+        ? { notify: nullableString(message.pushName, 255)! }
+        : {}),
+    },
+    {
+      sourceMask: CONTACT_SOURCE_MESSAGE | (realtime ? CONTACT_SOURCE_REALTIME : 0),
+      hasChatHistory: true,
+      lastInteractionAt: messageTimestamp(message),
+    },
+  )
+}
+
+function resolveHistoryWaiters(accumulator: ResourceAccumulator): void {
+  for (const resolve of accumulator.historyWaiters) resolve()
+  accumulator.historyWaiters.clear()
+}
+
+async function waitForHistory(accumulator: ResourceAccumulator): Promise<void> {
+  if (!accumulator.historyRequested || accumulator.historyComplete) return
+  await Promise.race([
+    new Promise<void>((resolve) => accumulator.historyWaiters.add(resolve)),
+    new Promise<void>((resolve) => setTimeout(resolve, 8_000)),
+  ])
+}
+
+function sameIdentity(
+  left: string | null | undefined,
+  right: string | null | undefined,
+  baileys: BaileysRuntimeModule,
+): boolean {
+  if (!left || !right) return false
+  return left === right || baileys.areJidsSameUser(left, right)
+}
+
+function groupResources(
+  groups: GroupMetadata[],
+  ownJid: string | undefined,
+  accumulator: ResourceAccumulator,
+  baileys: BaileysRuntimeModule,
+): {
+  groups: SyncedGroup[]
+  uniqueGroupMemberCount: number
+  identityMappingComplete: boolean
+} {
+  const uniqueMembers = new Set<string>()
+  let identityMappingComplete = true
+  const resources = groups.map((group): SyncedGroup => {
+    const own = group.participants.find((participant) =>
+      [participant.id, participant.jid, participant.lid].some((identity) =>
+        sameIdentity(identity, ownJid, baileys),
+      ),
+    )
+    const ownRole: SyncedGroup['ownRole'] = own?.isSuperAdmin || own?.admin === 'superadmin'
+      ? 'superadmin'
+      : own?.isAdmin || own?.admin === 'admin'
+        ? 'admin'
+        : 'member'
+    for (const participant of group.participants) {
+      const identities = [participant.jid, participant.id, participant.lid]
+        .filter((identity): identity is string => Boolean(identity))
+      if (identities.some((identity) => sameIdentity(identity, ownJid, baileys))) continue
+      const phoneJid = identities.find((identity) => identity.endsWith('@s.whatsapp.net'))
+      const mapped = identities
+        .map((identity) => accumulator.aliases.get(identity))
+        .find((identity): identity is string => Boolean(identity))
+      const canonical = phoneJid ?? mapped ?? identities[0]
+      if (!canonical) continue
+      if (!phoneJid && canonical.endsWith('@lid')) identityMappingComplete = false
+      uniqueMembers.add(canonical)
+    }
+    const communityType: SyncedGroup['communityType'] = group.isCommunityAnnounce
+      ? 'community_announcement'
+      : group.isCommunity
+        ? 'community'
+        : 'group'
+    return {
+      groupJid: group.id,
+      subject: group.subject || '',
+      size: Math.max(0, Number(group.size ?? group.participants.length) || 0),
+      announce: group.announce === true,
+      restrict: group.restrict === true,
+      communityType,
+      addressingMode: group.addressingMode ?? null,
+      linkedParentJid: group.linkedParent ?? null,
+      ownRole,
+      canSend: group.announce !== true || ownRole !== 'member',
+    }
+  })
+  return {
+    groups: resources,
+    uniqueGroupMemberCount: uniqueMembers.size,
+    identityMappingComplete,
+  }
 }
 
 interface PairingEventEmitter {
@@ -287,7 +564,6 @@ export class BaileysEngine implements ProtocolEngine {
   private readonly sockets = new Map<string, ActiveSocket>()
   private readonly reconnectAttempts = new Map<string, number>()
   private readonly blockedReconnect = new Set<string>()
-  private readonly syncSnapshots = new Map<string, Record<string, unknown>>()
   private handler: (event: EngineEvent) => void = () => undefined
   private started = false
   private readonly protocolLogger: Logger
@@ -389,6 +665,7 @@ export class BaileysEngine implements ProtocolEngine {
     const active = this.sockets.get(accountId)
     if (!active) return
     active.intentionalClose = true
+    resolveHistoryWaiters(active.resources)
     this.sockets.delete(accountId)
     active.socket.end(new Error('gateway disconnect'))
     active.proxyAgent?.destroy()
@@ -548,6 +825,7 @@ export class BaileysEngine implements ProtocolEngine {
     const active = this.sockets.get(accountId)
     if (!active?.online) throw new Error('account is offline')
     const ownJid = active.socket.user?.id
+    if (policy.contacts) await waitForHistory(active.resources)
     let hasAvatar: boolean | null = null
     let avatar: AccountAvatar | null | undefined
     if (policy.avatar && ownJid) {
@@ -577,32 +855,65 @@ export class BaileysEngine implements ProtocolEngine {
       }
     }
     let groupCount: number | null = null
-    const metadata: Record<string, unknown> = { ...(this.syncSnapshots.get(accountId) ?? {}) }
-    if (policy.groupSummary || policy.groupDetails) {
+    let groups: SyncedGroup[] = []
+    let groupsStatus: ResourceSyncStatus = policy.groupDetails ? 'pending' : 'disabled'
+    let uniqueGroupMemberCount: number | null = null
+    let identityMappingComplete = true
+    const metadata: Record<string, unknown> = {}
+    if (policy.groupDetails) {
       try {
-        const groups = await active.socket.groupFetchAllParticipating()
-        groupCount = Object.keys(groups).length
-        if (policy.groupDetails) {
-          metadata.groups = Object.values(groups).map((group) => ({
-            id: group.id,
-            subject: group.subject,
-            size: group.size,
-          }))
-        }
+        const participating = Object.values(await active.socket.groupFetchAllParticipating())
+        const normalized = groupResources(
+          participating,
+          ownJid,
+          active.resources,
+          this.baileys,
+        )
+        groups = normalized.groups
+        groupCount = groups.length
+        uniqueGroupMemberCount = normalized.uniqueGroupMemberCount
+        identityMappingComplete = normalized.identityMappingComplete
+        groupsStatus = 'complete'
+        metadata.groups = groups.map((group) => ({
+          id: group.groupJid,
+          subject: group.subject,
+          size: group.size,
+        }))
       } catch {
         groupCount = null
+        groupsStatus = 'failed'
       }
     }
-    // Baileys does not expose a stable, privacy-safe definition for “friends”
-    // or “mutual contacts” without syncing chat/contact history. Keep them
-    // unknown instead of manufacturing zeroes.
+    const contacts = policy.contacts
+      ? [...active.resources.contacts.values()].filter(
+          (contact) => contact.isSavedContact || contact.hasChatHistory,
+        )
+      : []
+    const contactsStatus: ResourceSyncStatus = !policy.contacts
+      ? 'disabled'
+      : active.resources.historyComplete
+        ? 'complete'
+        : active.resources.historyReceived || contacts.length
+          ? 'partial'
+          : 'pending'
+    const platform = normalizePlatform(active.resources.platformRaw)
     return {
       hasAvatar,
       ...(avatar !== undefined ? { avatar } : {}),
       groupCount,
-      friendCount: null,
-      mutualContactCount: null,
+      friendCount: policy.contacts ? contacts.length : null,
       metadata,
+      resources: {
+        contacts,
+        groups,
+        contactsStatus,
+        groupsStatus,
+        contactsComplete: active.resources.historyComplete,
+        identityMappingComplete,
+        uniqueGroupMemberCount,
+        ...platform,
+        syncedAt: new Date().toISOString(),
+      },
     }
   }
 
@@ -623,24 +934,39 @@ export class BaileysEngine implements ProtocolEngine {
       proxyAgent?.destroy()
       throw error
     }
+    const historyRequested = account.syncPolicy.contacts
+      && account.metadata?.requestContactsHistory === true
     const socket = this.baileys.default({
       auth: state,
       browser: this.baileys.Browsers.macOS('Chrome'),
       version,
       logger: this.protocolLogger,
       markOnlineOnConnect: !account.syncPolicy.closeOnline,
-      syncFullHistory: account.syncPolicy.contacts || account.syncPolicy.chats || account.syncPolicy.messageHistory,
-      shouldSyncHistoryMessage: () => account.syncPolicy.messageHistory,
+      syncFullHistory: historyRequested,
+      shouldSyncHistoryMessage: () => historyRequested,
       ...(proxyAgent ? { agent: proxyAgent as Agent, fetchAgent: proxyAgent as Agent } : {}),
     })
-    const active: ActiveSocket = proxyAgent ? { socket, online: false, proxyAgent } : { socket, online: false }
+    const resources: ResourceAccumulator = {
+      contacts: new Map(),
+      aliases: new Map(),
+      historyRequested,
+      historyReceived: false,
+      historyComplete: false,
+      historyWaiters: new Set(),
+      platformRaw: nullableString(state.creds.platform, 32),
+    }
+    const active: ActiveSocket = proxyAgent
+      ? { socket, online: false, proxyAgent, resources }
+      : { socket, online: false, resources }
     this.sockets.set(account.accountId, active)
-    this.syncSnapshots.set(account.accountId, {})
 
     let credsSaveTail = Promise.resolve()
     let pairingConfigured = false
     socket.ev.on('creds.update', (update) => {
       mergeCreds(state.creds, update)
+      if (typeof update.platform === 'string') {
+        active.resources.platformRaw = nullableString(update.platform, 32)
+      }
       credsSaveTail = credsSaveTail.catch(() => undefined).then(saveCreds)
       void credsSaveTail.catch((error: unknown) => {
         this.protocolLogger.error({ accountId: account.accountId, error }, 'credential_persist_failed')
@@ -665,6 +991,7 @@ export class BaileysEngine implements ProtocolEngine {
         this.handler({ kind: 'connected', accountId: account.accountId, deviceJid })
       } else if (update.connection === 'close') {
         active.online = false
+        resolveHistoryWaiters(active.resources)
         if (this.sockets.get(account.accountId) === active) this.sockets.delete(account.accountId)
         proxyAgent?.destroy()
         if (active.intentionalClose) return
@@ -748,18 +1075,45 @@ export class BaileysEngine implements ProtocolEngine {
         }
       }
     })
-    socket.ev.on('messaging-history.set', ({ chats, contacts, messages }) => {
-      const snapshot = this.syncSnapshots.get(account.accountId) ?? {}
-      if (account.syncPolicy.chats) snapshot.chatCount = chats.length
-      if (account.syncPolicy.contacts) snapshot.contactCount = contacts.length
-      if (account.syncPolicy.messageHistory) snapshot.historyMessageCount = messages.length
-      this.syncSnapshots.set(account.accountId, snapshot)
+    socket.ev.on('messaging-history.set', ({ contacts, messages, isLatest, progress }) => {
+      if (!account.syncPolicy.contacts) return
+      active.resources.historyReceived = true
+      for (const contact of contacts) {
+        mergeContact(active.resources, contact, { sourceMask: CONTACT_SOURCE_HISTORY })
+      }
+      for (const message of messages) {
+        contactFromMessage(active.resources, message, false, this.baileys)
+      }
+      if (isLatest === true || Number(progress) >= 100) {
+        active.resources.historyComplete = true
+        resolveHistoryWaiters(active.resources)
+      }
     })
     socket.ev.on('contacts.upsert', (contacts) => {
       if (!account.syncPolicy.contacts) return
-      const snapshot = this.syncSnapshots.get(account.accountId) ?? {}
-      snapshot.contactUpdateCount = Number(snapshot.contactUpdateCount ?? 0) + contacts.length
-      this.syncSnapshots.set(account.accountId, snapshot)
+      for (const contact of contacts) {
+        mergeContact(active.resources, contact, {
+          sourceMask: CONTACT_SOURCE_SAVED | CONTACT_SOURCE_REALTIME,
+        })
+      }
+    })
+    socket.ev.on('contacts.update', (contacts) => {
+      if (!account.syncPolicy.contacts) return
+      for (const contact of contacts) {
+        mergeContact(active.resources, contact, {
+          sourceMask: CONTACT_SOURCE_REALTIME,
+        })
+      }
+    })
+    socket.ev.on('chats.phoneNumberShare', ({ lid, jid }) => {
+      if (!account.syncPolicy.contacts) return
+      registerPhoneShare(active.resources, lid, jid)
+    })
+    socket.ev.on('messages.upsert', ({ messages }) => {
+      if (!account.syncPolicy.contacts) return
+      for (const message of messages) {
+        contactFromMessage(active.resources, message, true, this.baileys)
+      }
     })
     socket.ev.on('messages.update', (updates) => {
       for (const update of updates) {
@@ -833,6 +1187,12 @@ export class MockEngine implements ProtocolEngine {
     return `mock-${crypto.randomUUID()}`
   }
   async getQuality(_id: string, _policy: SyncPolicy): Promise<AccountQuality> {
-    return { hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {} }
+    return {
+      hasAvatar: null,
+      groupCount: null,
+      friendCount: null,
+      metadata: {},
+      resources: emptyAccountResources(),
+    }
   }
 }

@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.database import SessionLocal
-from app.models import PersonalAccount
+from app.models import AccountContact, AccountWhatsappGroup, PersonalAccount
 from app.routers.personal_accounts import _apply_gateway_account
 from app.services.baileys_credentials import (
     MAX_SESSION_KEY_BYTES,
@@ -21,6 +21,7 @@ from app.services.baileys_credentials import (
     validate_baileys_session,
 )
 from app.services.account_avatars import apply_gateway_avatar
+from app.services.account_metadata_sync import _apply_gateway_metadata
 from app.services.wa_gateway import WaGatewayClient
 
 
@@ -185,6 +186,37 @@ def test_offline_import_is_not_ready_until_gateway_verifies_session() -> None:
     assert item.validation_status == "ready"
 
 
+def test_unknown_gateway_platform_does_not_replace_known_intake_profile() -> None:
+    item = PersonalAccount(
+        public_id="wa_platform_fallback",
+        name="Known intake profile",
+        phone_e164="+12025550995",
+        status="linked_offline",
+        validation_status="ready",
+        metadata_sync_status="ready",
+        account_type="business",
+        device_os="android",
+        wa_platform_raw="smba",
+        enabled=True,
+        created_by=1,
+    )
+    _apply_gateway_account(
+        item,
+        {
+            "metadata": {
+                "accountProfile": {
+                    "platformRaw": None,
+                    "accountType": "unknown",
+                    "deviceOs": "unknown",
+                }
+            }
+        },
+    )
+    assert item.account_type == "business"
+    assert item.device_os == "android"
+    assert item.wa_platform_raw == "smba"
+
+
 def test_gateway_avatar_payload_is_validated_cached_and_clearable() -> None:
     item = PersonalAccount(
         public_id="wa_avatar",
@@ -218,6 +250,148 @@ def test_gateway_avatar_payload_is_validated_cached_and_clearable() -> None:
     assert apply_gateway_avatar(item, {"avatar": None})
     assert item.avatar_source_url is None
     assert item.avatar_content is None
+
+
+def test_account_resources_are_upserted_scored_and_exposed(
+    admin_client: TestClient,
+) -> None:
+    group = admin_client.post(
+        "/api/account-groups",
+        json={"name": "Account resource synchronization"},
+    ).json()["data"]["group"]
+    protocol_id = next(
+        row["id"]
+        for row in admin_client.get(
+            "/api/personal-accounts/import-options"
+        ).json()["data"]["rows"]
+        if row["available"]
+    )
+    imported = admin_client.post(
+        "/api/personal-accounts/import",
+        data={
+            "groupId": group["id"],
+            "protocolId": protocol_id,
+            "name": "Resource model demo",
+        },
+        files={
+            "file": (
+                "resource-model.json",
+                io.BytesIO(json.dumps(_credentials("12025550996")).encode()),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 201, imported.text
+    account_id = imported.json()["data"]["account"]["id"]
+    synced_at = datetime.now(UTC).isoformat()
+
+    with SessionLocal() as db:
+        item = db.get(PersonalAccount, int(account_id))
+        assert item is not None
+        item.validation_status = "ready"
+        item.status = "linked_offline"
+        _apply_gateway_metadata(
+            db,
+            item,
+            {
+                "metadataSyncStatus": "ready",
+                "quality": {"hasAvatar": True},
+                "resources": {
+                    "contacts": [
+                        {
+                            "contactId": "12025550101@s.whatsapp.net",
+                            "jid": "12025550101@s.whatsapp.net",
+                            "phoneE164": "+12025550101",
+                            "savedName": "Saved only",
+                            "isSavedContact": True,
+                            "hasChatHistory": False,
+                            "sourceMask": 1,
+                        },
+                        {
+                            "contactId": "12025550102@s.whatsapp.net",
+                            "jid": "12025550102@s.whatsapp.net",
+                            "phoneE164": "+12025550102",
+                            "notifyName": "Contacted only",
+                            "isSavedContact": False,
+                            "hasChatHistory": True,
+                            "sourceMask": 2,
+                            "lastInteractionAt": synced_at,
+                        },
+                        {
+                            "contactId": "12025550103@s.whatsapp.net",
+                            "jid": "12025550103@s.whatsapp.net",
+                            "phoneE164": "+12025550103",
+                            "savedName": "Saved and contacted",
+                            "isSavedContact": True,
+                            "hasChatHistory": True,
+                            "sourceMask": 3,
+                            "lastInteractionAt": synced_at,
+                        },
+                    ],
+                    "contactsStatus": "complete",
+                    "contactsComplete": True,
+                    "groups": [
+                        {
+                            "groupJid": "120363001@g.us",
+                            "subject": "First group",
+                            "size": 8,
+                            "communityType": "group",
+                            "ownRole": "admin",
+                            "canSend": True,
+                        },
+                        {
+                            "groupJid": "120363002@g.us",
+                            "subject": "Second group",
+                            "size": 9,
+                            "communityType": "group",
+                            "ownRole": "member",
+                            "canSend": False,
+                            "announce": True,
+                        },
+                    ],
+                    "groupsStatus": "complete",
+                    "uniqueGroupMemberCount": 11,
+                    "identityMappingComplete": True,
+                    "platformRaw": "smbi",
+                    "accountType": "business",
+                    "deviceOs": "ios",
+                    "syncedAt": synced_at,
+                },
+            },
+            sync_policy_version=4,
+        )
+        db.commit()
+        assert db.query(AccountContact).filter_by(account_id=item.id, active=True).count() == 3
+        assert db.query(AccountWhatsappGroup).filter_by(account_id=item.id, active=True).count() == 2
+
+    account = admin_client.get(f"/api/personal-accounts/{account_id}")
+    assert account.status_code == 200, account.text
+    body = account.json()["data"]["account"]
+    assert body["accountType"] == "business"
+    assert body["deviceOs"] == "ios"
+    assert body["quality"]["friendCount"] == 3
+    assert body["quality"]["groupCount"] == 2
+    assert body["quality"]["uniqueGroupMemberCount"] == 11
+    assert body["quality"]["score"] == 10
+    assert body["quality"]["avatarPoints"] == 5
+    assert body["quality"]["friendPoints"] == 3
+    assert body["quality"]["groupMemberPoints"] == 2
+
+    friends = admin_client.get(
+        f"/api/personal-accounts/{account_id}/resources/contacts",
+        params={"source": "contacted"},
+    )
+    assert friends.status_code == 200, friends.text
+    assert friends.json()["data"]["total"] == 2
+    groups = admin_client.get(
+        f"/api/personal-accounts/{account_id}/resources/groups",
+        params={"canSend": "true"},
+    )
+    assert groups.status_code == 200, groups.text
+    assert groups.json()["data"]["total"] == 1
+    assert groups.json()["data"]["rows"][0]["subject"] == "First group"
+    deleted = admin_client.delete(f"/api/personal-accounts/{account_id}")
+    assert deleted.status_code == 200, deleted.text
 
 
 def test_import_group_statistics_and_export(
@@ -306,7 +480,7 @@ def test_import_group_statistics_and_export(
         stored.avatar_fetched_at = datetime.now(UTC)
         stored.group_count = 3
         stored.friend_count = 12
-        stored.mutual_contact_count = 4
+        stored.unique_group_member_count = 18
         db.commit()
 
     filtered = admin_client.get(
@@ -395,7 +569,6 @@ def test_import_group_statistics_and_export(
     assert matched["noAvatarCount"] == 0
     assert matched["noGroupCount"] == 0
     assert matched["zeroFriendCount"] == 0
-    assert matched["zeroMutualCount"] == 0
 
     with SessionLocal() as db:
         stored = db.scalar(select(PersonalAccount).where(PersonalAccount.id == int(account["id"])))

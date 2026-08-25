@@ -502,7 +502,6 @@ type AccountGroup = {
   noAvatarCount: number | null;
   noGroupCount: number | null;
   zeroFriendCount: number | null;
-  zeroMutualCount: number | null;
   createdAt: string;
 };
 function accountGroup(input: unknown): AccountGroup {
@@ -561,11 +560,6 @@ function accountGroup(input: unknown): AccountGroup {
       row,
       "zeroFriendCount",
       "zero_friend_count",
-    ),
-    zeroMutualCount: optionalNumber(
-      row,
-      "zeroMutualCount",
-      "zero_mutual_count",
     ),
     createdAt: field(row, "createdAt", "created_at"),
   };
@@ -707,7 +701,6 @@ export function AccountGroupsPage() {
                   </span>
                   <span>
                     0 好友 {row.zeroFriendCount ?? "-"}
-                    {" · "}0 双向 {row.zeroMutualCount ?? "-"}
                   </span>
                 </div>
               </TableCell>

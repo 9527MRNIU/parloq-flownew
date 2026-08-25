@@ -129,11 +129,8 @@ def test_protocol_node_create_pool_and_template_contract(
     assert node["syncPolicy"] == {
         "closeOnline": True,
         "avatar": True,
-        "groupSummary": True,
         "groupDetails": False,
         "contacts": False,
-        "chats": False,
-        "messageHistory": False,
     }
     assert node["rateLimitPolicy"]["visitorCheck"] == {
         "maxRequests": 7,
@@ -247,16 +244,23 @@ def test_protocol_batch_tenant_scope_and_gateway_error_summary(
     admin_client: TestClient, monkeypatch
 ) -> None:
     node = admin_client.get("/api/protocol-nodes").json()["data"]["rows"][0]
+    created = admin_client.post(
+        "/api/personal-accounts",
+        json={
+            "name": "Protocol batch failure",
+            "phone": "+12025551983",
+            "protocolId": node["id"],
+        },
+    )
+    assert created.status_code == 201, created.text
+    account_id = int(created.json()["data"]["account"]["id"])
     with SessionLocal() as db:
         protocol = db.scalar(
             select(ProtocolNode).where(ProtocolNode.id == int(node["id"]))
         )
-        account = db.scalar(
-            select(PersonalAccount).where(
-                PersonalAccount.protocol_id == protocol.id,
-            )
-        )
+        account = db.get(PersonalAccount, account_id)
         assert account is not None
+        assert account.protocol_id == protocol.id
         account.status = "linked_offline"
         account.enabled = True
         gateway_account_id = account.gateway_account_id

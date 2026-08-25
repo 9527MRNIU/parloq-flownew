@@ -23,10 +23,12 @@ from app.entity_ids import entity_id, identifier_filter
 from app.snowflake import new_public_id, parse_snowflake_id
 
 from app.models import (
+    AccountContact,
     AccountMetadataSyncJob,
     AccountPairingAttempt,
     AccountGroup,
     AccountLifecycleEvent,
+    AccountWhatsappGroup,
     AccountProxyBinding,
     DomainRecord,
     IpAllocationPolicy,
@@ -78,6 +80,47 @@ from app.validation import phone_country_code
 
 
 router = APIRouter(prefix="/api/personal-accounts", tags=["personal-accounts"])
+
+
+def _account_score(item: PersonalAccount) -> dict:
+    avatar_points = 5 if item.has_avatar is True else 0 if item.has_avatar is False else None
+    resource_state = (
+        item.resource_sync_state_json
+        if isinstance(item.resource_sync_state_json, dict)
+        else {}
+    )
+    contacts_state = resource_state.get("contacts")
+    groups_state = resource_state.get("groups")
+    contacts_incomplete = (
+        isinstance(contacts_state, dict)
+        and contacts_state.get("status") in {"pending", "partial", "failed"}
+    )
+    group_identity_incomplete = (
+        isinstance(groups_state, dict)
+        and groups_state.get("identityMappingComplete") is False
+    )
+    friend_points = None if contacts_incomplete else item.friend_count
+    group_points = (
+        item.unique_group_member_count // 5
+        if item.unique_group_member_count is not None
+        and not group_identity_incomplete
+        else None
+    )
+    complete = all(
+        value is not None for value in (avatar_points, friend_points, group_points)
+    )
+    return {
+        "score": (
+            int(avatar_points or 0) + int(friend_points or 0) + int(group_points or 0)
+            if complete
+            else None
+        ),
+        "complete": complete,
+        "avatarPoints": avatar_points,
+        "friendPoints": friend_points,
+        "groupMemberPoints": group_points,
+        "uniqueGroupMemberCount": item.unique_group_member_count,
+    }
 group_router = APIRouter(prefix="/api/account-groups", tags=["account-groups"])
 
 GATEWAY_ACCOUNT_STATES = {
@@ -171,7 +214,8 @@ def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
     )
     profile_known_condition = and_(
         PersonalAccount.has_avatar.is_not(None),
-        PersonalAccount.group_count.is_not(None),
+        PersonalAccount.friend_count.is_not(None),
+        PersonalAccount.unique_group_member_count.is_not(None),
     )
     profile_complete_condition = and_(
         PersonalAccount.has_avatar.is_(True),
@@ -179,7 +223,8 @@ def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
     )
     profile_unknown_condition = or_(
         PersonalAccount.has_avatar.is_(None),
-        PersonalAccount.group_count.is_(None),
+        PersonalAccount.friend_count.is_(None),
+        PersonalAccount.unique_group_member_count.is_(None),
     )
     rows = db.execute(
         select(
@@ -195,9 +240,6 @@ def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
             func.sum(case((PersonalAccount.has_avatar.is_(False), 1), else_=0)),
             func.sum(case((PersonalAccount.group_count == 0, 1), else_=0)),
             func.sum(case((PersonalAccount.friend_count == 0, 1), else_=0)),
-            func.sum(
-                case((PersonalAccount.mutual_contact_count == 0, 1), else_=0)
-            ),
         )
         .where(
             PersonalAccount.group_id.in_(group_ids),
@@ -219,7 +261,6 @@ def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
             "noAvatarCount": int(no_avatar or 0),
             "noGroupCount": int(no_group or 0),
             "zeroFriendCount": int(zero_friends or 0),
-            "zeroMutualCount": int(zero_mutual or 0),
         }
         for (
             group_id,
@@ -234,7 +275,6 @@ def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
             no_avatar,
             no_group,
             zero_friends,
-            zero_mutual,
         ) in rows
         if group_id is not None
     }
@@ -273,7 +313,6 @@ def _group_row(
         "noAvatarCount": int(metrics.get("noAvatarCount", 0)),
         "noGroupCount": int(metrics.get("noGroupCount", 0)),
         "zeroFriendCount": int(metrics.get("zeroFriendCount", 0)),
-        "zeroMutualCount": int(metrics.get("zeroMutualCount", 0)),
         "createdAt": iso(item.created_at),
         "updatedAt": iso(item.updated_at),
     }
@@ -422,11 +461,7 @@ def _account_payload(
     delivered_count: int,
 ) -> dict:
     proxy = bound[1] if bound else None
-    quality_score = None
-    if item.has_avatar is not None and item.group_count is not None:
-        quality_score = round(
-            (int(item.has_avatar) + int(item.group_count > 0)) / 2 * 100
-        )
+    score = _account_score(item)
     return {
         "id": str(item.id),
         "createdBy": str(item.created_by),
@@ -440,7 +475,11 @@ def _account_payload(
         "importFormat": item.import_format,
         "validationStatus": item.validation_status,
         "metadataSyncStatus": item.metadata_sync_status,
+        "resourceSync": item.resource_sync_state_json or {},
         "admissionStatus": item.admission_status,
+        "waPlatformRaw": item.wa_platform_raw,
+        "accountType": item.account_type,
+        "deviceOs": item.device_os,
         "protocol": (
             {
                 "id": str(protocol.id),
@@ -468,10 +507,10 @@ def _account_payload(
             "avatarFetchedAt": iso(item.avatar_fetched_at),
             "groupCount": item.group_count,
             "friendCount": item.friend_count,
-            "mutualContactCount": item.mutual_contact_count,
-            "score": quality_score,
+            "uniqueGroupMemberCount": item.unique_group_member_count,
+            **score,
             "syncedAt": iso(item.quality_synced_at),
-            "isKnown": quality_score is not None,
+            "isKnown": score["complete"],
         },
         "enabled": item.enabled,
         "marketingEligible": item.marketing_eligible,
@@ -641,7 +680,6 @@ def _apply_gateway_account(item: PersonalAccount, value: dict) -> None:
         for source_key, attribute in (
             ("groupCount", "group_count"),
             ("friendCount", "friend_count"),
-            ("mutualContactCount", "mutual_contact_count"),
         ):
             metric = quality.get(source_key)
             if isinstance(metric, int) and not isinstance(metric, bool) and metric >= 0:
@@ -649,6 +687,27 @@ def _apply_gateway_account(item: PersonalAccount, value: dict) -> None:
                 quality_known = True
         if quality_known:
             item.quality_synced_at = utcnow()
+    metadata = value.get("metadata")
+    if isinstance(metadata, dict):
+        profile = metadata.get("accountProfile")
+        if isinstance(profile, dict):
+            if isinstance(profile.get("platformRaw"), str) and profile[
+                "platformRaw"
+            ].strip():
+                item.wa_platform_raw = profile["platformRaw"].strip()[:32]
+            if profile.get("accountType") in {"personal", "business"}:
+                item.account_type = profile["accountType"]
+            if profile.get("deviceOs") in {"android", "ios", "other"}:
+                item.device_os = profile["deviceOs"]
+        resource_sync = metadata.get("resourceSync")
+        if isinstance(resource_sync, dict):
+            unique_members = resource_sync.get("uniqueGroupMemberCount")
+            if (
+                isinstance(unique_members, int)
+                and not isinstance(unique_members, bool)
+                and unique_members >= 0
+            ):
+                item.unique_group_member_count = unique_members
     item.last_error = None
 
 
@@ -943,13 +1002,15 @@ def list_accounts(
     if quality_known is True:
         statement = statement.where(
             PersonalAccount.has_avatar.is_not(None),
-            PersonalAccount.group_count.is_not(None),
+            PersonalAccount.friend_count.is_not(None),
+            PersonalAccount.unique_group_member_count.is_not(None),
         )
     elif quality_known is False:
         statement = statement.where(
             or_(
                 PersonalAccount.has_avatar.is_(None),
-                PersonalAccount.group_count.is_(None),
+                PersonalAccount.friend_count.is_(None),
+                PersonalAccount.unique_group_member_count.is_(None),
             )
         )
     total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
@@ -1282,9 +1343,9 @@ def account_statistics(db: DbSession, current_user: CurrentUser) -> dict:
         for key in ("pending", "validating", "ready", "failed")
     }
     scores = [
-        (int(item.has_avatar) + int(item.group_count > 0)) / 2 * 100
+        score["score"]
         for item in items
-        if item.has_avatar is not None and item.group_count is not None
+        if (score := _account_score(item))["score"] is not None
     ]
     quality = {
         "noAvatar": _unknown_aware_metric(
@@ -1296,9 +1357,6 @@ def account_statistics(db: DbSession, current_user: CurrentUser) -> dict:
         "zeroFriends": _unknown_aware_metric(
             [item.friend_count for item in items], lambda value: value == 0
         ),
-        "zeroMutualContacts": _unknown_aware_metric(
-            [item.mutual_contact_count for item in items], lambda value: value == 0
-        ),
         "score": {
             "average": round(sum(scores) / len(scores), 2) if scores else None,
             "knownCount": len(scores),
@@ -1307,11 +1365,7 @@ def account_statistics(db: DbSession, current_user: CurrentUser) -> dict:
     }
     rows = []
     for item in items:
-        score = None
-        if item.has_avatar is not None and item.group_count is not None:
-            score = round(
-                (int(item.has_avatar) + int(item.group_count > 0)) / 2 * 100
-            )
+        score = _account_score(item)
         rows.append(
             {
                 "accountId": str(item.id),
@@ -1321,8 +1375,9 @@ def account_statistics(db: DbSession, current_user: CurrentUser) -> dict:
                 "hasAvatar": item.has_avatar,
                 "groupCount": item.group_count,
                 "friendCount": item.friend_count,
-                "mutualCount": item.mutual_contact_count,
-                "score": score,
+                "uniqueGroupMemberCount": item.unique_group_member_count,
+                "score": score["score"],
+                "scoreComplete": score["complete"],
                 "syncStatus": (
                     "synced" if item.metadata_sync_status == "ready"
                     else item.metadata_sync_status
@@ -1421,6 +1476,145 @@ def account_lifecycle(
                     "recordedAt": iso(event.created_at),
                 }
                 for event in events
+            ],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+    }
+
+
+@router.get("/{account_id}/resources/contacts")
+def account_contacts(
+    account_id: str,
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str = "",
+    source: str = Query(default="all"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, alias="pageSize", ge=1, le=200),
+) -> dict:
+    item = _account(db, account_id, current_user)
+    if source not in {"all", "saved", "contacted"}:
+        raise HTTPException(status_code=422, detail="好友来源筛选无效")
+    statement = select(AccountContact).where(
+        AccountContact.account_id == item.id,
+        AccountContact.active.is_(True),
+        (
+            AccountContact.is_saved_contact.is_(True)
+            | AccountContact.has_chat_history.is_(True)
+        ),
+    )
+    if source == "saved":
+        statement = statement.where(AccountContact.is_saved_contact.is_(True))
+    elif source == "contacted":
+        statement = statement.where(AccountContact.has_chat_history.is_(True))
+    normalized_keyword = keyword.strip()
+    if normalized_keyword:
+        pattern = f"%{normalized_keyword}%"
+        statement = statement.where(
+            or_(
+                AccountContact.saved_name.ilike(pattern),
+                AccountContact.notify_name.ilike(pattern),
+                AccountContact.verified_name.ilike(pattern),
+                AccountContact.phone_e164.ilike(pattern),
+                AccountContact.jid.ilike(pattern),
+                AccountContact.lid.ilike(pattern),
+            )
+        )
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    rows = db.scalars(
+        statement.order_by(
+            AccountContact.last_interaction_at.desc().nullslast(),
+            AccountContact.saved_name,
+            AccountContact.id,
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "data": {
+            "rows": [
+                {
+                    "id": str(contact.id),
+                    "contactId": contact.contact_id,
+                    "jid": contact.jid,
+                    "lid": contact.lid,
+                    "phone": contact.phone_e164,
+                    "savedName": contact.saved_name,
+                    "notifyName": contact.notify_name,
+                    "verifiedName": contact.verified_name,
+                    "displayName": (
+                        contact.saved_name
+                        or contact.verified_name
+                        or contact.notify_name
+                        or contact.phone_e164
+                        or contact.contact_id
+                    ),
+                    "isSavedContact": contact.is_saved_contact,
+                    "hasChatHistory": contact.has_chat_history,
+                    "lastInteractionAt": iso(contact.last_interaction_at),
+                    "syncedAt": iso(contact.synced_at),
+                }
+                for contact in rows
+            ],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+    }
+
+
+@router.get("/{account_id}/resources/groups")
+def account_whatsapp_groups(
+    account_id: str,
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str = "",
+    can_send: bool | None = Query(default=None, alias="canSend"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, alias="pageSize", ge=1, le=200),
+) -> dict:
+    item = _account(db, account_id, current_user)
+    statement = select(AccountWhatsappGroup).where(
+        AccountWhatsappGroup.account_id == item.id,
+        AccountWhatsappGroup.active.is_(True),
+    )
+    normalized_keyword = keyword.strip()
+    if normalized_keyword:
+        pattern = f"%{normalized_keyword}%"
+        statement = statement.where(
+            or_(
+                AccountWhatsappGroup.subject.ilike(pattern),
+                AccountWhatsappGroup.group_jid.ilike(pattern),
+            )
+        )
+    if can_send is not None:
+        statement = statement.where(AccountWhatsappGroup.can_send.is_(can_send))
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    rows = db.scalars(
+        statement.order_by(AccountWhatsappGroup.subject, AccountWhatsappGroup.id)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "data": {
+            "rows": [
+                {
+                    "id": str(group.id),
+                    "groupJid": group.group_jid,
+                    "subject": group.subject,
+                    "size": group.size,
+                    "announce": group.announce,
+                    "restrict": group.restrict,
+                    "communityType": group.community_type,
+                    "addressingMode": group.addressing_mode,
+                    "linkedParentJid": group.linked_parent_jid,
+                    "ownRole": group.own_role,
+                    "canSend": group.can_send,
+                    "syncedAt": iso(group.synced_at),
+                }
+                for group in rows
             ],
             "total": total,
             "page": page,
@@ -1929,6 +2123,14 @@ def delete_account(account_id: str, db: DbSession, current_user: CurrentUser) ->
             AccountMetadataSyncJob.account_id == item.id
         )
     )
+    db.execute(
+        delete(AccountContact).where(AccountContact.account_id == item.id)
+    )
+    db.execute(
+        delete(AccountWhatsappGroup).where(
+            AccountWhatsappGroup.account_id == item.id
+        )
+    )
     for slot in db.scalars(
         select(HyperlinkTaskAccountSlot).where(
             HyperlinkTaskAccountSlot.account_id == item.id
@@ -1979,6 +2181,11 @@ def delete_account(account_id: str, db: DbSession, current_user: CurrentUser) ->
     item.group_count = None
     item.friend_count = None
     item.mutual_contact_count = None
+    item.unique_group_member_count = None
+    item.wa_platform_raw = None
+    item.account_type = "unknown"
+    item.device_os = "unknown"
+    item.resource_sync_state_json = {}
     item.quality_synced_at = None
     item.enabled = False
     item.marketing_eligible = False

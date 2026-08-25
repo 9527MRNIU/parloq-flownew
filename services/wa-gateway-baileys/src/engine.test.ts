@@ -187,25 +187,24 @@ describe('Baileys intentional disconnect handling', () => {
       syncPolicy: {
         closeOnline,
         avatar: true,
-        groupSummary: true,
-        groupDetails: false,
-        contacts: false,
-        chats: false,
-        messageHistory: false,
+        groupDetails: true,
+        contacts: true,
       },
     })
 
     expect(baileys.default).toHaveBeenCalledWith(expect.objectContaining({
       markOnlineOnConnect,
+      syncFullHistory: false,
     }))
+    const normalSocketOptions = (baileys.default.mock.calls[0] as unknown as [{
+      shouldSyncHistoryMessage: (message: unknown) => boolean
+    }])[0]
+    expect(normalSocketOptions.shouldSyncHistoryMessage({})).toBe(false)
     await expect(engine.getQuality('wa_shutdown', {
       closeOnline,
       avatar: true,
-      groupSummary: false,
       groupDetails: false,
       contacts: false,
-      chats: false,
-      messageHistory: false,
     })).resolves.toMatchObject({
       hasAvatar: true,
       avatar: {
@@ -220,6 +219,122 @@ describe('Baileys intentional disconnect handling', () => {
 
     expect(socket.end).toHaveBeenCalledWith(expect.objectContaining({ message: 'gateway disconnect' }))
     expect(events).toEqual(['connected'])
+  })
+
+  it('requests history only for an explicit metadata run and deduplicates saved and contacted identities', async () => {
+    const emitter = new EventEmitter()
+    const socket = {
+      ev: {
+        on: (event: string, listener: (...args: unknown[]) => void) => emitter.on(event, listener),
+        off: (event: string, listener: (...args: unknown[]) => void) => emitter.off(event, listener),
+      },
+      user: { id: '14155550123:1@s.whatsapp.net' },
+      profilePictureUrl: vi.fn(async () => undefined),
+      end: vi.fn((error: Error) => {
+        emitter.emit('connection.update', {
+          connection: 'close',
+          lastDisconnect: { error },
+        })
+      }),
+    }
+    const storedCreds = JSON.parse(JSON.stringify({
+      ...initAuthCreds(),
+      registered: true,
+      platform: 'smbi',
+      me: { id: socket.user.id, name: 'Business test' },
+    }, BufferJSON.replacer)) as unknown
+    const store = {
+      getCreds: vi.fn(async () => storedCreds),
+      setCreds: vi.fn(async () => undefined),
+      getKeys: vi.fn(async () => ({})),
+      setKeys: vi.fn(async () => undefined),
+      clearAuth: vi.fn(async () => undefined),
+    } as unknown as Store
+    const baileys = {
+      ...(await import('@whiskeysockets/baileys')),
+      default: vi.fn(() => {
+        queueMicrotask(() => emitter.emit('connection.update', { connection: 'open' }))
+        return socket
+      }),
+      fetchLatestWaWebVersion: vi.fn(async () => ({
+        version: [2, 3000, 1023],
+        isLatest: true,
+      })),
+    }
+    const engine = new BaileysEngine(store, undefined, 'http://api:8000', baileys as never)
+    await engine.start()
+    await engine.connect({
+      accountId: 'wa_resource_sync',
+      protocolDefinitionId: '0',
+      protocolVersion: '6.7.24',
+      phoneE164: '+14155550123',
+      proxyUrl: '',
+      syncPolicy: {
+        closeOnline: true,
+        avatar: false,
+        groupDetails: false,
+        contacts: true,
+      },
+      metadata: { requestContactsHistory: true },
+    })
+
+    const socketOptions = (baileys.default.mock.calls[0] as unknown as [{
+      syncFullHistory: boolean
+      shouldSyncHistoryMessage: (message: unknown) => boolean
+    }])[0]
+    expect(socketOptions).toEqual(expect.objectContaining({ syncFullHistory: true }))
+    expect(socketOptions.shouldSyncHistoryMessage({})).toBe(true)
+
+    emitter.emit('messaging-history.set', {
+      contacts: [
+        { id: '11111111111@lid', lid: '11111111111@lid', name: 'Saved Alice' },
+      ],
+      messages: [
+        {
+          key: {
+            remoteJid: '11111111111@lid',
+            senderLid: '11111111111@lid',
+            senderPn: '14155550101@s.whatsapp.net',
+          },
+          pushName: 'Alice',
+          messageTimestamp: 1_700_000_000,
+        },
+        {
+          key: { remoteJid: '14155550102@s.whatsapp.net' },
+          pushName: 'Bob',
+          messageTimestamp: 1_700_000_001,
+        },
+      ],
+      isLatest: true,
+      progress: 100,
+    })
+
+    const quality = await engine.getQuality('wa_resource_sync', {
+      closeOnline: true,
+      avatar: false,
+      groupDetails: false,
+      contacts: true,
+    })
+    expect(quality.friendCount).toBe(2)
+    expect(quality.resources.contactsStatus).toBe('complete')
+    expect(quality.resources.contactsComplete).toBe(true)
+    expect(quality.resources.accountType).toBe('business')
+    expect(quality.resources.deviceOs).toBe('ios')
+    expect(quality.resources.contacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        contactId: '14155550101@s.whatsapp.net',
+        jid: '14155550101@s.whatsapp.net',
+        lid: '11111111111@lid',
+        isSavedContact: true,
+        hasChatHistory: true,
+      }),
+      expect.objectContaining({
+        contactId: '14155550102@s.whatsapp.net',
+        isSavedContact: false,
+        hasChatHistory: true,
+      }),
+    ]))
+    await engine.close()
   })
 
   it('rejects non-HTTPS profile avatar URLs before making a request', async () => {

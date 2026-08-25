@@ -1,5 +1,5 @@
 import type { Logger } from 'pino'
-import type { Account, AccountState, Message, PublicAccount } from './domain.js'
+import type { Account, AccountResourceSnapshot, AccountState, Message, PublicAccount } from './domain.js'
 import { GatewayError, defaultSyncPolicy, normalizeE164, normalizeSyncPolicy, publicAccount, safeError, validateProxy, type AccountAvatar, type MetadataSyncResponse, type SyncPolicy } from './domain.js'
 import type { EngineEvent, PairResult, ProtocolEngine } from './engine.js'
 import { BAILEYS_VERSION, exportSession, parseImportedSession, phoneFromDeviceJid } from './session.js'
@@ -471,27 +471,60 @@ export class GatewayService {
     if (current.state === 'restricted' || current.state === 'reauth_required' || current.state === 'pairing') {
       throw new GatewayError('conflict', 'account is not available for metadata synchronization')
     }
+    if (current.state === 'sending' || (this.queueDepth.get(id) ?? 0) > 0) {
+      throw new GatewayError('conflict', 'account has messages in flight; retry metadata synchronization later')
+    }
     const wasOnline = this.engine.isOnline(id)
-    if (!wasOnline) {
+    const requestContactsHistory = current.syncPolicy.contacts
+    if (requestContactsHistory) {
+      current = await this.store.updateAccount(id, {
+        metadata: { ...current.metadata, requestContactsHistory: true },
+      })
+      if (wasOnline) await this.engine.disconnect(id)
+    }
+    if (!this.engine.isOnline(id)) {
       await this.connect(id)
       current = await this.store.getAccount(id)
     }
     await this.store.updateAccount(id, { metadataSyncStatus: 'syncing' })
     let avatar: AccountAvatar | null | undefined
     let avatarIncluded = false
+    let resources: AccountResourceSnapshot | undefined
     try {
       const synced = await this.syncMetadata(await this.store.getAccount(id))
       avatar = synced.avatar
       avatarIncluded = synced.avatarIncluded
+      resources = synced.resources
     } finally {
-      const latest = await this.store.getAccount(id)
-      if (!wasOnline && latest.connectionPolicy === 'on_demand' && this.engine.isOnline(id)) {
+      let latest = await this.store.getAccount(id)
+      if (requestContactsHistory) {
+        const metadata = { ...latest.metadata }
+        delete metadata.requestContactsHistory
+        latest = await this.store.updateAccount(id, { metadata })
+        // The explicit history socket captures requestContactsHistory in its
+        // reconnect closure. Replace it after this one-shot run so later
+        // routine reconnects never request history again.
+        if (this.engine.isOnline(id)) await this.engine.disconnect(id)
+      }
+      const shouldRemainOnline = wasOnline || latest.connectionPolicy === 'always_on'
+      if (shouldRemainOnline && !this.engine.isOnline(id)) {
+        try { await this.connect(id) } catch (error) {
+          this.logger.warn({ accountId: id, error: safeError(error) }, 'metadata_sync_online_restore_failed')
+        }
+      } else if (!shouldRemainOnline && this.engine.isOnline(id)) {
+        await this.disconnect(id)
+      } else if (!shouldRemainOnline && requestContactsHistory) {
+        // A raw engine disconnect above must also be reflected in the durable
+        // account state for on-demand accounts.
         await this.disconnect(id)
       }
     }
     const response = publicAccount(await this.store.getAccount(id))
-    if (!avatarIncluded) return response
-    return { ...response, avatar: avatar ?? null }
+    return {
+      ...response,
+      ...(avatarIncluded ? { avatar: avatar ?? null } : {}),
+      ...(resources ? { resources } : {}),
+    }
   }
 
   async sendMessage(id: string, request: SendMessageRequest): Promise<Message> {
@@ -617,19 +650,39 @@ export class GatewayService {
     account: Account
     avatar?: AccountAvatar | null
     avatarIncluded: boolean
+    resources: AccountResourceSnapshot
   }> {
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         const quality = await this.engine.getQuality(account.id, account.syncPolicy)
-        const { avatar, ...persistentQuality } = quality
+        const { avatar, resources, metadata, ...persistentQuality } = quality
+        const mergedMetadata = {
+          ...account.metadata,
+          ...metadata,
+          accountProfile: {
+            platformRaw: resources.platformRaw,
+            accountType: resources.accountType,
+            deviceOs: resources.deviceOs,
+          },
+          resourceSync: {
+            contactsStatus: resources.contactsStatus,
+            groupsStatus: resources.groupsStatus,
+            contactsComplete: resources.contactsComplete,
+            identityMappingComplete: resources.identityMappingComplete,
+            uniqueGroupMemberCount: resources.uniqueGroupMemberCount,
+            syncedAt: resources.syncedAt,
+          },
+        }
         const updated = await this.store.updateAccount(account.id, {
           metadataSyncStatus: 'ready',
           ...persistentQuality,
+          metadata: mergedMetadata,
         })
         return {
           account: updated,
           ...(avatar !== undefined ? { avatar } : {}),
           avatarIncluded: avatar !== undefined,
+          resources,
         }
       } catch (error) {
         if (attempt === 3 || !this.engine.isOnline(account.id)) {

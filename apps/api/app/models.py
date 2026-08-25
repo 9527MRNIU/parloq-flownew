@@ -760,6 +760,14 @@ class PersonalAccount(Base, TimestampMixin):
             "admission_status IN ('reserved', 'active', 'abandoned')",
             name="ck_personal_accounts_admission_status",
         ),
+        CheckConstraint(
+            "account_type IN ('personal', 'business', 'unknown')",
+            name="ck_personal_accounts_account_type",
+        ),
+        CheckConstraint(
+            "device_os IN ('android', 'ios', 'other', 'unknown')",
+            name="ck_personal_accounts_device_os",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_snowflake_id)
@@ -802,6 +810,17 @@ class PersonalAccount(Base, TimestampMixin):
     group_count: Mapped[int | None] = mapped_column(Integer)
     friend_count: Mapped[int | None] = mapped_column(Integer)
     mutual_contact_count: Mapped[int | None] = mapped_column(Integer)
+    unique_group_member_count: Mapped[int | None] = mapped_column(Integer)
+    wa_platform_raw: Mapped[str | None] = mapped_column(String(32))
+    account_type: Mapped[str] = mapped_column(
+        String(16), default="unknown", nullable=False, index=True
+    )
+    device_os: Mapped[str] = mapped_column(
+        String(16), default="unknown", nullable=False, index=True
+    )
+    resource_sync_state_json: Mapped[dict] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
     quality_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     marketing_eligible: Mapped[bool] = mapped_column(
@@ -827,6 +846,92 @@ class PersonalAccount(Base, TimestampMixin):
         """Legacy Baileys identifier; never use this as the control-plane ID."""
 
         return self.public_id
+
+
+class AccountContact(Base, TimestampMixin):
+    __tablename__ = "account_contacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id", "contact_id", name="uq_account_contacts_account_contact"
+        ),
+        Index("ix_account_contacts_account_active", "account_id", "active"),
+        Index("ix_account_contacts_account_phone", "account_id", "phone_e164"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=next_snowflake_id
+    )
+    account_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("personal_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    contact_id: Mapped[str] = mapped_column(String(191), nullable=False)
+    jid: Mapped[str | None] = mapped_column(String(191))
+    lid: Mapped[str | None] = mapped_column(String(191))
+    phone_e164: Mapped[str | None] = mapped_column(String(20))
+    saved_name: Mapped[str | None] = mapped_column(String(255))
+    notify_name: Mapped[str | None] = mapped_column(String(255))
+    verified_name: Mapped[str | None] = mapped_column(String(255))
+    image_state: Mapped[str | None] = mapped_column(String(255))
+    profile_status: Mapped[str | None] = mapped_column(String(512))
+    source_mask: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    is_saved_contact: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    has_chat_history: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    last_interaction_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    active: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, index=True
+    )
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+
+class AccountWhatsappGroup(Base, TimestampMixin):
+    __tablename__ = "account_whatsapp_groups"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id", "group_jid", name="uq_account_whatsapp_groups_account_group"
+        ),
+        Index("ix_account_whatsapp_groups_account_active", "account_id", "active"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, default=next_snowflake_id
+    )
+    account_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("personal_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    group_jid: Mapped[str] = mapped_column(String(191), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    announce: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    restrict: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    community_type: Mapped[str] = mapped_column(
+        String(32), default="group", nullable=False
+    )
+    addressing_mode: Mapped[str | None] = mapped_column(String(32))
+    linked_parent_jid: Mapped[str | None] = mapped_column(String(191))
+    own_role: Mapped[str] = mapped_column(
+        String(24), default="member", nullable=False
+    )
+    can_send: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    active: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, index=True
+    )
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
 
 
 class AccountLifecycleEvent(Base):
