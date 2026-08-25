@@ -1742,6 +1742,7 @@ export function PromotionTemplatesPage() {
             <TableHeader>
               <TableRow>
                 <TableHead>模板</TableHead>
+                <TableHead>来源</TableHead>
                 <TableHead>版本</TableHead>
                 <TableHead>语言</TableHead>
                 <TableHead>资源</TableHead>
@@ -1783,6 +1784,11 @@ export function PromotionTemplatesPage() {
                         ],
                       }}
                     />
+                  </TableCell>
+                  <TableCell>
+                    <Badge tone="neutral">
+                      {row.repositorySource ? "远程仓库" : "离线导入"}
+                    </Badge>
                   </TableCell>
                   <TableCell>
                     <Badge tone="neutral">{row.version.split(" · ")[0]}</Badge>
