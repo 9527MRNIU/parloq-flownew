@@ -339,6 +339,7 @@ const deviceOsLabel = (value: string) =>
 function DeviceOsDisplay({ value }: { value: string }) {
   if (!value || value === "unknown") return <span>-</span>;
   const label = deviceOsLabel(value);
+  const knownMobileOs = value === "android" || value === "ios";
   const Icon =
     value === "android"
       ? IoLogoAndroid
@@ -347,11 +348,13 @@ function DeviceOsDisplay({ value }: { value: string }) {
         : SmartphoneIcon;
   return (
     <div className="flex min-w-max items-center justify-center gap-2">
-      <Icon
-        className="size-4 shrink-0"
-        color={value === "android" ? "#3DDC84" : undefined}
-        aria-hidden="true"
-      />
+      <span className="flex h-4 w-6 shrink-0 items-center justify-center">
+        <Icon
+          className={knownMobileOs ? "size-5" : "size-4"}
+          color={value === "android" ? "#3DDC84" : undefined}
+          aria-hidden="true"
+        />
+      </span>
       <span>{label}</span>
     </div>
   );
