@@ -143,16 +143,19 @@ function AccountProxyDisplay({
   proxy?: ProxyRow;
 }) {
   return (
-    <div className="cell-main min-w-[180px]">
+    <div className="grid min-w-[180px] justify-items-center gap-1 text-center">
       {proxy?.countryCode ? (
         <CountryDisplay
           code={proxy.countryCode}
-          className="justify-start font-semibold"
+          className="justify-center"
         />
       ) : (
-        <strong>-</strong>
+        <span>-</span>
       )}
-      <span title={proxy?.endpoint || undefined}>
+      <span
+        className="block max-w-[180px] truncate text-xs text-muted-foreground"
+        title={proxy?.endpoint || undefined}
+      >
         {proxyId ? proxy?.endpoint || "已绑定固定代理" : "系统自动分配"}
       </span>
     </div>
