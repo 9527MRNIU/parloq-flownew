@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from io import BytesIO
-from urllib.parse import quote
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile, status
@@ -39,7 +38,7 @@ from app.models import (
     RoleActionPermission,
     HyperlinkTask,
 )
-from app.security import decrypt_secret, utcnow
+from app.security import utcnow
 from app.serializers import iso
 from app.services.baileys_credentials import (
     MAX_SESSION_BYTES,
@@ -47,6 +46,10 @@ from app.services.baileys_credentials import (
     validate_baileys_session,
 )
 from app.services.wa_gateway import GatewayError, WaGatewayClient
+from app.services.gateway_account_configuration import (
+    ensure_gateway_account_configuration,
+    gateway_proxy_url,
+)
 from app.services.proxy_health import proxy_is_quarantined
 from app.services.protocol_nodes import (
     ingress_unavailable_reason,
@@ -395,19 +398,7 @@ def _binding(db: DbSession, account_id: str) -> tuple[AccountProxyBinding, Proxy
 
 
 def _proxy_url(db: DbSession, account_id: str) -> str | None:
-    row = _binding(db, account_id)
-    if row is None:
-        return None
-    proxy = row[1]
-    username = decrypt_secret(proxy.username_ciphertext) if proxy.username_ciphertext else ""
-    password = decrypt_secret(proxy.password_ciphertext) if proxy.password_ciphertext else ""
-    auth = ""
-    if username:
-        auth = quote(username, safe="")
-        if password:
-            auth += ":" + quote(password, safe="")
-        auth += "@"
-    return f"{proxy.protocol}://{auth}{proxy.host}:{proxy.port}"
+    return gateway_proxy_url(db, account_id)
 
 
 def _account_payload(
@@ -1062,7 +1053,6 @@ def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: 
     )
     db.add(item)
     client = WaGatewayClient()
-    runtime_binding = protocol_runtime_binding(db, protocol)
     gateway_attempted = False
     try:
         db.flush()
@@ -1070,16 +1060,11 @@ def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: 
         db.flush()
         if item.phone_e164:
             gateway_attempted = True
-            client.create(
-                item.gateway_account_id,
-                item.phone_e164,
-                _proxy_url(db, item.gateway_account_id),
-                protocol_definition_id=runtime_binding.definition_id,
-                protocol_version=runtime_binding.version,
-                connection_policy=protocol.connection_policy,
-                idle_disconnect_seconds=protocol.idle_disconnect_seconds,
-                post_verify_grace_seconds=protocol.post_verify_grace_seconds,
-                sync_policy=normalized_sync_policy(protocol.sync_policy_json),
+            ensure_gateway_account_configuration(
+                db,
+                item,
+                protocol=protocol,
+                client=client,
             )
         record_initial_account_state(
             db, item, reason_category="account_created"
@@ -1818,9 +1803,7 @@ def update_account(account_id: str, payload: PersonalAccountUpdate, db: DbSessio
                 db, item.gateway_account_id
             )
         if gateway_changes and item.phone_e164:
-            WaGatewayClient().update(
-                item.gateway_account_id, **gateway_changes
-            )
+            ensure_gateway_account_configuration(db, item)
         db.commit()
     except GatewayError as exc:
         db.rollback()
@@ -1865,33 +1848,14 @@ def pairing_code(account_id: str, payload: PairRequest, db: DbSession, current_u
         protocol = db.get(ProtocolNode, item.protocol_id)
         if protocol is None:
             raise HTTPException(status_code=409, detail="账号所属协议节点不存在")
-        runtime_binding = protocol_runtime_binding(db, protocol)
-        if not item.phone_e164 and phone:
-            client.create(
-                item.gateway_account_id,
-                phone,
-                _proxy_url(db, item.gateway_account_id),
-                protocol_definition_id=runtime_binding.definition_id,
-                protocol_version=runtime_binding.version,
-                connection_policy=protocol.connection_policy,
-                idle_disconnect_seconds=protocol.idle_disconnect_seconds,
-                post_verify_grace_seconds=protocol.post_verify_grace_seconds,
-                sync_policy=normalized_sync_policy(protocol.sync_policy_json),
-            )
-        else:
-            client.update(
-                item.gateway_account_id,
-                connection_policy=protocol.connection_policy,
-                idle_disconnect_seconds=protocol.idle_disconnect_seconds,
-                post_verify_grace_seconds=protocol.post_verify_grace_seconds,
-                sync_policy=normalized_sync_policy(protocol.sync_policy_json),
-            )
-        result = client.pair(
-            item.gateway_account_id,
-            phone,
-            payload.method,
-            _proxy_url(db, item.gateway_account_id),
+        ensure_gateway_account_configuration(
+            db,
+            item,
+            protocol=protocol,
+            phone_e164=phone,
+            client=client,
         )
+        result = client.pair(item.gateway_account_id, phone)
     except GatewayError as exc:
         item.last_error = str(exc)
         db.commit()
@@ -1911,14 +1875,8 @@ def connect(account_id: str, db: DbSession, current_user: CurrentUser) -> dict:
         raise HTTPException(status_code=409, detail="账号尚未配对或已停用")
     try:
         client = WaGatewayClient()
-        result = (
-            client.connect(item.gateway_account_id)
-            if item.status in {"warming", "online_idle", "sending", "draining"}
-            else client.connect(
-                item.gateway_account_id,
-                _proxy_url(db, item.gateway_account_id),
-            )
-        )
+        ensure_gateway_account_configuration(db, item, client=client)
+        result = client.connect(item.gateway_account_id)
     except GatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from None
     _apply_gateway_account(item, result or {"state": "online_idle"})

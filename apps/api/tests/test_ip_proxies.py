@@ -221,12 +221,18 @@ def test_batch_rebind_maps_each_source_proxy_to_manual_target(
         disconnected.append(account_id)
         return {"id": account_id, "state": "linked_offline"}
 
-    def record_update(self, account_id: str, proxy_url: str | None):
+    def record_update(
+        self,
+        account_id: str,
+        _phone_e164: str,
+        proxy_url: str | None,
+        **_kwargs,
+    ):
         synchronized.append((account_id, proxy_url))
         return {"id": account_id, "state": "linked_offline"}
 
     monkeypatch.setattr(WaGatewayClient, "disconnect", record_disconnect)
-    monkeypatch.setattr(WaGatewayClient, "update_proxy", record_update)
+    monkeypatch.setattr(WaGatewayClient, "ensure", record_update)
     response = admin_client.post(
         "/api/ip-proxy-bindings/rebind-batch",
         json={
@@ -480,14 +486,16 @@ def test_proxy_unbind_succeeds_when_gateway_account_is_already_missing(
 
     calls: list[str] = []
 
-    def missing_gateway_account(self, account_id, proxy_url):
+    def missing_gateway_account(
+        self, account_id, _phone_e164, _proxy_url, **_kwargs
+    ):
         calls.append(account_id)
         raise GatewayError(
             "WhatsApp 网关请求失败（404）",
             status_code=404,
         )
 
-    monkeypatch.setattr(WaGatewayClient, "update_proxy", missing_gateway_account)
+    monkeypatch.setattr(WaGatewayClient, "ensure", missing_gateway_account)
 
     deleted = admin_client.delete(f"/api/ip-proxy-bindings/{binding['id']}")
     assert deleted.status_code == 200, deleted.text
@@ -538,11 +546,13 @@ def test_proxy_reconciliation_uses_the_persisted_binding(
 
     updates = []
 
-    def record_update(self, account_id, proxy_url):
+    def record_update(
+        self, account_id, _phone_e164, proxy_url, **_kwargs
+    ):
         updates.append((account_id, proxy_url))
         return {"id": account_id, "state": "linked_offline"}
 
-    monkeypatch.setattr(WaGatewayClient, "update_proxy", record_update)
+    monkeypatch.setattr(WaGatewayClient, "ensure", record_update)
     _reconcile_account_proxy_best_effort(gateway_account_id)
 
     assert updates == [

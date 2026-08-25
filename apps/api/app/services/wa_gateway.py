@@ -174,6 +174,8 @@ class WaGatewayClient:
         *,
         proxy_url: str | None | object = _UNSET,
         phone_e164: str | object = _UNSET,
+        protocol_definition_id: str | object = _UNSET,
+        protocol_version: str | object = _UNSET,
         connection_policy: str | object = _UNSET,
         idle_disconnect_seconds: int | object = _UNSET,
         post_verify_grace_seconds: int | object = _UNSET,
@@ -184,6 +186,10 @@ class WaGatewayClient:
             payload["proxyUrl"] = proxy_url or ""
         if phone_e164 is not _UNSET:
             payload["phoneE164"] = phone_e164
+        if protocol_definition_id is not _UNSET:
+            payload["protocolDefinitionId"] = protocol_definition_id
+        if protocol_version is not _UNSET:
+            payload["protocolVersion"] = protocol_version
         if connection_policy is not _UNSET:
             payload["connectionPolicy"] = connection_policy
         if idle_disconnect_seconds is not _UNSET:
@@ -199,9 +205,70 @@ class WaGatewayClient:
         )
         return value if isinstance(value, dict) else {}
 
-    def pair(
-        self, account_id: str, phone: str | None, method: str, proxy_url: str | None
+    def ensure(
+        self,
+        account_id: str,
+        phone_e164: str,
+        proxy_url: str | None,
+        *,
+        protocol_definition_id: str,
+        protocol_version: str,
+        connection_policy: str,
+        idle_disconnect_seconds: int,
+        post_verify_grace_seconds: int,
+        sync_policy: dict[str, bool],
     ) -> dict[str, Any]:
+        """Make the gateway runtime configuration match the control plane.
+
+        Existing accounts are the common case, so update first. A missing row
+        is created, while a concurrent creator is resolved by one final
+        idempotent update.
+        """
+        if self.settings.wa_gateway_mock:
+            return self.create(
+                account_id,
+                phone_e164,
+                proxy_url,
+                protocol_definition_id=protocol_definition_id,
+                protocol_version=protocol_version,
+                connection_policy=connection_policy,
+                idle_disconnect_seconds=idle_disconnect_seconds,
+                post_verify_grace_seconds=post_verify_grace_seconds,
+                sync_policy=sync_policy,
+            )
+        desired = {
+            "proxy_url": proxy_url,
+            "phone_e164": phone_e164,
+            "protocol_definition_id": protocol_definition_id,
+            "protocol_version": protocol_version,
+            "connection_policy": connection_policy,
+            "idle_disconnect_seconds": idle_disconnect_seconds,
+            "post_verify_grace_seconds": post_verify_grace_seconds,
+            "sync_policy": sync_policy,
+        }
+        try:
+            return self.update(account_id, **desired)
+        except GatewayError as exc:
+            if exc.status_code != 404:
+                raise
+        try:
+            return self.create(
+                account_id,
+                phone_e164,
+                proxy_url,
+                protocol_definition_id=protocol_definition_id,
+                protocol_version=protocol_version,
+                connection_policy=connection_policy,
+                idle_disconnect_seconds=idle_disconnect_seconds,
+                post_verify_grace_seconds=post_verify_grace_seconds,
+                sync_policy=sync_policy,
+            )
+        except GatewayError as exc:
+            if exc.status_code != 409:
+                raise
+        return self.update(account_id, **desired)
+
+    def pair(self, account_id: str, phone: str | None) -> dict[str, Any]:
         if self.settings.wa_gateway_mock:
             return {
                 "code": "0000-0000",

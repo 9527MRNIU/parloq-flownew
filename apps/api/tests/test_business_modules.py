@@ -1900,6 +1900,7 @@ def test_number_country_is_independent_from_channel_and_visit_country(
 
 def test_legacy_unverified_landing_pairing_can_request_a_fresh_code(
     admin_client: TestClient,
+    monkeypatch,
 ) -> None:
     public_config = admin_client.get(
         "/api/public/promotion/channels/de-facebook-demo"
@@ -1931,6 +1932,31 @@ def test_legacy_unverified_landing_pairing_can_request_a_fresh_code(
         assert stored.validation_status == "validating"
         assert stored.admission_status == "reserved"
         assert stored.last_connected_at is None
+        gateway_account_id = stored.gateway_account_id
+        binding = db.scalar(
+            select(AccountProxyBinding).where(
+                AccountProxyBinding.account_public_id == gateway_account_id
+            )
+        )
+        assert binding is not None
+        db.delete(binding)
+        db.commit()
+
+    synchronized_routes: list[str | None] = []
+    original_ensure = WaGatewayClient.ensure
+
+    def observe_ensure(self, account_id, phone_e164, proxy_url, **kwargs):
+        if account_id == gateway_account_id:
+            synchronized_routes.append(proxy_url)
+        return original_ensure(
+            self,
+            account_id,
+            phone_e164,
+            proxy_url,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(WaGatewayClient, "ensure", observe_ensure)
 
     retried = admin_client.post(
         "/api/public/promotion/channels/de-facebook-demo/pairing/start",
@@ -1938,6 +1964,8 @@ def test_legacy_unverified_landing_pairing_can_request_a_fresh_code(
     )
     assert retried.status_code == 200, retried.text
     assert retried.json()["data"]["pairing"]["pairingCode"] == "0000-0000"
+    assert synchronized_routes
+    assert synchronized_routes[-1]
 
 
 def test_landing_reauthentication_preserves_account_ownership_and_enqueues_sync(

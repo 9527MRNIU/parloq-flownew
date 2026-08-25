@@ -140,7 +140,7 @@ def test_gateway_client_uses_canonical_contract_and_bearer(monkeypatch) -> None:
         protocol_version="6.7.24",
     )["state"] == "unpaired"
     assert client.export_session("wa_contract") == {"registered": True}
-    assert client.pair("wa_contract", "+12025550199", "pairing_code", None)["code"] == "1234-5678"
+    assert client.pair("wa_contract", "+12025550199")["code"] == "1234-5678"
     assert client.cancel_pairing("wa_contract")["state"] == "unpaired"
     assert client.send("wa_contract", "idem-12345678", "+12025550200", "hello")["status"] == "queued"
     structured_message = {
@@ -234,3 +234,94 @@ def test_connect_synchronizes_an_explicit_proxy_before_connecting(monkeypatch) -
     assert len(calls) == 1
     assert calls[0][0] == "POST"
     assert calls[0][1].endswith("/v1/accounts/wa_connect/connect")
+
+
+def test_ensure_updates_existing_account_with_the_complete_runtime_config(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    def request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return _Response({"id": "wa_existing", "state": "unpaired"})
+
+    monkeypatch.setattr(wa_gateway._HTTP_CLIENT, "request", request)
+    client = wa_gateway.WaGatewayClient()
+    client.settings = replace(
+        get_settings(),
+        wa_gateway_mock=False,
+        wa_gateway_url="http://gateway.test",
+    )
+
+    result = client.ensure(
+        "wa_existing",
+        "+12025550199",
+        "socks5://proxy.test:1080",
+        protocol_definition_id="8541455568736000",
+        protocol_version="6.7.24",
+        connection_policy="on_demand",
+        idle_disconnect_seconds=600,
+        post_verify_grace_seconds=120,
+        sync_policy={"avatar": True},
+    )
+
+    assert result["id"] == "wa_existing"
+    assert len(calls) == 1
+    assert calls[0][0] == "PATCH"
+    assert calls[0][2]["json"] == {
+        "phoneE164": "+12025550199",
+        "proxyUrl": "socks5://proxy.test:1080",
+        "protocolDefinitionId": "8541455568736000",
+        "protocolVersion": "6.7.24",
+        "connectionPolicy": "on_demand",
+        "idleDisconnectSeconds": 600,
+        "postVerifyGraceSeconds": 120,
+        "syncPolicy": {"avatar": True},
+    }
+
+
+def test_ensure_creates_a_missing_gateway_account(monkeypatch) -> None:
+    calls = []
+
+    def request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        if method == "PATCH":
+            response = _Response({})
+            response.is_success = False
+            response.status_code = 404
+            return response
+        return _Response({"id": "wa_missing", "state": "unpaired"})
+
+    monkeypatch.setattr(wa_gateway._HTTP_CLIENT, "request", request)
+    client = wa_gateway.WaGatewayClient()
+    client.settings = replace(
+        get_settings(),
+        wa_gateway_mock=False,
+        wa_gateway_url="http://gateway.test",
+    )
+
+    result = client.ensure(
+        "wa_missing",
+        "+12025550201",
+        "socks5://proxy.test:1080",
+        protocol_definition_id="8541455568736000",
+        protocol_version="6.7.24",
+        connection_policy="always_on",
+        idle_disconnect_seconds=900,
+        post_verify_grace_seconds=180,
+        sync_policy={"avatar": True},
+    )
+
+    assert result["id"] == "wa_missing"
+    assert [call[0] for call in calls] == ["PATCH", "POST"]
+    assert calls[1][2]["json"] == {
+        "id": "wa_missing",
+        "protocolDefinitionId": "8541455568736000",
+        "protocolVersion": "6.7.24",
+        "phoneE164": "+12025550201",
+        "proxyUrl": "socks5://proxy.test:1080",
+        "connectionPolicy": "always_on",
+        "idleDisconnectSeconds": 900,
+        "postVerifyGraceSeconds": 180,
+        "syncPolicy": {"avatar": True},
+    }

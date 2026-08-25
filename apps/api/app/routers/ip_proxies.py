@@ -54,6 +54,9 @@ from app.services.proxy_health import (
     probe_proxy,
     proxy_is_quarantined,
 )
+from app.services.gateway_account_configuration import (
+    ensure_gateway_account_configuration,
+)
 from app.services.wa_gateway import GatewayError, WaGatewayClient
 
 
@@ -399,7 +402,7 @@ def _disconnect_accounts_best_effort(account_ids: list[str]) -> None:
 
 
 def _sync_account_proxy(db: DbSession, account_public_id: str) -> None:
-    """Push a committed-to-be binding into the connection data plane.
+    """Push the authoritative account runtime configuration to the gateway.
 
     A legacy/external accountPublicId can still be recorded by the IP v1 API;
     only real personal accounts owned by this control plane have a Baileys gateway
@@ -412,11 +415,7 @@ def _sync_account_proxy(db: DbSession, account_public_id: str) -> None:
     )
     if account is None or not account.phone_e164:
         return
-    # Import locally to avoid making proxy serialization depend on the account
-    # router at import time.
-    from app.routers.personal_accounts import _proxy_url
-
-    WaGatewayClient().update_proxy(account_public_id, _proxy_url(db, account_public_id))
+    ensure_gateway_account_configuration(db, account)
 
 
 def _reconcile_account_proxy_best_effort(account_public_id: str) -> None:

@@ -2993,7 +2993,6 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
     from app.services.protocol_nodes import (
         normalized_sync_policy,
         protocol_capacity,
-        protocol_runtime_binding,
         resolve_channel_ingress_protocol,
     )
 
@@ -3416,10 +3415,12 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             )
 
     from app.routers.personal_accounts import _auto_proxy, _proxy_url, _set_binding
+    from app.services.gateway_account_configuration import (
+        ensure_gateway_account_configuration,
+    )
     from app.services.wa_gateway import GatewayError, WaGatewayClient
 
     client = WaGatewayClient()
-    runtime_binding = protocol_runtime_binding(db, protocol)
     try:
         if _proxy_url(db, item.gateway_account_id) is None:
             proxy = _auto_proxy(
@@ -3498,42 +3499,21 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
         )
 
     try:
-        try:
-            client.create(
-                item.gateway_account_id,
-                payload.phone,
-                _proxy_url(db, item.gateway_account_id),
-                protocol_definition_id=runtime_binding.definition_id,
-                protocol_version=runtime_binding.version,
-                connection_policy=protocol.connection_policy,
-                idle_disconnect_seconds=protocol.idle_disconnect_seconds,
-                post_verify_grace_seconds=protocol.post_verify_grace_seconds,
-                sync_policy=active_attempt.sync_policy_json,
-            )
-        except GatewayError as exc:
-            # An existing gateway account is normal when a visitor requests a
-            # fresh code for an unpaired record; pairing remains authoritative.
-            if "409" not in str(exc):
-                raise
-            client.update(
-                item.gateway_account_id,
-                connection_policy=protocol.connection_policy,
-                idle_disconnect_seconds=protocol.idle_disconnect_seconds,
-                post_verify_grace_seconds=protocol.post_verify_grace_seconds,
-                sync_policy=active_attempt.sync_policy_json,
-            )
+        ensure_gateway_account_configuration(
+            db,
+            item,
+            protocol=protocol,
+            phone_e164=payload.phone,
+            sync_policy=active_attempt.sync_policy_json,
+            client=client,
+        )
         if (
             active_attempt.attempt_type == "reauthentication"
             and gateway_requires_reset
         ):
             result = client.reauthenticate(item.gateway_account_id, payload.phone)
         else:
-            result = client.pair(
-                item.gateway_account_id,
-                payload.phone,
-                "pairing_code",
-                _proxy_url(db, item.gateway_account_id),
-            )
+            result = client.pair(item.gateway_account_id, payload.phone)
         item.status = "linked_offline" if client.settings.wa_gateway_mock else "pairing"
         item.last_error = None
         try:

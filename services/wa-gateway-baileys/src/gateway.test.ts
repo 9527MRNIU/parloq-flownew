@@ -239,6 +239,43 @@ describe('Baileys gateway HTTP contract', () => {
     expect(store.accounts.has('wa_orphan_new')).toBe(true)
   })
 
+  it('accepts an identical runtime configuration while active and rejects real route changes', async () => {
+    const headers = { authorization: `Bearer ${token}` }
+    const desired = {
+      id: 'wa_idempotent_config',
+      phoneE164: '+14155550144',
+      proxyUrl: 'socks5://proxy.example:1080',
+      protocolDefinitionId: '8541455568736000',
+      protocolVersion: '6.7.24',
+    }
+    expect((await app.inject({ method: 'POST', url: '/v1/accounts', headers, payload: desired })).statusCode).toBe(201)
+    expect((await app.inject({ method: 'POST', url: '/v1/accounts/wa_idempotent_config/pairing-code', headers, payload: {} })).statusCode).toBe(200)
+
+    const repeated = await app.inject({
+      method: 'PATCH',
+      url: '/v1/accounts/wa_idempotent_config',
+      headers,
+      payload: desired,
+    })
+    expect(repeated.statusCode).toBe(200)
+
+    const changedProxy = await app.inject({
+      method: 'PATCH',
+      url: '/v1/accounts/wa_idempotent_config',
+      headers,
+      payload: { proxyUrl: 'socks5://other.example:1080' },
+    })
+    expect(changedProxy.statusCode).toBe(409)
+
+    const changedProtocol = await app.inject({
+      method: 'PATCH',
+      url: '/v1/accounts/wa_idempotent_config',
+      headers,
+      payload: { protocolVersion: '6.7.25' },
+    })
+    expect(changedProtocol.statusCode).toBe(409)
+  })
+
   it('fails an interrupted unverified pairing instead of reusing its stale code', async () => {
     const isolatedStore = new MemoryStore()
     const interruptedEngine = new InterruptedPairingEngine()

@@ -12,7 +12,7 @@ import { diagnosePairingFailure } from './failure-diagnosis.js'
 import type { FailureDiagnosis } from './domain.js'
 
 export interface CreateAccountRequest { id?: string; protocolDefinitionId?: string; protocolVersion?: string; phoneE164: string; proxyUrl?: string; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: SyncPolicy }
-export interface UpdateAccountRequest { phoneE164?: string; proxyUrl?: string; autoConnect?: boolean; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: SyncPolicy }
+export interface UpdateAccountRequest { phoneE164?: string; proxyUrl?: string; protocolDefinitionId?: string; protocolVersion?: string; autoConnect?: boolean; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: SyncPolicy }
 export interface MetadataSyncRequest { syncPolicy?: SyncPolicy }
 
 function pairingCodeFromCreds(value: unknown): string | null {
@@ -143,13 +143,38 @@ export class GatewayService {
   async updateAccount(id: string, request: UpdateAccountRequest): Promise<PublicAccount> {
     const current = await this.store.getAccount(id)
     const changes: Partial<Pick<Account, 'phoneE164' | 'proxyUrl' | 'autoConnect' | 'connectionPolicy' | 'idleDisconnectSeconds' | 'postVerifyGraceSeconds' | 'syncPolicy'>> = {}
-    if (request.phoneE164 !== undefined) changes.phoneE164 = normalizeE164(request.phoneE164)
-    if (request.proxyUrl !== undefined) changes.proxyUrl = validateProxy(request.proxyUrl)
-    if (request.autoConnect !== undefined) changes.autoConnect = request.autoConnect
-    if (request.connectionPolicy !== undefined) changes.connectionPolicy = request.connectionPolicy
-    if (request.idleDisconnectSeconds !== undefined) changes.idleDisconnectSeconds = Math.min(86_400, Math.max(60, request.idleDisconnectSeconds))
-    if (request.postVerifyGraceSeconds !== undefined) changes.postVerifyGraceSeconds = Math.min(3_600, Math.max(0, request.postVerifyGraceSeconds))
-    if (request.syncPolicy !== undefined) changes.syncPolicy = normalizeSyncPolicy(request.syncPolicy)
+    if (request.protocolDefinitionId !== undefined) {
+      const protocolDefinitionId = request.protocolDefinitionId.trim()
+      if (!/^\d{1,20}$/.test(protocolDefinitionId)) throw new GatewayError('invalid_argument', 'protocolDefinitionId must be a Snowflake identifier')
+      if (protocolDefinitionId !== current.protocolDefinitionId) throw new GatewayError('conflict', 'an existing account cannot change its protocol binding')
+    }
+    if (request.protocolVersion !== undefined) {
+      const protocolVersion = request.protocolVersion.trim()
+      if (!/^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$/.test(protocolVersion)) throw new GatewayError('invalid_argument', 'protocolVersion has an invalid format')
+      if (protocolVersion !== current.protocolVersion) throw new GatewayError('conflict', 'an existing account cannot change its protocol binding')
+    }
+    if (request.phoneE164 !== undefined) {
+      const phoneE164 = normalizeE164(request.phoneE164)
+      if (phoneE164 !== current.phoneE164) changes.phoneE164 = phoneE164
+    }
+    if (request.proxyUrl !== undefined) {
+      const proxyUrl = validateProxy(request.proxyUrl)
+      if (proxyUrl !== current.proxyUrl) changes.proxyUrl = proxyUrl
+    }
+    if (request.autoConnect !== undefined && request.autoConnect !== current.autoConnect) changes.autoConnect = request.autoConnect
+    if (request.connectionPolicy !== undefined && request.connectionPolicy !== current.connectionPolicy) changes.connectionPolicy = request.connectionPolicy
+    if (request.idleDisconnectSeconds !== undefined) {
+      const idleDisconnectSeconds = Math.min(86_400, Math.max(60, request.idleDisconnectSeconds))
+      if (idleDisconnectSeconds !== current.idleDisconnectSeconds) changes.idleDisconnectSeconds = idleDisconnectSeconds
+    }
+    if (request.postVerifyGraceSeconds !== undefined) {
+      const postVerifyGraceSeconds = Math.min(3_600, Math.max(0, request.postVerifyGraceSeconds))
+      if (postVerifyGraceSeconds !== current.postVerifyGraceSeconds) changes.postVerifyGraceSeconds = postVerifyGraceSeconds
+    }
+    if (request.syncPolicy !== undefined) {
+      const syncPolicy = normalizeSyncPolicy(request.syncPolicy)
+      if ((Object.keys(syncPolicy) as Array<keyof SyncPolicy>).some((key) => syncPolicy[key] !== current.syncPolicy[key])) changes.syncPolicy = syncPolicy
+    }
     if (this.engine.isOnline(id) && (changes.phoneE164 !== undefined || changes.proxyUrl !== undefined)) {
       throw new GatewayError('conflict', 'disconnect the account before changing its phone or proxy')
     }
