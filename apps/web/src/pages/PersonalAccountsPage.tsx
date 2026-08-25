@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { SiAndroid, SiApple } from "react-icons/si";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import {
@@ -22,6 +22,7 @@ import {
 } from "../components/account-status-indicator";
 import { CountryDisplay } from "../components/country-display";
 import { DrawerFieldLabel } from "../components/drawer-form";
+import { AccountResourceDetailDrawer } from "./AccountResourceDetailPage";
 import {
   ListPagination,
   ListTableCard,
@@ -332,7 +333,6 @@ const canSwitchProxy = (row: Account) =>
 
 export function PersonalAccountsPage() {
   const { user, can } = useAuth();
-  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const canManage =
     can("resources.accounts.manage") ||
@@ -368,6 +368,7 @@ export function PersonalAccountsPage() {
   const [testText, setTestText] = useState("Parloq 连接测试消息");
   const [testPending, setTestPending] = useState(false);
   const [testResult, setTestResult] = useState("");
+  const [detailAccount, setDetailAccount] = useState<Account | null>(null);
   const [importOpen, setImportOpen] = useState(
     searchParams.get("import") === "1",
   );
@@ -1250,7 +1251,7 @@ export function PersonalAccountsPage() {
                         variant="outline"
                         size="sm"
                         disabled={!row.id}
-                        onClick={() => navigate(`/resources/accounts/manage/${row.id}`)}
+                        onClick={() => setDetailAccount(row)}
                       >
                         <EyeIcon size={16} />
                         详情
@@ -1337,6 +1338,12 @@ export function PersonalAccountsPage() {
           />
         )}
       </ListTableCard>
+      <AccountResourceDetailDrawer
+        accountId={detailAccount?.id || ""}
+        accountLabel={detailAccount?.phone || detailAccount?.name || ""}
+        onClose={() => setDetailAccount(null)}
+      />
+
       <Drawer
         open={importOpen}
         onClose={closeImport}

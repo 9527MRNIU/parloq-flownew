@@ -20,6 +20,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  Drawer,
   EmptyState,
   SelectField,
   Spinner,
@@ -222,16 +223,17 @@ function resourceState(account: AccountDetail, key: "contacts" | "groups") {
     : {};
 }
 
-export function AccountResourceDetailPage() {
-  const { accountId = "" } = useParams();
-  const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const requestedTab = searchParams.get("tab") as DetailTab | null;
-  const tab: DetailTab = ["overview", "friends", "groups", "lifecycle"].includes(
-    requestedTab || "",
-  )
-    ? requestedTab!
-    : "overview";
+function AccountResourceDetailContent({
+  accountId,
+  tab,
+  onTabChange,
+  onBack,
+}: {
+  accountId: string;
+  tab: DetailTab;
+  onTabChange: (tab: DetailTab) => void;
+  onBack?: () => void;
+}) {
   const [account, setAccount] = useState<AccountDetail | null>(null);
   const [loadingAccount, setLoadingAccount] = useState(true);
   const [rows, setRows] = useState<Array<FriendRow | GroupRow | LifecycleRow>>([]);
@@ -306,7 +308,7 @@ export function AccountResourceDetailPage() {
   useEffect(() => void loadRows(), [loadRows]);
 
   const switchTab = (value: DetailTab) => {
-    setSearchParams({ tab: value });
+    onTabChange(value);
     setPage(1);
     setKeyword("");
     setAppliedKeyword("");
@@ -338,9 +340,11 @@ export function AccountResourceDetailPage() {
           title="账号不存在或无权查看"
           description="请返回账号管理重新选择账号。"
         />
-        <div className="flex justify-center">
-          <Button onClick={() => navigate("/resources/accounts/manage")}>返回账号管理</Button>
-        </div>
+        {onBack ? (
+          <div className="flex justify-center">
+            <Button onClick={onBack}>返回账号管理</Button>
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -352,12 +356,14 @@ export function AccountResourceDetailPage() {
   const lifecycleRows = rows as LifecycleRow[];
 
   return (
-    <StandardListPage>
+    <div className="grid gap-4">
       <div className="flex flex-col gap-4 rounded-xl border bg-card p-4 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex min-w-0 items-center gap-3">
-          <Button variant="outline" size="icon" aria-label="返回账号管理" onClick={() => navigate("/resources/accounts/manage")}>
-            <ArrowLeftIcon size={18} />
-          </Button>
+          {onBack ? (
+            <Button variant="outline" size="icon" aria-label="返回账号管理" onClick={onBack}>
+              <ArrowLeftIcon size={18} />
+            </Button>
+          ) : null}
           <div className="flex size-14 shrink-0 items-center justify-center overflow-hidden rounded-xl border bg-muted text-muted-foreground">
             {account.quality.avatarUrl ? (
               <img src={account.quality.avatarUrl} alt="账号头像" className="size-full object-cover" />
@@ -447,6 +453,72 @@ export function AccountResourceDetailPage() {
           </ListTableCard>
         </>
       )}
+    </div>
+  );
+}
+
+export function AccountResourceDetailDrawer({
+  accountId,
+  accountLabel,
+  onClose,
+}: {
+  accountId: string;
+  accountLabel: string;
+  onClose: () => void;
+}) {
+  return (
+    <Drawer
+      open={Boolean(accountId)}
+      onClose={onClose}
+      title="账号详情"
+      description={
+        accountId
+          ? `${accountLabel || "未命名账号"} · ID ${accountId}`
+          : "查看账号资料与同步资源。"
+      }
+      wide
+    >
+      {accountId ? (
+        <AccountResourceDrawerBody
+          key={accountId}
+          accountId={accountId}
+        />
+      ) : null}
+    </Drawer>
+  );
+}
+
+function AccountResourceDrawerBody({ accountId }: { accountId: string }) {
+  const [tab, setTab] = useState<DetailTab>("overview");
+  return (
+    <AccountResourceDetailContent
+      accountId={accountId}
+      tab={tab}
+      onTabChange={setTab}
+    />
+  );
+}
+
+export function AccountResourceDetailPage() {
+  const { accountId = "" } = useParams();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedTab = searchParams.get("tab") as DetailTab | null;
+  const tab: DetailTab = ["overview", "friends", "groups", "lifecycle"].includes(
+    requestedTab || "",
+  )
+    ? requestedTab!
+    : "overview";
+
+  return (
+    <StandardListPage>
+      <AccountResourceDetailContent
+        key={accountId}
+        accountId={accountId}
+        tab={tab}
+        onTabChange={(value) => setSearchParams({ tab: value })}
+        onBack={() => navigate("/resources/accounts/manage")}
+      />
     </StandardListPage>
   );
 }
