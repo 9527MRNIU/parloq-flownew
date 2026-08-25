@@ -1019,6 +1019,7 @@ export function PersonalAccountsPage() {
                 <TableHead adaptive>账号</TableHead>
                 <TableHead className="text-center">号码国家</TableHead>
                 <TableHead className="text-center">访问国家</TableHead>
+                <TableHead className="text-center">代理国家</TableHead>
                 <TableHead className="text-center">头像</TableHead>
                 <TableHead className="text-center">类型</TableHead>
                 <TableHead className="text-center">系统</TableHead>
@@ -1027,7 +1028,6 @@ export function PersonalAccountsPage() {
                 <TableHead className="text-center">群组数</TableHead>
                 <TableHead className="text-center">评分</TableHead>
                 <TableHead>分组</TableHead>
-                <TableHead>代理</TableHead>
                 <TableHead className="text-center">发送数据</TableHead>
                 <TableHead>操作</TableHead>
               </TableRow>
@@ -1086,6 +1086,12 @@ export function PersonalAccountsPage() {
                     )}
                   </TableCell>
                   <TableCell className="text-center align-middle">
+                    <AccountProxyDisplay
+                      proxyId={row.proxyId}
+                      proxy={proxyById.get(row.proxyId)}
+                    />
+                  </TableCell>
+                  <TableCell className="text-center align-middle">
                     <div className="flex justify-center">
                       <AccountAvatar account={row} />
                     </div>
@@ -1135,12 +1141,6 @@ export function PersonalAccountsPage() {
                     <strong className="min-w-[140px]">
                       {row.groupName || "未分组"}
                     </strong>
-                  </TableCell>
-                  <TableCell>
-                    <AccountProxyDisplay
-                      proxyId={row.proxyId}
-                      proxy={proxyById.get(row.proxyId)}
-                    />
                   </TableCell>
                   <TableCell className="text-center align-middle">
                     <div className="cell-main mx-auto min-w-[160px] items-center text-center">
