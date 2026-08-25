@@ -1,4 +1,5 @@
 import {
+  ArrowRightLeftIcon,
   ChevronDownIcon,
   CircleGaugeIcon,
   EyeIcon,
@@ -31,6 +32,7 @@ import {
   useClientPagination,
 } from "../components/list-page";
 import {
+  DrawerChoiceGroup,
   DrawerFieldLabel,
   DrawerFormField,
   DrawerFormLayout,
@@ -169,6 +171,24 @@ type BulkDetectionResult = {
   latencyMs?: number | null;
   error?: string;
 };
+type RebindMode = "manual" | "automatic";
+type BatchRebindResult = {
+  bindingId: string;
+  accountId: string;
+  accountName: string;
+  accountPhone: string;
+  sourceProxyId: string;
+  targetProxyId: string;
+  status: "success" | "failed";
+  error: string;
+};
+type BatchRebindSummary = {
+  sourceProxies: number;
+  accounts: number;
+  migrated: number;
+  failed: number;
+  emptySources: number;
+};
 
 function upsertBulkPreviewResult(
   current: BulkPreviewResult[],
@@ -202,6 +222,12 @@ const allocationDescriptions: Record<AllocationMode, string> = {
     "低负载优先：从符合条件的代理中选择当前绑定数最少的 IP，兼顾利用率与稳定性。",
   manual:
     "手动分配：系统不自动选择 IP，账号必须由管理员显式绑定后才能使用代理。",
+};
+const allocationModeLabels: Record<AllocationMode, string> = {
+  strict_one_to_one: "严格 1:1",
+  tenant_reuse: "租户内复用",
+  least_load: "低负载优先",
+  manual: "仅手动分配",
 };
 const countryDescriptions: Record<CountryMatch, string> = {
   visitor_country:
@@ -431,6 +457,14 @@ function proxyStatus(row: IpProxy): EntityStatusMeta {
   return { label: "待检测", description: "代理尚未完成首次健康检测。", tone: "warning" };
 }
 
+function proxyAvailableForRebind(row: IpProxy): boolean {
+  if (!row.enabled) return false;
+  if (row.status !== "unhealthy") return true;
+  if (!row.cooldownUntil) return false;
+  const cooldownEndsAt = new Date(row.cooldownUntil).getTime();
+  return Number.isFinite(cooldownEndsAt) && cooldownEndsAt <= Date.now();
+}
+
 export function IpManagementPage() {
   const { can } = useAuth();
   const canManage = can("resources.ip.manage");
@@ -477,8 +511,18 @@ export function IpManagementPage() {
   });
   const [selectedProxyIds, setSelectedProxyIds] = useState<string[]>([]);
   const [batchAction, setBatchAction] = useState<
-    "test" | "enable" | "disable" | "delete" | ""
+    "test" | "enable" | "disable" | "rebind" | "delete" | ""
   >("");
+  const [rebindDrawerOpen, setRebindDrawerOpen] = useState(false);
+  const [rebindSourceIds, setRebindSourceIds] = useState<string[]>([]);
+  const [rebindMode, setRebindMode] = useState<RebindMode>("automatic");
+  const [rebindMappings, setRebindMappings] = useState<
+    Record<string, string>
+  >({});
+  const [rebindResult, setRebindResult] = useState<{
+    summary: BatchRebindSummary;
+    results: BatchRebindResult[];
+  } | null>(null);
   const [testingIds, setTestingIds] = useState<string[]>([]);
   const [accountId, setAccountId] = useState("");
   const [bindingPending, setBindingPending] = useState(false);
@@ -620,6 +664,26 @@ export function IpManagementPage() {
       return true;
     });
   }, [country, keyword, protocol, rows, status]);
+  const rebindSourceRows = useMemo(() => {
+    const sourceIdSet = new Set(rebindSourceIds);
+    return rows.filter((row) => row.id && sourceIdSet.has(row.id));
+  }, [rebindSourceIds, rows]);
+  const rebindAccountCount = rebindSourceRows.reduce(
+    (total, row) => total + row.bindingCount,
+    0,
+  );
+  const automaticRebindTargets = useMemo(() => {
+    const sourceIdSet = new Set(rebindSourceIds);
+    return rows.filter(
+      (row) =>
+        row.id &&
+        !sourceIdSet.has(row.id) &&
+        proxyAvailableForRebind(row),
+    );
+  }, [rebindSourceIds, rows]);
+  const manualRebindReady = rebindSourceRows
+    .filter((row) => row.bindingCount > 0)
+    .every((row) => Boolean(rebindMappings[row.id]));
   const proxyPagination = useClientPagination(visibleRows, {
     resetKey: `${keyword}|${protocol}|${country}|${status}`,
   });
@@ -723,6 +787,14 @@ export function IpManagementPage() {
     setBulkConfirmMode("");
     setBulkText("");
     setBulkDrawerOpen(true);
+  }
+  function openBatchRebind() {
+    if (!selectedProxyIds.length) return;
+    setRebindSourceIds([...selectedProxyIds]);
+    setRebindMode("automatic");
+    setRebindMappings({});
+    setRebindResult(null);
+    setRebindDrawerOpen(true);
   }
   function openEdit(row: IpProxy) {
     if (!row.id) return;
@@ -1043,6 +1115,94 @@ export function IpManagementPage() {
       setBatchAction("");
     }
   }
+  async function batchRebind() {
+    if (!rebindSourceIds.length || batchAction || !rebindAccountCount) return;
+    if (rebindMode === "manual" && !manualRebindReady) {
+      toast.warning("请为每个有账号绑定的源代理选择目标代理");
+      return;
+    }
+    if (rebindMode === "automatic" && policy.allocationMode === "manual") {
+      toast.warning("当前分配模式为仅手动分配，不能执行自动重绑");
+      return;
+    }
+    if (
+      !(await confirmAction({
+        title: `重绑 ${rebindAccountCount} 个账号？`,
+        description:
+          rebindMode === "manual"
+            ? "系统会按指定映射迁移账号；在线账号将先断开，已保存的会话不会删除。"
+            : "系统会排除已选源代理，再按当前国家匹配和分配策略选择目标；在线账号将先断开。",
+        confirmText: "确认重绑",
+      }))
+    )
+      return;
+    setBatchAction("rebind");
+    setRebindResult(null);
+    try {
+      const payload = await apiRequest(
+        "/api/ip-proxy-bindings/rebind-batch",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            mode: rebindMode,
+            sourceProxyIds: rebindSourceIds,
+            mappings:
+              rebindMode === "manual"
+                ? rebindSourceRows
+                    .filter(
+                      (row) =>
+                        row.bindingCount > 0 && rebindMappings[row.id],
+                    )
+                    .map((row) => ({
+                      sourceProxyId: row.id,
+                      targetProxyId: rebindMappings[row.id],
+                    }))
+                : [],
+          }),
+        },
+      );
+      const data = ((payload as { data?: Record<string, unknown> }).data ||
+        payload) as Record<string, unknown>;
+      const rawSummary = (data.summary || {}) as Record<string, unknown>;
+      const summary: BatchRebindSummary = {
+        sourceProxies: Number(rawSummary.sourceProxies || 0),
+        accounts: Number(rawSummary.accounts || 0),
+        migrated: Number(rawSummary.migrated || 0),
+        failed: Number(rawSummary.failed || 0),
+        emptySources: Number(rawSummary.emptySources || 0),
+      };
+      const results = Array.isArray(data.results)
+        ? data.results.map((item) => {
+            const row = item as Record<string, unknown>;
+            return {
+              bindingId: text(row, "bindingId"),
+              accountId: text(row, "accountId"),
+              accountName: text(row, "accountName"),
+              accountPhone: formatPhoneDisplay(text(row, "accountPhone")),
+              sourceProxyId: text(row, "sourceProxyId"),
+              targetProxyId: text(row, "targetProxyId"),
+              status:
+                text(row, "status") === "success" ? "success" : "failed",
+              error: text(row, "error"),
+            } satisfies BatchRebindResult;
+          })
+        : [];
+      await load();
+      if (summary.failed) {
+        setRebindResult({ summary, results });
+        toast.warning(
+          `批量重绑完成：成功 ${summary.migrated}，失败 ${summary.failed}`,
+        );
+      } else {
+        setRebindDrawerOpen(false);
+        toast.success(`已重绑 ${summary.migrated} 个账号`);
+      }
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "批量重绑失败");
+    } finally {
+      setBatchAction("");
+    }
+  }
   async function batchDelete() {
     const proxyIds = [...selectedProxyIds];
     if (!proxyIds.length || batchAction) return;
@@ -1317,6 +1477,10 @@ export function IpManagementPage() {
                     <DropdownMenuItem onSelect={() => void batchHealthTest()}>
                       <CircleGaugeIcon />
                       批量检测
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={openBatchRebind}>
+                      <ArrowRightLeftIcon />
+                      批量重绑
                     </DropdownMenuItem>
                     <DropdownMenuItem
                       onSelect={() => void batchSetEnabled(true)}
@@ -1840,6 +2004,214 @@ export function IpManagementPage() {
             </section>
           </div>
         ) : null}
+      </Drawer>
+
+      <Drawer
+        open={rebindDrawerOpen}
+        onClose={() => {
+          if (batchAction !== "rebind") setRebindDrawerOpen(false);
+        }}
+        title="批量重绑代理"
+        description={`已选择 ${rebindSourceRows.length} 个源代理，共 ${rebindAccountCount} 个账号。`}
+        footer={
+          <>
+            <Button
+              variant="outline"
+              disabled={batchAction === "rebind"}
+              onClick={() => setRebindDrawerOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              disabled={
+                batchAction === "rebind" ||
+                !rebindAccountCount ||
+                (rebindMode === "manual" && !manualRebindReady) ||
+                (rebindMode === "automatic" &&
+                  (policyLoading ||
+                    Boolean(policyError) ||
+                    policy.allocationMode === "manual"))
+              }
+              onClick={() => void batchRebind()}
+            >
+              {batchAction === "rebind" ? (
+                <Spinner />
+              ) : (
+                <ArrowRightLeftIcon />
+              )}
+              确认重绑
+            </Button>
+          </>
+        }
+      >
+        <DrawerFormLayout>
+          <DrawerFormSection
+            title="重绑方式"
+            description="手动为每个源代理指定目标，或让系统按当前分配策略自动选择。"
+          >
+            <DrawerFormField required label="选择模式" align="start">
+              <div className="grid min-w-0 gap-2">
+                <DrawerChoiceGroup
+                  label="批量重绑模式"
+                  value={rebindMode}
+                  onChange={(value) => {
+                    setRebindMode(value as RebindMode);
+                    setRebindResult(null);
+                  }}
+                  options={[
+                    { value: "automatic", label: "自动重绑模式" },
+                    { value: "manual", label: "一对一模式" },
+                  ]}
+                />
+                <p className="text-xs leading-5 text-muted-foreground">
+                  {rebindMode === "manual"
+                    ? "每个源代理下的全部账号，统一迁移到你为它指定的目标代理。"
+                    : "排除本次选中的全部源代理，使用其他可用代理并遵循当前分配策略。"}
+                </p>
+              </div>
+            </DrawerFormField>
+          </DrawerFormSection>
+
+          {rebindMode === "manual" ? (
+            <DrawerFormSection
+              title="代理映射"
+              description="仅有账号绑定的源代理需要指定目标；目标代理必须已启用且不在冷却中。"
+            >
+              <div className="grid gap-3">
+                {rebindSourceRows.map((source) => {
+                  const targetOptions = rows
+                    .filter(
+                      (target) =>
+                        target.id &&
+                        target.id !== source.id &&
+                        proxyAvailableForRebind(target),
+                    )
+                    .map((target) => ({
+                      value: target.id,
+                      label: `${target.host}:${target.port}${target.countryCode ? ` · ${countryDisplayName(target.countryCode)}` : ""}`,
+                      keywords: `${target.host} ${target.port} ${target.countryCode} ${target.provider}`,
+                      leading: <CountryFlag code={target.countryCode || "WW"} />,
+                    }));
+                  return (
+                    <div
+                      key={source.id}
+                      className="grid gap-3 rounded-xl border p-3"
+                    >
+                      <div className="flex min-w-0 items-center justify-between gap-3">
+                        <div className="cell-main min-w-0">
+                          <strong>{source.host}:{source.port}</strong>
+                          <span>{source.id}</span>
+                        </div>
+                        <Badge tone={source.bindingCount ? "neutral" : "warning"}>
+                          {source.bindingCount} 个账号
+                        </Badge>
+                      </div>
+                      {source.bindingCount ? (
+                        <SearchableSelect
+                          ariaLabel={`源代理 ${source.host}:${source.port} 的目标代理`}
+                          className="w-full"
+                          value={rebindMappings[source.id] || ""}
+                          placeholder="选择目标代理"
+                          searchPlaceholder="搜索主机、国家或供应商"
+                          emptyText="没有其他可用代理"
+                          onValueChange={(targetId) =>
+                            setRebindMappings((current) => ({
+                              ...current,
+                              [source.id]: targetId,
+                            }))
+                          }
+                          options={targetOptions}
+                        />
+                      ) : (
+                        <span className="text-xs text-muted-foreground">
+                          当前没有绑定账号，无需指定目标代理。
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </DrawerFormSection>
+          ) : (
+            <DrawerFormSection
+              title="自动分配规则"
+              description="自动重绑与账号首次分配使用同一套国家匹配和容量规则。"
+            >
+              <div className="grid gap-3 rounded-xl border p-4 sm:grid-cols-2">
+                <div className="cell-main">
+                  <span>国家匹配</span>
+                  <strong>
+                    {policy.countryMatch === "visitor_country"
+                      ? "访问国家优先"
+                      : "号码国家优先"}
+                  </strong>
+                </div>
+                <div className="cell-main">
+                  <span>分配模式</span>
+                  <strong>{allocationModeLabels[policy.allocationMode]}</strong>
+                </div>
+                <div className="cell-main">
+                  <span>每个 IP 上限</span>
+                  <strong>{policy.maxAccountsPerIp} 个账号</strong>
+                </div>
+                <div className="cell-main">
+                  <span>当前可见目标池</span>
+                  <strong>{automaticRebindTargets.length} 个代理</strong>
+                </div>
+              </div>
+              {policy.allocationMode === "manual" ? (
+                <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive">
+                  当前分配模式为“仅手动分配”，请改用一对一模式，或先修改分配策略。
+                </div>
+              ) : (
+                <p className="text-xs leading-5 text-muted-foreground">
+                  同国家代理只做优先匹配；没有同国家代理时会回退到其他国家，再按
+                  {allocationModeLabels[policy.allocationMode]}选择目标。
+                </p>
+              )}
+            </DrawerFormSection>
+          )}
+
+          <DrawerFormSection title="执行说明">
+            <div className="grid gap-2 rounded-xl border bg-muted/30 p-4 text-sm">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-muted-foreground">源代理</span>
+                <strong>{rebindSourceRows.length} 个</strong>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-muted-foreground">待重绑账号</span>
+                <strong>{rebindAccountCount} 个</strong>
+              </div>
+              <p className="mt-1 border-t pt-3 text-xs leading-5 text-muted-foreground">
+                在线账号会先断开连接再更新代理，已保存的 WhatsApp 会话不会删除；重绑完成后可正常重新连接。
+              </p>
+            </div>
+          </DrawerFormSection>
+
+          {rebindResult?.summary.failed ? (
+            <DrawerFormSection title="失败明细">
+              <div className="grid gap-2 rounded-xl border border-destructive/20 bg-destructive/5 p-3">
+                <strong className="text-sm text-destructive">
+                  成功 {rebindResult.summary.migrated} 个，失败 {rebindResult.summary.failed} 个
+                </strong>
+                {rebindResult.results
+                  .filter((item) => item.status === "failed")
+                  .slice(0, 20)
+                  .map((item) => (
+                    <div
+                      key={item.bindingId}
+                      className="grid gap-0.5 border-t border-destructive/10 pt-2 text-xs"
+                    >
+                      <span className="font-medium">
+                        {item.accountName || item.accountPhone || item.accountId || "账号已不存在"}
+                      </span>
+                      <span className="text-destructive">{item.error}</span>
+                    </div>
+                  ))}
+              </div>
+            </DrawerFormSection>
+          ) : null}
+        </DrawerFormLayout>
       </Drawer>
 
       <Drawer

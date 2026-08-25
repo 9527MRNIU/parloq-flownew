@@ -25,10 +25,17 @@ from app.entity_ids import entity_id, identifier_filter
 from app.config import get_settings
 from app.snowflake import new_public_id, parse_snowflake_id
 
-from app.models import AccountProxyBinding, IpAllocationPolicy, PersonalAccount, ProxyEndpoint
+from app.models import (
+    AccountPairingAttempt,
+    AccountProxyBinding,
+    IpAllocationPolicy,
+    PersonalAccount,
+    ProxyEndpoint,
+)
 from app.schemas import (
     AccountProxyBindingCreate,
     AccountProxyBindingUpdate,
+    ProxyBatchRebind,
     ProxyEndpointBulkCreate,
     ProxyEndpointBulkTest,
     ProxyEndpointCreate,
@@ -464,6 +471,20 @@ def _binding_row(db: DbSession, binding: AccountProxyBinding) -> dict:
         str(account.id) if account is not None else None,
         account.name if account is not None else None,
         account.phone_e164 if account is not None else None,
+    )
+
+
+def _latest_visitor_country_code(
+    db: DbSession, account_id: int
+) -> str | None:
+    return db.scalar(
+        select(AccountPairingAttempt.visitor_country_code)
+        .where(
+            AccountPairingAttempt.account_id == account_id,
+            AccountPairingAttempt.visitor_country_code.is_not(None),
+        )
+        .order_by(AccountPairingAttempt.created_at.desc())
+        .limit(1)
     )
 
 
@@ -1188,6 +1209,254 @@ def test_proxies_batch(
                 "healthy": sum(results[item.id].healthy for item in proxies),
                 "unhealthy": sum(not results[item.id].healthy for item in proxies),
             },
+        }
+    }
+
+
+@router.post("/api/ip-proxy-bindings/rebind-batch")
+def rebind_proxy_accounts_batch(
+    payload: ProxyBatchRebind,
+    db: DbSession,
+    _admin: AdminUser,
+) -> dict:
+    source_proxies: list[ProxyEndpoint] = []
+    source_ids: set[int] = set()
+    for identifier in payload.source_proxy_ids:
+        proxy = _proxy_or_404(db, identifier)
+        if proxy.id not in source_ids:
+            source_ids.add(proxy.id)
+            source_proxies.append(proxy)
+
+    source_entity_ids = {
+        proxy.id: entity_id(proxy) for proxy in source_proxies
+    }
+    manual_target_ids: dict[int, int] = {}
+    if payload.mode == "manual":
+        for mapping in payload.mappings:
+            source = _proxy_or_404(db, mapping.source_proxy_id)
+            if source.id not in source_ids:
+                raise HTTPException(
+                    status_code=422,
+                    detail="手动重绑映射包含未选择的源代理",
+                )
+            if source.id in manual_target_ids:
+                raise HTTPException(
+                    status_code=422,
+                    detail="同一个源代理不能重复指定目标代理",
+                )
+            target = _proxy_or_404(db, mapping.target_proxy_id)
+            if target.id == source.id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="源代理和目标代理不能相同",
+                )
+            if not target.enabled:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"目标代理 {target.host}:{target.port} 已停用",
+                )
+            if proxy_is_quarantined(target):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"目标代理 {target.host}:{target.port} 正在冷却或需要修复",
+                )
+            manual_target_ids[source.id] = target.id
+
+    binding_snapshots = [
+        {
+            "binding_id": binding_id,
+            "account_id": account_id,
+            "source_proxy_id": source_proxy_id,
+        }
+        for binding_id, account_id, source_proxy_id in db.execute(
+            select(
+                AccountProxyBinding.id,
+                PersonalAccount.id,
+                AccountProxyBinding.proxy_id,
+            )
+            .outerjoin(
+                PersonalAccount,
+                PersonalAccount.public_id
+                == AccountProxyBinding.account_public_id,
+            )
+            .where(AccountProxyBinding.proxy_id.in_(source_ids))
+            .order_by(AccountProxyBinding.proxy_id, AccountProxyBinding.id)
+        ).all()
+    ]
+    populated_source_ids = {
+        item["source_proxy_id"] for item in binding_snapshots
+    }
+    if payload.mode == "manual":
+        missing_mapping_ids = populated_source_ids - manual_target_ids.keys()
+        if missing_mapping_ids:
+            missing_sources = ", ".join(
+                source_entity_ids[source_id]
+                for source_id in sorted(missing_mapping_ids)
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=f"请为有账号绑定的源代理选择目标代理：{missing_sources}",
+            )
+
+    from app.routers.personal_accounts import (
+        _apply_gateway_account,
+        _auto_proxy,
+    )
+
+    results: list[dict] = []
+    migrated = 0
+    gateway_client = WaGatewayClient()
+    disconnect_states = {"warming", "online_idle", "sending", "draining"}
+    for snapshot in binding_snapshots:
+        binding_id = int(snapshot["binding_id"])
+        source_proxy_id = int(snapshot["source_proxy_id"])
+        account_database_id = snapshot["account_id"]
+        binding = db.get(AccountProxyBinding, binding_id)
+        account = (
+            db.get(PersonalAccount, int(account_database_id))
+            if account_database_id is not None
+            else None
+        )
+        base_result = {
+            "bindingId": str(binding_id),
+            "accountId": str(account.id) if account is not None else None,
+            "accountName": account.name if account is not None else None,
+            "accountPhone": account.phone_e164 if account is not None else None,
+            "sourceProxyId": source_entity_ids[source_proxy_id],
+        }
+        if binding is None or binding.proxy_id != source_proxy_id:
+            results.append(
+                {
+                    **base_result,
+                    "status": "failed",
+                    "targetProxyId": None,
+                    "error": "账号绑定已发生变化，请刷新后重试",
+                }
+            )
+            continue
+        if account is None:
+            results.append(
+                {
+                    **base_result,
+                    "status": "failed",
+                    "targetProxyId": None,
+                    "error": "账号已不存在，请先清理残留绑定",
+                }
+            )
+            continue
+        if account.status == "pairing":
+            results.append(
+                {
+                    **base_result,
+                    "status": "failed",
+                    "targetProxyId": None,
+                    "error": "账号正在配对，请完成或取消配对后重试",
+                }
+            )
+            continue
+
+        target = None
+        if payload.mode == "manual":
+            target = db.get(ProxyEndpoint, manual_target_ids[source_proxy_id])
+        else:
+            target = _auto_proxy(
+                db,
+                account.created_by,
+                account.country_code,
+                _latest_visitor_country_code(db, account.id),
+                exclude_proxy_ids=source_ids,
+            )
+        if target is None:
+            results.append(
+                {
+                    **base_result,
+                    "status": "failed",
+                    "targetProxyId": None,
+                    "error": "没有符合当前分配策略的可用代理",
+                }
+            )
+            continue
+        target_entity_id = entity_id(target)
+        if not target.enabled or proxy_is_quarantined(target):
+            results.append(
+                {
+                    **base_result,
+                    "status": "failed",
+                    "targetProxyId": target_entity_id,
+                    "error": "目标代理已停用、正在冷却或需要修复",
+                }
+            )
+            continue
+
+        try:
+            if account.status in disconnect_states:
+                try:
+                    disconnected = gateway_client.disconnect(
+                        account.gateway_account_id
+                    )
+                except GatewayError as exc:
+                    if exc.status_code != 404:
+                        raise
+                else:
+                    _apply_gateway_account(
+                        account,
+                        disconnected or {"state": "linked_offline"},
+                    )
+            binding.proxy_id = target.id
+            db.flush()
+            try:
+                _sync_account_proxy(db, account.gateway_account_id)
+            except GatewayError as exc:
+                if exc.status_code != 404:
+                    raise
+            db.commit()
+        except GatewayError as exc:
+            _rollback_and_reconcile(db, account.gateway_account_id)
+            results.append(
+                {
+                    **base_result,
+                    "status": "failed",
+                    "targetProxyId": target_entity_id,
+                    "error": str(exc),
+                }
+            )
+            continue
+        except Exception:
+            _rollback_and_reconcile(db, account.gateway_account_id)
+            logger.exception(
+                "Failed to batch rebind account %s from proxy %s",
+                account.gateway_account_id,
+                source_proxy_id,
+            )
+            results.append(
+                {
+                    **base_result,
+                    "status": "failed",
+                    "targetProxyId": target_entity_id,
+                    "error": "重绑失败，请稍后重试",
+                }
+            )
+            continue
+        migrated += 1
+        results.append(
+            {
+                **base_result,
+                "status": "success",
+                "targetProxyId": target_entity_id,
+                "error": None,
+            }
+        )
+
+    return {
+        "data": {
+            "summary": {
+                "sourceProxies": len(source_ids),
+                "accounts": len(binding_snapshots),
+                "migrated": migrated,
+                "failed": len(binding_snapshots) - migrated,
+                "emptySources": len(source_ids - populated_source_ids),
+            },
+            "results": results,
         }
     }
 

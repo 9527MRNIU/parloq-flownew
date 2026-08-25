@@ -715,6 +715,8 @@ def _auto_proxy(
     owner_id: int,
     phone_country_code: str | None,
     visitor_country_code: str | None = None,
+    *,
+    exclude_proxy_ids: set[int] | None = None,
 ) -> ProxyEndpoint | None:
     policy = db.scalar(
         select(IpAllocationPolicy).where(IpAllocationPolicy.created_by == owner_id)
@@ -753,6 +755,10 @@ def _auto_proxy(
         )
         .group_by(ProxyEndpoint.id)
     )
+    if exclude_proxy_ids:
+        statement = statement.where(
+            ProxyEndpoint.id.notin_(exclude_proxy_ids)
+        )
     if mode == "strict_one_to_one":
         statement = statement.having(func.count(AccountProxyBinding.id) == 0)
     else:

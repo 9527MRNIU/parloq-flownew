@@ -391,6 +391,32 @@ class ProxyEndpointBulkTest(ApiModel):
     source: Literal["import", "manual"] = "manual"
 
 
+class ProxyBatchRebindMapping(ApiModel):
+    source_proxy_id: str = Field(
+        alias="sourceProxyId",
+        min_length=1,
+        max_length=64,
+    )
+    target_proxy_id: str = Field(
+        alias="targetProxyId",
+        min_length=1,
+        max_length=64,
+    )
+
+
+class ProxyBatchRebind(ApiModel):
+    source_proxy_ids: list[str] = Field(
+        alias="sourceProxyIds",
+        min_length=1,
+        max_length=100,
+    )
+    mode: Literal["manual", "automatic"]
+    mappings: list[ProxyBatchRebindMapping] = Field(
+        default_factory=list,
+        max_length=100,
+    )
+
+
 class AccountProxyBindingCreate(ApiModel):
     account_id: str = Field(
         alias="accountId",

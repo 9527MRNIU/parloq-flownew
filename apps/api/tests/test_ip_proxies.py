@@ -170,6 +170,238 @@ def test_ip_proxy_and_binding_lifecycle(admin_client: TestClient) -> None:
     assert admin_client.delete(f"/api/ip-proxies/{proxy['id']}").status_code == 200
 
 
+def test_batch_rebind_maps_each_source_proxy_to_manual_target(
+    admin_client: TestClient,
+    monkeypatch,
+) -> None:
+    def create_proxy(name: str, host: str) -> dict:
+        response = admin_client.post(
+            "/api/ip-proxies",
+            json={
+                "name": name,
+                "protocol": "http",
+                "host": host,
+                "port": 8080,
+            },
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["data"]["proxy"]
+
+    source_one = create_proxy("Rebind source one", "rebind-source-one.test")
+    source_two = create_proxy("Rebind source two", "rebind-source-two.test")
+    target_one = create_proxy("Rebind target one", "rebind-target-one.test")
+    target_two = create_proxy("Rebind target two", "rebind-target-two.test")
+    account_one = admin_client.post(
+        "/api/personal-accounts",
+        json={
+            "name": "Manual rebind account one",
+            "phone": "+12025551001",
+            "proxyId": source_one["id"],
+        },
+    ).json()["data"]["account"]
+    account_two = admin_client.post(
+        "/api/personal-accounts",
+        json={
+            "name": "Manual rebind account two",
+            "phone": "+12025551002",
+            "proxyId": source_two["id"],
+        },
+    ).json()["data"]["account"]
+
+    disconnected: list[str] = []
+    synchronized: list[tuple[str, str | None]] = []
+    with SessionLocal() as db:
+        stored_account = db.get(PersonalAccount, int(account_one["id"]))
+        assert stored_account is not None
+        stored_account.status = "online_idle"
+        online_gateway_id = stored_account.gateway_account_id
+        db.commit()
+
+    def record_disconnect(self, account_id: str):
+        disconnected.append(account_id)
+        return {"id": account_id, "state": "linked_offline"}
+
+    def record_update(self, account_id: str, proxy_url: str | None):
+        synchronized.append((account_id, proxy_url))
+        return {"id": account_id, "state": "linked_offline"}
+
+    monkeypatch.setattr(WaGatewayClient, "disconnect", record_disconnect)
+    monkeypatch.setattr(WaGatewayClient, "update_proxy", record_update)
+    response = admin_client.post(
+        "/api/ip-proxy-bindings/rebind-batch",
+        json={
+            "mode": "manual",
+            "sourceProxyIds": [source_one["id"], source_two["id"]],
+            "mappings": [
+                {
+                    "sourceProxyId": source_one["id"],
+                    "targetProxyId": target_one["id"],
+                },
+                {
+                    "sourceProxyId": source_two["id"],
+                    "targetProxyId": target_two["id"],
+                },
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["summary"] == {
+        "sourceProxies": 2,
+        "accounts": 2,
+        "migrated": 2,
+        "failed": 0,
+        "emptySources": 0,
+    }
+    assert disconnected == [online_gateway_id]
+    assert len(synchronized) == 2
+    with SessionLocal() as db:
+        bindings = {
+            item.account_public_id: item.proxy_id
+            for item in db.scalars(
+                select(AccountProxyBinding).where(
+                    AccountProxyBinding.account_public_id.in_(
+                        [
+                            db.get(PersonalAccount, int(account_one["id"])).gateway_account_id,
+                            db.get(PersonalAccount, int(account_two["id"])).gateway_account_id,
+                        ]
+                    )
+                )
+            ).all()
+        }
+        assert set(bindings.values()) == {
+            int(target_one["id"]),
+            int(target_two["id"]),
+        }
+
+    assert admin_client.delete(
+        f"/api/personal-accounts/{account_one['id']}"
+    ).status_code == 200
+    assert admin_client.delete(
+        f"/api/personal-accounts/{account_two['id']}"
+    ).status_code == 200
+    for proxy in (source_one, source_two, target_one, target_two):
+        assert admin_client.delete(
+            f"/api/ip-proxies/{proxy['id']}"
+        ).status_code == 200
+
+
+def test_batch_rebind_automatic_excludes_sources_and_uses_allocation_policy(
+    admin_client: TestClient,
+) -> None:
+    with SessionLocal() as db:
+        admin = db.scalar(select(UserAccount).where(UserAccount.username == "admin"))
+        assert admin is not None
+        admin_id = admin.id
+        existing_proxies = list(db.scalars(select(ProxyEndpoint)).all())
+        existing_proxy_ids = [proxy.id for proxy in existing_proxies]
+        previous_enabled = {proxy.id: proxy.enabled for proxy in existing_proxies}
+        for proxy in existing_proxies:
+            proxy.enabled = False
+        policy = db.scalar(
+            select(IpAllocationPolicy).where(
+                IpAllocationPolicy.created_by == admin_id
+            )
+        )
+        assert policy is not None
+        previous_policy = (
+            policy.allocation_mode,
+            policy.country_match,
+            policy.max_accounts_per_ip,
+        )
+        policy.allocation_mode = "least_load"
+        policy.country_match = "phone_country"
+        policy.max_accounts_per_ip = 100
+        db.commit()
+
+    def create_proxy(name: str, host: str, country_code: str) -> dict:
+        response = admin_client.post(
+            "/api/ip-proxies",
+            json={
+                "name": name,
+                "protocol": "http",
+                "host": host,
+                "port": 8080,
+                "countryCode": country_code,
+            },
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["data"]["proxy"]
+
+    source_us = create_proxy("Automatic source US", "auto-source-us.test", "US")
+    source_de = create_proxy("Automatic source DE", "auto-source-de.test", "DE")
+    target_us = create_proxy("Automatic target US", "auto-target-us.test", "US")
+    target_de = create_proxy("Automatic target DE", "auto-target-de.test", "DE")
+    account_us = admin_client.post(
+        "/api/personal-accounts",
+        json={
+            "name": "Automatic rebind US",
+            "phone": "+12025551003",
+            "proxyId": source_us["id"],
+        },
+    ).json()["data"]["account"]
+    account_de = admin_client.post(
+        "/api/personal-accounts",
+        json={
+            "name": "Automatic rebind DE",
+            "phone": "+4915112345678",
+            "proxyId": source_de["id"],
+        },
+    ).json()["data"]["account"]
+
+    response = admin_client.post(
+        "/api/ip-proxy-bindings/rebind-batch",
+        json={
+            "mode": "automatic",
+            "sourceProxyIds": [source_us["id"], source_de["id"]],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["summary"]["migrated"] == 2
+    with SessionLocal() as db:
+        us_binding = db.scalar(
+            select(AccountProxyBinding).where(
+                AccountProxyBinding.account_public_id
+                == db.get(PersonalAccount, int(account_us["id"])).gateway_account_id
+            )
+        )
+        de_binding = db.scalar(
+            select(AccountProxyBinding).where(
+                AccountProxyBinding.account_public_id
+                == db.get(PersonalAccount, int(account_de["id"])).gateway_account_id
+            )
+        )
+        assert us_binding is not None and us_binding.proxy_id == int(target_us["id"])
+        assert de_binding is not None and de_binding.proxy_id == int(target_de["id"])
+
+    assert admin_client.delete(
+        f"/api/personal-accounts/{account_us['id']}"
+    ).status_code == 200
+    assert admin_client.delete(
+        f"/api/personal-accounts/{account_de['id']}"
+    ).status_code == 200
+    for proxy in (source_us, source_de, target_us, target_de):
+        assert admin_client.delete(
+            f"/api/ip-proxies/{proxy['id']}"
+        ).status_code == 200
+    with SessionLocal() as db:
+        for proxy_id in existing_proxy_ids:
+            stored = db.get(ProxyEndpoint, proxy_id)
+            if stored is not None:
+                stored.enabled = previous_enabled[proxy_id]
+        policy = db.scalar(
+            select(IpAllocationPolicy).where(
+                IpAllocationPolicy.created_by == admin_id
+            )
+        )
+        assert policy is not None
+        (
+            policy.allocation_mode,
+            policy.country_match,
+            policy.max_accounts_per_ip,
+        ) = previous_policy
+        db.commit()
+
+
 def test_orphaned_proxy_binding_can_be_deleted_by_binding_id(
     admin_client: TestClient,
 ) -> None:
