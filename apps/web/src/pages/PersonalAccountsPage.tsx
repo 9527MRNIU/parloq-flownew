@@ -135,6 +135,29 @@ type ProxyRow = {
   countryCode: string;
   enabled: boolean;
 };
+function AccountProxyDisplay({
+  proxyId,
+  proxy,
+}: {
+  proxyId: string;
+  proxy?: ProxyRow;
+}) {
+  return (
+    <div className="cell-main min-w-[180px]">
+      {proxy?.countryCode ? (
+        <CountryDisplay
+          code={proxy.countryCode}
+          className="justify-start font-semibold"
+        />
+      ) : (
+        <strong>-</strong>
+      )}
+      <span title={proxy?.endpoint || undefined}>
+        {proxyId ? proxy?.endpoint || "已绑定固定代理" : "系统自动分配"}
+      </span>
+    </div>
+  );
+}
 type AccountGroup = { id: string; readKey: string; name: string; ownerId: string };
 type ImportProtocol = {
   id: string;
@@ -384,14 +407,8 @@ export function PersonalAccountsPage() {
   const [importGroupId, setImportGroupId] = useState("");
   const [importProtocolId, setImportProtocolId] = useState("");
   const [importProxyId, setImportProxyId] = useState("");
-  const proxyEndpointById = useMemo(
-    () =>
-      new Map(
-        proxies.map((proxy) => [
-          proxy.id,
-          `${proxy.endpoint}${proxy.countryCode ? ` · ${proxy.countryCode}` : ""}`,
-        ]),
-      ),
+  const proxyById = useMemo(
+    () => new Map(proxies.map((proxy) => [proxy.id, proxy])),
     [proxies],
   );
 
@@ -1147,11 +1164,10 @@ export function PersonalAccountsPage() {
                     </strong>
                   </TableCell>
                   <TableCell>
-                    <strong className="min-w-[180px]">
-                      {row.proxyId
-                        ? proxyEndpointById.get(row.proxyId) || "已绑定固定代理"
-                        : "系统自动分配"}
-                    </strong>
+                    <AccountProxyDisplay
+                      proxyId={row.proxyId}
+                      proxy={proxyById.get(row.proxyId)}
+                    />
                   </TableCell>
                   <TableCell className="text-center align-middle">
                     <div className="cell-main mx-auto min-w-[160px] items-center text-center">
