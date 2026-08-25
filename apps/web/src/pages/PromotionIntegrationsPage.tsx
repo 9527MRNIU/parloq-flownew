@@ -358,7 +358,7 @@ export default function PromotionIntegrationsPage() {
       return { ok: true, cacheHit: data.cacheHit === true };
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "远程仓库读取失败";
-      if (preserve) toast.error(`仓库刷新失败，当前显示上次缓存：${message}`);
+      if (preserve) toast.warning(`仓库刷新失败，当前显示上次缓存：${message}`);
       else {
         setRepositoryRows([]);
         setRepositoryTotal(0);
@@ -460,6 +460,7 @@ export default function PromotionIntegrationsPage() {
   async function importRepositoryIntegration(
     row: Pick<RemotePromotionArtifact, "sequence">,
     domainId?: string,
+    notifications = toast,
   ) {
     if (!canManage || repositoryPending) return;
     setRepositoryPending(row.sequence);
@@ -477,10 +478,10 @@ export default function PromotionIntegrationsPage() {
       const data = object(object(payload).data ?? payload);
       const action = field(data, "action");
       setRepositoryImporting(null);
-      toast.success(action === "updated" ? "远程集成已更新" : "远程集成已添加到本地");
+      notifications.success(action === "updated" ? "远程集成已更新" : "远程集成已添加到本地");
       await Promise.all([load(), loadRepository()]);
     } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "远程集成导入失败");
+      notifications.error(caught instanceof Error ? caught.message : "远程集成导入失败");
     } finally {
       setRepositoryPending("");
     }
@@ -1076,7 +1077,11 @@ export default function PromotionIntegrationsPage() {
               disabled={!repositoryImporting || !repositoryDomainId || Boolean(repositoryPending)}
               onClick={() => {
                 if (repositoryImporting) {
-                  void importRepositoryIntegration(repositoryImporting, repositoryDomainId);
+                  void importRepositoryIntegration(
+                    repositoryImporting,
+                    repositoryDomainId,
+                    toast,
+                  );
                 }
               }}
             >

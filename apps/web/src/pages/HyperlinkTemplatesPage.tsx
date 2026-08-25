@@ -691,7 +691,7 @@ export function HyperlinkTemplatesPage() {
 
   async function save() {
     const error = validateForm();
-    if (error) { toast.error(error); return; }
+    if (error) { toast.warning(error); return; }
     setPending(true);
     try {
       await apiRequest(editing ? `/api/hyperlink/templates/${editing.id}` : "/api/hyperlink/templates", {

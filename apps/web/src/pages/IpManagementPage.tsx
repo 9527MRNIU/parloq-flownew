@@ -868,7 +868,7 @@ export function IpManagementPage() {
     setBulkPreviewToken("");
     try {
       await cancellation;
-      toast.info("已取消代理检测");
+      toast.success("已取消代理检测");
     } catch {
       toast.warning("页面已停止检测，服务端取消通知失败");
     }
@@ -990,7 +990,7 @@ export function IpManagementPage() {
     const skipped = selectedProxyIds.length - proxyIds.length;
     if (!selectedProxyIds.length || batchAction) return;
     if (!proxyIds.length) {
-      toast.info(`选中的代理已经全部${enabled ? "启用" : "停用"}`);
+      toast.success(`选中的代理已经全部${enabled ? "启用" : "停用"}`);
       return;
     }
     if (

@@ -1284,7 +1284,7 @@ export function PromotionTemplatesPage() {
       return { ok: true, cacheHit: data.cacheHit === true };
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "远程仓库读取失败";
-      if (preserve) toast.error(`仓库刷新失败，当前显示上次缓存：${message}`);
+      if (preserve) toast.warning(`仓库刷新失败，当前显示上次缓存：${message}`);
       else {
         setRepositoryRows([]);
         setRepositoryTotal(0);
@@ -1344,7 +1344,7 @@ export function PromotionTemplatesPage() {
     if (next && next.size > TEMPLATE_PACKAGE_MAX_BYTES) {
       setFile(null);
       setPackageInspecting(false);
-      toast.error("模板 ZIP 不能超过 64 MB");
+      toast.warning("模板 ZIP 不能超过 64 MB");
       return;
     }
     setFile(next);
@@ -1407,11 +1407,13 @@ export function PromotionTemplatesPage() {
         toast.success(file ? "模板及资源包已更新" : "模板已保存");
       } else {
         setQualityReviewing(imported);
-        toast.success(
-          imported.qualityReport.status === "warnings"
-            ? `模板已导入，发现 ${imported.qualityReport.warnings.length} 项优化建议`
-            : "模板已导入，质量检查通过",
-        );
+        if (imported.qualityReport.status === "warnings") {
+          toast.warning(
+            `模板已导入，发现 ${imported.qualityReport.warnings.length} 项优化建议`,
+          );
+        } else {
+          toast.success("模板已导入，质量检查通过");
+        }
       }
       await load();
     } catch (caught) {

@@ -782,7 +782,11 @@ export function DomainsPage() {
     setEnabled(row.enabled);
     setDrawer(true);
   }
-  async function continueOnboarding(row: DomainRow, quiet = false) {
+  async function continueOnboarding(
+    row: DomainRow,
+    quiet = false,
+    notifications = toast,
+  ) {
     if (!row.id) return null;
     setOnboardingPending(row.id);
     try {
@@ -795,16 +799,16 @@ export function DomainsPage() {
       await load();
       if (!quiet) {
         if (updated.onboarding.status === "completed") {
-          toast.success("域名已完成自动接入并通过验证");
+          notifications.success("域名已完成自动接入并通过验证");
         } else if (updated.onboarding.status === "failed") {
-          toast.error(updated.onboarding.message || "自动接入未完成");
+          notifications.error(updated.onboarding.message || "自动接入未完成");
         } else {
-          toast.success(updated.onboarding.message || "接入状态已更新");
+          notifications.success(updated.onboarding.message || "接入状态已更新");
         }
       }
       return updated;
     } catch (caught) {
-      if (!quiet) toast.error(caught instanceof Error ? caught.message : "自动接入失败");
+      if (!quiet) notifications.error(caught instanceof Error ? caught.message : "自动接入失败");
       return null;
     } finally {
       setOnboardingPending("");
@@ -851,7 +855,7 @@ export function DomainsPage() {
       if (next.status === "failed") {
         toast.error(next.error || "域名后缀查询失败");
       } else if (next.status === "completed" && !next.options.length) {
-        toast.error("没有找到可购买的域名后缀");
+        toast.warning("没有找到可购买的域名后缀");
       }
     } catch (caught) {
       setDomainSearch(null);
@@ -899,7 +903,7 @@ export function DomainsPage() {
       setPurchasePending(false);
     }
   }
-  async function verify(row: DomainRow) {
+  async function verify(row: DomainRow, notifications = toast) {
     if (!row.id) return;
     setTesting(row.id);
     try {
@@ -908,15 +912,19 @@ export function DomainsPage() {
       const updated = value ? normalize(value) : null;
       if (updated && editing?.id === row.id) setEditing(updated);
       await load();
-      if (updated?.channelSelectable) toast.success("域名验证已完成，可用于推广渠道");
-      else toast.error(updated?.lastError || "DNS 或 TLS 尚未验证通过，请检查解析记录");
+      if (updated?.channelSelectable) notifications.success("域名验证已完成，可用于推广渠道");
+      else notifications.warning(updated?.lastError || "DNS 或 TLS 尚未验证通过，请检查解析记录");
     } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "验证失败");
+      notifications.error(caught instanceof Error ? caught.message : "验证失败");
     } finally {
       setTesting("");
     }
   }
-  async function runOrderAction(row: DomainOrderRow, action: "mock-payment" | "provision" | "cancel") {
+  async function runOrderAction(
+    row: DomainOrderRow,
+    action: "mock-payment" | "provision" | "cancel",
+    notifications = toast,
+  ) {
     if (!row.id) return;
     if (action === "provision" && row.provider === "namesilo" && !(await confirmAction({
       title: `确认通过 NameSilo 购买 ${row.hostname}？`,
@@ -942,7 +950,7 @@ export function DomainsPage() {
       }
       if (order?.id === row.id) setOrder(updated);
       await load();
-      toast.success(
+      notifications.success(
         action === "cancel"
           ? "订单已取消"
           : updated.status === "completed"
@@ -952,11 +960,11 @@ export function DomainsPage() {
               : "订单状态已更新",
       );
       if (updated.status === "completed" && provisionedDomain) {
-        await continueOnboarding(normalize(provisionedDomain));
+        await continueOnboarding(normalize(provisionedDomain), false, notifications);
       }
     } catch (caught) {
       await load().catch(() => undefined);
-      toast.error(caught instanceof Error ? caught.message : "订单操作失败");
+      notifications.error(caught instanceof Error ? caught.message : "订单操作失败");
     } finally {
       setOrderPending("");
     }
@@ -1776,7 +1784,7 @@ export function DomainsPage() {
                       <Button
                         variant="outline"
                         disabled={!editing.id || onboardingPending === editing.id}
-                        onClick={() => void continueOnboarding(editing)}
+                        onClick={() => void continueOnboarding(editing, false, toast)}
                       >
                         {onboardingPending === editing.id ? <Spinner /> : <PlayCircleIcon size={16} />}
                         立即重试
@@ -1785,7 +1793,7 @@ export function DomainsPage() {
                     <Button
                       variant="outline"
                       disabled={!editing.id || testing === editing.id}
-                      onClick={() => void verify(editing)}
+                      onClick={() => void verify(editing, toast)}
                     >
                       {testing === editing.id ? <LoaderCircleIcon className="spin" size={16} /> : <RefreshCwIcon size={16} />}
                       重新验证
@@ -1825,11 +1833,11 @@ export function DomainsPage() {
                 {purchasePending ? <Spinner /> : null}确认并创建订单
               </Button>
             ) : order?.allowedActions.mockPayment ? (
-              <Button disabled={Boolean(orderPending)} onClick={() => void runOrderAction(order, "mock-payment")}>
+              <Button disabled={Boolean(orderPending)} onClick={() => void runOrderAction(order, "mock-payment", toast)}>
                 {orderPending ? <Spinner /> : null}确认支付并开通
               </Button>
             ) : order?.allowedActions.provision ? (
-              <Button disabled={Boolean(orderPending)} onClick={() => void runOrderAction(order, "provision")}>
+              <Button disabled={Boolean(orderPending)} onClick={() => void runOrderAction(order, "provision", toast)}>
                 {orderPending ? <Spinner /> : null}{order.provider === "namesilo" ? "确认购买并开通" : "立即开通"}
               </Button>
             ) : order ? null : (

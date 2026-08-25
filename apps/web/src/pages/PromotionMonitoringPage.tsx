@@ -568,12 +568,12 @@ export default function PromotionMonitoringPage() {
     setPage(1);
   }
 
-  async function copyLandingUrl(value: string) {
+  async function copyLandingUrl(value: string, notifications = toast) {
     try {
       await navigator.clipboard.writeText(value);
-      toast.success("访问地址已复制");
+      notifications.success("访问地址已复制");
     } catch {
-      toast.error("复制失败，请手动复制");
+      notifications.error("复制失败，请手动复制");
     }
   }
 
@@ -860,7 +860,10 @@ export default function PromotionMonitoringPage() {
         {detailLoading || !detail?.metadata ? (
           <div className="loading-state"><Spinner />正在加载监控详情…</div>
         ) : (
-          <RecordDetail item={detail} onCopyLanding={(value) => void copyLandingUrl(value)} />
+          <RecordDetail
+            item={detail}
+            onCopyLanding={(value) => void copyLandingUrl(value, toast)}
+          />
         )}
       </Drawer>
     </StandardListPage>

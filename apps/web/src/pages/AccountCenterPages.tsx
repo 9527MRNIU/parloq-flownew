@@ -760,12 +760,12 @@ export function AccountIntakePage() {
     setPage(1);
   }
 
-  async function copyLandingUrl(value: string) {
+  async function copyLandingUrl(value: string, notifications = toast) {
     try {
       await navigator.clipboard.writeText(value);
-      toast.success("访问地址已复制");
+      notifications.success("访问地址已复制");
     } catch {
-      toast.error("复制失败，请手动复制");
+      notifications.error("复制失败，请手动复制");
     }
   }
   const advancedFilterCount = [
@@ -1005,7 +1005,10 @@ export function AccountIntakePage() {
         footer={<Button onClick={() => setSelectedAttempt(null)}>关闭</Button>}
       >
         {selectedAttempt ? (
-          <IntakeRecordDetail attempt={selectedAttempt} onCopyLanding={copyLandingUrl} />
+          <IntakeRecordDetail
+            attempt={selectedAttempt}
+            onCopyLanding={(value) => void copyLandingUrl(value, toast)}
+          />
         ) : null}
       </Drawer>
     </StandardListPage>

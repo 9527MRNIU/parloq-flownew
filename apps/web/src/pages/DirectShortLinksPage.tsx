@@ -388,7 +388,7 @@ export function DirectShortLinksPage() {
       const updated = Number(response.data?.updated || 0);
       const failed = Number(response.data?.failed || 0);
       if (failed) {
-        toast.error(`已同步 ${updated} 条，${failed} 条读取失败`);
+        toast.warning(`已同步 ${updated} 条，${failed} 条读取失败`);
       } else {
         toast.success(`已同步 ${updated} 条短链的点击数据`);
       }

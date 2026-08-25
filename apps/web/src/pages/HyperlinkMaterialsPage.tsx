@@ -590,7 +590,7 @@ export function MaterialsPage() {
     const selectedFiles = Array.from(files).filter((file) => file.size > 0);
     const additions = selectedFiles.filter((file) => acceptsMaterialFile(file, definition(form.type).accept));
     const rejectedCount = selectedFiles.length - additions.length;
-    if (rejectedCount) toast.error(`${rejectedCount} 个文件格式不符合${definition(form.type).label}要求`);
+    if (rejectedCount) toast.warning(`${rejectedCount} 个文件格式不符合${definition(form.type).label}要求`);
     if (!additions.length) return;
     setBatchItems((current) => {
       const usedNames = new Set(current.map((item) => item.name.trim().toLocaleLowerCase()));
@@ -727,7 +727,8 @@ export function MaterialsPage() {
     await Promise.all(Array.from({ length: Math.min(3, queue.length) }, () => worker()));
     setActiveType(form.type);
     await load();
-    if (failures.length) toast.error(`${queue.length - failures.length} 个上传成功，${failures.length} 个失败`);
+    if (failures.length === queue.length) toast.error(`${failures.length} 个文件上传失败`);
+    else if (failures.length) toast.warning(`${queue.length - failures.length} 个上传成功，${failures.length} 个失败`);
     else toast.success(`已上传 ${queue.length} 个素材`);
     setPending(false);
   }
@@ -801,7 +802,8 @@ export function MaterialsPage() {
       ? apiRequest(`/api/materials/${row.id}`, { method: "DELETE" })
       : apiRequest(`/api/materials/${row.id}`, { method: "PATCH", body: JSON.stringify({ enabled: action === "enable" }) })));
     const failed = settled.filter((item) => item.status === "rejected").length;
-    if (failed) toast.error(`${selectedRows.length - failed} 个处理成功，${failed} 个失败`);
+    if (failed === selectedRows.length) toast.error(`${failed} 个素材处理失败`);
+    else if (failed) toast.warning(`${selectedRows.length - failed} 个处理成功，${failed} 个失败`);
     else toast.success(`已处理 ${selectedRows.length} 个素材`);
     setSelected(new Set());
     await load();
@@ -817,7 +819,7 @@ export function MaterialsPage() {
       { method: "PATCH", body: JSON.stringify({ textRole: role }) },
     )));
     const failed = settled.filter((item) => item.status === "rejected").length;
-    if (failed) toast.error(`${textRows.length - failed} 个已修改，${failed} 个不符合${textRoleDefinition(role).label}规则`);
+    if (failed) toast.warning(`${textRows.length - failed} 个已修改，${failed} 个不符合${textRoleDefinition(role).label}规则`);
     else toast.success(`已改为${textRoleDefinition(role).label}素材`);
     setSelected(new Set());
     await load();
