@@ -1179,7 +1179,7 @@ export function PersonalAccountsPage() {
                           disabled={!row.id || Boolean(operation)}
                           onClick={() => void action(row, "disconnect")}
                         >
-                          断开
+                          断开下线
                         </Button>
                       ) : (
                         <Button
