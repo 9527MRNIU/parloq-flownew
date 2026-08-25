@@ -1044,12 +1044,12 @@ export function PersonalAccountsPage() {
                 <TableHead className="text-center">类型</TableHead>
                 <TableHead className="text-center">系统</TableHead>
                 <TableHead className="text-center">来源</TableHead>
-                <TableHead>分组</TableHead>
-                <TableHead>代理</TableHead>
-                <TableHead className="text-center">发送数据</TableHead>
                 <TableHead className="text-center">好友数</TableHead>
                 <TableHead className="text-center">群组数</TableHead>
                 <TableHead className="text-center">评分</TableHead>
+                <TableHead>分组</TableHead>
+                <TableHead>代理</TableHead>
+                <TableHead className="text-center">发送数据</TableHead>
                 <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
@@ -1122,6 +1122,21 @@ export function PersonalAccountsPage() {
                         </span>
                       ) : null}
                     </div>
+                  </TableCell>
+                  <TableCell className="text-center align-middle">
+                    <strong className="tabular-nums">
+                      {row.friendCount == null ? "-" : row.friendCount}
+                    </strong>
+                  </TableCell>
+                  <TableCell className="text-center align-middle">
+                    <strong className="tabular-nums">
+                      {row.groupCount == null ? "-" : row.groupCount}
+                    </strong>
+                  </TableCell>
+                  <TableCell className="text-center align-middle">
+                    <strong className="tabular-nums">
+                      {row.qualityScore == null ? "待同步" : `${row.qualityScore} 分`}
+                    </strong>
                   </TableCell>
                   <TableCell>
                     <div className="cell-main min-w-[160px]">
@@ -1201,21 +1216,6 @@ export function PersonalAccountsPage() {
                       ) : null}
                       <span>最近连接 {formatDateTime(row.lastConnectedAt)}</span>
                     </div>
-                  </TableCell>
-                  <TableCell className="text-center align-middle">
-                    <strong className="tabular-nums">
-                      {row.friendCount == null ? "-" : row.friendCount}
-                    </strong>
-                  </TableCell>
-                  <TableCell className="text-center align-middle">
-                    <strong className="tabular-nums">
-                      {row.groupCount == null ? "-" : row.groupCount}
-                    </strong>
-                  </TableCell>
-                  <TableCell className="text-center align-middle">
-                    <strong className="tabular-nums">
-                      {row.qualityScore == null ? "待同步" : `${row.qualityScore} 分`}
-                    </strong>
                   </TableCell>
                   <TableCell className="sticky right-0 bg-background">
                     <div className="flex min-w-max items-center justify-end gap-2">
