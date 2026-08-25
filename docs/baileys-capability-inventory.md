@@ -12,6 +12,8 @@
 | 连接与会话 | 二维码配对 | `connection.update` 中的 QR | 未产品化 | Baileys 支持，当前页面未提供 |
 | 连接与会话 | 保存登录凭证 | `creds.update` | 已接入 | 持久化凭证和 Signal 密钥 |
 | 连接与会话 | 恢复登录会话 | `auth`、保存的凭证 | 已接入 | 无需重新配对即可恢复连接 |
+| 连接与会话 | 识别账号平台 | `AuthenticationCreds.platform`、`creds.update` | 底层已保存，业务未提取 | 配对成功时 Baileys 保存手机平台原始值；可归一化为 Android、iOS、其他或未知 |
+| 连接与会话 | 识别个人版/商业版 | `isWABusinessPlatform(platform)` | 未接入业务表 | Baileys 6.7.24 明确将 `smba`、`smbi` 判断为 WhatsApp Business；分别对应 Android、iOS |
 | 连接与会话 | 连接状态与断线原因 | `connection.update` | 已接入 | 驱动账号状态机、断线重连和管理端在线/离线显示 |
 | 连接与会话 | 连接后向 WhatsApp 显示在线 | `markOnlineOnConnect` | 已接入，可配置 | 协议节点提供“关闭在线”开关且默认开启；开启时传 `false`，关闭该开关时传 `true`，不影响 Parloq 管理端判断连接状态 |
 | 连接与会话 | 主动发布在线、离线或输入状态 | `sendPresenceUpdate()` | 未直接接入 | Baileys 支持 `available`、`unavailable`、`composing`、`recording`、`paused` 等 Presence 状态 |
@@ -51,10 +53,12 @@
 | 媒体 | 刷新媒体连接 | `refreshMediaConn()` | 已接入底层链路 | Baileys 内部上传所需 |
 | 媒体 | 下载媒体 | `downloadMediaMessage()` | 未接入 | 未做入站媒体归档 |
 | 媒体 | 媒体重传 | `updateMediaMessage()` | 未产品化 | Baileys 支持 |
-| 历史同步 | 请求完整历史 | `syncFullHistory` | 部分接入 | 联系人、聊天列表或消息历史开启时设为 `true` |
-| 历史同步 | 过滤历史消息类型 | `shouldSyncHistoryMessage()` | 部分接入 | 由消息历史开关控制 |
+| 历史同步 | 请求完整历史 | `syncFullHistory` | 部分接入 | 后续统一由 Parloq 的 `historySync` 控制；实际下发范围由 WhatsApp 决定 |
+| 历史同步 | 选择是否处理历史同步通知 | `shouldSyncHistoryMessage()` | 部分接入 | 后续与 `historySync` 使用同一判断；处理联系人资源后丢弃聊天列表和消息正文 |
 | 历史同步 | 接收首次历史 | `messaging-history.set` | 部分接入 | 当前只统计聊天、联系人和历史消息数量 |
+| 历史同步 | 聚合双向互动 | 历史 `messages`、在线 `messages.upsert`、`key.fromMe` | 未接入 | Baileys 没有“双方互存”字段；只能按收发两个方向计算一段时间内的双向互动联系人 |
 | 联系人 | 联系人新增/更新事件 | `contacts.upsert`、`contacts.update` | 部分接入 | 当前只统计联系人增量数量 |
+| 联系人 | 判断本账号已保存的联系人 | `Contact.name` | 未接入业务表 | `name` 是本账号保存的名称；`notify` 是对方自己的显示名，不能作为已保存好友的证据 |
 | 联系人 | 新增或修改联系人 | `addOrEditContact()` | 未接入 | Baileys 支持 |
 | 联系人 | 删除联系人 | `removeContact()` | 未接入 | Baileys 支持 |
 | 聊天 | 聊天新增/更新/删除事件 | `chats.upsert/update/delete` | 未接入 | Baileys 支持 |
@@ -108,29 +112,31 @@
 | 底层协议 | Signal 会话和 PreKey | `assertSessions()`、`uploadPreKeys()` | 已接入底层链路 | 维持加密会话所需 |
 | 底层协议 | App State 重新同步 | `resyncAppState()`、`appPatch()` | 未产品化 | Baileys 支持 |
 
-## 2. 当前同步开关确认表
+## 2. 账户同步开关规划
 
 | 同步开关 | Baileys 能力 | 当前保存结果 | 主系统是否消费 | 数据/资源成本 | 当前默认 | 建议 |
 | --- | --- | --- | --- | --- | --- | --- |
 | 头像 `avatar` | `profilePictureUrl(ownJid)` | `hasAvatar` | 是 | 低 | 开 | 保留，默认开启 |
 | 群组概览 `groupSummary` | `groupFetchAllParticipating()` | `groupCount` | 是 | 中，需要读取全部参与群 | 开 | 需要群数量就保留并默认开启 |
-| 群组详情 `groupDetails` | `groupFetchAllParticipating()` | 群 ID、名称、人数 | 否，只在网关保存 | 较高，包含群资料 | 关 | 没有近期需求就删除 |
-| 联系人 `contacts` | `syncFullHistory`、联系人事件 | 联系人数量、增量数 | 否 | 高，会触发完整历史同步 | 关 | 没有近期联系人功能就删除 |
-| 聊天列表 `chats` | `syncFullHistory`、聊天历史事件 | 聊天数量 | 否 | 高，会触发完整历史同步 | 关 | 没有近期会话列表功能就删除 |
-| 消息历史 `messageHistory` | `syncFullHistory`、`shouldSyncHistoryMessage()` | 历史消息数量 | 否 | 很高 | 关 | 建议删除，发送不依赖它 |
+| 群组详情 `groupDetails` | `groupFetchAllParticipating()` | 群 ID、名称、人数 | 否，只在网关保存 | 较高，包含群资料 | 关 | 保留；群组营销启用后落库并消费 |
+| 历史同步 `historySync` | `syncFullHistory`、`shouldSyncHistoryMessage()`、历史同步事件 | 当前尚未形成独立语义 | 否 | 高，需要接收 WhatsApp 历史资源包 | 关 | 由联系人详情自动开启；不保存聊天列表或消息正文 |
+| 联系人详情 `contactDetails` | 历史包、联系人事件、LID/JID 映射、新消息事件 | 当前 `contacts` 只统计数量 | 否 | 中高，需要分类混合数据 | 关 | 替代当前 `contacts`，保存分类后的联系人资源和互动摘要 |
+| 聊天列表 `chats` | 聊天历史事件 | 只统计数量 | 否 | 高 | 关 | 删除开关及配套，不建设聊天列表资源 |
+| 消息历史 `messageHistory` | 历史消息集合 | 只统计数量 | 否 | 很高 | 关 | 删除开关及配套，不保存消息正文 |
 
-## 3. 建议确认结果
+## 3. 已确认规划
 
 | 决策 | 同步开关 | 默认值 |
 | --- | --- | --- |
-| 建议保留 | 头像 `avatar` | 开 |
-| 建议保留 | 群组概览 `groupSummary` | 开 |
-| 建议删除 | 群组详情 `groupDetails` | — |
-| 建议删除 | 联系人 `contacts` | — |
-| 建议删除 | 聊天列表 `chats` | — |
-| 建议删除 | 消息历史 `messageHistory` | — |
+| 保留 | 关闭在线 `closeOnline` | 开 |
+| 保留 | 头像 `avatar` | 开 |
+| 保留 | 群组概览 `groupSummary` | 开 |
+| 保留，群组营销使用 | 群组详情 `groupDetails` | 关，按节点开启 |
+| 新增，联系人详情自动依赖 | 历史同步 `historySync` | 关，依赖项开启时自动开启 |
+| 由现有联系人开关调整而来 | 联系人详情 `contactDetails` | 关，按节点开启 |
+| 删除 | 聊天列表 `chats` | — |
+| 删除 | 消息历史 `messageHistory` | — |
 
-需要确认的只有两点：
+依赖规则：`contactDetails → historySync`，`groupDetails → groupSummary`。群组详情通过独立群组接口获取，不依赖历史同步。
 
-1. 群组数量是否仍用于账号质量、筛选或分组规则？
-2. 近期是否确定要建设群详情、联系人、聊天列表或历史消息功能？
+群组营销和好友营销的具体接口、同步字段、落库范围及任务前置条件见 [接入账户模型升级方案](./account-model-lightweight-upgrade.md)。
