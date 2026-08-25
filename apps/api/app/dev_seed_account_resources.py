@@ -301,6 +301,7 @@ def seed() -> str:
                         "superadmin" if index == 1 else "admin" if index <= 4 else "member"
                     ),
                     can_send=index != 5,
+                    last_interaction_at=now - timedelta(hours=index * 6),
                     active=True,
                     synced_at=now,
                 )

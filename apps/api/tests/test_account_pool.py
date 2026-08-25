@@ -338,6 +338,7 @@ def test_account_resources_are_upserted_scored_and_exposed(
                             "communityType": "group",
                             "ownRole": "admin",
                             "canSend": True,
+                            "lastInteractionAt": synced_at,
                         },
                         {
                             "groupJid": "120363002@g.us",
@@ -390,6 +391,12 @@ def test_account_resources_are_upserted_scored_and_exposed(
     assert groups.status_code == 200, groups.text
     assert groups.json()["data"]["total"] == 1
     assert groups.json()["data"]["rows"][0]["subject"] == "First group"
+    returned_interaction = datetime.fromisoformat(
+        groups.json()["data"]["rows"][0]["lastInteractionAt"]
+    )
+    if returned_interaction.tzinfo is None:
+        returned_interaction = returned_interaction.replace(tzinfo=UTC)
+    assert returned_interaction == datetime.fromisoformat(synced_at)
     deleted = admin_client.delete(f"/api/personal-accounts/{account_id}")
     assert deleted.status_code == 200, deleted.text
 

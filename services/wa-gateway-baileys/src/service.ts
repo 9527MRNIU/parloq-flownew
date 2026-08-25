@@ -461,7 +461,7 @@ export class GatewayService {
       throw new GatewayError('conflict', 'account has messages in flight; retry metadata synchronization later')
     }
     const wasOnline = this.engine.isOnline(id)
-    const requestContactsHistory = current.syncPolicy.contacts
+    const requestContactsHistory = current.syncPolicy.contacts || current.syncPolicy.groupDetails
     if (requestContactsHistory) {
       current = await this.store.updateAccount(id, {
         metadata: { ...current.metadata, requestContactsHistory: true },

@@ -78,6 +78,7 @@ export interface SyncedGroup {
   linkedParentJid: string | null
   ownRole: 'member' | 'admin' | 'superadmin'
   canSend: boolean
+  lastInteractionAt: string | null
 }
 
 export interface AccountResourceSnapshot {

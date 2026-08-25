@@ -15,7 +15,7 @@
 
 ## 2. 账户开关语义调整
 
-`closeOnline`、`avatar`、`groupDetails`、`contacts` 继续保留。`groupDetails` 的开关名称调整为“群组同步”，`contacts` 的开关名称调整为“好友同步”。`groupSummary` 与 `groupDetails` 使用相同的 Baileys 查询，作为独立开关属于冗余，因此删除；群组同步完成后直接计算 `groupCount`。`syncFullHistory`、`shouldSyncHistoryMessage()` 和历史同步事件属于好友同步的内部取数机制，不再包装成独立的产品开关。`chats`、`messageHistory` 以及只为它们服务的表单、DTO、网关统计和测试夹具删除。
+`closeOnline`、`avatar`、`groupDetails`、`contacts` 继续保留。`groupDetails` 的开关名称调整为“群组同步”，`contacts` 的开关名称调整为“好友同步”。`groupSummary` 与 `groupDetails` 使用相同的 Baileys 查询，作为独立开关属于冗余，因此删除；群组同步完成后直接计算 `groupCount`。`syncFullHistory`、`shouldSyncHistoryMessage()` 和历史同步事件属于账号资源同步的内部取数机制，不再包装成独立的产品开关。`chats`、`messageHistory` 以及只为它们服务的表单、DTO、网关统计和测试夹具删除。
 
 `closeOnline` 不改字段、不改位置、不改默认值。它虽然不是资源同步动作，但确实是账户运行模型的一项开关，继续和其他账户开关一起管理。
 
@@ -23,7 +23,7 @@
 | --- | --- | --- | --- | --- |
 | `closeOnline` | 关闭在线 | 开 | `markOnlineOnConnect: !closeOnline` | 控制 Socket 连接后是否向 WhatsApp 发布在线状态；保持现有实现 |
 | `avatar` | 头像同步 | 开 | `profilePictureUrl(ownJid, "image")` | 同步本账号头像，用于账户展示和评分 |
-| `groupDetails` | 群组同步 | 开 | `groupFetchAllParticipating()` | 同步群 JID、名称、人数、权限等详情，并直接计算 `groupCount`；用于账户概览、评分和群组营销 |
+| `groupDetails` | 群组同步 | 开 | `groupFetchAllParticipating()`、历史/实时聊天事件 | 同步群 JID、名称、人数、权限等详情，合并已下发范围内的最近联系时间，并直接计算 `groupCount`；用于账户概览、评分和群组营销 |
 | `contacts` | 好友同步 | 开 | `syncFullHistory`、`shouldSyncHistoryMessage()`、历史包、`contacts.upsert/update`、`chats.phoneNumberShare`、`messages.upsert` | 接收必要的历史资源包，分类并保存好友资源、LID/JID 映射和最后联系时间；不保存聊天列表或消息正文 |
 
 `contacts` 是 Parloq 自己封装的业务同步策略，不是 Baileys 原生开关，Baileys 也没有统一的 `syncContacts()` 接口。网关根据这个开关编排历史同步配置和多个增量事件。外部不再暴露“历史同步”开关；内部直接按下面的规则派生：
@@ -32,9 +32,9 @@
 needHistorySync = contacts && explicitMetadataSyncRun
 ```
 
-也就是说，`contacts=true` 表示允许并处理好友资源，但日常连接和发信重连不会反复请求完整历史。只有首次资料同步、手动“同步资料”或节点策略变更触发的后台资料任务，才临时带上 `requestContactsHistory=true` 受控重建 Socket；完成后立即清除该临时参数。
+也就是说，`contacts=true` 表示允许并处理好友资源，`groupDetails=true` 表示允许用已下发聊天摘要补充群组最近联系时间；日常连接和发信重连不会反复请求完整历史。只有首次资料同步、手动“同步资料”或节点策略变更触发的后台资料任务，才临时带上内部历史请求参数受控重建 Socket；完成后立即清除该临时参数。
 
-群组同步通过独立群组接口获取数据，不依赖历史同步，也不再设置独立的群组概览开关。第一期不增加“账号资源同步”之类的冗余总开关。
+群组名称、成员和权限仍通过独立群组接口获取；最近联系时间仅复用资料任务已经收到的历史聊天摘要和实时消息事件，不保存聊天或消息正文。系统不再设置独立的群组概览开关，也不增加“账号资源同步”之类的冗余总开关。
 
 推荐的功能开关组合：
 
@@ -319,7 +319,7 @@ Baileys 只能处理 WhatsApp 实际下发的历史包，不能保证每个旧�
 ## 10. 同步时机
 
 1. 账户配对或导入验证成功后，按配对任务快照执行首次同步。
-2. `avatar`、`groupDetails` 和 `contacts` 默认开启；`groupDetails` 同步并落库群详情，同时计算 `groupCount` 和 `uniqueGroupMemberCount`，不触发历史同步。
+2. `avatar`、`groupDetails` 和 `contacts` 默认开启；`groupDetails` 同步并落库群详情，同时计算 `groupCount` 和 `uniqueGroupMemberCount`，并在显式资料任务中复用一次历史摘要补充群组最近联系时间。
 3. “好友同步” `contacts` 只在显式资料同步任务创建 Socket 时临时启用历史同步配置，接收历史资源包并分类落库联系人；对已经在线的账户执行资料同步时，受控重建一次 Socket，日常发信连接不请求完整历史。
 4. `contacts` 只聚合历史包中的联系人来源和最后联系时间，在线期间通过联系人和消息事件继续更新。
 5. 在线期间通过群组和联系人事件增量更新。

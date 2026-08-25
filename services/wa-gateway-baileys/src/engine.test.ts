@@ -230,7 +230,7 @@ describe('Baileys intentional disconnect handling', () => {
     expect(events).toEqual(['connected'])
   })
 
-  it('requests history only for an explicit metadata run and deduplicates saved and contacted identities', async () => {
+  it('uses explicit history to deduplicate contacts and track group interactions', async () => {
     const emitter = new EventEmitter()
     const socket = {
       ev: {
@@ -239,6 +239,17 @@ describe('Baileys intentional disconnect handling', () => {
       },
       user: { id: '14155550123:1@s.whatsapp.net' },
       profilePictureUrl: vi.fn(async () => undefined),
+      groupFetchAllParticipating: vi.fn(async () => ({
+        '120363000000001@g.us': {
+          id: '120363000000001@g.us',
+          addressingMode: 'pn',
+          owner: socket.user.id,
+          subject: 'Customer group',
+          participants: [
+            { id: socket.user.id, admin: 'superadmin' },
+          ],
+        },
+      })),
       end: vi.fn((error: Error) => {
         emitter.emit('connection.update', {
           connection: 'close',
@@ -281,7 +292,7 @@ describe('Baileys intentional disconnect handling', () => {
       syncPolicy: {
         closeOnline: true,
         avatar: false,
-        groupDetails: false,
+        groupDetails: true,
         contacts: true,
       },
       metadata: { requestContactsHistory: true },
@@ -295,6 +306,12 @@ describe('Baileys intentional disconnect handling', () => {
     expect(socketOptions.shouldSyncHistoryMessage({})).toBe(true)
 
     emitter.emit('messaging-history.set', {
+      chats: [
+        {
+          id: '120363000000001@g.us',
+          conversationTimestamp: 1_700_000_000,
+        },
+      ],
       contacts: [
         { id: '11111111111@lid', lid: '11111111111@lid', name: 'Saved Alice' },
       ],
@@ -313,6 +330,10 @@ describe('Baileys intentional disconnect handling', () => {
           pushName: 'Bob',
           messageTimestamp: 1_700_000_001,
         },
+        {
+          key: { remoteJid: '120363000000001@g.us' },
+          messageTimestamp: 1_700_000_002,
+        },
       ],
       isLatest: true,
       progress: 100,
@@ -321,7 +342,7 @@ describe('Baileys intentional disconnect handling', () => {
     const quality = await engine.getQuality('wa_resource_sync', {
       closeOnline: true,
       avatar: false,
-      groupDetails: false,
+      groupDetails: true,
       contacts: true,
     })
     expect(quality.friendCount).toBe(2)
@@ -343,6 +364,29 @@ describe('Baileys intentional disconnect handling', () => {
         hasChatHistory: true,
       }),
     ]))
+    expect(quality.resources.groups).toEqual([
+      expect.objectContaining({
+        groupJid: '120363000000001@g.us',
+        lastInteractionAt: '2023-11-14T22:13:22.000Z',
+      }),
+    ])
+    emitter.emit('messages.upsert', {
+      messages: [
+        {
+          key: { remoteJid: '120363000000001@g.us' },
+          messageTimestamp: 1_700_000_003,
+        },
+      ],
+      type: 'notify',
+    })
+    const updated = await engine.getQuality('wa_resource_sync', {
+      closeOnline: true,
+      avatar: false,
+      groupDetails: true,
+      contacts: true,
+    })
+    expect(updated.resources.groups[0]?.lastInteractionAt)
+      .toBe('2023-11-14T22:13:23.000Z')
     await engine.close()
   })
 

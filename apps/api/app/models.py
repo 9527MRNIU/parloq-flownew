@@ -926,6 +926,9 @@ class AccountWhatsappGroup(Base, TimestampMixin):
         String(24), default="member", nullable=False
     )
     can_send: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    last_interaction_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
     active: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False, index=True
     )

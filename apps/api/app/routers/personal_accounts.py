@@ -1637,7 +1637,11 @@ def account_whatsapp_groups(
         statement = statement.where(AccountWhatsappGroup.can_send.is_(can_send))
     total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
     rows = db.scalars(
-        statement.order_by(AccountWhatsappGroup.subject, AccountWhatsappGroup.id)
+        statement.order_by(
+            AccountWhatsappGroup.last_interaction_at.desc().nullslast(),
+            AccountWhatsappGroup.subject,
+            AccountWhatsappGroup.id,
+        )
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
@@ -1656,6 +1660,7 @@ def account_whatsapp_groups(
                     "linkedParentJid": group.linked_parent_jid,
                     "ownRole": group.own_role,
                     "canSend": group.can_send,
+                    "lastInteractionAt": iso(group.last_interaction_at),
                     "syncedAt": iso(group.synced_at),
                 }
                 for group in rows

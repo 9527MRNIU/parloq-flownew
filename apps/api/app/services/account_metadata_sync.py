@@ -123,6 +123,11 @@ def _timestamp(value: object, fallback: datetime) -> datetime:
     return fallback
 
 
+def _timestamp_seconds(value: datetime) -> float:
+    normalized = value if value.tzinfo else value.replace(tzinfo=UTC)
+    return normalized.timestamp()
+
+
 def _nonnegative_int(value: object) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
         return value
@@ -255,6 +260,16 @@ def _apply_groups(
             else "member"
         )
         item.can_send = value.get("canSend") is True
+        if value.get("lastInteractionAt"):
+            interaction_at = _timestamp(
+                value.get("lastInteractionAt"), synced_at
+            )
+            if (
+                item.last_interaction_at is None
+                or _timestamp_seconds(interaction_at)
+                > _timestamp_seconds(item.last_interaction_at)
+            ):
+                item.last_interaction_at = interaction_at
         item.active = True
         item.synced_at = synced_at
 

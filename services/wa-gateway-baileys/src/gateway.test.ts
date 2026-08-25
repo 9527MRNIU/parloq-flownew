@@ -485,7 +485,7 @@ describe('Baileys gateway HTTP contract', () => {
       method: 'POST',
       url: '/v1/accounts/wa_metadata/metadata-sync',
       headers,
-      payload: { syncPolicy: { contacts: true, groupSummary: true } },
+      payload: { syncPolicy: { contacts: false, groupDetails: true } },
     })
     expect(synced.statusCode).toBe(200)
     expect(synced.json().data.metadataSyncStatus).toBe('ready')

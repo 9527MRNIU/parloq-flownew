@@ -1,6 +1,7 @@
 import { Boom } from '@hapi/boom'
 import * as BuiltinBaileys from '@whiskeysockets/baileys'
 import type {
+  Chat,
   Contact,
   proto,
   ConnectionState,
@@ -192,6 +193,7 @@ interface ActiveSocket {
 interface ResourceAccumulator {
   contacts: Map<string, SyncedContact>
   aliases: Map<string, string>
+  groupLastInteractionAt: Map<string, string>
   historyRequested: boolean
   historyReceived: boolean
   historyComplete: boolean
@@ -222,12 +224,55 @@ function latestTimestamp(first: string | null, second: string | null): string | 
   return first >= second ? first : second
 }
 
-function messageTimestamp(value: WAMessage): string | null {
-  const raw = value.messageTimestamp
+function unixTimestamp(raw: unknown): string | null {
   if (raw == null) return null
   const seconds = Number(raw)
   if (!Number.isFinite(seconds) || seconds <= 0) return null
   return new Date(seconds * 1_000).toISOString()
+}
+
+function messageTimestamp(value: WAMessage): string | null {
+  return unixTimestamp(value.messageTimestamp)
+}
+
+function recordGroupInteraction(
+  accumulator: ResourceAccumulator,
+  groupJid: string | null,
+  timestamp: string | null,
+): void {
+  if (!groupJid?.endsWith('@g.us') || !timestamp) return
+  const existing = accumulator.groupLastInteractionAt.get(groupJid) ?? null
+  accumulator.groupLastInteractionAt.set(
+    groupJid,
+    latestTimestamp(existing, timestamp)!,
+  )
+}
+
+function groupInteractionFromChat(
+  accumulator: ResourceAccumulator,
+  chat: Chat,
+): void {
+  const groupJid = nullableString(chat.id, 191)
+  const timestamp = [
+    chat.conversationTimestamp,
+    chat.lastMsgTimestamp,
+    chat.lastMessageRecvTimestamp,
+  ].reduce<string | null>(
+    (latest, value) => latestTimestamp(latest, unixTimestamp(value)),
+    null,
+  )
+  recordGroupInteraction(accumulator, groupJid, timestamp)
+}
+
+function groupInteractionFromMessage(
+  accumulator: ResourceAccumulator,
+  message: WAMessage,
+): void {
+  recordGroupInteraction(
+    accumulator,
+    nullableString(message.key.remoteJid, 191),
+    messageTimestamp(message),
+  )
 }
 
 function normalizePlatform(platform: string | null): {
@@ -444,6 +489,7 @@ function groupResources(
       linkedParentJid: group.linkedParent ?? null,
       ownRole,
       canSend: group.announce !== true || ownRole !== 'member',
+      lastInteractionAt: accumulator.groupLastInteractionAt.get(group.id) ?? null,
     }
   })
   return {
@@ -831,7 +877,7 @@ export class BaileysEngine implements ProtocolEngine {
     const active = this.sockets.get(accountId)
     if (!active?.online) throw new Error('account is offline')
     const ownJid = active.socket.user?.id
-    if (policy.contacts) await waitForHistory(active.resources)
+    if (policy.contacts || policy.groupDetails) await waitForHistory(active.resources)
     let hasAvatar: boolean | null = null
     let avatar: AccountAvatar | null | undefined
     if (policy.avatar && ownJid) {
@@ -940,7 +986,7 @@ export class BaileysEngine implements ProtocolEngine {
       proxyAgent?.destroy()
       throw error
     }
-    const historyRequested = account.syncPolicy.contacts
+    const historyRequested = (account.syncPolicy.contacts || account.syncPolicy.groupDetails)
       && account.metadata?.requestContactsHistory === true
     const socket = this.baileys.default({
       auth: state,
@@ -955,6 +1001,7 @@ export class BaileysEngine implements ProtocolEngine {
     const resources: ResourceAccumulator = {
       contacts: new Map(),
       aliases: new Map(),
+      groupLastInteractionAt: new Map(),
       historyRequested,
       historyReceived: false,
       historyComplete: false,
@@ -1081,14 +1128,24 @@ export class BaileysEngine implements ProtocolEngine {
         }
       }
     })
-    socket.ev.on('messaging-history.set', ({ contacts, messages, isLatest, progress }) => {
-      if (!account.syncPolicy.contacts) return
+    socket.ev.on('messaging-history.set', ({ chats, contacts, messages, isLatest, progress }) => {
+      if (!account.syncPolicy.contacts && !account.syncPolicy.groupDetails) return
       active.resources.historyReceived = true
-      for (const contact of contacts) {
-        mergeContact(active.resources, contact, { sourceMask: CONTACT_SOURCE_HISTORY })
+      if (account.syncPolicy.groupDetails) {
+        for (const chat of chats ?? []) groupInteractionFromChat(active.resources, chat)
       }
       for (const message of messages) {
-        contactFromMessage(active.resources, message, false, this.baileys)
+        if (account.syncPolicy.groupDetails) {
+          groupInteractionFromMessage(active.resources, message)
+        }
+        if (account.syncPolicy.contacts) {
+          contactFromMessage(active.resources, message, false, this.baileys)
+        }
+      }
+      if (account.syncPolicy.contacts) {
+        for (const contact of contacts) {
+          mergeContact(active.resources, contact, { sourceMask: CONTACT_SOURCE_HISTORY })
+        }
       }
       if (isLatest === true || Number(progress) >= 100) {
         active.resources.historyComplete = true
@@ -1116,9 +1173,14 @@ export class BaileysEngine implements ProtocolEngine {
       registerPhoneShare(active.resources, lid, jid)
     })
     socket.ev.on('messages.upsert', ({ messages }) => {
-      if (!account.syncPolicy.contacts) return
+      if (!account.syncPolicy.contacts && !account.syncPolicy.groupDetails) return
       for (const message of messages) {
-        contactFromMessage(active.resources, message, true, this.baileys)
+        if (account.syncPolicy.groupDetails) {
+          groupInteractionFromMessage(active.resources, message)
+        }
+        if (account.syncPolicy.contacts) {
+          contactFromMessage(active.resources, message, true, this.baileys)
+        }
       }
     })
     socket.ev.on('messages.update', (updates) => {
