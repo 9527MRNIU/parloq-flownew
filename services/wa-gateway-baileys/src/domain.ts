@@ -268,6 +268,14 @@ export function normalizeE164(raw: string): string {
   return trimmed
 }
 
+export function normalizeMessageTarget(raw: string): string {
+  const trimmed = raw.trim().toLowerCase()
+  if (/^(?:[1-9]\d{6,19}(?::\d{1,5})?@s\.whatsapp\.net|[1-9]\d{5,20}(?:-\d{5,20})?@g\.us)$/.test(trimmed)) {
+    return trimmed
+  }
+  return normalizeE164(trimmed)
+}
+
 export function validateProxy(raw: string): string {
   const trimmed = raw.trim()
   if (!trimmed) return ''

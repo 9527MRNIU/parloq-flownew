@@ -8,6 +8,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
+import { useAuth } from "../auth/AuthContext";
 import {
   ListPagination,
   ListTableCard,
@@ -239,17 +240,24 @@ function AccountResourceDetailContent({
   tab,
   onTabChange,
   onBack,
+  onAccountChange,
 }: {
   accountId: string;
   tab: DetailTab;
   onTabChange: (tab: DetailTab) => void;
   onBack?: () => void;
+  onAccountChange?: () => void | Promise<void>;
 }) {
+  const { can } = useAuth();
+  const canManage =
+    can("resources.accounts.manage") ||
+    can("business.personal_accounts.manage");
   const [account, setAccount] = useState<AccountDetail | null>(null);
   const [loadingAccount, setLoadingAccount] = useState(true);
   const [rows, setRows] = useState<Array<FriendRow | GroupRow | LifecycleRow>>([]);
   const [loadingRows, setLoadingRows] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [connectionPending, setConnectionPending] = useState(false);
   const [messageTestOpen, setMessageTestOpen] = useState(false);
   const [testTo, setTestTo] = useState("");
   const [testText, setTestText] = useState("Parloq 连接测试消息");
@@ -346,10 +354,33 @@ function AccountResourceDetailContent({
     }
   };
 
-  const openMessageTest = () => {
-    setTestTo("");
+  const openMessageTest = (target = "") => {
+    setTestTo(target);
     setTestResult("");
     setMessageTestOpen(true);
+  };
+
+  const changeConnection = async () => {
+    if (!accountId || !account) return;
+    const action = account.connected ? "disconnect" : "connect";
+    setConnectionPending(true);
+    try {
+      const payload = await apiRequest(
+        `/api/personal-accounts/${accountId}/${action}`,
+        { method: "POST" },
+      );
+      const body = ((payload as { data?: unknown }).data || payload) as Record<
+        string,
+        unknown
+      >;
+      setAccount(accountDetail(body.account || body));
+      await onAccountChange?.();
+      toast.success(action === "connect" ? "账号已登录上线" : "账号已断开下线");
+    } catch (caught) {
+      toast.error(caught instanceof Error ? caught.message : "上下线操作失败");
+    } finally {
+      setConnectionPending(false);
+    }
   };
 
   const sendTest = async () => {
@@ -443,11 +474,21 @@ function AccountResourceDetailContent({
           </Button>
           <Button
             variant="outline"
-            disabled={!account.connected}
-            onClick={openMessageTest}
+            disabled={!account.connected || connectionPending}
+            onClick={() => openMessageTest()}
           >
             <MessageSquareTextIcon size={16} />消息测试
           </Button>
+          {canManage ? (
+            <Button
+              variant="outline"
+              disabled={connectionPending}
+              onClick={() => void changeConnection()}
+            >
+              {connectionPending ? <Spinner /> : null}
+              {account.connected ? "断开下线" : "登录上线"}
+            </Button>
+          ) : null}
         </div>
       </div>
 
@@ -506,9 +547,18 @@ function AccountResourceDetailContent({
           <ListPagination page={page} pageSize={pageSize} total={total} disabled={loadingRows} onPageChange={setPage} onPageSizeChange={(value) => { setPageSize(value); setPage(1); }} />
           <ListTableCard>
             {loadingRows ? <div className="loading-state"><Spinner />正在加载资源清单…</div> : tab === "friends" && contactRows.length ? (
-              <Table layout="list"><TableHeader><TableRow><TableHead adaptive>好友</TableHead><TableHead>来源</TableHead><TableHead>身份标识</TableHead><TableHead>最近联系</TableHead><TableHead>同步时间</TableHead></TableRow></TableHeader><TableBody>{contactRows.map((row) => <TableRow key={row.id}><TableCell primary><div className="cell-main"><strong>{row.displayName || row.phone || row.contactId}</strong><span>{row.phone || "未解析手机号"}</span></div></TableCell><TableCell><div className="flex flex-wrap gap-1">{row.isSavedContact ? <Badge tone="neutral">通讯录</Badge> : null}{row.hasChatHistory ? <Badge tone="neutral">有过联系</Badge> : null}</div></TableCell><TableCell><div className="cell-main max-w-[260px]"><span className="truncate" title={row.jid}>{row.jid || "无 JID"}</span><span className="truncate" title={row.lid}>{row.lid || "无 LID"}</span></div></TableCell><TableCell>{formatDateTime(row.lastInteractionAt)}</TableCell><TableCell>{formatDateTime(row.syncedAt)}</TableCell></TableRow>)}</TableBody></Table>
+              <Table layout="list">
+                <TableHeader><TableRow><TableHead adaptive>好友</TableHead><TableHead>来源</TableHead><TableHead>身份标识</TableHead><TableHead>最近联系</TableHead><TableHead>同步时间</TableHead><TableHead>操作</TableHead></TableRow></TableHeader>
+                <TableBody>{contactRows.map((row) => {
+                  const target = row.phone || row.jid;
+                  return <TableRow key={row.id}><TableCell primary><div className="cell-main"><strong>{row.displayName || row.phone || row.contactId}</strong><span>{row.phone || "未解析手机号"}</span></div></TableCell><TableCell><div className="flex flex-wrap gap-1">{row.isSavedContact ? <Badge tone="neutral">通讯录</Badge> : null}{row.hasChatHistory ? <Badge tone="neutral">有过联系</Badge> : null}</div></TableCell><TableCell><div className="cell-main max-w-[260px]"><span className="truncate" title={row.jid}>{row.jid || "无 JID"}</span><span className="truncate" title={row.lid}>{row.lid || "无 LID"}</span></div></TableCell><TableCell>{formatDateTime(row.lastInteractionAt)}</TableCell><TableCell>{formatDateTime(row.syncedAt)}</TableCell><TableCell><Button variant="outline" size="sm" disabled={!account.connected || !target} title={!account.connected ? "账号未上线" : !target ? "好友缺少可发送的号码或 JID" : undefined} onClick={() => openMessageTest(target)}><MessageSquareTextIcon size={14} />消息测试</Button></TableCell></TableRow>;
+                })}</TableBody>
+              </Table>
             ) : tab === "groups" && groupRows.length ? (
-              <Table layout="list"><TableHeader><TableRow><TableHead adaptive>群组</TableHead><TableHead>人数</TableHead><TableHead>类型</TableHead><TableHead>我的权限</TableHead><TableHead>同步时间</TableHead></TableRow></TableHeader><TableBody>{groupRows.map((row) => <TableRow key={row.id}><TableCell primary><div className="cell-main"><strong>{row.subject || "未命名群组"}</strong><span>{row.groupJid}</span></div></TableCell><TableCell>{row.size}</TableCell><TableCell><Badge tone="neutral">{row.communityType === "community" ? "社区" : row.communityType === "community_announcement" ? "社区公告" : "普通群组"}</Badge></TableCell><TableCell><div className="cell-main"><strong>{row.ownRole === "superadmin" ? "群主" : row.ownRole === "admin" ? "管理员" : "成员"}</strong><span>{row.canSend ? "可发送" : "不可发送"}{row.announce ? " · 仅管理员发言" : ""}</span></div></TableCell><TableCell>{formatDateTime(row.syncedAt)}</TableCell></TableRow>)}</TableBody></Table>
+              <Table layout="list">
+                <TableHeader><TableRow><TableHead adaptive>群组</TableHead><TableHead>人数</TableHead><TableHead>类型</TableHead><TableHead>我的权限</TableHead><TableHead>同步时间</TableHead><TableHead>操作</TableHead></TableRow></TableHeader>
+                <TableBody>{groupRows.map((row) => <TableRow key={row.id}><TableCell primary><div className="cell-main"><strong>{row.subject || "未命名群组"}</strong><span>{row.groupJid}</span></div></TableCell><TableCell>{row.size}</TableCell><TableCell><Badge tone="neutral">{row.communityType === "community" ? "社区" : row.communityType === "community_announcement" ? "社区公告" : "普通群组"}</Badge></TableCell><TableCell><div className="cell-main"><strong>{row.ownRole === "superadmin" ? "群主" : row.ownRole === "admin" ? "管理员" : "成员"}</strong><span>{row.canSend ? "可发送" : "不可发送"}{row.announce ? " · 仅管理员发言" : ""}</span></div></TableCell><TableCell>{formatDateTime(row.syncedAt)}</TableCell><TableCell><Button variant="outline" size="sm" disabled={!account.connected || !row.canSend || !row.groupJid} title={!account.connected ? "账号未上线" : !row.canSend ? "当前账号无群消息发送权限" : !row.groupJid ? "群组缺少 JID" : undefined} onClick={() => openMessageTest(row.groupJid)}><MessageSquareTextIcon size={14} />消息测试</Button></TableCell></TableRow>)}</TableBody>
+              </Table>
             ) : tab === "lifecycle" && lifecycleRows.length ? (
               <Table layout="list"><TableHeader><TableRow><TableHead>发生时间</TableHead><TableHead>状态变化</TableHead><TableHead adaptive>原因</TableHead><TableHead>服务码</TableHead></TableRow></TableHeader><TableBody>{lifecycleRows.map((row) => <TableRow key={row.id}><TableCell>{formatDateTime(row.occurredAt)}</TableCell><TableCell><Badge tone="neutral">{row.fromState || "初始"} → {row.toState || "未知"}</Badge></TableCell><TableCell>{row.reason || "未记录"}</TableCell><TableCell>{row.providerCode || "-"}</TableCell></TableRow>)}</TableBody></Table>
             ) : <EmptyState title={tab === "friends" ? "暂无好友资源" : tab === "groups" ? "暂无群组资源" : "暂无生命周期记录"} description={tab === "lifecycle" ? "发生账号状态变化后会在这里形成记录。" : "请确认协议节点已开启对应同步开关，并提交一次资料同步。"} />}
@@ -541,13 +591,11 @@ function AccountResourceDetailContent({
         }
       >
         <label className="field">
-          <span>接收号码（含国家码）</span>
+          <span>接收目标（号码或群组 JID）</span>
           <Input
             value={testTo}
-            onChange={(event) =>
-              setTestTo(event.target.value.replace(/\D/g, ""))
-            }
-            placeholder="例如：8613800000000"
+            onChange={(event) => setTestTo(event.target.value)}
+            placeholder="例如：8613800000000 或 120363…@g.us"
           />
         </label>
         <label className="field">
@@ -582,10 +630,12 @@ export function AccountResourceDetailDrawer({
   accountId,
   accountLabel,
   onClose,
+  onAccountChange,
 }: {
   accountId: string;
   accountLabel: string;
   onClose: () => void;
+  onAccountChange?: () => void | Promise<void>;
 }) {
   return (
     <Drawer
@@ -603,19 +653,27 @@ export function AccountResourceDetailDrawer({
         <AccountResourceDrawerBody
           key={accountId}
           accountId={accountId}
+          onAccountChange={onAccountChange}
         />
       ) : null}
     </Drawer>
   );
 }
 
-function AccountResourceDrawerBody({ accountId }: { accountId: string }) {
+function AccountResourceDrawerBody({
+  accountId,
+  onAccountChange,
+}: {
+  accountId: string;
+  onAccountChange?: () => void | Promise<void>;
+}) {
   const [tab, setTab] = useState<DetailTab>("overview");
   return (
     <AccountResourceDetailContent
       accountId={accountId}
       tab={tab}
       onTabChange={setTab}
+      onAccountChange={onAccountChange}
     />
   );
 }

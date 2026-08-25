@@ -10,12 +10,21 @@ import {
   downloadProfileAvatar,
   hasReconnectableIdentity,
   isRequiredPairingRestart,
+  messageTargetJid,
   requestStablePairingCode,
 } from './engine.js'
 import type { ManagedMediaReference } from './message-content.js'
 import type { Store } from './store.js'
 
 afterEach(() => vi.unstubAllGlobals())
+
+describe('Baileys message targets', () => {
+  it('maps E.164 recipients and preserves WhatsApp JIDs', () => {
+    expect(messageTargetJid('+14155550123')).toBe('14155550123@s.whatsapp.net')
+    expect(messageTargetJid('14155550123@s.whatsapp.net')).toBe('14155550123@s.whatsapp.net')
+    expect(messageTargetJid('120363000000001@g.us')).toBe('120363000000001@g.us')
+  })
+})
 
 describe('Baileys pairing restart classification', () => {
   it('accepts pair-success identity credentials even before registered is true', () => {

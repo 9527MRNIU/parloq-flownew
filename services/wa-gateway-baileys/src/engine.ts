@@ -174,6 +174,12 @@ export interface ProtocolEngine {
   protocolVersionInfo?(): Promise<ProtocolVersionInfo>
 }
 
+export function messageTargetJid(target: string): string {
+  return target.endsWith('@g.us') || target.endsWith('@s.whatsapp.net')
+    ? target
+    : `${target.slice(1)}@s.whatsapp.net`
+}
+
 interface ActiveSocket {
   socket: WASocket
   online: boolean
@@ -712,7 +718,7 @@ export class BaileysEngine implements ProtocolEngine {
   async send(accountId: string, toE164: string, message: OutboundMessage): Promise<string> {
     const active = this.sockets.get(accountId)
     if (!active?.online) throw new Error('account is offline')
-    const jid = `${toE164.slice(1)}@s.whatsapp.net`
+    const jid = messageTargetJid(toE164)
     let id: string | null | undefined
     if (!message.buttons.length) {
       const footer = message.footer.text

@@ -1,6 +1,6 @@
 import type { Logger } from 'pino'
 import type { Account, AccountResourceSnapshot, AccountState, Message, PublicAccount } from './domain.js'
-import { GatewayError, defaultSyncPolicy, normalizeE164, normalizeSyncPolicy, publicAccount, safeError, validateProxy, type AccountAvatar, type MetadataSyncResponse, type SyncPolicy } from './domain.js'
+import { GatewayError, defaultSyncPolicy, normalizeE164, normalizeMessageTarget, normalizeSyncPolicy, publicAccount, safeError, validateProxy, type AccountAvatar, type MetadataSyncResponse, type SyncPolicy } from './domain.js'
 import type { EngineEvent, PairResult, ProtocolEngine } from './engine.js'
 import { BAILEYS_VERSION, exportSession, parseImportedSession, phoneFromDeviceJid } from './session.js'
 import type { Store } from './store.js'
@@ -515,7 +515,7 @@ export class GatewayService {
 
   async sendMessage(id: string, request: SendMessageRequest): Promise<Message> {
     if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(request.messageId)) throw new GatewayError('invalid_argument', 'messageId is required and contains unsupported characters')
-    const recipientE164 = normalizeE164(request.toE164)
+    const recipientE164 = normalizeMessageTarget(request.toE164)
     const message = normalizeOutboundMessage(request)
     let current = await this.store.getAccount(id)
     if (!this.engine.isOnline(id) && current.connectionPolicy === 'on_demand' && current.state === 'linked_offline') {

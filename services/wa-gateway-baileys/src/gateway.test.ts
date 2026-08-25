@@ -578,6 +578,11 @@ describe('Baileys gateway HTTP contract', () => {
     await new Promise((resolve) => setTimeout(resolve, 5))
     const status = await app.inject({ method: 'GET', url: '/v1/messages/msg-1', headers })
     expect(status.json().data.status).toBe('sent')
+
+    const groupRequest = { method: 'POST' as const, url: '/v1/accounts/wa_send/messages', headers, payload: { messageId: 'msg-group-1', toE164: '120363000000001@g.us', text: 'hello group' } }
+    expect((await app.inject(groupRequest)).statusCode).toBe(202)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect((await store.getMessage('msg-group-1')).recipientE164).toBe('120363000000001@g.us')
   })
 
   it('requeues a durable queued message after an in-memory queue restart', async () => {

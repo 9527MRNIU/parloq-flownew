@@ -990,7 +990,7 @@ class MessageDelivery(Base, TimestampMixin):
         BigInteger,
         ForeignKey("personal_accounts.id", ondelete="RESTRICT"), index=True
     )
-    recipient_e164: Mapped[str] = mapped_column(String(20), index=True)
+    recipient_e164: Mapped[str] = mapped_column(String(191), index=True)
     provider_message_id: Mapped[str | None] = mapped_column(String(255), unique=True, index=True)
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
     queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

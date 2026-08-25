@@ -1220,6 +1220,7 @@ export function PersonalAccountsPage() {
         accountId={detailAccount?.id || ""}
         accountLabel={detailAccount?.phone || detailAccount?.name || ""}
         onClose={() => setDetailAccount(null)}
+        onAccountChange={loadAccounts}
       />
 
       <Drawer

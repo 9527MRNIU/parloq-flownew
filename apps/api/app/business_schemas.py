@@ -446,12 +446,24 @@ class PairRequest(Model):
     _phone = field_validator("phone")(lambda value: normalize_phone(value) if value else None)
 
 
+MESSAGE_TARGET_JID_RE = re.compile(
+    r"^(?:[1-9]\d{6,19}(?::\d{1,5})?@s\.whatsapp\.net|[1-9]\d{5,20}(?:-\d{5,20})?@g\.us)$"
+)
+
+
+def normalize_message_target(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if MESSAGE_TARGET_JID_RE.fullmatch(normalized):
+        return normalized
+    return normalize_phone(normalized)
+
+
 class SendRequest(Model):
     to: str
     message: str = Field(min_length=1, max_length=4096)
     idempotency_key: str = Field(alias="idempotencyKey", min_length=8, max_length=160)
 
-    _to = field_validator("to")(normalize_phone)
+    _to = field_validator("to")(normalize_message_target)
 
 
 class DomainCreate(Model):
