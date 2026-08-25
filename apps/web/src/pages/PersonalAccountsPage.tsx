@@ -328,9 +328,6 @@ function DeviceOsDisplay({ value }: { value: string }) {
     </div>
   );
 }
-const canSwitchProxy = (row: Account) =>
-  ["linked_offline", "unpaired"].includes(row.status);
-
 export function PersonalAccountsPage() {
   const { user, can } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -383,7 +380,13 @@ export function PersonalAccountsPage() {
   const [importProtocolId, setImportProtocolId] = useState("");
   const [importProxyId, setImportProxyId] = useState("");
   const proxyEndpointById = useMemo(
-    () => new Map(proxies.map((proxy) => [proxy.id, proxy.endpoint])),
+    () =>
+      new Map(
+        proxies.map((proxy) => [
+          proxy.id,
+          `${proxy.endpoint}${proxy.countryCode ? ` · ${proxy.countryCode}` : ""}`,
+        ]),
+      ),
     [proxies],
   );
 
@@ -603,39 +606,6 @@ export function PersonalAccountsPage() {
       toast.error(caught instanceof Error ? caught.message : "账号删除失败");
     } finally {
       setOperation("");
-    }
-  }
-  async function bindProxy(row: Account, proxyId: string) {
-    if (!row.id) return;
-    try {
-      await apiRequest(`/api/personal-accounts/${row.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ proxyId: proxyId || null }),
-      });
-      await loadAccounts();
-      toast.success("隔离代理已更新");
-    } catch (caught) {
-      toast.error(
-        caught instanceof Error
-          ? caught.message
-          : "代理绑定失败；在线账号请先断开连接",
-      );
-    }
-  }
-  async function changeGroup(row: Account, groupId: string) {
-    if (!row.id) return;
-    setGroupingIds((current) => [...current, row.id]);
-    try {
-      await apiRequest(`/api/personal-accounts/${row.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ groupId: groupId || null }),
-      });
-      await loadAccounts();
-      toast.success(groupId ? "账号分组已更新" : "账号已移出分组");
-    } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "账号改组失败");
-    } finally {
-      setGroupingIds((current) => current.filter((id) => id !== row.id));
     }
   }
   async function batchChangeGroup() {
@@ -1167,65 +1137,16 @@ export function PersonalAccountsPage() {
                     </strong>
                   </TableCell>
                   <TableCell>
-                    <div className="cell-main min-w-[160px]">
-                      <SelectField
-                        ariaLabel={`账号 ${row.phone || "待迁移账号"} 的分组`}
-                        className="w-[150px]"
-                        value={row.groupId}
-                        onValueChange={(groupId) =>
-                          void changeGroup(row, groupId)
-                        }
-                        placeholder="未分组"
-                        clearable
-                        disabled={
-                          !canManage || !row.id || groupingIds.includes(row.id)
-                        }
-                        options={groups
-                          .filter((group) => group.ownerId === row.ownerId)
-                          .map((group) => ({
-                            value: group.id,
-                            label: group.name,
-                          }))}
-                      />
-                    </div>
+                    <strong className="min-w-[140px]">
+                      {row.groupName || "未分组"}
+                    </strong>
                   </TableCell>
                   <TableCell>
-                    {user?.isAdmin ? (
-                      <div className="cell-main">
-                        <SelectField
-                          ariaLabel="固定隔离代理"
-                          className="w-[155px]"
-                          value={row.proxyId}
-                          onValueChange={(value) => void bindProxy(row, value)}
-                          placeholder="系统自动分配"
-                          clearable
-                          disabled={
-                            !canManage ||
-                            !row.id ||
-                            !canSwitchProxy(row) ||
-                            Boolean(operation)
-                          }
-                          options={proxies
-                            .filter((proxy) => proxy.enabled && proxy.id)
-                            .map((proxy) => ({
-                              value: proxy.id,
-                              label: `${proxy.endpoint}${proxy.countryCode ? ` · ${proxy.countryCode}` : ""}`,
-                            }))}
-                        />
-                        {!canSwitchProxy(row) ? (
-                          <span>先断开账号再切换代理</span>
-                        ) : null}
-                      </div>
-                    ) : (
-                      <div className="cell-main">
-                        <strong>
-                          {row.proxyId
-                            ? proxyEndpointById.get(row.proxyId) || "已绑定固定代理"
-                            : "系统自动分配隔离 IP"}
-                        </strong>
-                        <span>隔离代理由系统维护</span>
-                      </div>
-                    )}
+                    <strong className="min-w-[180px]">
+                      {row.proxyId
+                        ? proxyEndpointById.get(row.proxyId) || "已绑定固定代理"
+                        : "系统自动分配"}
+                    </strong>
                   </TableCell>
                   <TableCell className="text-center align-middle">
                     <div className="cell-main mx-auto min-w-[160px] items-center text-center">
