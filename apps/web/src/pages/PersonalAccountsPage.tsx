@@ -13,7 +13,7 @@ import {
   UserRoundIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { FaAndroid, FaApple } from "react-icons/fa6";
+import { SiAndroid, SiApple } from "react-icons/si";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
@@ -308,10 +308,14 @@ const deviceOsLabel = (value: string) =>
 function DeviceOsDisplay({ value }: { value: string }) {
   const label = deviceOsLabel(value);
   const Icon =
-    value === "android" ? FaAndroid : value === "ios" ? FaApple : SmartphoneIcon;
+    value === "android" ? SiAndroid : value === "ios" ? SiApple : SmartphoneIcon;
   return (
     <div className="flex min-w-max items-center justify-center gap-2">
-      <Icon className="size-4 shrink-0" aria-hidden="true" />
+      <Icon
+        className="size-4 shrink-0"
+        color={value === "android" ? "#3DDC84" : undefined}
+        aria-hidden="true"
+      />
       <span>{label}</span>
     </div>
   );
