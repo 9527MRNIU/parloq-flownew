@@ -1786,7 +1786,7 @@ export function PromotionTemplatesPage() {
                     />
                   </TableCell>
                   <TableCell>
-                    <Badge tone="neutral">
+                    <Badge tone={row.repositorySource ? "success" : "neutral"}>
                       {row.repositorySource ? "远程仓库" : "离线导入"}
                     </Badge>
                   </TableCell>
