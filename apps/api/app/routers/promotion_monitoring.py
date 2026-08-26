@@ -285,6 +285,26 @@ def _device_type_expression(user_agent):
     )
 
 
+def _device_system_expression(user_agent):
+    return case(
+        (
+            or_(user_agent.ilike("%iPhone%"), user_agent.ilike("%iPad%")),
+            literal("ios"),
+        ),
+        (user_agent.ilike("%Android%"), literal("android")),
+        (user_agent.ilike("%Windows%"), literal("windows")),
+        (
+            or_(
+                user_agent.ilike("%Macintosh%"),
+                user_agent.ilike("%Mac OS%"),
+            ),
+            literal("macos"),
+        ),
+        (user_agent.ilike("%Linux%"), literal("linux")),
+        else_=None,
+    )
+
+
 def _record_device(mapping) -> dict[str, Any]:
     return _device_summary(
         {
@@ -434,6 +454,9 @@ def list_records(
     device_type: Literal["all", "mobile", "tablet", "desktop"] = Query(
         default="all", alias="deviceType"
     ),
+    device_system: Literal[
+        "all", "ios", "android", "windows", "macos", "linux", "unknown"
+    ] = Query(default="all", alias="deviceSystem"),
     date_from: date | None = Query(default=None, alias="dateFrom"),
     date_to: date | None = Query(default=None, alias="dateTo"),
     page: int = Query(default=1, ge=1),
@@ -447,6 +470,7 @@ def list_records(
         "templateName",
         "integrationName",
         "deviceType",
+        "deviceSystem",
         "trafficSource",
         "occurredAt",
     ] = Query(default="id", alias="sortBy"),
@@ -470,6 +494,7 @@ def list_records(
 
     records = _monitoring_sources(channel_ids, start, end)
     device_type_expression = _device_type_expression(records.c.user_agent)
+    device_system_expression = _device_system_expression(records.c.user_agent)
     statement = (
         select(
             records,
@@ -517,6 +542,10 @@ def list_records(
         statement = statement.where(records.c.source_ip.ilike(f"%{source_ip.strip()}%"))
     if device_type != "all":
         statement = statement.where(device_type_expression == device_type)
+    if device_system == "unknown":
+        statement = statement.where(device_system_expression.is_(None))
+    elif device_system != "all":
+        statement = statement.where(device_system_expression == device_system)
     if keyword and keyword.strip():
         pattern = f"%{keyword.strip()}%"
         statement = statement.where(
@@ -544,6 +573,7 @@ def list_records(
         "templateName": PromotionTemplate.name,
         "integrationName": PromotionIntegration.name,
         "deviceType": device_type_expression,
+        "deviceSystem": device_system_expression,
         "trafficSource": records.c.traffic_source,
         "occurredAt": records.c.occurred_at,
     }

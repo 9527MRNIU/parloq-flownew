@@ -7,6 +7,8 @@ import {
   RouteIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { FaLinux } from "react-icons/fa6";
+import { IoLogoAndroid, IoLogoApple, IoLogoWindows } from "react-icons/io";
 import { useSearchParams } from "react-router-dom";
 import { apiRequest, formatDateTime, unwrapList } from "../api/client";
 import {
@@ -108,6 +110,7 @@ type MonitoringSortBy =
   | "templateName"
   | "integrationName"
   | "deviceType"
+  | "deviceSystem"
   | "trafficSource"
   | "occurredAt";
 
@@ -150,6 +153,42 @@ function networkSourceLabel(value?: string | null) {
 
 function deviceTypeLabel(value?: string | null) {
   return { mobile: "手机", tablet: "平板", desktop: "桌面设备" }[value || ""] || "未知设备";
+}
+
+function DeviceSystemDisplay({
+  system,
+  version,
+}: {
+  system?: string | null;
+  version?: string | null;
+}) {
+  const normalized = system?.trim().toLowerCase();
+  const presentation =
+    normalized === "ios"
+      ? { label: "iOS", Icon: IoLogoApple }
+      : normalized === "android"
+        ? { label: "Android", Icon: IoLogoAndroid, color: "#3DDC84" }
+        : normalized === "windows"
+          ? { label: "Windows", Icon: IoLogoWindows, color: "#0078D4" }
+          : normalized === "macos"
+            ? { label: "macOS", Icon: IoLogoApple }
+            : normalized === "linux"
+              ? { label: "Linux", Icon: FaLinux }
+              : null;
+  if (!presentation) return <span>-</span>;
+  const { label, Icon } = presentation;
+  return (
+    <div className="flex min-w-max items-center justify-center gap-[7px]">
+      <span className="flex size-4 shrink-0 items-center justify-center">
+        <Icon
+          className="size-4 shrink-0 scale-[1.3334]"
+          color={presentation.color}
+          aria-hidden="true"
+        />
+      </span>
+      <span>{versionedName(label, version)}</span>
+    </div>
+  );
 }
 
 function pairingFailureStageLabel(value: unknown) {
@@ -419,6 +458,7 @@ export default function PromotionMonitoringPage() {
   const [templateId, setTemplateId] = useState("all");
   const [integrationId, setIntegrationId] = useState(initialIntegrationId);
   const [deviceType, setDeviceType] = useState("all");
+  const [deviceSystem, setDeviceSystem] = useState("all");
   const [dateFrom, setDateFrom] = useState(() => dateInput(-6));
   const [dateTo, setDateTo] = useState(() => dateInput());
   const [appliedDates, setAppliedDates] = useState(() => ({
@@ -468,6 +508,7 @@ export default function PromotionMonitoringPage() {
         trafficSource,
         visitorCountryCode,
         deviceType,
+        deviceSystem,
         sortBy,
         sortOrder,
       });
@@ -493,6 +534,7 @@ export default function PromotionMonitoringPage() {
     channelId,
     eventType,
     deviceType,
+    deviceSystem,
     integrationId,
     page,
     pageSize,
@@ -560,6 +602,7 @@ export default function PromotionMonitoringPage() {
     setTemplateId("all");
     setIntegrationId("all");
     setDeviceType("all");
+    setDeviceSystem("all");
     setSortBy("id");
     setSortOrder("desc");
     setDateFrom(next.dateFrom);
@@ -708,6 +751,23 @@ export default function PromotionMonitoringPage() {
                 { value: "desktop", label: "桌面设备" },
               ]}
             />
+            <SelectField
+              ariaLabel="系统"
+              value={deviceSystem}
+              onValueChange={(value) => {
+                setPage(1);
+                setDeviceSystem(value);
+              }}
+              options={[
+                { value: "all", label: "全部系统" },
+                { value: "ios", label: "iOS" },
+                { value: "android", label: "Android" },
+                { value: "windows", label: "Windows" },
+                { value: "macos", label: "macOS" },
+                { value: "linux", label: "Linux" },
+                { value: "unknown", label: "未知系统" },
+              ]}
+            />
           </>
         }
         meta={`${total} 条记录 · 当前页客户端 ${visibleSummary.client} · 服务端 ${visibleSummary.server} · 集成 ${visibleSummary.integration}`}
@@ -749,6 +809,7 @@ export default function PromotionMonitoringPage() {
                 <ListSortableHead sortKey="templateName" activeSortKey={sortBy} sortOrder={sortOrder} onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>模板</ListSortableHead>
                 <ListSortableHead sortKey="integrationName" activeSortKey={sortBy} sortOrder={sortOrder} onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>集成</ListSortableHead>
                 <ListSortableHead sortKey="deviceType" activeSortKey={sortBy} sortOrder={sortOrder} onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>设备</ListSortableHead>
+                <ListSortableHead sortKey="deviceSystem" activeSortKey={sortBy} sortOrder={sortOrder} onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>系统</ListSortableHead>
                 <ListSortableHead sortKey="trafficSource" activeSortKey={sortBy} sortOrder={sortOrder} onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>流量来源</ListSortableHead>
                 <ListSortableHead sortKey="occurredAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={(key, order) => { setSortBy(key); setSortOrder(order); setPage(1); }}>记录时间</ListSortableHead>
                 <TableHead className="text-center">操作</TableHead>
@@ -813,10 +874,15 @@ export default function PromotionMonitoringPage() {
                     <div className="cell-main mx-auto min-w-[180px] justify-items-center text-center">
                       <strong>{versionedName(row.device.browser, row.device.browserVersion)}</strong>
                       <span>
-                        {deviceTypeLabel(row.device.type)} · {versionedName(row.device.system, row.device.systemVersion)} ·{" "}
-                        {viewportLabel(row.device.viewport)}
+                        {deviceTypeLabel(row.device.type)} · {viewportLabel(row.device.viewport)}
                       </span>
                     </div>
+                  </TableCell>
+                  <TableCell className="text-center align-middle">
+                    <DeviceSystemDisplay
+                      system={row.device.system}
+                      version={row.device.systemVersion}
+                    />
                   </TableCell>
                   <TableCell className="text-center align-middle">
                     {row.trafficSource === "fission" ? "裂变" : "直接"}

@@ -949,7 +949,8 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     monitored = admin_client.get(
         f"/api/promotion/monitoring/records?channelId={channel_id}"
         "&eventType=phone_submit&visitorCountryCode=CA"
-        "&sourceIp=2001%3Adb8&deviceType=mobile&sortBy=channelName&sortOrder=asc"
+        "&sourceIp=2001%3Adb8&deviceType=mobile&deviceSystem=ios"
+        "&sortBy=deviceSystem&sortOrder=asc"
     )
     assert monitored.status_code == 200, monitored.text
     monitored_data = monitored.json()["data"]
@@ -965,6 +966,8 @@ def test_promotion_zip_channel_tracking_leads_and_insights(
     assert monitored_record["device"]["browserVersion"] == "18.6"
     assert monitored_record["device"]["viewport"] == [390, 844]
     assert monitored_record["device"]["type"] == "mobile"
+    assert monitored_record["device"]["system"] == "iOS"
+    assert monitored_record["device"]["systemVersion"] == "18.6"
     assert monitored_record["id"].isdigit()
     record_detail = admin_client.get(
         "/api/promotion/monitoring/records/server/"

@@ -665,8 +665,8 @@ def test_iframe_feedback_uses_an_independent_runtime_and_persists_events(
 
     monitoring = admin_client.get(
         f"/api/promotion/monitoring/records?integrationId={integration['id']}"
-        "&sourceIp=198.51.100&deviceType=desktop"
-        "&sortBy=integrationName&sortOrder=asc"
+        "&sourceIp=198.51.100&deviceType=desktop&deviceSystem=unknown"
+        "&sortBy=deviceSystem&sortOrder=asc"
     )
     assert monitoring.status_code == 200, monitoring.text
     monitoring_data = monitoring.json()["data"]
