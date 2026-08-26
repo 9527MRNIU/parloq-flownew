@@ -118,6 +118,21 @@ def test_protocol_definitions_separate_versions_from_nodes(
     assert candidate["versionCategory"] == "preview"
     assert candidate["remoteLatestVersion"] == "7.0.0-rc.14"
 
+    sorted_definitions = admin_client.get(
+        "/api/protocol-definitions",
+        params={"sortBy": "version", "sortOrder": "desc", "pageSize": 1},
+    )
+    assert sorted_definitions.status_code == 200, sorted_definitions.text
+    assert sorted_definitions.json()["data"]["rows"][0]["id"] == candidate["id"]
+    filtered_definitions = admin_client.get(
+        "/api/protocol-definitions",
+        params={"keyword": candidate["id"]},
+    )
+    assert filtered_definitions.status_code == 200, filtered_definitions.text
+    assert [
+        row["id"] for row in filtered_definitions.json()["data"]["rows"]
+    ] == [candidate["id"]]
+
     unavailable = admin_client.post(
         "/api/protocol-nodes",
         json={

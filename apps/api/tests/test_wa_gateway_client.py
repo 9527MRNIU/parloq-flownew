@@ -157,6 +157,7 @@ def test_gateway_client_uses_canonical_contract_and_bearer(monkeypatch) -> None:
     assert client.sync_metadata("wa_contract", {"avatar": True})[
         "metadataSyncStatus"
     ] == "ready"
+    assert client.delete_account("wa_contract")["id"] == "wa_contract"
 
     assert calls[0][2]["json"] == {
         "id": "wa_contract",
@@ -198,6 +199,8 @@ def test_gateway_client_uses_canonical_contract_and_bearer(monkeypatch) -> None:
     assert calls[11][2]["json"] == {"phoneE164": "+12025550199"}
     assert calls[12][1].endswith("/v1/accounts/wa_contract/metadata-sync")
     assert calls[12][2]["json"] == {"syncPolicy": {"avatar": True}}
+    assert calls[13][0] == "DELETE"
+    assert calls[13][1].endswith("/v1/accounts/wa_contract")
     assert all(
         call[2]["headers"]["Authorization"] == "Bearer gateway-token"
         for call in calls

@@ -170,6 +170,43 @@ def test_ip_proxy_and_binding_lifecycle(admin_client: TestClient) -> None:
     assert admin_client.delete(f"/api/ip-proxies/{proxy['id']}").status_code == 200
 
 
+def test_ip_proxy_filter_and_sort_contract(admin_client: TestClient) -> None:
+    provider = "Sorting Contract Provider"
+    created_rows = []
+    for suffix, country_code in (("ca", "CA"), ("us", "US")):
+        response = admin_client.post(
+            "/api/ip-proxies",
+            json={
+                "name": f"Sorting proxy {suffix}",
+                "protocol": "http",
+                "host": f"sorting-{suffix}.example.test",
+                "port": 8080,
+                "countryCode": country_code,
+                "provider": provider,
+            },
+        )
+        assert response.status_code == 201, response.text
+        created_rows.append(response.json()["data"]["proxy"])
+
+    listed = admin_client.get(
+        "/api/ip-proxies",
+        params={
+            "provider": provider,
+            "protocol": "http",
+            "sortBy": "countryCode",
+            "sortOrder": "asc",
+        },
+    )
+    assert listed.status_code == 200, listed.text
+    rows = listed.json()["data"]["rows"]
+    assert [row["countryCode"] for row in rows] == ["CA", "US"]
+    assert {row["id"] for row in rows} == {row["id"] for row in created_rows}
+
+    filter_options = admin_client.get("/api/ip-proxies/filter-options")
+    assert filter_options.status_code == 200, filter_options.text
+    assert provider in filter_options.json()["data"]["providers"]
+
+
 def test_batch_rebind_maps_each_source_proxy_to_manual_target(
     admin_client: TestClient,
     monkeypatch,

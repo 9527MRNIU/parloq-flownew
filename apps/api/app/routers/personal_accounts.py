@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from io import BytesIO
+from typing import Literal
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile, status
@@ -22,10 +24,12 @@ from app.entity_ids import entity_id, identifier_filter
 from app.snowflake import new_public_id, parse_snowflake_id
 
 from app.models import (
+    AccountContact,
     AccountMetadataSyncJob,
     AccountPairingAttempt,
     AccountGroup,
     AccountLifecycleEvent,
+    AccountWhatsappGroup,
     AccountProxyBinding,
     DomainRecord,
     IpAllocationPolicy,
@@ -37,6 +41,8 @@ from app.models import (
     ProtocolNode,
     RoleActionPermission,
     HyperlinkTask,
+    HyperlinkTaskAccountSlot,
+    HyperlinkTaskDelivery,
 )
 from app.security import utcnow
 from app.serializers import iso
@@ -75,6 +81,191 @@ from app.validation import phone_country_code
 
 
 router = APIRouter(prefix="/api/personal-accounts", tags=["personal-accounts"])
+
+
+def _resource_score_metrics(
+    db: DbSession, account_ids: list[int]
+) -> dict[int, dict[str, int | float]]:
+    if not account_ids:
+        return {}
+    metrics = {
+        account_id: {
+            "savedContactCount": 0,
+            "savedOnlyContactCount": 0,
+            "chatHistoryContactCount": 0,
+            "adminGroupMemberPoints": 0,
+            "memberGroupMemberPoints": 0,
+        }
+        for account_id in account_ids
+    }
+    for account_id, saved_count, saved_only_count, chat_history_count in db.execute(
+        select(
+            AccountContact.account_id,
+            func.sum(
+                case((AccountContact.is_saved_contact.is_(True), 1), else_=0)
+            ),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            AccountContact.is_saved_contact.is_(True),
+                            AccountContact.has_chat_history.is_(False),
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
+            func.sum(
+                case((AccountContact.has_chat_history.is_(True), 1), else_=0)
+            ),
+        )
+        .where(
+            AccountContact.account_id.in_(account_ids),
+            AccountContact.active.is_(True),
+        )
+        .group_by(AccountContact.account_id)
+    ).all():
+        saved = int(saved_count or 0)
+        saved_only = int(saved_only_count or 0)
+        chat_history = int(chat_history_count or 0)
+        metrics[int(account_id)].update(
+            {
+                "savedContactCount": saved,
+                "savedOnlyContactCount": saved_only,
+                "chatHistoryContactCount": chat_history,
+            }
+        )
+    for account_id, admin_points, member_points in db.execute(
+        select(
+            AccountWhatsappGroup.account_id,
+            func.sum(
+                case(
+                    (
+                        and_(
+                            AccountWhatsappGroup.can_send.is_(True),
+                            AccountWhatsappGroup.own_role.in_(
+                                ("admin", "superadmin")
+                            ),
+                        ),
+                        AccountWhatsappGroup.size,
+                    ),
+                    else_=0,
+                )
+            ),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            AccountWhatsappGroup.can_send.is_(True),
+                            AccountWhatsappGroup.own_role == "member",
+                        ),
+                        AccountWhatsappGroup.size * 0.5,
+                    ),
+                    else_=0,
+                )
+            ),
+        )
+        .where(
+            AccountWhatsappGroup.account_id.in_(account_ids),
+            AccountWhatsappGroup.active.is_(True),
+        )
+        .group_by(AccountWhatsappGroup.account_id)
+    ).all():
+        admin = float(admin_points or 0)
+        member = float(member_points or 0)
+        metrics[int(account_id)].update(
+            {
+                "adminGroupMemberPoints": admin,
+                "memberGroupMemberPoints": member,
+            }
+        )
+    return metrics
+
+
+def _account_score(
+    item: PersonalAccount, resource_metrics: dict[str, int | float] | None
+) -> dict:
+    resource_state = (
+        item.resource_sync_state_json
+        if isinstance(item.resource_sync_state_json, dict)
+        else {}
+    )
+    contacts_state = resource_state.get("contacts")
+    groups_state = resource_state.get("groups")
+    contacts_complete = (
+        isinstance(contacts_state, dict)
+        and contacts_state.get("status") == "complete"
+        and contacts_state.get("complete") is True
+    )
+    groups_complete = (
+        isinstance(groups_state, dict)
+        and groups_state.get("status") == "complete"
+    )
+    saved_contact_count = (
+        resource_metrics["savedContactCount"]
+        if contacts_complete and resource_metrics is not None
+        else None
+    )
+    saved_only_contact_count = (
+        resource_metrics["savedOnlyContactCount"]
+        if contacts_complete and resource_metrics is not None
+        else None
+    )
+    chat_history_count = (
+        resource_metrics["chatHistoryContactCount"]
+        if contacts_complete and resource_metrics is not None
+        else None
+    )
+    saved_contact_points = (
+        saved_only_contact_count * 0.5
+        if saved_only_contact_count is not None
+        else None
+    )
+    chat_history_points = chat_history_count
+    friend_points = (
+        saved_contact_points + chat_history_points
+        if saved_contact_points is not None and chat_history_points is not None
+        else None
+    )
+    admin_group_points = (
+        resource_metrics["adminGroupMemberPoints"]
+        if groups_complete and resource_metrics is not None
+        else None
+    )
+    member_group_points = (
+        resource_metrics["memberGroupMemberPoints"]
+        if groups_complete and resource_metrics is not None
+        else None
+    )
+    group_points = (
+        admin_group_points + member_group_points
+        if admin_group_points is not None and member_group_points is not None
+        else None
+    )
+    complete = all(
+        value is not None for value in (friend_points, group_points)
+    )
+    return {
+        "score": (
+            float(friend_points or 0) + float(group_points or 0)
+            if complete
+            else None
+        ),
+        "complete": complete,
+        "friendPoints": friend_points,
+        "groupMemberPoints": group_points,
+        "savedContactCount": saved_contact_count,
+        "savedOnlyContactCount": saved_only_contact_count,
+        "chatHistoryContactCount": chat_history_count,
+        "savedContactPoints": saved_contact_points,
+        "chatHistoryPoints": chat_history_points,
+        "adminGroupMemberPoints": admin_group_points,
+        "memberGroupMemberPoints": member_group_points,
+        "uniqueGroupMemberCount": item.unique_group_member_count,
+    }
+
+
 group_router = APIRouter(prefix="/api/account-groups", tags=["account-groups"])
 
 GATEWAY_ACCOUNT_STATES = {
@@ -145,7 +336,12 @@ def _require_account_export(db: DbSession, user) -> None:
         raise HTTPException(status_code=403, detail="没有账号导出权限")
 
 
-def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
+def _group_metrics(
+    db: DbSession,
+    group_ids: list[int],
+    *,
+    include_average_score: bool = False,
+) -> dict[int, dict]:
     if not group_ids:
         return {}
     valid_condition = and_(
@@ -168,6 +364,7 @@ def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
     )
     profile_known_condition = and_(
         PersonalAccount.has_avatar.is_not(None),
+        PersonalAccount.friend_count.is_not(None),
         PersonalAccount.group_count.is_not(None),
     )
     profile_complete_condition = and_(
@@ -176,6 +373,7 @@ def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
     )
     profile_unknown_condition = or_(
         PersonalAccount.has_avatar.is_(None),
+        PersonalAccount.friend_count.is_(None),
         PersonalAccount.group_count.is_(None),
     )
     rows = db.execute(
@@ -192,17 +390,15 @@ def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
             func.sum(case((PersonalAccount.has_avatar.is_(False), 1), else_=0)),
             func.sum(case((PersonalAccount.group_count == 0, 1), else_=0)),
             func.sum(case((PersonalAccount.friend_count == 0, 1), else_=0)),
-            func.sum(
-                case((PersonalAccount.mutual_contact_count == 0, 1), else_=0)
-            ),
         )
         .where(
             PersonalAccount.group_id.in_(group_ids),
             PersonalAccount.admission_status == "active",
+            PersonalAccount.deleted_at.is_(None),
         )
         .group_by(PersonalAccount.group_id)
     ).all()
-    return {
+    metrics = {
         int(group_id): {
             "accountCount": int(total or 0),
             "validAccountCount": int(valid or 0),
@@ -215,7 +411,6 @@ def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
             "noAvatarCount": int(no_avatar or 0),
             "noGroupCount": int(no_group or 0),
             "zeroFriendCount": int(zero_friends or 0),
-            "zeroMutualCount": int(zero_mutual or 0),
         }
         for (
             group_id,
@@ -230,10 +425,30 @@ def _group_metrics(db: DbSession, group_ids: list[int]) -> dict[int, dict]:
             no_avatar,
             no_group,
             zero_friends,
-            zero_mutual,
         ) in rows
         if group_id is not None
     }
+    if not include_average_score:
+        return metrics
+    accounts = db.scalars(
+        select(PersonalAccount).where(
+            PersonalAccount.group_id.in_(group_ids),
+            PersonalAccount.admission_status == "active",
+            PersonalAccount.deleted_at.is_(None),
+        )
+    ).all()
+    score_metrics = _resource_score_metrics(db, [item.id for item in accounts])
+    scores_by_group: dict[int, list[float]] = {}
+    for item in accounts:
+        score = _account_score(item, score_metrics.get(item.id))["score"]
+        if item.group_id is not None and score is not None:
+            scores_by_group.setdefault(item.group_id, []).append(float(score))
+    for group_id in group_ids:
+        scores = scores_by_group.get(group_id, [])
+        metrics.setdefault(group_id, {})["averageScore"] = (
+            round(sum(scores) / len(scores), 2) if scores else None
+        )
+    return metrics
 
 
 def _group_row(
@@ -255,6 +470,7 @@ def _group_row(
         "accountCount": account_count,
         "validAccountCount": valid_count,
         "validRate": round(valid_count / account_count, 6) if account_count else None,
+        "averageScore": metrics.get("averageScore"),
         "onlineAccountCount": int(metrics.get("onlineAccountCount", 0)),
         "abnormalAccountCount": int(metrics.get("abnormalAccountCount", 0)),
         "pendingValidationCount": int(metrics.get("pendingValidationCount", 0)),
@@ -269,14 +485,95 @@ def _group_row(
         "noAvatarCount": int(metrics.get("noAvatarCount", 0)),
         "noGroupCount": int(metrics.get("noGroupCount", 0)),
         "zeroFriendCount": int(metrics.get("zeroFriendCount", 0)),
-        "zeroMutualCount": int(metrics.get("zeroMutualCount", 0)),
         "createdAt": iso(item.created_at),
         "updatedAt": iso(item.updated_at),
     }
 
 
 @group_router.get("")
-def list_account_groups(db: DbSession, current_user: CurrentUser) -> dict:
+def list_account_groups(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id",
+        "accountCount",
+        "validAccountCount",
+        "abnormalAccountCount",
+        "validRate",
+        "averageScore",
+        "createdAt",
+        "updatedAt",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
+) -> dict:
+    statement = select(AccountGroup)
+    if current_user.role != "admin":
+        statement = statement.where(AccountGroup.created_by == current_user.id)
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        statement = statement.where(
+            or_(
+                AccountGroup.name.ilike(pattern),
+                AccountGroup.description.ilike(pattern),
+            )
+        )
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    descending = sort_order == "desc"
+    direct_sort_columns = {
+        "id": AccountGroup.id,
+        "createdAt": AccountGroup.created_at,
+        "updatedAt": AccountGroup.updated_at,
+    }
+    if sort_by in direct_sort_columns:
+        sort_column = direct_sort_columns[sort_by]
+        ordering = [sort_column.desc() if descending else sort_column.asc()]
+        if sort_by != "id":
+            ordering.append(AccountGroup.id.desc() if descending else AccountGroup.id.asc())
+        items = db.scalars(
+            statement.order_by(*ordering)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).all()
+        metrics = _group_metrics(
+            db,
+            [item.id for item in items],
+            include_average_score=True,
+        )
+        paged_rows = [
+            _group_row(db, item, metrics.get(item.id, {})) for item in items
+        ]
+    else:
+        items = db.scalars(statement).all()
+        metrics = _group_metrics(
+            db,
+            [item.id for item in items],
+            include_average_score=True,
+        )
+        rows = [_group_row(db, item, metrics.get(item.id, {})) for item in items]
+        present = [row for row in rows if row.get(sort_by) is not None]
+        missing = [row for row in rows if row.get(sort_by) is None]
+        present.sort(
+            key=lambda row: (row[sort_by], int(row["id"])),
+            reverse=descending,
+        )
+        missing.sort(key=lambda row: int(row["id"]), reverse=descending)
+        start = (page - 1) * page_size
+        paged_rows = (present + missing)[start : start + page_size]
+    return {
+        "data": {
+            "rows": paged_rows,
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+    }
+
+
+@group_router.get("/options")
+def list_account_group_options(db: DbSession, current_user: CurrentUser) -> dict:
     statement = select(AccountGroup)
     if current_user.role != "admin":
         statement = statement.where(AccountGroup.created_by == current_user.id)
@@ -285,7 +582,12 @@ def list_account_groups(db: DbSession, current_user: CurrentUser) -> dict:
     return {
         "data": {
             "rows": [
-                _group_row(db, item, metrics.get(item.id, {})) for item in items
+                {
+                    "id": entity_id(item),
+                    "name": item.name,
+                    "accountCount": int(metrics.get(item.id, {}).get("accountCount", 0)),
+                }
+                for item in items
             ],
             "total": len(items),
         }
@@ -371,7 +673,13 @@ def delete_account_group(
     return {"data": {"ok": True}}
 
 
-def _account(db: DbSession, account_id: str, user) -> PersonalAccount:
+def _account(
+    db: DbSession,
+    account_id: str,
+    user,
+    *,
+    for_update: bool = False,
+) -> PersonalAccount:
     try:
         database_id = parse_snowflake_id(account_id)
     except ValueError:
@@ -379,10 +687,11 @@ def _account(db: DbSession, account_id: str, user) -> PersonalAccount:
     statement = select(PersonalAccount).where(
         PersonalAccount.id == database_id,
         PersonalAccount.admission_status == "active",
+        PersonalAccount.deleted_at.is_(None),
         )
     if user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == user.id)
-    item = db.scalar(statement)
+    item = db.scalar(statement.with_for_update() if for_update else statement)
     if item is None:
         raise HTTPException(status_code=404, detail="个人账号不存在")
     return item
@@ -401,27 +710,63 @@ def _proxy_url(db: DbSession, account_id: str) -> str | None:
     return gateway_proxy_url(db, account_id)
 
 
+def _latest_visitor_country_codes(
+    db: DbSession, account_ids: list[int]
+) -> dict[int, str]:
+    if not account_ids:
+        return {}
+    ranked = (
+        select(
+            AccountPairingAttempt.account_id.label("account_id"),
+            AccountPairingAttempt.visitor_country_code.label(
+                "visitor_country_code"
+            ),
+            func.row_number()
+            .over(
+                partition_by=AccountPairingAttempt.account_id,
+                order_by=(
+                    AccountPairingAttempt.created_at.desc(),
+                    AccountPairingAttempt.id.desc(),
+                ),
+            )
+            .label("position"),
+        )
+        .where(
+            AccountPairingAttempt.account_id.in_(account_ids),
+            AccountPairingAttempt.visitor_country_code.is_not(None),
+        )
+        .subquery()
+    )
+    return {
+        int(account_id): str(visitor_country_code)
+        for account_id, visitor_country_code in db.execute(
+            select(ranked.c.account_id, ranked.c.visitor_country_code).where(
+                ranked.c.position == 1
+            )
+        ).all()
+    }
+
+
 def _account_payload(
     item: PersonalAccount,
     *,
+    resource_score_metrics: dict[str, int | float] | None,
     bound: tuple[AccountProxyBinding, ProxyEndpoint] | None,
     group: AccountGroup | None,
     protocol: ProtocolNode | None,
+    visitor_country_code: str | None,
     sent_count: int,
     delivered_count: int,
 ) -> dict:
     proxy = bound[1] if bound else None
-    quality_score = None
-    if item.has_avatar is not None and item.group_count is not None:
-        quality_score = round(
-            (int(item.has_avatar) + int(item.group_count > 0)) / 2 * 100
-        )
+    score = _account_score(item, resource_score_metrics)
     return {
         "id": str(item.id),
         "createdBy": str(item.created_by),
         "name": item.name,
         "phone": item.phone_e164,
         "countryCode": item.country_code,
+        "visitorCountryCode": visitor_country_code,
         "status": item.status,
         "source": item.source,
         "sourceRefType": item.source_ref_type,
@@ -429,7 +774,11 @@ def _account_payload(
         "importFormat": item.import_format,
         "validationStatus": item.validation_status,
         "metadataSyncStatus": item.metadata_sync_status,
+        "resourceSync": item.resource_sync_state_json or {},
         "admissionStatus": item.admission_status,
+        "waPlatformRaw": item.wa_platform_raw,
+        "accountType": item.account_type,
+        "deviceOs": item.device_os,
         "protocol": (
             {
                 "id": str(protocol.id),
@@ -457,10 +806,10 @@ def _account_payload(
             "avatarFetchedAt": iso(item.avatar_fetched_at),
             "groupCount": item.group_count,
             "friendCount": item.friend_count,
-            "mutualContactCount": item.mutual_contact_count,
-            "score": quality_score,
+            "uniqueGroupMemberCount": item.unique_group_member_count,
+            **score,
             "syncedAt": iso(item.quality_synced_at),
-            "isKnown": quality_score is not None,
+            "isKnown": score["complete"],
         },
         "enabled": item.enabled,
         "marketingEligible": item.marketing_eligible,
@@ -509,9 +858,13 @@ def account_row(db: DbSession, item: PersonalAccount) -> dict:
     )
     return _account_payload(
         item,
+        resource_score_metrics=_resource_score_metrics(db, [item.id]).get(item.id),
         bound=_binding(db, item.gateway_account_id),
         group=db.get(AccountGroup, item.group_id) if item.group_id else None,
         protocol=db.get(ProtocolNode, item.protocol_id) if item.protocol_id else None,
+        visitor_country_code=_latest_visitor_country_codes(db, [item.id]).get(
+            item.id
+        ),
         sent_count=sent_count,
         delivered_count=delivered_count,
     )
@@ -563,15 +916,19 @@ def account_rows(db: DbSession, items: list[PersonalAccount]) -> list[dict]:
             .group_by(MessageDelivery.account_id)
         ).all()
     }
+    visitor_country_codes = _latest_visitor_country_codes(db, account_ids)
+    score_metrics = _resource_score_metrics(db, account_ids)
     rows = []
     for item in items:
         sent_count, delivered_count = deliveries.get(item.id, (0, 0))
         rows.append(
             _account_payload(
                 item,
+                resource_score_metrics=score_metrics.get(item.id),
                 bound=bindings.get(item.gateway_account_id),
                 group=groups.get(item.group_id),
                 protocol=protocols.get(item.protocol_id),
+                visitor_country_code=visitor_country_codes.get(item.id),
                 sent_count=sent_count,
                 delivered_count=delivered_count,
             )
@@ -630,7 +987,6 @@ def _apply_gateway_account(item: PersonalAccount, value: dict) -> None:
         for source_key, attribute in (
             ("groupCount", "group_count"),
             ("friendCount", "friend_count"),
-            ("mutualContactCount", "mutual_contact_count"),
         ):
             metric = quality.get(source_key)
             if isinstance(metric, int) and not isinstance(metric, bool) and metric >= 0:
@@ -638,6 +994,27 @@ def _apply_gateway_account(item: PersonalAccount, value: dict) -> None:
                 quality_known = True
         if quality_known:
             item.quality_synced_at = utcnow()
+    metadata = value.get("metadata")
+    if isinstance(metadata, dict):
+        profile = metadata.get("accountProfile")
+        if isinstance(profile, dict):
+            if isinstance(profile.get("platformRaw"), str) and profile[
+                "platformRaw"
+            ].strip():
+                item.wa_platform_raw = profile["platformRaw"].strip()[:32]
+            if profile.get("accountType") in {"personal", "business"}:
+                item.account_type = profile["accountType"]
+            if profile.get("deviceOs") in {"android", "ios", "other"}:
+                item.device_os = profile["deviceOs"]
+        resource_sync = metadata.get("resourceSync")
+        if isinstance(resource_sync, dict):
+            unique_members = resource_sync.get("uniqueGroupMemberCount")
+            if (
+                isinstance(unique_members, int)
+                and not isinstance(unique_members, bool)
+                and unique_members >= 0
+            ):
+                item.unique_group_member_count = unique_members
     item.last_error = None
 
 
@@ -851,6 +1228,49 @@ def _unified_status_predicate(status_key: str):
     return predicate
 
 
+def _account_visitor_country_expression():
+    return (
+        select(AccountPairingAttempt.visitor_country_code)
+        .where(
+            AccountPairingAttempt.account_id == PersonalAccount.id,
+            AccountPairingAttempt.visitor_country_code.is_not(None),
+        )
+        .order_by(
+            AccountPairingAttempt.created_at.desc(),
+            AccountPairingAttempt.id.desc(),
+        )
+        .limit(1)
+        .correlate(PersonalAccount)
+        .scalar_subquery()
+    )
+
+
+def _account_proxy_country_expression():
+    return (
+        select(ProxyEndpoint.country_code)
+        .join(
+            AccountProxyBinding,
+            AccountProxyBinding.proxy_id == ProxyEndpoint.id,
+        )
+        .where(AccountProxyBinding.account_public_id == PersonalAccount.public_id)
+        .limit(1)
+        .correlate(PersonalAccount)
+        .scalar_subquery()
+    )
+
+
+def _account_sent_count_expression():
+    return (
+        select(func.count(MessageDelivery.id))
+        .where(
+            MessageDelivery.account_id == PersonalAccount.id,
+            MessageDelivery.status.in_(("sent", "delivered")),
+        )
+        .correlate(PersonalAccount)
+        .scalar_subquery()
+    )
+
+
 @router.get("")
 def list_accounts(
     db: DbSession,
@@ -866,15 +1286,66 @@ def list_accounts(
         max_length=2,
         pattern=r"^[A-Za-z]{2}$",
     ),
+    visitor_country_code: str | None = Query(
+        default=None,
+        alias="visitorCountryCode",
+        min_length=2,
+        max_length=2,
+        pattern=r"^[A-Za-z]{2}$",
+    ),
+    proxy_country_code: str | None = Query(
+        default=None,
+        alias="proxyCountryCode",
+        min_length=2,
+        max_length=2,
+        pattern=r"^[A-Za-z]{2}$",
+    ),
+    account_type: Literal["personal", "business", "unknown"] | None = Query(
+        default=None,
+        alias="accountType",
+    ),
+    device_os: Literal["android", "ios", "other", "unknown"] | None = Query(
+        default=None,
+        alias="deviceOs",
+    ),
     protocol_id: str | None = Query(default=None, alias="protocolId"),
     metadata_status: str | None = Query(default=None, alias="metadataStatus"),
     quality_known: bool | None = Query(default=None, alias="qualityKnown"),
+    connected: bool | None = None,
+    validation_status: str | None = Query(default=None, alias="validationStatus"),
+    exportable: bool | None = None,
     sync: bool = Query(default=False),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id",
+        "countryCode",
+        "visitorCountryCode",
+        "proxyCountryCode",
+        "accountType",
+        "deviceOs",
+        "source",
+        "friendCount",
+        "groupCount",
+        "qualityScore",
+        "groupName",
+        "protocolId",
+        "sentCount",
+        "createdAt",
+        "updatedAt",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
 ) -> dict:
-    statement = select(PersonalAccount).where(
-        PersonalAccount.admission_status == "active",
+    visitor_country_expression = _account_visitor_country_expression()
+    proxy_country_expression = _account_proxy_country_expression()
+    sent_count_expression = _account_sent_count_expression()
+    statement = (
+        select(PersonalAccount)
+        .outerjoin(AccountGroup, AccountGroup.id == PersonalAccount.group_id)
+        .where(
+            PersonalAccount.admission_status == "active",
+            PersonalAccount.deleted_at.is_(None),
+        )
     )
     if current_user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == current_user.id)
@@ -887,6 +1358,7 @@ def list_accounts(
             PersonalAccount.country_code.ilike(pattern),
             PersonalAccount.source_ref_type.ilike(pattern),
             PersonalAccount.import_format.ilike(pattern),
+            AccountGroup.name.ilike(pattern),
         ]
         if normalized_keyword.isdigit():
             matches.append(PersonalAccount.id == int(normalized_keyword))
@@ -910,6 +1382,18 @@ def list_accounts(
         statement = statement.where(
             PersonalAccount.country_code == country_code.upper()
         )
+    if visitor_country_code:
+        statement = statement.where(
+            visitor_country_expression == visitor_country_code.upper()
+        )
+    if proxy_country_code:
+        statement = statement.where(
+            proxy_country_expression == proxy_country_code.upper()
+        )
+    if account_type:
+        statement = statement.where(PersonalAccount.account_type == account_type)
+    if device_os:
+        statement = statement.where(PersonalAccount.device_os == device_os)
     if protocol_id:
         try:
             database_protocol_id = parse_snowflake_id(protocol_id)
@@ -931,21 +1415,84 @@ def list_accounts(
     if quality_known is True:
         statement = statement.where(
             PersonalAccount.has_avatar.is_not(None),
+            PersonalAccount.friend_count.is_not(None),
             PersonalAccount.group_count.is_not(None),
         )
     elif quality_known is False:
         statement = statement.where(
             or_(
                 PersonalAccount.has_avatar.is_(None),
+                PersonalAccount.friend_count.is_(None),
                 PersonalAccount.group_count.is_(None),
             )
         )
+    if connected is not None:
+        connection_predicate = PersonalAccount.status.in_(ONLINE_ACCOUNT_STATES)
+        statement = statement.where(
+            connection_predicate if connected else ~connection_predicate
+        )
+    if validation_status:
+        statement = statement.where(
+            PersonalAccount.validation_status == validation_status
+        )
+    if exportable is True:
+        statement = statement.where(
+            PersonalAccount.validation_status == "ready",
+            PersonalAccount.status.not_in(
+                ("pairing", "warming", "online_idle", "sending", "draining")
+            ),
+        )
     total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
-    items = db.scalars(
-        statement.order_by(PersonalAccount.created_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-    ).all()
+    if sort_by == "qualityScore":
+        all_items = db.scalars(statement).all()
+        all_rows = account_rows(db, list(all_items))
+        present = [row for row in all_rows if row["quality"]["score"] is not None]
+        missing = [row for row in all_rows if row["quality"]["score"] is None]
+        descending = sort_order == "desc"
+        present.sort(
+            key=lambda row: (row["quality"]["score"], int(row["id"])),
+            reverse=descending,
+        )
+        missing.sort(key=lambda row: int(row["id"]), reverse=descending)
+        start = (page - 1) * page_size
+        paged_rows = (present + missing)[start : start + page_size]
+        items_by_id = {str(item.id): item for item in all_items}
+        items = [items_by_id[row["id"]] for row in paged_rows]
+    else:
+        sort_columns = {
+            "id": PersonalAccount.id,
+            "countryCode": PersonalAccount.country_code,
+            "visitorCountryCode": visitor_country_expression,
+            "proxyCountryCode": proxy_country_expression,
+            "accountType": PersonalAccount.account_type,
+            "deviceOs": PersonalAccount.device_os,
+            "source": PersonalAccount.source,
+            "friendCount": PersonalAccount.friend_count,
+            "groupCount": PersonalAccount.group_count,
+            "groupName": AccountGroup.name,
+            "protocolId": PersonalAccount.protocol_id,
+            "sentCount": sent_count_expression,
+            "createdAt": PersonalAccount.created_at,
+            "updatedAt": PersonalAccount.updated_at,
+        }
+        sort_column = sort_columns[sort_by]
+        primary_order = (
+            sort_column.asc().nullslast()
+            if sort_order == "asc"
+            else sort_column.desc().nullslast()
+        )
+        ordering = [primary_order]
+        if sort_by != "id":
+            ordering.append(
+                PersonalAccount.id.asc()
+                if sort_order == "asc"
+                else PersonalAccount.id.desc()
+            )
+        items = db.scalars(
+            statement.order_by(*ordering)
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).all()
     if sync and items:
         try:
             gateway_accounts = {
@@ -959,9 +1506,11 @@ def list_accounts(
             db.commit()
         except GatewayError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from None
+    if sort_by != "qualityScore" or sync:
+        paged_rows = account_rows(db, list(items))
     return {
         "data": {
-            "rows": account_rows(db, list(items)),
+            "rows": paged_rows,
             "total": total,
             "page": page,
             "pageSize": page_size,
@@ -969,10 +1518,34 @@ def list_accounts(
     }
 
 
+@router.get("/options")
+def account_options(db: DbSession, current_user: CurrentUser) -> dict:
+    statement = select(PersonalAccount).where(
+        PersonalAccount.admission_status == "active",
+        PersonalAccount.deleted_at.is_(None),
+    )
+    if current_user.role != "admin":
+        statement = statement.where(PersonalAccount.created_by == current_user.id)
+    items = db.scalars(
+        statement.order_by(PersonalAccount.name, PersonalAccount.id)
+    ).all()
+    rows = [
+        {
+            "id": entity_id(item),
+            "name": item.name,
+            "phone": item.phone_e164,
+            "status": item.status,
+        }
+        for item in items
+    ]
+    return {"data": {"rows": rows, "total": len(rows)}}
+
+
 @router.get("/filter-options")
 def account_filter_options(db: DbSession, current_user: CurrentUser) -> dict:
     account_scope = select(PersonalAccount).where(
         PersonalAccount.admission_status == "active",
+        PersonalAccount.deleted_at.is_(None),
     )
     if current_user.role != "admin":
         account_scope = account_scope.where(
@@ -995,9 +1568,39 @@ def account_filter_options(db: DbSession, current_user: CurrentUser) -> dict:
         .where(ProtocolNode.id.in_(protocol_ids))
         .order_by(ProtocolNode.name, ProtocolNode.id)
     ).all()
+    account_ids = account_scope.with_only_columns(PersonalAccount.id)
+    account_public_ids = account_scope.with_only_columns(PersonalAccount.public_id)
+    visitor_countries = list(
+        db.scalars(
+            select(AccountPairingAttempt.visitor_country_code)
+            .where(
+                AccountPairingAttempt.account_id.in_(account_ids),
+                AccountPairingAttempt.visitor_country_code.is_not(None),
+            )
+            .distinct()
+            .order_by(AccountPairingAttempt.visitor_country_code)
+        ).all()
+    )
+    proxy_countries = list(
+        db.scalars(
+            select(ProxyEndpoint.country_code)
+            .join(
+                AccountProxyBinding,
+                AccountProxyBinding.proxy_id == ProxyEndpoint.id,
+            )
+            .where(
+                AccountProxyBinding.account_public_id.in_(account_public_ids),
+                ProxyEndpoint.country_code.is_not(None),
+            )
+            .distinct()
+            .order_by(ProxyEndpoint.country_code)
+        ).all()
+    )
     return {
         "data": {
             "countries": countries,
+            "visitorCountries": visitor_countries,
+            "proxyCountries": proxy_countries,
             "protocols": [
                 {
                     "id": str(item.id),
@@ -1074,7 +1677,7 @@ def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: 
         db.rollback()
         if gateway_attempted:
             try:
-                client.logout(item.gateway_account_id)
+                client.delete_account(item.gateway_account_id)
             except GatewayError:
                 pass
         raise HTTPException(status_code=409, detail="手机号已被其他个人账号使用") from None
@@ -1084,7 +1687,7 @@ def create_account(payload: PersonalAccountCreate, db: DbSession, current_user: 
         # Best-effort cleanup keeps a subsequent user retry from hitting 409.
         if gateway_attempted:
             try:
-                client.logout(item.gateway_account_id)
+                client.delete_account(item.gateway_account_id)
             except GatewayError:
                 pass
         raise HTTPException(status_code=502, detail=str(exc)) from None
@@ -1259,18 +1862,23 @@ def _unknown_aware_metric(values: list[object], predicate) -> dict:
 def account_statistics(db: DbSession, current_user: CurrentUser) -> dict:
     statement = select(PersonalAccount).where(
         PersonalAccount.admission_status == "active",
+        PersonalAccount.deleted_at.is_(None),
     )
     if current_user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == current_user.id)
     items = list(db.scalars(statement).all())
+    score_metrics = _resource_score_metrics(db, [item.id for item in items])
     validation = {
         key: sum(1 for item in items if item.validation_status == key)
         for key in ("pending", "validating", "ready", "failed")
     }
     scores = [
-        (int(item.has_avatar) + int(item.group_count > 0)) / 2 * 100
+        score["score"]
         for item in items
-        if item.has_avatar is not None and item.group_count is not None
+        if (
+            score := _account_score(item, score_metrics.get(item.id))
+        )["score"]
+        is not None
     ]
     quality = {
         "noAvatar": _unknown_aware_metric(
@@ -1282,9 +1890,6 @@ def account_statistics(db: DbSession, current_user: CurrentUser) -> dict:
         "zeroFriends": _unknown_aware_metric(
             [item.friend_count for item in items], lambda value: value == 0
         ),
-        "zeroMutualContacts": _unknown_aware_metric(
-            [item.mutual_contact_count for item in items], lambda value: value == 0
-        ),
         "score": {
             "average": round(sum(scores) / len(scores), 2) if scores else None,
             "knownCount": len(scores),
@@ -1293,11 +1898,7 @@ def account_statistics(db: DbSession, current_user: CurrentUser) -> dict:
     }
     rows = []
     for item in items:
-        score = None
-        if item.has_avatar is not None and item.group_count is not None:
-            score = round(
-                (int(item.has_avatar) + int(item.group_count > 0)) / 2 * 100
-            )
+        score = _account_score(item, score_metrics.get(item.id))
         rows.append(
             {
                 "accountId": str(item.id),
@@ -1307,8 +1908,9 @@ def account_statistics(db: DbSession, current_user: CurrentUser) -> dict:
                 "hasAvatar": item.has_avatar,
                 "groupCount": item.group_count,
                 "friendCount": item.friend_count,
-                "mutualCount": item.mutual_contact_count,
-                "score": score,
+                "uniqueGroupMemberCount": item.unique_group_member_count,
+                "score": score["score"],
+                "scoreComplete": score["complete"],
                 "syncStatus": (
                     "synced" if item.metadata_sync_status == "ready"
                     else item.metadata_sync_status
@@ -1377,19 +1979,57 @@ def account_lifecycle(
     current_user: CurrentUser,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, alias="pageSize", ge=1, le=100),
+    from_state: str | None = Query(default=None, alias="fromState", max_length=32),
+    to_state: str | None = Query(default=None, alias="toState", max_length=32),
+    reason: str | None = Query(default=None, max_length=64),
+    sort_by: Literal[
+        "occurredAt", "fromState", "toState", "reason", "providerCode"
+    ] = Query(default="occurredAt", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
 ) -> dict:
     item = _account(db, account_id, current_user)
     statement = select(AccountLifecycleEvent).where(
         AccountLifecycleEvent.account_id == item.id
     )
+    if from_state == "__initial__":
+        statement = statement.where(AccountLifecycleEvent.from_state.is_(None))
+    elif from_state:
+        statement = statement.where(AccountLifecycleEvent.from_state == from_state)
+    if to_state:
+        statement = statement.where(AccountLifecycleEvent.to_state == to_state)
+    if reason:
+        statement = statement.where(AccountLifecycleEvent.reason_category == reason)
     total = int(
         db.scalar(select(func.count()).select_from(statement.subquery())) or 0
     )
-    events = db.scalars(
-        statement.order_by(
-            AccountLifecycleEvent.occurred_at.desc(),
-            AccountLifecycleEvent.id.desc(),
+    sort_columns = {
+        "occurredAt": AccountLifecycleEvent.occurred_at,
+        "fromState": AccountLifecycleEvent.from_state,
+        "toState": AccountLifecycleEvent.to_state,
+        "reason": AccountLifecycleEvent.reason_category,
+        "providerCode": AccountLifecycleEvent.provider_code,
+    }
+    sort_column = sort_columns[sort_by]
+    primary_order = (
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    )
+    ordering = [primary_order]
+    if sort_by != "occurredAt":
+        ordering.append(
+            AccountLifecycleEvent.id.asc()
+            if sort_order == "asc"
+            else AccountLifecycleEvent.id.desc()
         )
+    else:
+        ordering.append(
+            AccountLifecycleEvent.id.asc()
+            if sort_order == "asc"
+            else AccountLifecycleEvent.id.desc()
+        )
+    events = db.scalars(
+        statement.order_by(*ordering)
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
@@ -1407,6 +2047,203 @@ def account_lifecycle(
                     "recordedAt": iso(event.created_at),
                 }
                 for event in events
+            ],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+    }
+
+
+@router.get("/{account_id}/resources/contacts")
+def account_contacts(
+    account_id: str,
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str = "",
+    source: str = Query(default="all"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, alias="pageSize", ge=1, le=200),
+    sort_by: Literal["phone", "source", "lastInteractionAt", "syncedAt"] = Query(
+        default="lastInteractionAt",
+        alias="sortBy",
+    ),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
+) -> dict:
+    item = _account(db, account_id, current_user)
+    if source not in {"all", "saved", "contacted"}:
+        raise HTTPException(status_code=422, detail="好友来源筛选无效")
+    statement = select(AccountContact).where(
+        AccountContact.account_id == item.id,
+        AccountContact.active.is_(True),
+        (
+            AccountContact.is_saved_contact.is_(True)
+            | AccountContact.has_chat_history.is_(True)
+        ),
+    )
+    if source == "saved":
+        statement = statement.where(AccountContact.is_saved_contact.is_(True))
+    elif source == "contacted":
+        statement = statement.where(AccountContact.has_chat_history.is_(True))
+    normalized_keyword = keyword.strip()
+    if normalized_keyword:
+        pattern = f"%{normalized_keyword}%"
+        statement = statement.where(
+            or_(
+                AccountContact.saved_name.ilike(pattern),
+                AccountContact.notify_name.ilike(pattern),
+                AccountContact.verified_name.ilike(pattern),
+                AccountContact.phone_e164.ilike(pattern),
+                AccountContact.jid.ilike(pattern),
+                AccountContact.lid.ilike(pattern),
+            )
+        )
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    source_expression = case(
+        (AccountContact.is_saved_contact.is_(True), 0),
+        (AccountContact.has_chat_history.is_(True), 1),
+        else_=2,
+    )
+    sort_columns = {
+        "phone": AccountContact.phone_e164,
+        "source": source_expression,
+        "lastInteractionAt": AccountContact.last_interaction_at,
+        "syncedAt": AccountContact.synced_at,
+    }
+    sort_column = sort_columns[sort_by]
+    primary_order = (
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    )
+    rows = db.scalars(
+        statement.order_by(
+            primary_order,
+            AccountContact.id.asc() if sort_order == "asc" else AccountContact.id.desc(),
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "data": {
+            "rows": [
+                {
+                    "id": str(contact.id),
+                    "contactId": contact.contact_id,
+                    "jid": contact.jid,
+                    "lid": contact.lid,
+                    "phone": contact.phone_e164,
+                    "savedName": contact.saved_name,
+                    "notifyName": contact.notify_name,
+                    "verifiedName": contact.verified_name,
+                    "displayName": (
+                        contact.saved_name
+                        or contact.verified_name
+                        or contact.notify_name
+                        or contact.phone_e164
+                        or contact.contact_id
+                    ),
+                    "isSavedContact": contact.is_saved_contact,
+                    "hasChatHistory": contact.has_chat_history,
+                    "lastInteractionAt": iso(contact.last_interaction_at),
+                    "syncedAt": iso(contact.synced_at),
+                }
+                for contact in rows
+            ],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+        }
+    }
+
+
+@router.get("/{account_id}/resources/groups")
+def account_whatsapp_groups(
+    account_id: str,
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str = "",
+    can_send: bool | None = Query(default=None, alias="canSend"),
+    community_type: Literal["group", "community", "community_announcement"] | None = Query(
+        default=None,
+        alias="communityType",
+    ),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, alias="pageSize", ge=1, le=200),
+    sort_by: Literal[
+        "groupJid",
+        "size",
+        "communityType",
+        "ownRole",
+        "lastInteractionAt",
+        "syncedAt",
+    ] = Query(default="lastInteractionAt", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
+) -> dict:
+    item = _account(db, account_id, current_user)
+    statement = select(AccountWhatsappGroup).where(
+        AccountWhatsappGroup.account_id == item.id,
+        AccountWhatsappGroup.active.is_(True),
+    )
+    normalized_keyword = keyword.strip()
+    if normalized_keyword:
+        pattern = f"%{normalized_keyword}%"
+        statement = statement.where(
+            or_(
+                AccountWhatsappGroup.subject.ilike(pattern),
+                AccountWhatsappGroup.group_jid.ilike(pattern),
+            )
+        )
+    if can_send is not None:
+        statement = statement.where(AccountWhatsappGroup.can_send.is_(can_send))
+    if community_type:
+        statement = statement.where(
+            AccountWhatsappGroup.community_type == community_type
+        )
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    sort_columns = {
+        "groupJid": AccountWhatsappGroup.group_jid,
+        "size": AccountWhatsappGroup.size,
+        "communityType": AccountWhatsappGroup.community_type,
+        "ownRole": AccountWhatsappGroup.own_role,
+        "lastInteractionAt": AccountWhatsappGroup.last_interaction_at,
+        "syncedAt": AccountWhatsappGroup.synced_at,
+    }
+    sort_column = sort_columns[sort_by]
+    primary_order = (
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    )
+    rows = db.scalars(
+        statement.order_by(
+            primary_order,
+            AccountWhatsappGroup.id.asc()
+            if sort_order == "asc"
+            else AccountWhatsappGroup.id.desc(),
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "data": {
+            "rows": [
+                {
+                    "id": str(group.id),
+                    "groupJid": group.group_jid,
+                    "subject": group.subject,
+                    "size": group.size,
+                    "announce": group.announce,
+                    "restrict": group.restrict,
+                    "communityType": group.community_type,
+                    "addressingMode": group.addressing_mode,
+                    "linkedParentJid": group.linked_parent_jid,
+                    "ownRole": group.own_role,
+                    "canSend": group.can_send,
+                    "lastInteractionAt": iso(group.last_interaction_at),
+                    "syncedAt": iso(group.synced_at),
+                }
+                for group in rows
             ],
             "total": total,
             "page": page,
@@ -1480,6 +2317,7 @@ def export_accounts_batch(
     statement = select(PersonalAccount).where(
         PersonalAccount.id.in_(database_ids),
         PersonalAccount.admission_status == "active",
+        PersonalAccount.deleted_at.is_(None),
     )
     if current_user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == current_user.id)
@@ -1554,6 +2392,7 @@ def export_accounts_batch(
 def sync_all_accounts(db: DbSession, current_user: CurrentUser) -> dict:
     statement = select(PersonalAccount).where(
         PersonalAccount.admission_status == "active",
+        PersonalAccount.deleted_at.is_(None),
     )
     if current_user.role != "admin":
         statement = statement.where(PersonalAccount.created_by == current_user.id)
@@ -1568,14 +2407,126 @@ def sync_all_accounts(db: DbSession, current_user: CurrentUser) -> dict:
     return {"data": {"queuedCount": queued, "total": len(items)}}
 
 
+@router.get("/intake/attempts/filter-options")
+def intake_attempt_filter_options(
+    db: DbSession,
+    current_user: CurrentUser,
+) -> dict:
+    scope = select(AccountPairingAttempt).join(
+        PersonalAccount,
+        PersonalAccount.id == AccountPairingAttempt.account_id,
+    )
+    if current_user.role != "admin":
+        scope = scope.where(PersonalAccount.created_by == current_user.id)
+    attempt_ids = scope.with_only_columns(AccountPairingAttempt.id)
+    group_ids = scope.with_only_columns(AccountPairingAttempt.account_group_id)
+    channel_ids = scope.with_only_columns(AccountPairingAttempt.channel_id)
+    protocol_ids = scope.with_only_columns(AccountPairingAttempt.protocol_node_id)
+    channels = db.scalars(
+        select(PromotionChannel)
+        .where(PromotionChannel.id.in_(channel_ids))
+        .order_by(PromotionChannel.name, PromotionChannel.id)
+    ).all()
+    template_ids = {item.template_id for item in channels}
+    templates = db.scalars(
+        select(PromotionTemplate)
+        .where(PromotionTemplate.id.in_(template_ids))
+        .order_by(PromotionTemplate.name, PromotionTemplate.id)
+    ).all() if template_ids else []
+    groups = db.scalars(
+        select(AccountGroup)
+        .where(AccountGroup.id.in_(group_ids))
+        .order_by(AccountGroup.name, AccountGroup.id)
+    ).all()
+    protocols = db.scalars(
+        select(ProtocolNode)
+        .where(ProtocolNode.id.in_(protocol_ids))
+        .order_by(ProtocolNode.name, ProtocolNode.id)
+    ).all()
+    country_codes = db.scalars(
+        select(PersonalAccount.country_code)
+        .join(
+            AccountPairingAttempt,
+            AccountPairingAttempt.account_id == PersonalAccount.id,
+        )
+        .where(
+            AccountPairingAttempt.id.in_(attempt_ids),
+            PersonalAccount.country_code.is_not(None),
+        )
+        .distinct()
+        .order_by(PersonalAccount.country_code)
+    ).all()
+    visitor_country_codes = db.scalars(
+        select(AccountPairingAttempt.visitor_country_code)
+        .where(
+            AccountPairingAttempt.id.in_(attempt_ids),
+            AccountPairingAttempt.visitor_country_code.is_not(None),
+        )
+        .distinct()
+        .order_by(AccountPairingAttempt.visitor_country_code)
+    ).all()
+    return {
+        "data": {
+            "groups": [{"id": str(item.id), "name": item.name} for item in groups],
+            "channels": [{"id": str(item.id), "name": item.name} for item in channels],
+            "templates": [{"id": str(item.id), "name": item.name} for item in templates],
+            "protocols": [{"id": str(item.id), "name": item.name} for item in protocols],
+            "countries": list(country_codes),
+            "visitorCountries": list(visitor_country_codes),
+        }
+    }
+
+
 @router.get("/intake/attempts")
 def list_intake_attempts(
     db: DbSession,
     current_user: CurrentUser,
     keyword: str | None = None,
     attempt_status: str | None = Query(default=None, alias="status"),
+    pairing_type: Literal["initial", "reauthentication"] | None = Query(
+        default=None,
+        alias="pairingType",
+    ),
+    group_id: str | None = Query(default=None, alias="groupId"),
+    channel_id: str | None = Query(default=None, alias="channelId"),
+    template_id: str | None = Query(default=None, alias="templateId"),
+    protocol_id: str | None = Query(default=None, alias="protocolId"),
+    source_ip: str | None = Query(default=None, alias="sourceIp", max_length=64),
+    country_code: str | None = Query(
+        default=None,
+        alias="countryCode",
+        min_length=2,
+        max_length=2,
+        pattern=r"^[A-Za-z]{2}$",
+    ),
+    visitor_country_code: str | None = Query(
+        default=None,
+        alias="visitorCountryCode",
+        min_length=2,
+        max_length=2,
+        pattern=r"^[A-Za-z]{2}$",
+    ),
+    admission_status: Literal["reserved", "active", "abandoned"] | None = Query(
+        default=None,
+        alias="admissionStatus",
+    ),
+    metadata_status: Literal[
+        "pending", "syncing", "ready", "failed", "unsupported"
+    ] | None = Query(default=None, alias="metadataStatus"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "accountId",
+        "status",
+        "pairingType",
+        "countryCode",
+        "visitorCountryCode",
+        "channelId",
+        "admissionStatus",
+        "metadataStatus",
+        "createdAt",
+    ] = Query(default="createdAt", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
 ) -> dict:
     statement = (
         select(AccountPairingAttempt, PersonalAccount)
@@ -1585,18 +2536,98 @@ def list_intake_attempts(
         statement = statement.where(PersonalAccount.created_by == current_user.id)
     if attempt_status and attempt_status != "all":
         statement = statement.where(AccountPairingAttempt.status == attempt_status)
+    if pairing_type:
+        statement = statement.where(
+            AccountPairingAttempt.attempt_type == pairing_type
+        )
+    if group_id:
+        if group_id == "__ungrouped__":
+            statement = statement.where(AccountPairingAttempt.account_group_id.is_(None))
+        else:
+            try:
+                database_group_id = parse_snowflake_id(group_id)
+            except ValueError:
+                raise HTTPException(status_code=422, detail="账号分组筛选无效") from None
+            statement = statement.where(
+                AccountPairingAttempt.account_group_id == database_group_id
+            )
+    if channel_id:
+        try:
+            database_channel_id = parse_snowflake_id(channel_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="渠道筛选无效") from None
+        statement = statement.where(AccountPairingAttempt.channel_id == database_channel_id)
+    if template_id:
+        try:
+            database_template_id = parse_snowflake_id(template_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="模板筛选无效") from None
+        statement = statement.where(
+            AccountPairingAttempt.channel_id.in_(
+                select(PromotionChannel.id).where(
+                    PromotionChannel.template_id == database_template_id
+                )
+            )
+        )
+    if protocol_id:
+        try:
+            database_protocol_id = parse_snowflake_id(protocol_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="协议筛选无效") from None
+        statement = statement.where(
+            AccountPairingAttempt.protocol_node_id == database_protocol_id
+        )
+    if source_ip:
+        statement = statement.where(
+            AccountPairingAttempt.source_ip.ilike(f"%{source_ip.strip()}%")
+        )
+    if country_code:
+        statement = statement.where(PersonalAccount.country_code == country_code.upper())
+    if visitor_country_code:
+        statement = statement.where(
+            AccountPairingAttempt.visitor_country_code == visitor_country_code.upper()
+        )
+    if admission_status:
+        statement = statement.where(PersonalAccount.admission_status == admission_status)
+    if metadata_status:
+        statement = statement.where(
+            PersonalAccount.metadata_sync_status == metadata_status
+        )
     if keyword:
         pattern = f"%{keyword.strip()}%"
         statement = statement.where(
             or_(
                 PersonalAccount.name.ilike(pattern),
                 PersonalAccount.phone_e164.ilike(pattern),
+                PersonalAccount.deleted_phone_e164.ilike(pattern),
                 AccountPairingAttempt.public_id.ilike(pattern),
             )
         )
     total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    sort_columns = {
+        "accountId": PersonalAccount.id,
+        "status": AccountPairingAttempt.status,
+        "pairingType": AccountPairingAttempt.attempt_type,
+        "countryCode": PersonalAccount.country_code,
+        "visitorCountryCode": AccountPairingAttempt.visitor_country_code,
+        "channelId": AccountPairingAttempt.channel_id,
+        "admissionStatus": PersonalAccount.admission_status,
+        "metadataStatus": PersonalAccount.metadata_sync_status,
+        "createdAt": AccountPairingAttempt.created_at,
+    }
+    sort_column = sort_columns[sort_by]
+    primary_order = (
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    )
     rows = db.execute(
-        statement.order_by(AccountPairingAttempt.created_at.desc())
+        statement.order_by(
+            primary_order,
+            AccountPairingAttempt.id.asc()
+            if sort_order == "asc"
+            else AccountPairingAttempt.id.desc(),
+        )
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
@@ -1617,13 +2648,25 @@ def list_intake_attempts(
         if channel is not None and domain is not None:
             prefix = (channel.subdomain_prefix or "").strip().lower()
             hostname = f"{prefix}.{domain.hostname}" if prefix else domain.hostname
-        protocol = db.get(ProtocolNode, attempt.protocol_node_id)
-        group = db.get(AccountGroup, attempt.account_group_id)
-        latest_job = db.scalar(
-            select(AccountMetadataSyncJob)
-            .where(AccountMetadataSyncJob.account_id == account.id)
-            .order_by(AccountMetadataSyncJob.created_at.desc())
-            .limit(1)
+        protocol = (
+            db.get(ProtocolNode, attempt.protocol_node_id)
+            if attempt.protocol_node_id is not None
+            else None
+        )
+        group = (
+            db.get(AccountGroup, attempt.account_group_id)
+            if attempt.account_group_id is not None
+            else None
+        )
+        latest_job = (
+            db.scalar(
+                select(AccountMetadataSyncJob)
+                .where(AccountMetadataSyncJob.account_id == account.id)
+                .order_by(AccountMetadataSyncJob.created_at.desc())
+                .limit(1)
+            )
+            if account.deleted_at is None
+            else None
         )
         terminal_detail = attempt.terminal_reason or (
             attempt.status
@@ -1669,12 +2712,13 @@ def list_intake_attempts(
                 "account": {
                     "id": str(account.id),
                     "name": account.name,
-                    "phone": account.phone_e164,
+                    "phone": account.phone_e164 or account.deleted_phone_e164,
                     "countryCode": account.country_code,
                     "admissionStatus": account.admission_status,
                     "status": account.status,
                     "validationStatus": account.validation_status,
                     "metadataSyncStatus": account.metadata_sync_status,
+                    "deleted": account.deleted_at is not None,
                 },
                 "channel": (
                     {
@@ -1823,18 +2867,170 @@ def update_account(account_id: str, payload: PersonalAccountUpdate, db: DbSessio
 
 @router.delete("/{account_id}")
 def delete_account(account_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _account(db, account_id, current_user)
+    item = _account(db, account_id, current_user, for_update=True)
+    in_flight_message = db.scalar(
+        select(MessageDelivery.id)
+        .where(
+            MessageDelivery.account_id == item.id,
+            MessageDelivery.status == "queued",
+            MessageDelivery.queued_at >= utcnow() - timedelta(minutes=10),
+        )
+        .limit(1)
+    )
+    in_flight_task = db.scalar(
+        select(HyperlinkTaskDelivery.id)
+        .where(
+            HyperlinkTaskDelivery.account_id == item.id,
+            HyperlinkTaskDelivery.submission_status.in_(
+                ("leased", "submitting", "reconciling")
+            ),
+        )
+        .limit(1)
+    )
+    if in_flight_message is not None or in_flight_task is not None:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="账号仍有正在提交或等待网关回执的消息，请等待发送结束后再删除",
+        )
+
+    previous_enabled = item.enabled
+    previous_marketing_eligible = item.marketing_eligible
+    item.enabled = False
+    item.marketing_eligible = False
+    db.commit()
     try:
-        WaGatewayClient().logout(item.gateway_account_id)
+        gateway_result = WaGatewayClient().delete_account(item.gateway_account_id)
     except GatewayError as exc:
+        recoverable = db.scalar(
+            select(PersonalAccount)
+            .where(
+                PersonalAccount.id == item.id,
+                PersonalAccount.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+        if recoverable is not None:
+            recoverable.enabled = previous_enabled
+            recoverable.marketing_eligible = previous_marketing_eligible
+            db.commit()
+        if exc.status_code == 409:
+            raise HTTPException(
+                status_code=409,
+                detail="账号网关仍有发送中的消息，请等待发送结束后再删除",
+            ) from None
         raise HTTPException(status_code=502, detail=str(exc)) from None
-    binding = db.scalar(select(AccountProxyBinding).where(AccountProxyBinding.account_public_id == item.gateway_account_id))
+
+    item = db.scalar(
+        select(PersonalAccount)
+        .where(
+            PersonalAccount.id == item.id,
+            PersonalAccount.deleted_at.is_(None),
+        )
+        .with_for_update()
+    )
+    if item is None:
+        return {"data": {"ok": True, "alreadyDeleted": True}}
+    binding = db.scalar(
+        select(AccountProxyBinding).where(
+            AccountProxyBinding.account_public_id == item.gateway_account_id
+        )
+    )
     if binding:
         db.delete(binding)
-    db.execute(delete(MessageDelivery).where(MessageDelivery.account_id == item.id))
-    db.delete(item)
+    db.execute(
+        delete(AccountMetadataSyncJob).where(
+            AccountMetadataSyncJob.account_id == item.id
+        )
+    )
+    db.execute(
+        delete(AccountContact).where(AccountContact.account_id == item.id)
+    )
+    db.execute(
+        delete(AccountWhatsappGroup).where(
+            AccountWhatsappGroup.account_id == item.id
+        )
+    )
+    for slot in db.scalars(
+        select(HyperlinkTaskAccountSlot).where(
+            HyperlinkTaskAccountSlot.account_id == item.id
+        )
+    ).all():
+        slot.account_id = None
+        slot.status = "vacant" if slot.status != "released" else slot.status
+        slot.lease_token = None
+        slot.lease_expires_at = None
+        slot.released_at = utcnow()
+        slot.last_switch_reason = "account_deleted"
+        slot.last_error = None
+
+    now = utcnow()
+    previous_group_id = item.group_id
+    if previous_group_id is not None:
+        from app.services.account_group_wakeups import record_group_wakeup
+
+        record_group_wakeup(
+            db,
+            previous_group_id,
+            reason="account_deleted",
+            account_id=item.id,
+        )
+    db.add(
+        AccountLifecycleEvent(
+            public_id=f"deleted_{item.public_id}",
+            account_id=item.id,
+            from_state=item.status,
+            to_state="deleted",
+            reason_category="manual_delete",
+            occurred_at=now,
+        )
+    )
+    item.deleted_phone_e164 = item.phone_e164 or item.deleted_phone_e164
+    item.phone_e164 = None
+    item.group_id = None
+    item.status = "deleted"
+    item.validation_status = "failed"
+    item.metadata_sync_status = "unsupported"
+    item.has_avatar = None
+    item.avatar_source_url = None
+    item.avatar_content_type = None
+    item.avatar_size = None
+    item.avatar_sha256 = None
+    item.avatar_content = None
+    item.avatar_fetched_at = None
+    item.group_count = None
+    item.friend_count = None
+    item.mutual_contact_count = None
+    item.unique_group_member_count = None
+    item.wa_platform_raw = None
+    item.account_type = "unknown"
+    item.device_os = "unknown"
+    item.resource_sync_state_json = {}
+    item.quality_synced_at = None
+    item.enabled = False
+    item.marketing_eligible = False
+    item.last_error = None
+    item.last_connected_at = None
+    item.sending_cooldown_until = None
+    item.deleted_at = now
+    item.deleted_by = current_user.id
     db.commit()
-    return {"data": {"ok": True}}
+    if previous_group_id is not None:
+        from app.services.account_group_wakeups import (
+            dispatch_group_wakeups_best_effort,
+        )
+
+        dispatch_group_wakeups_best_effort(previous_group_id)
+    return {
+        "data": {
+            "ok": True,
+            "accountId": str(item.id),
+            "providerLogoutConfirmed": bool(
+                gateway_result.get("providerLogoutConfirmed")
+            ),
+            "businessHistoryPreserved": True,
+        }
+    }
 
 
 @router.post("/{account_id}/pairing-code")
@@ -1893,19 +3089,6 @@ def disconnect(account_id: str, db: DbSession, current_user: CurrentUser) -> dic
     except GatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from None
     _apply_gateway_account(item, result or {"state": "linked_offline"})
-    db.commit()
-    return {"data": {"account": account_row(db, item)}}
-
-
-@router.post("/{account_id}/logout")
-def logout(account_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    item = _account(db, account_id, current_user)
-    try:
-        result = WaGatewayClient().logout(item.gateway_account_id)
-    except GatewayError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from None
-    _apply_gateway_account(item, result or {"state": "unpaired"})
-    item.last_connected_at = None
     db.commit()
     return {"data": {"account": account_row(db, item)}}
 

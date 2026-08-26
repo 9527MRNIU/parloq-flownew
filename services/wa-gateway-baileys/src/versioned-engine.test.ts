@@ -1,6 +1,6 @@
 import pino from 'pino'
 import { describe, expect, it } from 'vitest'
-import type { SyncPolicy } from './domain.js'
+import { emptyAccountResources, type SyncPolicy } from './domain.js'
 import type {
   AccountQuality,
   EngineAccount,
@@ -38,7 +38,7 @@ class RecordingRuntime implements ProtocolEngine {
   }
   async getQuality(accountId: string, _policy: SyncPolicy): Promise<AccountQuality> {
     this.calls.push(`quality:${accountId}`)
-    return { hasAvatar: null, groupCount: null, friendCount: null, mutualContactCount: null, metadata: {} }
+    return { hasAvatar: null, groupCount: null, friendCount: null, metadata: {}, resources: emptyAccountResources() }
   }
   isOnline(): boolean { return false }
 }
@@ -46,11 +46,8 @@ class RecordingRuntime implements ProtocolEngine {
 const policy: SyncPolicy = {
   closeOnline: true,
   avatar: true,
-  groupSummary: true,
-  groupDetails: false,
-  contacts: false,
-  chats: false,
-  messageHistory: false,
+  groupDetails: true,
+  contacts: true,
 }
 
 function account(accountId: string, definitionId: string, version: string): EngineAccount {

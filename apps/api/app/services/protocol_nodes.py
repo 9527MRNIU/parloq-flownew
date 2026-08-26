@@ -24,11 +24,8 @@ from app.snowflake import new_public_id
 DEFAULT_SYNC_POLICY: dict[str, bool] = {
     "closeOnline": True,
     "avatar": True,
-    "groupSummary": True,
-    "groupDetails": False,
-    "contacts": False,
-    "chats": False,
-    "messageHistory": False,
+    "groupDetails": True,
+    "contacts": True,
 }
 
 DEFAULT_RATE_LIMIT_POLICY: dict[str, dict[str, int | None]] = {
@@ -78,16 +75,20 @@ def normalized_sync_policy(value: dict | None) -> dict[str, bool]:
     result = dict(DEFAULT_SYNC_POLICY)
     snake_aliases = {
         "closeOnline": "close_online",
-        "groupSummary": "group_summary",
         "groupDetails": "group_details",
-        "messageHistory": "message_history",
     }
     for key in result:
         raw = source.get(key, source.get(snake_aliases.get(key, "")))
         if isinstance(raw, bool):
             result[key] = raw
-    if result["groupDetails"]:
-        result["groupSummary"] = True
+    if not isinstance(
+        source.get("groupDetails", source.get("group_details")), bool
+    ):
+        legacy_summary = source.get(
+            "groupSummary", source.get("group_summary")
+        )
+        if isinstance(legacy_summary, bool):
+            result["groupDetails"] = legacy_summary
     return result
 
 
@@ -133,6 +134,7 @@ def protocol_capacity(db: Session, item: ProtocolNode) -> ProtocolCapacity:
             select(func.count(PersonalAccount.id)).where(
                 PersonalAccount.protocol_id == item.id,
                 PersonalAccount.admission_status.in_(("reserved", "active")),
+                PersonalAccount.deleted_at.is_(None),
             )
         )
         or 0
@@ -143,6 +145,7 @@ def protocol_capacity(db: Session, item: ProtocolNode) -> ProtocolCapacity:
                 PersonalAccount.protocol_id == item.id,
                 PersonalAccount.status.in_(ONLINE_ACCOUNT_STATES),
                 PersonalAccount.admission_status == "active",
+                PersonalAccount.deleted_at.is_(None),
             )
         )
         or 0

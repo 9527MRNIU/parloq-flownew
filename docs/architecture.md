@@ -80,7 +80,8 @@ a mock implementation for deterministic control-plane development. The
 real adapter covers:
 
 - phone-number pairing and session restoration;
-- connect, disconnect and logout as separate operations;
+- connect and disconnect as reversible connection operations;
+- account deletion, including provider logout and local credential cleanup;
 - text and link send operations required by the first release;
 - server-accepted and delivered receipt normalization;
 - proxy application to pairing, WebSocket and media traffic;
@@ -89,8 +90,9 @@ real adapter covers:
 A saved linked-device session does not require a permanent TCP/WebSocket
 connection. Accounts may remain in `linked_offline`, connect before a campaign,
 send, drain pending delivery receipts and disconnect after an idle timeout.
-Disconnect must retain credentials; logout must revoke/delete them and require
-pairing again.
+Disconnect must retain credentials. Provider logout and credential revocation
+belong exclusively to account deletion; the product does not expose a separate
+logout operation.
 
 ## Unified account pool and lifecycle
 
@@ -149,7 +151,7 @@ accounts receive a baseline event when lifecycle collection is introduced.
 Dates before `collection_started_at` are not returned because current account
 state cannot reconstruct historical unlinks honestly. The first collection day
 is marked partial; reporting uses the Asia/Shanghai business-day boundary.
-Provider restriction and confirmed logout are invalidation events, while
+Provider restriction and confirmed account deletion are invalidation events, while
 transient disconnect and `reauth_required` remain separate operational states.
 Marketing-before/after-unlink classification requires a successful sent or
 delivered record before the invalidation event; queued attempts do not count.
@@ -173,8 +175,8 @@ fencing token.
 WhatsApp device credentials and every Baileys Signal key-store category are
 stored in the gateway's dedicated PostgreSQL schema; local auth files are never
 used as the production session store. Credentials are durable across normal
-disconnects and gateway restarts. Session deletion is allowed only for an
-explicit logout or controlled re-pair operation. The control-plane database
+disconnects and gateway restarts. Session deletion is allowed only as part of
+account deletion or a controlled re-pair operation. The control-plane database
 stores account metadata but never a copy of the credentials JSON. Production
 PostgreSQL storage and backups must use encryption at rest and dedicated
 least-privilege roles because the gateway necessarily needs live key bytes.

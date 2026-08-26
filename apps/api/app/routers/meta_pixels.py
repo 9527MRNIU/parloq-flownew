@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from typing import Literal
 
-from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import delete, select
+from fastapi import APIRouter, HTTPException, Query, status
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.deps import CurrentUser, DbSession
@@ -42,11 +43,56 @@ def _pixel_or_404(db: DbSession, identifier: str, user) -> MetaPixel:
 
 
 @router.get("")
-def list_pixels(db: DbSession, current_user: CurrentUser) -> dict:
+def list_pixels(
+    db: DbSession,
+    current_user: CurrentUser,
+    enabled: bool | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal["id", "pixelId", "enabled"] = Query(
+        default="id",
+        alias="sortBy",
+    ),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
+) -> dict:
     statement = select(MetaPixel)
     if current_user.role != "admin":
         statement = statement.where(MetaPixel.created_by == current_user.id)
-    pixels = db.scalars(statement.order_by(MetaPixel.created_at.desc())).all()
+    if enabled is not None:
+        statement = statement.where(MetaPixel.enabled.is_(enabled))
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    sort_columns = {
+        "id": MetaPixel.id,
+        "pixelId": MetaPixel.dataset_id,
+        "enabled": MetaPixel.enabled,
+    }
+    sort_column = sort_columns[sort_by]
+    ordering = [
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    ]
+    if sort_by != "id":
+        ordering.append(
+            MetaPixel.id.asc()
+            if sort_order == "asc"
+            else MetaPixel.id.desc()
+        )
+    pixels = db.scalars(
+        statement.order_by(*ordering)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    rows = [meta_pixel_row(pixel) for pixel in pixels]
+    return {"data": {"rows": rows, "total": total, "page": page, "pageSize": page_size}}
+
+
+@router.get("/options")
+def pixel_options(db: DbSession, current_user: CurrentUser) -> dict:
+    statement = select(MetaPixel)
+    if current_user.role != "admin":
+        statement = statement.where(MetaPixel.created_by == current_user.id)
+    pixels = db.scalars(statement.order_by(MetaPixel.name, MetaPixel.id)).all()
     rows = [meta_pixel_row(pixel) for pixel in pixels]
     return {"data": {"rows": rows, "total": len(rows)}}
 

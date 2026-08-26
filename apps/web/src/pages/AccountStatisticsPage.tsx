@@ -25,6 +25,8 @@ import {
 import { DatePickerField } from "../components/date-picker-field";
 import {
   ListTableCard,
+  ListSortableHead,
+  type ListSortOrder,
   ListToolbar,
   StandardListPage,
 } from "../components/list-page";
@@ -259,6 +261,7 @@ export function AccountStatisticsPage() {
   const [countries, setCountries] = useState<CountryRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [dailySortOrder, setDailySortOrder] = useState<ListSortOrder>("asc");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -266,6 +269,8 @@ export function AccountStatisticsPage() {
     try {
       const query = new URLSearchParams({ dateFrom, dateTo });
       if (countryCode) query.set("countryCode", countryCode);
+      query.set("sortBy", "date");
+      query.set("sortOrder", dailySortOrder);
       const [overviewPayload, dailyPayload, countriesPayload] =
         await Promise.all([
           apiRequest("/api/account-statistics/overview"),
@@ -286,7 +291,7 @@ export function AccountStatisticsPage() {
     } finally {
       setLoading(false);
     }
-  }, [countryCode, dateFrom, dateTo]);
+  }, [countryCode, dailySortOrder, dateFrom, dateTo]);
   useEffect(() => void load(), [load]);
 
   function preset(days: number) {
@@ -342,6 +347,10 @@ export function AccountStatisticsPage() {
     return visible;
   }, [countries]);
   const countryTotal = countrySlices.reduce((sum, row) => sum + row.total, 0);
+  const chartDaily = useMemo(
+    () => [...daily].sort((left, right) => left.date.localeCompare(right.date)),
+    [daily],
+  );
   const chartConfig = {
     total: { label: "账号总数", color: "#6d87cd" },
     online: { label: "在线账号", color: "#10b981" },
@@ -427,7 +436,7 @@ export function AccountStatisticsPage() {
             <div className="loading-state h-[300px]"><Spinner />正在汇总趋势…</div>
           ) : daily.length ? (
             <ChartContainer config={chartConfig} className="mt-2 h-[300px] w-full">
-              <LineChart accessibilityLayer data={daily} margin={{ top: 12, right: 12, bottom: 0, left: -18 }}>
+              <LineChart accessibilityLayer data={chartDaily} margin={{ top: 12, right: 12, bottom: 0, left: -18 }}>
                 <CartesianGrid vertical={false} strokeDasharray="3 3" />
                 <XAxis dataKey="date" tickFormatter={(value) => String(value).slice(5)} tickLine={false} axisLine={false} />
                 <YAxis allowDecimals={false} tickLine={false} axisLine={false} />
@@ -501,7 +510,7 @@ export function AccountStatisticsPage() {
           <div className="loading-state min-h-64"><Spinner />正在汇总日统计…</div>
         ) : daily.length ? (
           <Table layout="list">
-            <TableHeader><TableRow><TableHead>日期</TableHead><TableHead adaptive>账号池</TableHead><TableHead>在线</TableHead><TableHead>新增账号</TableHead><TableHead>解绑阶段</TableHead><TableHead>净变化</TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><ListSortableHead sortKey="date" activeSortKey="date" sortOrder={dailySortOrder} onSort={(_sortBy, order) => setDailySortOrder(order)}>日期</ListSortableHead><TableHead adaptive>账号池</TableHead><TableHead>在线</TableHead><TableHead>新增账号</TableHead><TableHead>解绑阶段</TableHead><TableHead>净变化</TableHead></TableRow></TableHeader>
             <TableBody>{daily.map((row) => (
               <TableRow key={`${row.date}-${row.source}`}>
                 <TableCell><div className="cell-main min-w-[130px]"><strong>{row.date}</strong><span><Badge tone={row.source === "realtime" || row.source === "实时" ? "success" : "neutral"}>{row.source === "realtime" ? "实时" : row.source || "历史"}</Badge></span></div></TableCell>

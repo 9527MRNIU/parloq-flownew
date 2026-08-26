@@ -8,7 +8,6 @@ import {
   LoaderCircleIcon,
   MonitorIcon,
   PauseIcon,
-  PencilIcon,
   PlayIcon,
   PlusIcon,
   RefreshCwIcon,
@@ -39,13 +38,11 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   apiRequest,
   formatDateTime,
-  formatLocalDateInput,
   unwrapList,
 } from "../api/client";
 import {
   Badge,
   Button,
-  DatePickerField,
   Drawer,
   EmptyState,
   IconButton,
@@ -65,16 +62,18 @@ import {
 } from "../components/ui";
 import {
   ListPagination,
+  ListSortableHead,
   ListTableCard,
   ListToolbar,
   StandardListPage,
-  useClientPagination,
+  type ListSortOrder,
 } from "../components/list-page";
 import { EntityPrimaryCell } from "../components/entity-primary-cell";
 import { RepositorySourceTabs } from "../components/repository-source-tabs";
 import {
   DrawerFieldLabel,
   DrawerFormField,
+  DrawerFormLayout,
   DrawerFormSection,
 } from "../components/drawer-form";
 import {
@@ -87,7 +86,6 @@ import {
   promotionCountryOptions,
 } from "../lib/countries";
 import { entityRowKey, snowflakeId } from "../lib/entity-identifiers";
-import { formatPhoneDisplay } from "../lib/utils";
 import {
   formatRepositorySize,
   localRepositorySourceRow,
@@ -208,6 +206,15 @@ type PromotionTemplate = {
   createdAt?: string;
   updatedAt?: string;
 };
+type PromotionTemplateSortBy =
+  | "id"
+  | "repositorySource"
+  | "assetCount"
+  | "integrationCount"
+  | "channelCount"
+  | "createdAt"
+  | "updatedAt";
+type RepositoryTemplateSortBy = "sequence" | "assetCount" | "localStatus";
 type TemplateQualityWarning = {
   code: string;
   message: string;
@@ -353,11 +360,24 @@ type PromotionChannel = {
   leads: number;
   updatedAt?: string;
 };
+type PromotionChannelSortBy =
+  | "id"
+  | "countryCode"
+  | "channelType"
+  | "templateName"
+  | "accountGroupName"
+  | "hostname"
+  | "pixelName"
+  | "locale"
+  | "createdAt"
+  | "updatedAt";
+type PixelSortBy = "id" | "pixelId" | "enabled";
 type Option = { id: string; label: string };
 type TemplateOption = Option & {
   schema: string;
   runtime: string;
   pairingContract: string;
+  defaultLocale: string;
 };
 type ProtocolOption = Option & {
   health: string;
@@ -389,25 +409,6 @@ type MetaCapiProbeResult = {
   httpStatus?: number;
   sendError: string;
 };
-type PairingFunnelStep = {
-  key: string;
-  count: number;
-  visitorRate: number;
-  stepRate: number;
-};
-type PairingFailureReason = {
-  code: string;
-  label: string;
-  count: number;
-  share: number;
-};
-const pairingFunnelLabels: Record<string, string> = {
-  visitors: "可识别访客",
-  phoneSubmitted: "提交号码",
-  checksPassed: "通过配对检查",
-  pairingStarted: "获得配对码",
-  verified: "验证成功",
-};
 const defaultMetaEventMapping: MetaEventMapping = {
   page_view: "PageView",
   phone_submit: "Lead",
@@ -437,15 +438,6 @@ const metaEventOptions = [
   { value: "Contact", label: "联系 (Contact)" },
   { value: "Subscribe", label: "订阅 (Subscribe)" },
 ];
-type AdMetric = {
-  id: string;
-  readKey: string;
-  date: string;
-  spend: number;
-  impressions: number;
-  clicks: number;
-  updatedAt: string;
-};
 type TemplateProtectionMode = "basic" | "enhanced" | "strict";
 type TemplateDevtoolsAction = "log" | "block" | "blank";
 type EventRateLimitRuleForm = {
@@ -837,20 +829,6 @@ function pixelRow(input: unknown): PixelOption {
     },
   };
 }
-function metricRow(input: unknown): AdMetric {
-  const row = object(input);
-  const id = snowflakeId(row, "id");
-  return {
-    id,
-    readKey: entityRowKey(row, id, "promotion-ad-metric", `${field(row, "date", "metricDate", "metric_date")}:${field(row, "updatedAt", "updated_at")}`),
-    date: field(row, "date", "metricDate", "metric_date"),
-    spend: Number(row.spend || 0),
-    impressions: Number(row.impressions || 0),
-    clicks: Number(row.clicks || 0),
-    updatedAt: field(row, "updatedAt", "updated_at"),
-  };
-}
-
 function TemplatePreviewWorkspace({
   template,
   initialDevice = "mobile",
@@ -1204,6 +1182,20 @@ export function PromotionTemplatesPage() {
   const [repositoryPending, setRepositoryPending] = useState("");
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
+  const [templatePage, setTemplatePage] = useState(1);
+  const [templatePageSize, setTemplatePageSize] = useState(20);
+  const [templateTotal, setTemplateTotal] = useState(0);
+  const [repositoryPage, setRepositoryPage] = useState(1);
+  const [repositoryPageSize, setRepositoryPageSize] = useState(20);
+  const [repositoryTotal, setRepositoryTotal] = useState(0);
+  const [listTemplateStatus, setListTemplateStatus] = useState("all");
+  const [templateSource, setTemplateSource] = useState("all");
+  const [templateSortBy, setTemplateSortBy] = useState<PromotionTemplateSortBy>("id");
+  const [templateSortOrder, setTemplateSortOrder] = useState<ListSortOrder>("desc");
+  const [repositoryLocalStatus, setRepositoryLocalStatus] = useState("all");
+  const [repositorySortBy, setRepositorySortBy] = useState<RepositoryTemplateSortBy>("sequence");
+  const [repositorySortOrder, setRepositorySortOrder] = useState<ListSortOrder>("asc");
   const [drawer, setDrawer] = useState(false);
   const [editing, setEditing] = useState<PromotionTemplate | null>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -1227,34 +1219,32 @@ export function PromotionTemplatesPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [templatePayload, channelPayload, integrationPayload] = await Promise.all([
-        apiRequest("/api/promotion/templates?pageSize=100"),
-        apiRequest("/api/promotion/channels?pageSize=100"),
-        apiRequest("/api/promotion/integrations"),
+      const query = new URLSearchParams({ page: String(templatePage), pageSize: String(templatePageSize) });
+      if (debouncedKeyword) query.set("keyword", debouncedKeyword);
+      if (listTemplateStatus !== "all") query.set("status", listTemplateStatus);
+      if (templateSource !== "all") query.set("repositorySource", templateSource);
+      query.set("sortBy", templateSortBy);
+      query.set("sortOrder", templateSortOrder);
+      const [templatePayload, integrationPayload] = await Promise.all([
+        apiRequest(`/api/promotion/templates?${query}`),
+        apiRequest("/api/promotion/integrations/options"),
       ]);
-      const channels = unwrapList<unknown>(channelPayload).rows.map(channelRow);
       setIntegrations(
         unwrapList<unknown>(integrationPayload)
           .rows.map(runtimeIntegrationRow)
           .filter((row) => row.id),
       );
-      setRows(
-        unwrapList<unknown>(templatePayload)
-          .rows.map(templateRow)
-          .map((row) => ({
-            ...row,
-            channelCount: channels.filter(
-              (channel) => channel.templateId === row.id,
-            ).length,
-          })),
-      );
+      const list = unwrapList<unknown>(templatePayload);
+      setRows(list.rows.map(templateRow));
+      setTemplateTotal(list.total);
     } catch {
       setRows([]);
+      setTemplateTotal(0);
       setIntegrations([]);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [debouncedKeyword, listTemplateStatus, templatePage, templatePageSize, templateSortBy, templateSortOrder, templateSource]);
   useEffect(() => {
     void load();
   }, [load]);
@@ -1275,23 +1265,29 @@ export function PromotionTemplatesPage() {
       setRepositoryError("");
     }
     try {
+      const query = new URLSearchParams({ page: String(repositoryPage), pageSize: String(repositoryPageSize) });
+      if (debouncedKeyword) query.set("keyword", debouncedKeyword);
+      if (repositoryLocalStatus !== "all") query.set("localStatus", repositoryLocalStatus);
+      query.set("sortBy", repositorySortBy);
+      query.set("sortOrder", repositorySortOrder);
       const payload = await apiRequest(
-        `/api/promotion/templates/repository${refresh ? "/refresh" : ""}`,
+        `/api/promotion/templates/repository${refresh ? "/refresh" : ""}?${query}`,
         {
           method: refresh ? "POST" : "GET",
         },
       );
       const data = object(object(payload).data ?? payload);
-      setRepositoryRows(
-        unwrapList<unknown>(payload).rows.map(remotePromotionArtifactRow),
-      );
+      const list = unwrapList<unknown>(payload);
+      setRepositoryRows(list.rows.map(remotePromotionArtifactRow));
+      setRepositoryTotal(list.total);
       setRepositoryError("");
       return { ok: true, cacheHit: data.cacheHit === true };
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "远程仓库读取失败";
-      if (preserve) toast.error(`仓库刷新失败，当前显示上次缓存：${message}`);
+      if (preserve) toast.warning(`仓库刷新失败，当前显示上次缓存：${message}`);
       else {
         setRepositoryRows([]);
+        setRepositoryTotal(0);
         setRepositoryError(message);
       }
       return { ok: false, cacheHit: false };
@@ -1300,40 +1296,31 @@ export function PromotionTemplatesPage() {
       if (preserve) setRepositoryRefreshing(false);
       else setRepositoryLoading(false);
     }
-  }, []);
+  }, [debouncedKeyword, repositoryLocalStatus, repositoryPage, repositoryPageSize, repositorySortBy, repositorySortOrder]);
   function changeView(next: RepositoryView) {
     setView(next);
-    if (next !== "repository") return;
-    void (async () => {
-      const cached = await loadRepository({ preserve: repositoryRows.length > 0 });
-      if (!cached.ok || !cached.cacheHit) return;
-      const refreshed = await loadRepository({ refresh: true, preserve: true });
-      if (refreshed.ok) await load();
-    })();
   }
-  const visible = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    return search
-      ? rows.filter((row) =>
-          `${row.name} ${row.version} ${row.status}`
-            .toLowerCase()
-            .includes(search),
-        )
-      : rows;
-  }, [keyword, rows]);
-  const templatePagination = useClientPagination(visible, { resetKey: keyword });
-  const repositoryVisible = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    if (!search) return repositoryRows;
-    return repositoryRows.filter((row) =>
-      `${row.sequence} ${row.name} ${row.description} ${row.slug} ${row.version}`
-        .toLowerCase()
-        .includes(search),
-    );
-  }, [keyword, repositoryRows]);
-  const repositoryPagination = useClientPagination(repositoryVisible, {
-    resetKey: keyword,
-  });
+  function changeTemplateSort(nextSortBy: PromotionTemplateSortBy, nextSortOrder: ListSortOrder) {
+    setTemplateSortBy(nextSortBy);
+    setTemplateSortOrder(nextSortOrder);
+    setTemplatePage(1);
+  }
+  function changeRepositoryTemplateSort(nextSortBy: RepositoryTemplateSortBy, nextSortOrder: ListSortOrder) {
+    setRepositorySortBy(nextSortBy);
+    setRepositorySortOrder(nextSortOrder);
+    setRepositoryPage(1);
+  }
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+      setTemplatePage(1);
+      setRepositoryPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+  useEffect(() => {
+    if (view === "repository") void loadRepository();
+  }, [loadRepository, view]);
   async function importRepositoryTemplate(row: Pick<RemotePromotionArtifact, "sequence">) {
     if (!canManage || repositoryPending) return;
     setRepositoryPending(row.sequence);
@@ -1357,7 +1344,7 @@ export function PromotionTemplatesPage() {
     if (next && next.size > TEMPLATE_PACKAGE_MAX_BYTES) {
       setFile(null);
       setPackageInspecting(false);
-      toast.error("模板 ZIP 不能超过 64 MB");
+      toast.warning("模板 ZIP 不能超过 64 MB");
       return;
     }
     setFile(next);
@@ -1420,11 +1407,13 @@ export function PromotionTemplatesPage() {
         toast.success(file ? "模板及资源包已更新" : "模板已保存");
       } else {
         setQualityReviewing(imported);
-        toast.success(
-          imported.qualityReport.status === "warnings"
-            ? `模板已导入，发现 ${imported.qualityReport.warnings.length} 项优化建议`
-            : "模板已导入，质量检查通过",
-        );
+        if (imported.qualityReport.status === "warnings") {
+          toast.warning(
+            `模板已导入，发现 ${imported.qualityReport.warnings.length} 项优化建议`,
+          );
+        } else {
+          toast.success("模板已导入，质量检查通过");
+        }
       }
       await load();
     } catch (caught) {
@@ -1567,13 +1556,51 @@ export function PromotionTemplatesPage() {
               : "搜索远程模板名称、编号或版本",
         }}
         filters={
-          <RepositorySourceTabs
-            value={view}
-            localLabel="本地模板"
-            onChange={changeView}
-          />
+          <>
+            <RepositorySourceTabs
+              value={view}
+              localLabel="本地模板"
+              onChange={changeView}
+            />
+            {view === "local" ? (
+              <>
+                <SelectField
+                  value={listTemplateStatus}
+                  onValueChange={(value) => { setListTemplateStatus(value); setTemplatePage(1); }}
+                  options={[
+                    { value: "all", label: "全部状态" },
+                    { value: "active", label: "可用" },
+                    { value: "ready", label: "就绪" },
+                    { value: "disabled", label: "已停用" },
+                    { value: "processing", label: "处理中" },
+                  ]}
+                />
+                <SelectField
+                  value={templateSource}
+                  onValueChange={(value) => { setTemplateSource(value); setTemplatePage(1); }}
+                  options={[
+                    { value: "all", label: "全部来源" },
+                    { value: "repository", label: "远程仓库" },
+                    { value: "offline", label: "离线导入" },
+                  ]}
+                />
+              </>
+            ) : (
+              <SelectField
+                value={repositoryLocalStatus}
+                onValueChange={(value) => { setRepositoryLocalStatus(value); setRepositoryPage(1); }}
+                options={[
+                  { value: "all", label: "全部本地状态" },
+                  { value: "new", label: "未添加" },
+                  { value: "current", label: "已添加" },
+                  { value: "update", label: "可更新" },
+                  { value: "conflict", label: "版本冲突" },
+                ]}
+              />
+            )}
+          </>
         }
-        meta={`${view === "local" ? visible.length : repositoryVisible.length} 个模板`}
+        meta={`${view === "local" ? templateTotal : repositoryTotal} 个模板`}
         actions={
           <>
             <Button
@@ -1608,12 +1635,15 @@ export function PromotionTemplatesPage() {
         }
       />
       <ListPagination
-        page={view === "local" ? templatePagination.page : repositoryPagination.page}
-        pageSize={view === "local" ? templatePagination.pageSize : repositoryPagination.pageSize}
-        total={view === "local" ? templatePagination.total : repositoryPagination.total}
+        page={view === "local" ? templatePage : repositoryPage}
+        pageSize={view === "local" ? templatePageSize : repositoryPageSize}
+        total={view === "local" ? templateTotal : repositoryTotal}
         disabled={view === "local" ? loading : repositoryLoading}
-        onPageChange={view === "local" ? templatePagination.setPage : repositoryPagination.setPage}
-        onPageSizeChange={view === "local" ? templatePagination.setPageSize : repositoryPagination.setPageSize}
+        onPageChange={view === "local" ? setTemplatePage : setRepositoryPage}
+        onPageSizeChange={(value) => {
+          if (view === "local") { setTemplatePageSize(value); setTemplatePage(1); }
+          else { setRepositoryPageSize(value); setRepositoryPage(1); }
+        }}
       />
       <ListTableCard>
         {view === "repository" ? (
@@ -1626,21 +1656,21 @@ export function PromotionTemplatesPage() {
               title="远程仓库暂不可用"
               description={repositoryError}
             />
-          ) : repositoryVisible.length ? (
+          ) : repositoryRows.length ? (
             <Table layout="list">
               <TableHeader>
                 <TableRow>
-                  <TableHead>远程模板</TableHead>
+                  <ListSortableHead sortKey="sequence" activeSortKey={repositorySortBy} sortOrder={repositorySortOrder} onSort={changeRepositoryTemplateSort}>远程模板</ListSortableHead>
                   <TableHead>版本</TableHead>
                   <TableHead>源码目录</TableHead>
-                  <TableHead>资源</TableHead>
-                  <TableHead>本地状态</TableHead>
+                  <ListSortableHead sortKey="assetCount" activeSortKey={repositorySortBy} sortOrder={repositorySortOrder} defaultOrder="desc" onSort={changeRepositoryTemplateSort}>资源</ListSortableHead>
+                  <ListSortableHead sortKey="localStatus" activeSortKey={repositorySortBy} sortOrder={repositorySortOrder} onSort={changeRepositoryTemplateSort}>本地状态</ListSortableHead>
                   <TableHead adaptive>备注</TableHead>
                   <TableHead>操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {repositoryPagination.rows.map((row) => (
+                {repositoryRows.map((row) => (
                   <TableRow key={row.id}>
                     <TableCell>
                       <EntityPrimaryCell
@@ -1737,25 +1767,25 @@ export function PromotionTemplatesPage() {
           <div className="loading-state">
             <Spinner />
           </div>
-        ) : visible.length ? (
+        ) : rows.length ? (
           <Table layout="list">
             <TableHeader>
               <TableRow>
-                <TableHead>模板</TableHead>
-                <TableHead>来源</TableHead>
+                <ListSortableHead sortKey="id" activeSortKey={templateSortBy} sortOrder={templateSortOrder} defaultOrder="desc" onSort={changeTemplateSort}>模板</ListSortableHead>
+                <ListSortableHead sortKey="repositorySource" activeSortKey={templateSortBy} sortOrder={templateSortOrder} onSort={changeTemplateSort}>来源</ListSortableHead>
                 <TableHead>版本</TableHead>
                 <TableHead>语言</TableHead>
-                <TableHead>资源</TableHead>
-                <TableHead>集成</TableHead>
-                <TableHead>使用渠道</TableHead>
+                <ListSortableHead sortKey="assetCount" activeSortKey={templateSortBy} sortOrder={templateSortOrder} defaultOrder="desc" onSort={changeTemplateSort}>资源</ListSortableHead>
+                <ListSortableHead sortKey="integrationCount" activeSortKey={templateSortBy} sortOrder={templateSortOrder} defaultOrder="desc" onSort={changeTemplateSort}>集成</ListSortableHead>
+                <ListSortableHead sortKey="channelCount" activeSortKey={templateSortBy} sortOrder={templateSortOrder} defaultOrder="desc" onSort={changeTemplateSort}>使用渠道</ListSortableHead>
                 <TableHead adaptive>备注</TableHead>
-                <TableHead>创建时间</TableHead>
-                <TableHead>更新时间</TableHead>
+                <ListSortableHead sortKey="createdAt" activeSortKey={templateSortBy} sortOrder={templateSortOrder} defaultOrder="desc" onSort={changeTemplateSort}>创建时间</ListSortableHead>
+                <ListSortableHead sortKey="updatedAt" activeSortKey={templateSortBy} sortOrder={templateSortOrder} defaultOrder="desc" onSort={changeTemplateSort}>更新时间</ListSortableHead>
                 <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {templatePagination.rows.map((row) => (
+              {rows.map((row) => (
                 <TableRow key={row.readKey}>
                   <TableCell>
                     <EntityPrimaryCell
@@ -2322,7 +2352,6 @@ export function PromotionTemplatesPage() {
 export function PromotionChannelsPage() {
   const { can } = useAuth();
   const canManage = can("promotion.channels.manage");
-  const canManageMetrics = can("promotion.statistics.manage");
   const [rows, setRows] = useState<PromotionChannel[]>([]);
   const [templates, setTemplates] = useState<TemplateOption[]>([]);
   const [accountGroups, setAccountGroups] = useState<Option[]>([]);
@@ -2330,14 +2359,34 @@ export function PromotionChannelsPage() {
   const [protocolPools, setProtocolPools] = useState<ProtocolOption[]>([]);
   const [domains, setDomains] = useState<Option[]>([]);
   const [pixels, setPixels] = useState<PixelOption[]>([]);
+  const [pixelOptions, setPixelOptions] = useState<PixelOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
+  const [channelPage, setChannelPage] = useState(1);
+  const [channelPageSize, setChannelPageSize] = useState(20);
+  const [channelTotal, setChannelTotal] = useState(0);
+  const [countryFilter, setCountryFilter] = useState("all");
+  const [channelTypeFilter, setChannelTypeFilter] = useState("all");
+  const [templateFilter, setTemplateFilter] = useState("all");
+  const [accountGroupFilter, setAccountGroupFilter] = useState("all");
+  const [pixelFilter, setPixelFilter] = useState("all");
+  const [metaDomainFilter, setMetaDomainFilter] = useState("all");
+  const [localeFilter, setLocaleFilter] = useState("all");
+  const [channelSortBy, setChannelSortBy] = useState<PromotionChannelSortBy>("id");
+  const [channelSortOrder, setChannelSortOrder] = useState<ListSortOrder>("desc");
   const [drawer, setDrawer] = useState(false);
   const [editing, setEditing] = useState<PromotionChannel | null>(null);
   const [pending, setPending] = useState(false);
   const [pixelDrawer, setPixelDrawer] = useState(false);
   const [pixelPending, setPixelPending] = useState(false);
-  const pixelFormTopRef = useRef<HTMLDivElement>(null);
+  const [pixelPage, setPixelPage] = useState(1);
+  const [pixelPageSize, setPixelPageSize] = useState(20);
+  const [pixelTotal, setPixelTotal] = useState(0);
+  const [pixelFormOpen, setPixelFormOpen] = useState(false);
+  const [pixelEnabledFilter, setPixelEnabledFilter] = useState("all");
+  const [pixelSortBy, setPixelSortBy] = useState<PixelSortBy>("id");
+  const [pixelSortOrder, setPixelSortOrder] = useState<ListSortOrder>("desc");
   const [pixelEditingId, setPixelEditingId] = useState("");
   const [pixelForm, setPixelForm] = useState(emptyPixelForm);
   const [capiProbeOpen, setCapiProbeOpen] = useState(false);
@@ -2345,31 +2394,6 @@ export function PromotionChannelsPage() {
   const [capiProbeChannelId, setCapiProbeChannelId] = useState("");
   const [capiProbeResult, setCapiProbeResult] =
     useState<MetaCapiProbeResult | null>(null);
-  const [insightOpen, setInsightOpen] = useState(false);
-  const [insightChannelId, setInsightChannelId] = useState("");
-  const [insightLoading, setInsightLoading] = useState(false);
-  const [insightStats, setInsightStats] = useState<Record<string, number>>({});
-  const [pairingFunnel, setPairingFunnel] = useState<PairingFunnelStep[]>([]);
-  const [pairingFailureTotal, setPairingFailureTotal] = useState(0);
-  const [pairingFailures, setPairingFailures] = useState<
-    PairingFailureReason[]
-  >([]);
-  const [metaDeliverySummary, setMetaDeliverySummary] = useState<
-    Record<string, number>
-  >({});
-  const [insightLeads, setInsightLeads] = useState<
-    Array<Record<string, unknown>>
-  >([]);
-  const [metrics, setMetrics] = useState<AdMetric[]>([]);
-  const [metricDrawer, setMetricDrawer] = useState(false);
-  const [metricEditing, setMetricEditing] = useState<AdMetric | null>(null);
-  const [metricPending, setMetricPending] = useState(false);
-  const [metricForm, setMetricForm] = useState({
-    date: formatLocalDateInput(),
-    spend: "",
-    impressions: "",
-    clicks: "",
-  });
   const [form, setForm] = useState({
     name: "",
     countryCode: GLOBAL_PROMOTION_COUNTRY.value,
@@ -2387,16 +2411,29 @@ export function PromotionChannelsPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      const query = new URLSearchParams({ page: String(channelPage), pageSize: String(channelPageSize) });
+      if (debouncedKeyword) query.set("keyword", debouncedKeyword);
+      if (countryFilter !== "all") query.set("countryCode", countryFilter);
+      if (channelTypeFilter !== "all") query.set("channelType", channelTypeFilter);
+      if (templateFilter !== "all") query.set("templateId", templateFilter);
+      if (accountGroupFilter !== "all") query.set("accountGroupId", accountGroupFilter);
+      if (pixelFilter !== "all") query.set("pixelId", pixelFilter);
+      if (metaDomainFilter !== "all") query.set("metaDomainStatus", metaDomainFilter);
+      if (localeFilter !== "all") query.set("locale", localeFilter);
+      query.set("sortBy", channelSortBy);
+      query.set("sortOrder", channelSortOrder);
       const [c, t, d, p, g, pn, pp] = await Promise.all([
-        apiRequest("/api/promotion/channels?pageSize=100"),
-        apiRequest("/api/promotion/templates?pageSize=100"),
+        apiRequest(`/api/promotion/channels?${query}`),
+        apiRequest("/api/promotion/templates/options"),
         apiRequest("/api/domains/available-for-channels"),
-        apiRequest("/api/meta-pixels?pageSize=100"),
-        apiRequest("/api/account-groups?pageSize=100"),
-        apiRequest("/api/protocol-nodes?pageSize=100"),
-        apiRequest("/api/protocol-pools?pageSize=100"),
+        apiRequest("/api/meta-pixels/options"),
+        apiRequest("/api/account-groups/options"),
+        apiRequest("/api/protocol-nodes/options"),
+        apiRequest("/api/protocol-pools/options"),
       ]);
-      setRows(unwrapList<unknown>(c).rows.map(channelRow));
+      const channelList = unwrapList<unknown>(c);
+      setRows(channelList.rows.map(channelRow));
+      setChannelTotal(channelList.total);
       setTemplates(
         unwrapList<unknown>(t).rows.map((input) => {
           const row = object(input);
@@ -2409,6 +2446,7 @@ export function PromotionChannelsPage() {
             pairingContract:
               field(object(manifest.requirements), "pairingContract") ||
               "promotion-public-pairing/v1",
+            defaultLocale: field(manifest, "defaultLocale") || "en",
           };
         }).filter((row) => row.id),
       );
@@ -2421,7 +2459,7 @@ export function PromotionChannelsPage() {
           };
         }).filter((row) => row.id),
       );
-      setPixels(unwrapList<unknown>(p).rows.map(pixelRow));
+      setPixelOptions(unwrapList<unknown>(p).rows.map(pixelRow));
       setAccountGroups(
         unwrapList<unknown>(g).rows
           .map((input) => {
@@ -2457,33 +2495,43 @@ export function PromotionChannelsPage() {
       );
     } catch {
       setRows([]);
+      setChannelTotal(0);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [accountGroupFilter, channelPage, channelPageSize, channelSortBy, channelSortOrder, channelTypeFilter, countryFilter, debouncedKeyword, localeFilter, metaDomainFilter, pixelFilter, templateFilter]);
   useEffect(() => {
     void load();
   }, [load]);
-  const visible = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    return search
-      ? rows.filter((row) =>
-          `${row.name} ${row.countryCode} ${countryDisplayName(row.countryCode)} ${row.platform} ${platformDisplayName(row.platform)} ${row.hostname} ${row.slug} ${row.accountGroupName}`
-            .toLowerCase()
-            .includes(search),
-        )
-      : rows;
-  }, [keyword, rows]);
-  const channelPagination = useClientPagination(visible, { resetKey: keyword });
-  const pixelPagination = useClientPagination(pixels, {
-    resetKey: String(pixelDrawer),
-  });
-  const metricPagination = useClientPagination(metrics, {
-    resetKey: insightChannelId,
-  });
-  const leadPagination = useClientPagination(insightLeads, {
-    resetKey: insightChannelId,
-  });
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+      setChannelPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+  const loadPixels = useCallback(async () => {
+    try {
+      const payload = await apiRequest(
+        `/api/meta-pixels?${new URLSearchParams({
+          page: String(pixelPage),
+          pageSize: String(pixelPageSize),
+          ...(pixelEnabledFilter === "all" ? {} : { enabled: pixelEnabledFilter }),
+          sortBy: pixelSortBy,
+          sortOrder: pixelSortOrder,
+        })}`,
+      );
+      const list = unwrapList<unknown>(payload);
+      setPixels(list.rows.map(pixelRow));
+      setPixelTotal(list.total);
+    } catch {
+      setPixels([]);
+      setPixelTotal(0);
+    }
+  }, [pixelEnabledFilter, pixelPage, pixelPageSize, pixelSortBy, pixelSortOrder]);
+  useEffect(() => {
+    if (pixelDrawer) void loadPixels();
+  }, [loadPixels, pixelDrawer]);
   function open(row?: PromotionChannel) {
     if (row && !row.id) return;
     setEditing(row || null);
@@ -2622,164 +2670,6 @@ export function PromotionChannelsPage() {
       setCapiProbePending(false);
     }
   }
-  async function openInsights() {
-    if (!insightChannelId) return;
-    setInsightOpen(true);
-    setInsightLoading(true);
-    const [statsPayload, leadsPayload, metricsPayload, metaPayload] = await Promise.all([
-      apiRequest(`/api/promotion/channels/${insightChannelId}/stats`).catch(
-        () => null,
-      ),
-      apiRequest(
-        `/api/promotion/channels/${insightChannelId}/leads?pageSize=100`,
-      ).catch(() => null),
-      apiRequest(
-        `/api/promotion/ad-metrics?promotionChannelId=${encodeURIComponent(insightChannelId)}&pageSize=100`,
-      ).catch(() => null),
-      apiRequest(
-        `/api/promotion/channels/${insightChannelId}/meta-deliveries?pageSize=1`,
-      ).catch(() => null),
-    ]);
-    const statsData = ((
-      statsPayload as { data?: Record<string, unknown> } | null
-    )?.data || {}) as Record<string, unknown>;
-    const stats = (statsData.totals ||
-      statsData.stats ||
-      statsData.summary ||
-      statsData) as Record<string, unknown>;
-    const pairingFunnelData = object(statsData.pairingFunnel);
-    const pairingFailureData = object(statsData.pairingFailures);
-    const funnelSteps = Array.isArray(pairingFunnelData.steps)
-      ? pairingFunnelData.steps.map(object)
-      : [];
-    const failureReasons = Array.isArray(pairingFailureData.reasons)
-      ? pairingFailureData.reasons.map(object)
-      : [];
-    setInsightStats({
-      visits: Number(stats.visits ?? stats.pageView ?? stats.pageViews ?? 0),
-      visitors: Number(stats.uv ?? stats.visitors ?? 0),
-      fingerprintCoverageRate:
-        Number(stats.fingerprintCoverageRate ?? 0) * 100,
-      completedVisits: Number(stats.visitEnd ?? stats.completedVisits ?? 0),
-      leads: Number(
-        stats.uniqueLeads ??
-          stats.leads ??
-          stats.phoneSubmit ??
-          stats.phoneSubmits ??
-          0,
-      ),
-      submissions: Number(stats.phoneSubmit ?? stats.phoneSubmits ?? 0),
-    });
-    setPairingFunnel(
-      funnelSteps.map((step) => ({
-        key: field(step, "key"),
-        count: Number(step.count || 0),
-        visitorRate: Number(step.visitorRate || 0),
-        stepRate: Number(step.stepRate || 0),
-      })),
-    );
-    setPairingFailureTotal(Number(pairingFailureData.total || 0));
-    setPairingFailures(
-      failureReasons.map((reason) => ({
-        code: field(reason, "code"),
-        label: field(reason, "label") || "其他失败",
-        count: Number(reason.count || 0),
-        share: Number(reason.share || 0),
-      })),
-    );
-    setInsightLeads(
-      leadsPayload
-        ? unwrapList<Record<string, unknown>>(leadsPayload).rows
-        : [],
-    );
-    setMetrics(
-      metricsPayload
-        ? unwrapList<unknown>(metricsPayload).rows.map(metricRow)
-        : [],
-    );
-    const metaData = object(
-      (metaPayload as { data?: unknown } | null)?.data || metaPayload,
-    );
-    const metaSummary = object(metaData.summary);
-    setMetaDeliverySummary({
-      pending: Number(metaSummary.pending || 0),
-      retry: Number(metaSummary.retry || 0),
-      delivered: Number(metaSummary.delivered || 0),
-      failed: Number(metaSummary.failed || 0),
-    });
-    setInsightLoading(false);
-  }
-  function openMetric(row?: AdMetric) {
-    if (row && !row.id) return;
-    setMetricEditing(row || null);
-    setMetricForm(
-      row
-        ? {
-            date: row.date,
-            spend: String(row.spend),
-            impressions: String(row.impressions),
-            clicks: String(row.clicks),
-          }
-        : {
-            date: formatLocalDateInput(),
-            spend: "",
-            impressions: "",
-            clicks: "",
-          },
-    );
-    setMetricDrawer(true);
-  }
-  async function saveMetric() {
-    if (!insightChannelId || !metricForm.date || (metricEditing && !metricEditing.id)) return;
-    setMetricPending(true);
-    try {
-      const body = {
-        date: metricForm.date,
-        promotionChannelId: insightChannelId,
-        spend: Number(metricForm.spend || 0),
-        impressions: Number(metricForm.impressions || 0),
-        clicks: Number(metricForm.clicks || 0),
-      };
-      await apiRequest(
-        metricEditing
-          ? `/api/promotion/ad-metrics/${metricEditing.id}`
-          : "/api/promotion/ad-metrics",
-        {
-          method: metricEditing ? "PATCH" : "POST",
-          body: JSON.stringify(body),
-        },
-      );
-      setMetricDrawer(false);
-      await openInsights();
-    } catch (caught) {
-      toast.error(
-        caught instanceof Error ? caught.message : "保存日投放数据失败",
-      );
-    } finally {
-      setMetricPending(false);
-    }
-  }
-  async function removeMetric(row: AdMetric) {
-    if (!row.id) return;
-    if (
-      !(await confirmAction({
-        title: `删除 ${row.date} 的 Facebook 日投放数据？`,
-        description: "删除后不会影响系统自动采集的渠道事件。",
-        confirmText: "确认删除",
-      }))
-    )
-      return;
-    try {
-      await apiRequest(`/api/promotion/ad-metrics/${row.id}`, {
-        method: "DELETE",
-      });
-      await openInsights();
-    } catch (caught) {
-      toast.error(
-        caught instanceof Error ? caught.message : "删除日投放数据失败",
-      );
-    }
-  }
   const pixelBeingEdited = pixels.find((row) => row.id === pixelEditingId);
   const pixelHasCapiToken = Boolean(
     pixelForm.capiToken.trim() || pixelBeingEdited?.tokenConfigured,
@@ -2787,6 +2677,12 @@ export function PromotionChannelsPage() {
   function resetPixelForm() {
     setPixelEditingId("");
     setPixelForm(emptyPixelForm());
+    setPixelFormOpen(false);
+  }
+  function createPixel() {
+    setPixelEditingId("");
+    setPixelForm(emptyPixelForm());
+    setPixelFormOpen(true);
   }
   function editPixel(row: PixelOption) {
     setPixelEditingId(row.id);
@@ -2798,12 +2694,7 @@ export function PromotionChannelsPage() {
       capiEnabled: row.capiEnabled,
       eventMapping: { ...row.eventMapping },
     });
-    requestAnimationFrame(() => {
-      const drawerBody = pixelFormTopRef.current?.closest(
-        '[data-slot="sheet-body"]',
-      );
-      drawerBody?.scrollTo({ top: 0, behavior: "smooth" });
-    });
+    setPixelFormOpen(true);
   }
   async function savePixel() {
     if (!pixelForm.name.trim() || !pixelForm.datasetId.trim()) return;
@@ -2826,7 +2717,7 @@ export function PromotionChannelsPage() {
       },
       );
       resetPixelForm();
-      await load();
+      await Promise.all([load(), loadPixels()]);
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "保存 Pixel 失败");
     } finally {
@@ -2840,7 +2731,7 @@ export function PromotionChannelsPage() {
         method: "PATCH",
         body: JSON.stringify({ enabled: !row.enabled }),
       });
-      await load();
+      await Promise.all([load(), loadPixels()]);
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "更新 Pixel 失败");
     }
@@ -2859,11 +2750,24 @@ export function PromotionChannelsPage() {
     try {
       await apiRequest(`/api/meta-pixels/${row.id}`, { method: "DELETE" });
       if (row.id === pixelEditingId) resetPixelForm();
-      await load();
+      await Promise.all([load(), loadPixels()]);
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "删除 Pixel 失败");
     }
   }
+  function changeChannelSort(nextSortBy: PromotionChannelSortBy, nextSortOrder: ListSortOrder) {
+    setChannelSortBy(nextSortBy);
+    setChannelSortOrder(nextSortOrder);
+    setChannelPage(1);
+  }
+  function changePixelSort(nextSortBy: PixelSortBy, nextSortOrder: ListSortOrder) {
+    setPixelSortBy(nextSortBy);
+    setPixelSortOrder(nextSortOrder);
+    setPixelPage(1);
+  }
+  const localeOptions = Array.from(
+    new Set(templates.map((template) => template.defaultLocale).filter(Boolean)),
+  ).sort();
   return (
     <StandardListPage viewport>
       <ListToolbar
@@ -2873,25 +2777,74 @@ export function PromotionChannelsPage() {
           placeholder: "搜索渠道、投放国家、域名或 Slug",
         }}
         filters={
-          <div className="channel-data-bar">
-            <SelectField
-              className="w-[280px]"
-              value={insightChannelId}
-              onValueChange={setInsightChannelId}
-              placeholder="选择渠道查看数据和号码"
-              options={rows.filter((row) => row.id).map((row) => ({ value: row.id, label: row.name }))}
+          <>
+            <SearchableSelect
+              ariaLabel="投放国家筛选"
+              value={countryFilter}
+              onValueChange={(value) => { setCountryFilter(value); setChannelPage(1); }}
+              searchPlaceholder="搜索国家"
+              emptyText="没有匹配国家"
+              options={[
+                { value: "all", label: "全部投放国家", keywords: "全部 all" },
+                ...promotionCountryOptions,
+              ]}
             />
-            <Button
-              variant="outline"
-              disabled={!insightChannelId}
-              onClick={() => void openInsights()}
-            >
-              <EyeIcon size={16} />
-              查看渠道数据
-            </Button>
-          </div>
+            <SelectField
+              value={channelTypeFilter}
+              onValueChange={(value) => { setChannelTypeFilter(value); setChannelPage(1); }}
+              options={[
+                { value: "all", label: "全部平台" },
+                { value: "facebook", label: "Facebook" },
+              ]}
+            />
+            <SelectField
+              value={templateFilter}
+              onValueChange={(value) => { setTemplateFilter(value); setChannelPage(1); }}
+              options={[
+                { value: "all", label: "全部模板" },
+                ...templates.map((template) => ({ value: template.id, label: template.label })),
+              ]}
+            />
+            <SelectField
+              value={accountGroupFilter}
+              onValueChange={(value) => { setAccountGroupFilter(value); setChannelPage(1); }}
+              options={[
+                { value: "all", label: "全部账号分组" },
+                ...accountGroups.map((group) => ({ value: group.id, label: group.label })),
+              ]}
+            />
+            <SelectField
+              value={pixelFilter}
+              onValueChange={(value) => { setPixelFilter(value); setChannelPage(1); }}
+              options={[
+                { value: "all", label: "全部 Pixel" },
+                ...pixelOptions.map((pixel) => ({ value: pixel.id, label: pixel.label })),
+              ]}
+            />
+            <SelectField
+              value={metaDomainFilter}
+              onValueChange={(value) => { setMetaDomainFilter(value); setChannelPage(1); }}
+              options={[
+                { value: "all", label: "全部 FB 域名状态" },
+                { value: "normal", label: "正常" },
+                { value: "blocked", label: "疑似受限" },
+                { value: "unmonitored", label: "未监测" },
+              ]}
+            />
+            <SelectField
+              value={localeFilter}
+              onValueChange={(value) => { setLocaleFilter(value); setChannelPage(1); }}
+              options={[
+                { value: "all", label: "全部语言" },
+                ...localeOptions.map((locale) => ({
+                  value: locale,
+                  label: `${templatePreviewLocaleLabel(locale)} · ${locale}`,
+                })),
+              ]}
+            />
+          </>
         }
-        meta={`${visible.length} 个渠道`}
+        meta={`${channelTotal} 个渠道`}
         actions={
           <>
             <Button variant="outline" onClick={() => void load()}>
@@ -2914,38 +2867,38 @@ export function PromotionChannelsPage() {
         }
       />
       <ListPagination
-        page={channelPagination.page}
-        pageSize={channelPagination.pageSize}
-        total={channelPagination.total}
+        page={channelPage}
+        pageSize={channelPageSize}
+        total={channelTotal}
         disabled={loading}
-        onPageChange={channelPagination.setPage}
-        onPageSizeChange={channelPagination.setPageSize}
+        onPageChange={setChannelPage}
+        onPageSizeChange={(value) => { setChannelPageSize(value); setChannelPage(1); }}
       />
       <ListTableCard>
         {loading ? (
           <div className="loading-state">
             <Spinner />
           </div>
-        ) : visible.length ? (
+        ) : rows.length ? (
           <Table layout="list">
             <TableHeader>
               <TableRow>
-                <TableHead>渠道</TableHead>
-                <TableHead>投放国家</TableHead>
-                <TableHead>平台</TableHead>
-                <TableHead>模板</TableHead>
-                <TableHead>账号入库分组</TableHead>
-                <TableHead adaptive>访问地址</TableHead>
-                <TableHead>Pixel</TableHead>
+                <ListSortableHead sortKey="id" activeSortKey={channelSortBy} sortOrder={channelSortOrder} defaultOrder="desc" onSort={changeChannelSort}>渠道</ListSortableHead>
+                <ListSortableHead sortKey="countryCode" activeSortKey={channelSortBy} sortOrder={channelSortOrder} onSort={changeChannelSort}>投放国家</ListSortableHead>
+                <ListSortableHead sortKey="channelType" activeSortKey={channelSortBy} sortOrder={channelSortOrder} onSort={changeChannelSort}>平台</ListSortableHead>
+                <ListSortableHead sortKey="templateName" activeSortKey={channelSortBy} sortOrder={channelSortOrder} onSort={changeChannelSort}>模板</ListSortableHead>
+                <ListSortableHead sortKey="accountGroupName" activeSortKey={channelSortBy} sortOrder={channelSortOrder} onSort={changeChannelSort}>账号入库分组</ListSortableHead>
+                <ListSortableHead sortKey="hostname" activeSortKey={channelSortBy} sortOrder={channelSortOrder} onSort={changeChannelSort} adaptive>访问地址</ListSortableHead>
+                <ListSortableHead sortKey="pixelName" activeSortKey={channelSortBy} sortOrder={channelSortOrder} onSort={changeChannelSort}>Pixel</ListSortableHead>
                 <TableHead>FB 域名状态</TableHead>
-                <TableHead>语言</TableHead>
-                <TableHead>创建时间</TableHead>
-                <TableHead>更新时间</TableHead>
+                <ListSortableHead sortKey="locale" activeSortKey={channelSortBy} sortOrder={channelSortOrder} onSort={changeChannelSort}>语言</ListSortableHead>
+                <ListSortableHead sortKey="createdAt" activeSortKey={channelSortBy} sortOrder={channelSortOrder} defaultOrder="desc" onSort={changeChannelSort}>创建时间</ListSortableHead>
+                <ListSortableHead sortKey="updatedAt" activeSortKey={channelSortBy} sortOrder={channelSortOrder} defaultOrder="desc" onSort={changeChannelSort}>更新时间</ListSortableHead>
                 <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {channelPagination.rows.map((row) => (
+              {rows.map((row) => (
                 <TableRow key={row.readKey}>
                   <TableCell>
                     <EntityPrimaryCell
@@ -3050,7 +3003,7 @@ export function PromotionChannelsPage() {
                     </div>
                   </TableCell>
                   <TableCell>
-                    自动识别
+                    {row.locale ? `${templatePreviewLocaleLabel(row.locale)} · 自动` : "自动识别"}
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatDateTime(row.createdAt)}
@@ -3212,7 +3165,7 @@ export function PromotionChannelsPage() {
               clearable
               onValueChange={(value) => setForm({ ...form, pixelId: value })}
               placeholder="不绑定"
-              options={pixels
+              options={pixelOptions
                 .filter((row) => row.enabled && row.id)
                 .map((row) => ({ value: row.id, label: row.label }))}
             />
@@ -3426,107 +3379,145 @@ export function PromotionChannelsPage() {
             resetPixelForm();
           }
         }}
-        title="Meta Pixel 管理"
-        description="Pixel 统一管理浏览器上报、CAPI 与事件映射；渠道只需选择像素绑定。Token 保存后仅显示掩码。"
+        title={
+          pixelFormOpen
+            ? pixelEditingId
+              ? "编辑 Meta Pixel"
+              : "新建 Meta Pixel"
+            : "Meta Pixel 管理"
+        }
+        description={
+          pixelFormOpen
+            ? "统一配置浏览器上报、CAPI 与事件映射。Token 保存后仅显示掩码。"
+            : "管理渠道可绑定的 Meta Pixel。"
+        }
         footer={
-          <Button
-            onClick={() => {
-              setPixelDrawer(false);
-              resetPixelForm();
-            }}
-          >
-            完成
-          </Button>
+          pixelFormOpen ? (
+            <>
+              <Button
+                variant="outline"
+                disabled={pixelPending}
+                onClick={resetPixelForm}
+              >
+                取消
+              </Button>
+              <Button
+                disabled={
+                  pixelPending ||
+                  !pixelForm.name.trim() ||
+                  !pixelForm.datasetId.trim()
+                }
+                onClick={() => void savePixel()}
+              >
+                {pixelPending ? <Spinner /> : null}
+                保存
+              </Button>
+            </>
+          ) : (
+            <Button
+              onClick={() => {
+                setPixelDrawer(false);
+                resetPixelForm();
+              }}
+            >
+              完成
+            </Button>
+          )
         }
       >
-        <div className="drawer-form">
-          <div ref={pixelFormTopRef} className="pixel-create-card">
-            {pixelEditingId ? (
-              <div className="flex justify-end">
-                <Button size="sm" variant="ghost" onClick={resetPixelForm}>
-                  取消编辑
-                </Button>
-              </div>
-            ) : null}
-            <label className="field">
-              <DrawerFieldLabel required>内部名称</DrawerFieldLabel>
-              <Input
-                value={pixelForm.name}
-                onChange={(e) =>
-                  setPixelForm({ ...pixelForm, name: e.target.value })
-                }
-                placeholder="例如：FB 主 Pixel"
-              />
-            </label>
-            <label className="field">
-              <DrawerFieldLabel required>Dataset / Pixel ID</DrawerFieldLabel>
-              <Input
-                value={pixelForm.datasetId}
-                onChange={(e) =>
-                  setPixelForm({ ...pixelForm, datasetId: e.target.value })
-                }
-              />
-            </label>
-            <label className="field">
-              <DrawerFieldLabel>CAPI Token</DrawerFieldLabel>
-              <Input
-                type="password"
-                autoComplete="new-password"
-                value={pixelForm.capiToken}
-                onChange={(e) =>
-                  setPixelForm({
-                    ...pixelForm,
-                    capiToken: e.target.value,
-                    capiEnabled:
-                      e.target.value || pixelBeingEdited?.tokenConfigured
-                        ? pixelForm.capiEnabled
-                        : false,
-                  })
-                }
-                placeholder={
-                  pixelBeingEdited?.tokenConfigured
-                    ? "已保存；留空保持不变"
-                    : "保存后不会回显"
-                }
-              />
-            </label>
-            <DrawerFormField
-              label="浏览器 Pixel"
-              hint="在绑定该 Pixel 的公开落地页加载浏览器事件。"
-            >
-              <div className="flex h-8 items-center">
-                <Switch
-                  checked={pixelForm.browserPixelEnabled}
-                  onCheckedChange={(checked) =>
+        {pixelFormOpen ? (
+          <DrawerFormLayout>
+            <DrawerFormSection title="基础信息" hideHeader>
+              <DrawerFormField label="内部名称" required align="start">
+                <Input
+                  value={pixelForm.name}
+                  onChange={(event) =>
+                    setPixelForm({ ...pixelForm, name: event.target.value })
+                  }
+                  placeholder="例如：FB 主 Pixel"
+                />
+              </DrawerFormField>
+              <DrawerFormField
+                label="Dataset / Pixel ID"
+                required
+                align="start"
+              >
+                <Input
+                  value={pixelForm.datasetId}
+                  onChange={(event) =>
                     setPixelForm({
                       ...pixelForm,
-                      browserPixelEnabled: checked,
+                      datasetId: event.target.value,
                     })
                   }
-                  aria-label="启用浏览器 Pixel"
                 />
-              </div>
-            </DrawerFormField>
-            <DrawerFormField
-              label="服务端 Conversions API"
-              hint={
-                pixelHasCapiToken
-                  ? "异步投递、失败重试，并保留可审计账本。"
-                  : "请先填写 CAPI Token。"
-              }
-            >
-              <div className="flex h-8 items-center">
-                <Switch
-                  checked={pixelForm.capiEnabled}
-                  disabled={!pixelHasCapiToken}
-                  onCheckedChange={(checked) =>
-                    setPixelForm({ ...pixelForm, capiEnabled: checked })
+              </DrawerFormField>
+              <DrawerFormField
+                label="CAPI Token"
+                hint="Token 保存后不会回显。编辑时留空会保持原配置。"
+                align="start"
+              >
+                <Input
+                  type="password"
+                  autoComplete="new-password"
+                  value={pixelForm.capiToken}
+                  onChange={(event) =>
+                    setPixelForm({
+                      ...pixelForm,
+                      capiToken: event.target.value,
+                      capiEnabled:
+                        event.target.value || pixelBeingEdited?.tokenConfigured
+                          ? pixelForm.capiEnabled
+                          : false,
+                    })
                   }
-                  aria-label="启用 Meta CAPI"
+                  placeholder={
+                    pixelBeingEdited?.tokenConfigured
+                      ? "已保存；留空保持不变"
+                      : "填写 Meta CAPI Token"
+                  }
                 />
-              </div>
-            </DrawerFormField>
-            <div className="form-grid">
+              </DrawerFormField>
+            </DrawerFormSection>
+            <DrawerFormSection title="上报方式">
+              <DrawerFormField
+                label="浏览器 Pixel"
+                hint="在绑定该 Pixel 的公开落地页加载浏览器事件。"
+              >
+                <div className="flex h-8 items-center">
+                  <Switch
+                    checked={pixelForm.browserPixelEnabled}
+                    onCheckedChange={(checked) =>
+                      setPixelForm({
+                        ...pixelForm,
+                        browserPixelEnabled: checked,
+                      })
+                    }
+                    aria-label="启用浏览器 Pixel"
+                  />
+                </div>
+              </DrawerFormField>
+              <DrawerFormField
+                label="Conversions API"
+                hint={
+                  pixelHasCapiToken
+                    ? "异步投递、失败重试，并保留可审计账本。"
+                    : "请先填写 CAPI Token。"
+                }
+              >
+                <div className="flex h-8 items-center">
+                  <Switch
+                    checked={pixelForm.capiEnabled}
+                    disabled={!pixelHasCapiToken}
+                    onCheckedChange={(checked) =>
+                      setPixelForm({ ...pixelForm, capiEnabled: checked })
+                    }
+                    aria-label="启用 Meta CAPI"
+                  />
+                </div>
+              </DrawerFormField>
+            </DrawerFormSection>
+            <DrawerFormSection title="事件映射">
               {(
                 [
                   ["page_view", "页面访问"],
@@ -3535,8 +3526,7 @@ export function PromotionChannelsPage() {
                   ["pairing_verified", "账号链接成功"],
                 ] as Array<[keyof MetaEventMapping, string]>
               ).map(([key, label]) => (
-                <label className="field" key={key}>
-                  <DrawerFieldLabel required>{label}上报事件</DrawerFieldLabel>
+                <DrawerFormField key={key} label={`${label}上报事件`} required>
                   <SelectField
                     className="w-full"
                     value={pixelForm.eventMapping[key]}
@@ -3551,360 +3541,144 @@ export function PromotionChannelsPage() {
                     }
                     options={metaEventOptions}
                   />
-                </label>
+                </DrawerFormField>
               ))}
-            </div>
-            <Button
-              disabled={
-                pixelPending ||
-                !pixelForm.name.trim() ||
-                !pixelForm.datasetId.trim()
-              }
-              onClick={() => void savePixel()}
-            >
-              {pixelPending ? <Spinner /> : <PlusIcon size={16} />}
-              {pixelEditingId ? "保存配置" : "添加 Pixel"}
-            </Button>
-          </div>
-          <div className="binding-list-header">
-            <strong>已配置 Pixel</strong>
-            <span>{pixels.length}</span>
-          </div>
-          <ListPagination
-            page={pixelPagination.page}
-            pageSize={pixelPagination.pageSize}
-            total={pixelPagination.total}
-            onPageChange={pixelPagination.setPage}
-            onPageSizeChange={pixelPagination.setPageSize}
-            ariaLabel="Meta Pixel 分页"
-          />
-          {pixels.length ? (
-            <div className="pixel-list">
-              {pixelPagination.rows.map((row) => (
-                <div key={row.readKey}>
-                  <div>
-                    <strong>{row.name}</strong>
-                    <span>{row.id || "等待 ID 迁移"}</span>
-                    <span>
-                      {row.datasetId} · {row.tokenMasked || "未配置 CAPI Token"}
-                    </span>
-                  </div>
-                  <Badge tone={row.enabled ? "success" : "neutral"}>
-                    {row.enabled ? "启用" : "停用"}
-                  </Badge>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={!row.id}
-                    onClick={() => editPixel(row)}
-                  >
-                    配置
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={!row.id}
-                    onClick={() => void togglePixel(row)}
-                  >
-                    {row.enabled ? "停用" : "启用"}
-                  </Button>
-                  <IconButton
-                    label="删除 Pixel"
-                    className="text-destructive"
-                    disabled={!row.id}
-                    onClick={() => void removePixel(row)}
-                  >
-                    <Trash2Icon size={15} />
-                  </IconButton>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <EmptyState
-              title="暂无 Pixel"
-              description="添加后即可在推广渠道中绑定。"
-            />
-          )}
-        </div>
-      </Drawer>
-      <Drawer
-        open={insightOpen}
-        onClose={() => setInsightOpen(false)}
-        title="渠道数据与号码"
-        description={
-          rows.find((row) => row.id === insightChannelId)?.name || ""
-        }
-        footer={<Button onClick={() => setInsightOpen(false)}>关闭</Button>}
-      >
-        {insightLoading ? (
-          <div className="loading-state">
-            <Spinner />
-          </div>
+            </DrawerFormSection>
+          </DrawerFormLayout>
         ) : (
           <div className="drawer-form">
-            <div className="channel-stat-grid">
-              <div>
-                <span>页面访问</span>
-                <strong>{insightStats.visits || 0}</strong>
-              </div>
-              <div>
-                <span>设备增强 UV</span>
-                <strong>{insightStats.visitors || 0}</strong>
-              </div>
-              <div>
-                <span>指纹覆盖率</span>
-                <strong>
-                  {(insightStats.fingerprintCoverageRate || 0).toFixed(1)}%
-                </strong>
-              </div>
-              <div>
-                <span>完整停留会话</span>
-                <strong>{insightStats.completedVisits || 0}</strong>
-              </div>
-              <div>
-                <span>唯一号码</span>
-                <strong>{insightStats.leads || 0}</strong>
-              </div>
-              <div>
-                <span>号码提交次数</span>
-                <strong>{insightStats.submissions || 0}</strong>
-              </div>
-            </div>
-            <div className="binding-list-header">
-              <strong>配对转化漏斗</strong>
-              <span>按访客去重</span>
-            </div>
-            {pairingFunnel.length ? (
-              <div className="pairing-funnel-grid">
-                {pairingFunnel.map((step, index) => (
-                  <div key={step.key}>
-                    <span>
-                      {index + 1}. {pairingFunnelLabels[step.key] || step.key}
-                    </span>
-                    <strong>{step.count}</strong>
-                    <small>
-                      {index === 0
-                        ? "漏斗起点"
-                        : `上一步转化 ${(step.stepRate * 100).toFixed(1)}%`}
-                      {index > 0
-                        ? ` · 访问转化 ${(step.visitorRate * 100).toFixed(1)}%`
-                        : ""}
-                    </small>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="compact-empty">暂无配对漏斗数据。</div>
-            )}
-            <div className="binding-list-header">
-              <strong>主要流失原因</strong>
-              <span>{pairingFailureTotal}</span>
-            </div>
-            {pairingFailures.length ? (
-              <div className="pairing-failure-list">
-                {pairingFailures.map((reason) => (
-                  <div key={reason.code}>
-                    <strong>{reason.label}</strong>
-                    <span>{reason.count} 次</span>
-                    <small>{(reason.share * 100).toFixed(1)}%</small>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="compact-empty">当前没有配对失败记录。</div>
-            )}
-            <div className="binding-list-header">
-              <strong>Meta CAPI 投递账本</strong>
-              <span>Browser / CAPI 使用相同 eventId 去重</span>
-            </div>
-            <div className="channel-stat-grid">
-              <div><span>已送达</span><strong>{metaDeliverySummary.delivered || 0}</strong></div>
-              <div><span>待投递</span><strong>{metaDeliverySummary.pending || 0}</strong></div>
-              <div><span>重试中</span><strong>{metaDeliverySummary.retry || 0}</strong></div>
-              <div><span>最终失败</span><strong>{metaDeliverySummary.failed || 0}</strong></div>
-            </div>
-            <div className="binding-list-header">
-              <strong>Facebook 日投放数据</strong>
-              {canManageMetrics ? (
-                <Button variant="outline" onClick={() => openMetric()}>
-                  <PlusIcon size={15} />
-                  录入日数据
-                </Button>
-              ) : null}
-            </div>
-            <ListPagination
-              page={metricPagination.page}
-              pageSize={metricPagination.pageSize}
-              total={metricPagination.total}
-              onPageChange={metricPagination.setPage}
-              onPageSizeChange={metricPagination.setPageSize}
-              ariaLabel="Facebook 日投放数据分页"
-            />
-            {metrics.length ? (
-              <div className="metric-list">
-                {metricPagination.rows.map((metric) => (
-                  <div key={metric.readKey}>
-                    <strong>{metric.date}</strong>
-                    <span>{metric.id || "等待 ID 迁移"}</span>
-                    <span>${metric.spend.toFixed(2)}</span>
-                    <span>{metric.impressions.toLocaleString()} 展示</span>
-                    <span>{metric.clicks.toLocaleString()} 点击</span>
-                    {canManageMetrics ? (
-                      <>
-                        <IconButton
-                          label="编辑日投放数据"
-                          disabled={!metric.id}
-                          onClick={() => openMetric(metric)}
-                        >
-                          <PencilIcon size={14} />
-                        </IconButton>
-                        <IconButton
-                          label="删除日投放数据"
-                          className="text-destructive"
-                          disabled={!metric.id}
-                          onClick={() => void removeMetric(metric)}
-                        >
-                          <Trash2Icon size={14} />
-                        </IconButton>
-                      </>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="compact-empty">
-                尚未录入 Facebook 花费、展示与点击数据。
-              </div>
-            )}
-            <div className="binding-list-header">
-              <strong>号码留资</strong>
-              <span>{insightLeads.length}</span>
-            </div>
-            <ListPagination
-              page={leadPagination.page}
-              pageSize={leadPagination.pageSize}
-              total={leadPagination.total}
-              onPageChange={leadPagination.setPage}
-              onPageSizeChange={leadPagination.setPageSize}
-              ariaLabel="渠道号码留资分页"
-            />
-            {insightLeads.length ? (
-              <div className="lead-list">
-                {leadPagination.rows.map((lead, index) => (
-                  <div key={String(lead.id || index)}>
-                    <strong>
-                      {formatPhoneDisplay(
-                        lead.phone || lead.phoneNumber || "-",
-                      )}
-                    </strong>
-                    <span>{String(lead.countryCode || "-")}</span>
-                    <small>
-                      {formatDateTime(
-                        String(lead.lastSeenAt || lead.createdAt || ""),
-                      )}
-                    </small>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <EmptyState
-                title="暂无号码"
-                description="访客提交手机号后会自动进入这里。"
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <SelectField
+                value={pixelEnabledFilter}
+                onValueChange={(value) => {
+                  setPixelEnabledFilter(value);
+                  setPixelPage(1);
+                }}
+                options={[
+                  { value: "all", label: "全部状态" },
+                  { value: "true", label: "启用" },
+                  { value: "false", label: "停用" },
+                ]}
               />
-            )}
+              <Button onClick={createPixel}>
+                <PlusIcon size={16} />
+                新建 Pixel
+              </Button>
+            </div>
+            <ListPagination
+              page={pixelPage}
+              pageSize={pixelPageSize}
+              total={pixelTotal}
+              onPageChange={setPixelPage}
+              onPageSizeChange={(value) => {
+                setPixelPageSize(value);
+                setPixelPage(1);
+              }}
+              ariaLabel="Meta Pixel 分页"
+            />
+            <ListTableCard>
+              {pixels.length ? (
+                <Table layout="list">
+                  <TableHeader>
+                    <TableRow>
+                      <ListSortableHead
+                        sortKey="id"
+                        activeSortKey={pixelSortBy}
+                        sortOrder={pixelSortOrder}
+                        defaultOrder="desc"
+                        onSort={changePixelSort}
+                      >
+                        Pixel 名称
+                      </ListSortableHead>
+                      <ListSortableHead
+                        sortKey="pixelId"
+                        activeSortKey={pixelSortBy}
+                        sortOrder={pixelSortOrder}
+                        onSort={changePixelSort}
+                      >
+                        Dataset / Pixel ID
+                      </ListSortableHead>
+                      <ListSortableHead
+                        sortKey="enabled"
+                        activeSortKey={pixelSortBy}
+                        sortOrder={pixelSortOrder}
+                        onSort={changePixelSort}
+                      >
+                        状态
+                      </ListSortableHead>
+                      <TableHead>CAPI</TableHead>
+                      <TableHead>操作</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {pixels.map((row) => (
+                      <TableRow key={row.readKey}>
+                        <TableCell>
+                          <EntityPrimaryCell
+                            title={row.name}
+                            id={row.id}
+                            status={{
+                              label: row.enabled ? "启用" : "停用",
+                              tone: row.enabled ? "success" : "neutral",
+                              description: row.enabled
+                                ? "当前 Pixel 可供推广渠道绑定。"
+                                : "当前 Pixel 已停用。",
+                            }}
+                          />
+                        </TableCell>
+                        <TableCell>{row.datasetId || "-"}</TableCell>
+                        <TableCell>
+                          <Badge tone={row.enabled ? "success" : "neutral"}>
+                            {row.enabled ? "启用" : "停用"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
+                          <div className="cell-main mx-auto">
+                            <strong>{row.capiEnabled ? "已启用" : "未启用"}</strong>
+                            <span>{row.tokenMasked || "未配置 Token"}</span>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex min-w-max items-center justify-end gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={!row.id}
+                              onClick={() => editPixel(row)}
+                            >
+                              配置
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={!row.id}
+                              onClick={() => void togglePixel(row)}
+                            >
+                              {row.enabled ? "停用" : "启用"}
+                            </Button>
+                            <IconButton
+                              label="删除 Pixel"
+                              className="text-destructive"
+                              disabled={!row.id}
+                              onClick={() => void removePixel(row)}
+                            >
+                              <Trash2Icon size={15} />
+                            </IconButton>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              ) : (
+                <EmptyState
+                  title="暂无 Pixel"
+                  description="新建后即可在推广渠道中绑定。"
+                />
+              )}
+            </ListTableCard>
           </div>
         )}
-      </Drawer>
-      <Drawer
-        open={metricDrawer}
-        onClose={() => !metricPending && setMetricDrawer(false)}
-        title={metricEditing ? "编辑 Facebook 日数据" : "录入 Facebook 日数据"}
-        description={
-          rows.find((row) => row.id === insightChannelId)?.name || ""
-        }
-        footer={
-          <>
-            <Button variant="outline" onClick={() => setMetricDrawer(false)}>
-              取消
-            </Button>
-            <Button
-              disabled={metricPending || !metricForm.date}
-              onClick={() => void saveMetric()}
-            >
-              {metricPending ? <Spinner /> : null}保存
-            </Button>
-          </>
-        }
-      >
-        <div className="drawer-form">
-          <label className="field">
-            <DrawerFieldLabel required>日期</DrawerFieldLabel>
-            <DatePickerField
-              ariaLabel="广告数据日期"
-              value={metricForm.date}
-              onValueChange={(date) =>
-                setMetricForm({ ...metricForm, date })
-              }
-            />
-          </label>
-          <div className="form-grid">
-            <label className="field">
-              <DrawerFieldLabel>花费（USD）</DrawerFieldLabel>
-              <Input
-                type="number"
-                min="0"
-                step="0.01"
-                value={metricForm.spend}
-                onChange={(event) =>
-                  setMetricForm({ ...metricForm, spend: event.target.value })
-                }
-              />
-            </label>
-            <label className="field">
-              <DrawerFieldLabel>展示</DrawerFieldLabel>
-              <Input
-                type="number"
-                min="0"
-                value={metricForm.impressions}
-                onChange={(event) =>
-                  setMetricForm({
-                    ...metricForm,
-                    impressions: event.target.value,
-                  })
-                }
-              />
-            </label>
-            <label className="field">
-              <DrawerFieldLabel>点击</DrawerFieldLabel>
-              <Input
-                type="number"
-                min="0"
-                value={metricForm.clicks}
-                onChange={(event) =>
-                  setMetricForm({ ...metricForm, clicks: event.target.value })
-                }
-              />
-            </label>
-          </div>
-          <div className="metric-preview">
-            <span>
-              CTR{" "}
-              <strong>
-                {Number(metricForm.impressions)
-                  ? `${((Number(metricForm.clicks) / Number(metricForm.impressions)) * 100).toFixed(2)}%`
-                  : "-"}
-              </strong>
-            </span>
-            <span>
-              CPC{" "}
-              <strong>
-                {Number(metricForm.clicks)
-                  ? `$${(Number(metricForm.spend) / Number(metricForm.clicks)).toFixed(2)}`
-                  : "-"}
-              </strong>
-            </span>
-          </div>
-        </div>
       </Drawer>
     </StandardListPage>
   );

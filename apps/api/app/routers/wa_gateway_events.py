@@ -112,6 +112,15 @@ def _account_state_event(payload: dict) -> dict:
         )
         if account is None:
             raise HTTPException(status_code=404, detail="账号不存在")
+        if account.deleted_at is not None:
+            return {
+                "data": {
+                    "ok": True,
+                    "ignored": True,
+                    "reason": "account_deleted",
+                    "eventId": event_id,
+                }
+            }
         existing = db.scalar(
             select(AccountLifecycleEvent).where(
                 AccountLifecycleEvent.public_id == event_id
@@ -351,6 +360,15 @@ def _proxy_health_event(payload: dict) -> dict:
         )
         if account is None:
             raise HTTPException(status_code=404, detail="账号不存在")
+        if account.deleted_at is not None:
+            return {
+                "data": {
+                    "ok": True,
+                    "ignored": True,
+                    "reason": "account_deleted",
+                    "eventId": event_id,
+                }
+            }
         row = db.execute(
             select(AccountProxyBinding, ProxyEndpoint)
             .join(ProxyEndpoint, ProxyEndpoint.id == AccountProxyBinding.proxy_id)

@@ -3,7 +3,6 @@ import {
   ChevronDownIcon,
   CircleGaugeIcon,
   EyeIcon,
-  LinkIcon,
   ListChecksIcon,
   LoaderCircleIcon,
   PlusIcon,
@@ -11,10 +10,8 @@ import {
   PowerOffIcon,
   RefreshCwIcon,
   SaveIcon,
-  ShieldCheckIcon,
   SlidersHorizontalIcon,
   Trash2Icon,
-  UnlinkIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -26,10 +23,11 @@ import {
 import { useAuth } from "../auth/AuthContext";
 import {
   ListPagination,
+  ListSortableHead,
   ListTableCard,
   ListToolbar,
   StandardListPage,
-  useClientPagination,
+  type ListSortOrder,
 } from "../components/list-page";
 import {
   DrawerChoiceGroup,
@@ -58,7 +56,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
   EmptyState,
-  IconButton,
   Input,
   SearchableSelect,
   SelectField,
@@ -76,13 +73,20 @@ import {
 } from "../components/ui";
 import {
   entityRowKey,
-  legacyReadKey,
   snowflakeId,
 } from "../lib/entity-identifiers";
 import { countryOptions } from "../lib/countries";
 import { formatPhoneDisplay } from "../lib/utils";
 
 type ProxyStatus = "healthy" | "unhealthy" | "testing" | "disabled" | "unknown";
+type ProxySortBy =
+  | "id"
+  | "protocol"
+  | "countryCode"
+  | "provider"
+  | "healthStatus"
+  | "createdAt"
+  | "updatedAt";
 type IpProxy = {
   id: string;
   readKey: string;
@@ -106,16 +110,6 @@ type IpProxy = {
   createdAt?: string;
   updatedAt?: string;
 };
-type ProxyBinding = {
-  id: string;
-  readKey: string;
-  proxyId: string;
-  accountId: string;
-  accountName?: string;
-  accountPhone?: string;
-  createdAt?: string;
-};
-type AccountOption = { id: string; label: string; status: string };
 type AllocationMode =
   | "strict_one_to_one"
   | "tenant_reuse"
@@ -402,28 +396,6 @@ function normalizeProxy(input: unknown): IpProxy {
   };
 }
 
-function normalizeBinding(input: unknown): ProxyBinding {
-  const row = input as Record<string, unknown>;
-  const id = snowflakeId(row, "id", "bindingId", "binding_id");
-  const rawAccountName = text(row, "accountName", "account_name");
-  return {
-    id,
-    readKey:
-      (id && `proxy-binding:${id}`) ||
-      legacyReadKey(row, "proxy-binding") ||
-      `proxy-binding:read-only:${text(row, "accountName", "account_name")}:${text(row, "createdAt", "created_at")}`,
-    proxyId: snowflakeId(row, "proxyId", "proxy_id"),
-    accountId: snowflakeId(row, "accountId", "account_id"),
-    accountName: /^\+\d+$/.test(rawAccountName)
-      ? formatPhoneDisplay(rawAccountName)
-      : rawAccountName,
-    accountPhone: formatPhoneDisplay(
-      text(row, "accountPhone", "account_phone", "phone"),
-    ),
-    createdAt: text(row, "createdAt", "created_at"),
-  };
-}
-
 function bulkProxyEndpoint(rawLine: string, line: number): string {
   const withoutScheme = rawLine
     .trim()
@@ -469,16 +441,23 @@ export function IpManagementPage() {
   const { can } = useAuth();
   const canManage = can("resources.ip.manage");
   const [rows, setRows] = useState<IpProxy[]>([]);
-  const [bindings, setBindings] = useState<ProxyBinding[]>([]);
-  const [accounts, setAccounts] = useState<AccountOption[]>([]);
+  const [proxyOptions, setProxyOptions] = useState<IpProxy[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [loading, setLoading] = useState(true);
-  const [bindingsLoading, setBindingsLoading] = useState(false);
   const [error, setError] = useState("");
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
   const [protocol, setProtocol] = useState("all");
   const [country, setCountry] = useState("all");
+  const [provider, setProvider] = useState("all");
   const [status, setStatus] = useState("all");
+  const [sortBy, setSortBy] = useState<ProxySortBy>("id");
+  const [sortOrder, setSortOrder] = useState<ListSortOrder>("desc");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
+  const [filterCountries, setFilterCountries] = useState<string[]>([]);
+  const [filterProviders, setFilterProviders] = useState<string[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<IpProxy | null>(null);
   const [pending, setPending] = useState(false);
@@ -524,8 +503,6 @@ export function IpManagementPage() {
     results: BatchRebindResult[];
   } | null>(null);
   const [testingIds, setTestingIds] = useState<string[]>([]);
-  const [accountId, setAccountId] = useState("");
-  const [bindingPending, setBindingPending] = useState(false);
   const [policy, setPolicy] = useState<AllocationPolicy>(defaultPolicy);
   const [policyDrawerOpen, setPolicyDrawerOpen] = useState(false);
   const [policyLoading, setPolicyLoading] = useState(true);
@@ -546,31 +523,32 @@ export function IpManagementPage() {
     setLoading(true);
     setError("");
     try {
-      const [payload, accountPayload] = await Promise.all([
-        apiRequest("/api/ip-proxies?page=1&pageSize=100"),
-        apiRequest("/api/personal-accounts?pageSize=100"),
+      const query = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+      if (debouncedKeyword) query.set("keyword", debouncedKeyword);
+      if (protocol !== "all") query.set("protocol", protocol);
+      if (country !== "all") query.set("countryCode", country);
+      if (provider !== "all") query.set("provider", provider);
+      if (status !== "all") query.set("healthStatus", status);
+      query.set("sortBy", sortBy);
+      query.set("sortOrder", sortOrder);
+      const [payload, optionPayload, filterPayload] = await Promise.all([
+        apiRequest(`/api/ip-proxies?${query}`),
+        apiRequest("/api/ip-proxies/options"),
+        apiRequest("/api/ip-proxies/filter-options"),
       ]);
       const list = unwrapList<unknown>(payload);
       const nextRows = list.rows.map(normalizeProxy);
       setRows(nextRows);
-      setSelectedProxyIds((current) =>
-        current.filter((id) => nextRows.some((row) => row.id === id)),
-      );
-      setAccounts(
-        unwrapList<Record<string, unknown>>(accountPayload)
-          .rows.map((row) => {
-            const phone = formatPhoneDisplay(text(row, "phone"));
-            const rawName = text(row, "name");
-            const name = /^\+\d+$/.test(rawName)
-              ? formatPhoneDisplay(rawName)
-              : rawName;
-            return {
-              id: snowflakeId(row, "id", "accountId", "account_id"),
-              label: `${name || phone || "未命名账号"}${phone && phone !== formatPhoneDisplay(name) ? ` · ${phone}` : ""}`,
-              status: text(row, "status"),
-            };
-          })
-          .filter((row) => row.id),
+      setTotal(list.total);
+      setProxyOptions(unwrapList<unknown>(optionPayload).rows.map(normalizeProxy));
+      const filterData = ((filterPayload as {
+        data?: { countries?: unknown[]; providers?: unknown[] };
+      }).data || {});
+      setFilterCountries(Array.isArray(filterData.countries) ? filterData.countries.map(String) : []);
+      setFilterProviders(
+        Array.isArray(filterData.providers)
+          ? filterData.providers.map(String)
+          : [],
       );
       setSelectedId((current) =>
         current && nextRows.some((row) => row.id === current)
@@ -578,11 +556,13 @@ export function IpManagementPage() {
           : "",
       );
     } catch (caught) {
+      setRows([]);
+      setTotal(0);
       setError(caught instanceof Error ? caught.message : "加载 IP 代理失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [country, debouncedKeyword, page, pageSize, protocol, provider, sortBy, sortOrder, status]);
 
   const loadPolicy = useCallback(async () => {
     setPolicyLoading(true);
@@ -601,28 +581,6 @@ export function IpManagementPage() {
     }
   }, []);
 
-  const loadBindings = useCallback(async (proxyId: string) => {
-    if (!proxyId) {
-      setBindings([]);
-      return;
-    }
-    setBindingsLoading(true);
-    try {
-      const payload = await apiRequest(
-        `/api/ip-proxy-bindings?proxyId=${encodeURIComponent(proxyId)}&pageSize=100`,
-      );
-      setBindings(
-        unwrapList<unknown>(payload)
-          .rows.map(normalizeBinding)
-          .filter((row) => !row.proxyId || row.proxyId === proxyId),
-      );
-    } catch {
-      setBindings([]);
-    } finally {
-      setBindingsLoading(false);
-    }
-  }, []);
-
   useEffect(() => {
     void load();
   }, [load]);
@@ -630,66 +588,37 @@ export function IpManagementPage() {
     void loadPolicy();
   }, [loadPolicy]);
   useEffect(() => {
-    void loadBindings(selectedId);
-  }, [loadBindings, selectedId]);
-
-  const countries = useMemo(
-    () =>
-      Array.from(
-        new Map(
-          rows
-            .filter((row) => row.countryCode || row.countryName)
-            .map((row) => [
-              row.countryCode || row.countryName,
-              row.countryName || row.countryCode,
-            ]),
-        ).entries(),
-      ).sort((a, b) => a[1].localeCompare(b[1], "zh-CN")),
-    [rows],
-  );
-  const visibleRows = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    return rows.filter((row) => {
-      if (
-        search &&
-        !`${row.host} ${row.port} ${row.countryName} ${row.countryCode} ${row.provider}`
-          .toLowerCase()
-          .includes(search)
-      )
-        return false;
-      if (protocol !== "all" && row.protocol !== protocol) return false;
-      if (country !== "all" && (row.countryCode || row.countryName) !== country)
-        return false;
-      if (status !== "all" && row.status !== status) return false;
-      return true;
-    });
-  }, [country, keyword, protocol, rows, status]);
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+      setPage(1);
+      setSelectedProxyIds([]);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+  useEffect(() => { setPage(1); setSelectedProxyIds([]); }, [country, protocol, provider, status]);
   const rebindSourceRows = useMemo(() => {
     const sourceIdSet = new Set(rebindSourceIds);
-    return rows.filter((row) => row.id && sourceIdSet.has(row.id));
-  }, [rebindSourceIds, rows]);
+    return proxyOptions.filter((row) => row.id && sourceIdSet.has(row.id));
+  }, [proxyOptions, rebindSourceIds]);
   const rebindAccountCount = rebindSourceRows.reduce(
     (total, row) => total + row.bindingCount,
     0,
   );
   const automaticRebindTargets = useMemo(() => {
     const sourceIdSet = new Set(rebindSourceIds);
-    return rows.filter(
+    return proxyOptions.filter(
       (row) =>
         row.id &&
         !sourceIdSet.has(row.id) &&
         proxyAvailableForRebind(row),
     );
-  }, [rebindSourceIds, rows]);
+  }, [proxyOptions, rebindSourceIds]);
   const manualRebindReady = rebindSourceRows
     .filter((row) => row.bindingCount > 0)
     .every((row) => Boolean(rebindMappings[row.id]));
-  const proxyPagination = useClientPagination(visibleRows, {
-    resetKey: `${keyword}|${protocol}|${country}|${status}`,
-  });
   const pageProxyIds = useMemo(
-    () => proxyPagination.rows.map((row) => row.id).filter(Boolean),
-    [proxyPagination.rows],
+    () => rows.map((row) => row.id).filter(Boolean),
+    [rows],
   );
   const allPageSelected =
     Boolean(pageProxyIds.length) &&
@@ -697,11 +626,13 @@ export function IpManagementPage() {
   const somePageSelected =
     !allPageSelected &&
     pageProxyIds.some((id) => selectedProxyIds.includes(id));
-  const bindingPagination = useClientPagination(bindings, {
-    initialPageSize: 20,
-    resetKey: selectedId,
-  });
   const selected = rows.find((row) => row.id === selectedId) || null;
+  function changeSort(nextSortBy: ProxySortBy, nextSortOrder: ListSortOrder) {
+    setSortBy(nextSortBy);
+    setSortOrder(nextSortOrder);
+    setPage(1);
+    setSelectedProxyIds([]);
+  }
   const bulkLineCount = useMemo(
     () =>
       bulkText
@@ -937,7 +868,7 @@ export function IpManagementPage() {
     setBulkPreviewToken("");
     try {
       await cancellation;
-      toast.info("已取消代理检测");
+      toast.success("已取消代理检测");
     } catch {
       toast.warning("页面已停止检测，服务端取消通知失败");
     }
@@ -1052,14 +983,14 @@ export function IpManagementPage() {
   async function batchSetEnabled(enabled: boolean) {
     const action = enabled ? "启用" : "停用";
     const batchActionName = enabled ? "enable" : "disable";
-    const selectedRowsById = new Map(rows.map((row) => [row.id, row]));
+    const selectedRowsById = new Map(proxyOptions.map((row) => [row.id, row]));
     const proxyIds = selectedProxyIds.filter(
       (id) => selectedRowsById.get(id)?.enabled !== enabled,
     );
     const skipped = selectedProxyIds.length - proxyIds.length;
     if (!selectedProxyIds.length || batchAction) return;
     if (!proxyIds.length) {
-      toast.info(`选中的代理已经全部${enabled ? "启用" : "停用"}`);
+      toast.success(`选中的代理已经全部${enabled ? "启用" : "停用"}`);
       return;
     }
     if (
@@ -1206,7 +1137,7 @@ export function IpManagementPage() {
   async function batchDelete() {
     const proxyIds = [...selectedProxyIds];
     if (!proxyIds.length || batchAction) return;
-    const selectedRowsById = new Map(rows.map((row) => [row.id, row]));
+    const selectedRowsById = new Map(proxyOptions.map((row) => [row.id, row]));
     const boundProxyIds = proxyIds.filter(
       (id) => (selectedRowsById.get(id)?.bindingCount || 0) > 0,
     );
@@ -1297,55 +1228,6 @@ export function IpManagementPage() {
       toast.error(caught instanceof Error ? caught.message : "删除失败");
     }
   }
-  async function bindAccount() {
-    if (!selected?.id || !accountId.trim()) return;
-    setBindingPending(true);
-    try {
-      await apiRequest(`/api/personal-accounts/${accountId.trim()}`, {
-        method: "PATCH",
-        body: JSON.stringify({ proxyId: selected.id }),
-      });
-      setAccountId("");
-      await Promise.all([loadBindings(selected.id), load()]);
-    } catch (caught) {
-      toast.error(
-        caught instanceof Error
-          ? caught.message
-          : "绑定账号失败；在线账号请先断开连接",
-      );
-    } finally {
-      setBindingPending(false);
-    }
-  }
-  async function unbind(binding: ProxyBinding) {
-    if (!binding.id) return;
-    const orphaned = !binding.accountId;
-    if (
-      !(await confirmAction({
-        title: orphaned
-          ? "清理账号已不存在的残留绑定？"
-          : `解绑账号 ${binding.accountName || binding.accountPhone || "当前账号"}？`,
-        description: orphaned
-          ? "只会删除当前 IP 绑定记录，不会影响其他账号或代理。"
-          : "在线账号需先断开连接后才能解绑代理。",
-        confirmText: orphaned ? "确认清理" : "确认解绑",
-      }))
-    )
-      return;
-    try {
-      await apiRequest(`/api/ip-proxy-bindings/${binding.id}`, {
-        method: "DELETE",
-      });
-      await Promise.all([loadBindings(selectedId), load()]);
-    } catch (caught) {
-      toast.error(
-        caught instanceof Error
-          ? caught.message
-          : "解绑失败；在线账号请先断开连接",
-      );
-    }
-  }
-
   async function savePolicy() {
     setPolicySaving(true);
     setPolicyError("");
@@ -1404,13 +1286,27 @@ export function IpManagementPage() {
                   keywords: "全部 all",
                   leading: <CountryFlag code="WW" />,
                 },
-                ...countries.map(([value, label]) => ({
+                ...filterCountries.map((value) => ({
                   value,
-                  label: /^[A-Z]{2}$/.test(value)
-                    ? `${countryDisplayName(value)} · ${value}`
-                    : label,
-                  keywords: `${value} ${label}`,
+                  label: `${countryDisplayName(value)} · ${value}`,
+                  keywords: countryOptions.find((option) => option.value === value)?.keywords || value,
                   leading: <CountryFlag code={value} />,
+                })),
+              ]}
+            />
+            <SearchableSelect
+              ariaLabel="供应商筛选"
+              value={provider}
+              onValueChange={setProvider}
+              className="w-44"
+              searchPlaceholder="搜索供应商"
+              emptyText="没有匹配的供应商"
+              options={[
+                { value: "all", label: "全部供应商", keywords: "全部 all" },
+                ...filterProviders.map((value) => ({
+                  value,
+                  label: value,
+                  keywords: value,
                 })),
               ]}
             />
@@ -1431,7 +1327,7 @@ export function IpManagementPage() {
         meta={
           selectedProxyIds.length
             ? `已选择 ${selectedProxyIds.length} 条代理`
-            : `${visibleRows.length} 条代理`
+            : `${total} 条代理`
         }
         actions={
           <>
@@ -1516,12 +1412,12 @@ export function IpManagementPage() {
       />
 
       <ListPagination
-        page={proxyPagination.page}
-        pageSize={proxyPagination.pageSize}
-        total={proxyPagination.total}
+        page={page}
+        pageSize={pageSize}
+        total={total}
         disabled={loading}
-        onPageChange={proxyPagination.setPage}
-        onPageSizeChange={proxyPagination.setPageSize}
+        onPageChange={setPage}
+        onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
       />
 
       <ListTableCard>
@@ -1538,7 +1434,7 @@ export function IpManagementPage() {
                 重试
               </Button>
             </div>
-          ) : visibleRows.length ? (
+          ) : rows.length ? (
             <div className="table-scroll">
               <Table layout="list">
                 <TableHeader>
@@ -1567,20 +1463,20 @@ export function IpManagementPage() {
                         }
                       />
                     </TableHead>
-                    <TableHead adaptive>代理</TableHead>
-                    <TableHead>协议</TableHead>
-                    <TableHead>国家 / 地区</TableHead>
-                    <TableHead>供应商</TableHead>
+                    <ListSortableHead sortKey="id" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort} adaptive>代理</ListSortableHead>
+                    <ListSortableHead sortKey="protocol" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>协议</ListSortableHead>
+                    <ListSortableHead sortKey="countryCode" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>国家 / 地区</ListSortableHead>
+                    <ListSortableHead sortKey="provider" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>供应商</ListSortableHead>
                     <TableHead>凭证</TableHead>
-                    <TableHead>健康状态</TableHead>
+                    <ListSortableHead sortKey="healthStatus" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>健康状态</ListSortableHead>
                     <TableHead>绑定</TableHead>
-                    <TableHead>创建时间</TableHead>
-                    <TableHead>更新时间</TableHead>
+                    <ListSortableHead sortKey="createdAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>创建时间</ListSortableHead>
+                    <ListSortableHead sortKey="updatedAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>更新时间</ListSortableHead>
                     <TableHead>操作</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {proxyPagination.rows.map((row) => (
+                  {rows.map((row) => (
                     <TableRow key={row.readKey}>
                       <TableCell>
                         <Checkbox
@@ -1625,9 +1521,6 @@ export function IpManagementPage() {
                           ) : (
                             <strong>{row.countryName || "待自动检测"}</strong>
                           )}
-                          <span className="text-xs text-muted-foreground">
-                            {row.countryCode || "首次健康检测时识别"}
-                          </span>
                         </div>
                       </TableCell>
                       <TableCell>
@@ -1740,14 +1633,14 @@ export function IpManagementPage() {
         open={Boolean(selected)}
         onClose={() => {
           setSelectedId("");
-          setAccountId("");
         }}
         title="代理详情"
         description={
           selected
             ? `${selected.host}:${selected.port} · ${selected.id}`
-            : "集中查看代理信息、健康状态和账号绑定。"
+            : "集中查看代理信息和健康状态。"
         }
+        wide
       >
         {selected ? (
           <div className="grid gap-6 pb-6">
@@ -1884,124 +1777,6 @@ export function IpManagementPage() {
               </div>
             </section>
 
-            <section className="grid gap-3">
-              <div>
-                <h3 className="text-sm font-semibold">账号绑定</h3>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  固定绑定会应用到发送服务；在线账号更换代理前需要先断开连接。
-                </p>
-              </div>
-              {canManage ? (
-                <form
-                  className="rounded-xl border p-4"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void bindAccount();
-                  }}
-                >
-                  <DrawerFormField label="绑定账号" align="start">
-                    <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
-                      <SelectField
-                        ariaLabel="绑定账号"
-                        className="min-w-0 flex-1"
-                        value={accountId}
-                        placeholder="请选择账号"
-                        onValueChange={setAccountId}
-                        options={accounts.map((account) => ({
-                          value: account.id,
-                          label: `${account.label} · ${account.status || "未知状态"}`,
-                        }))}
-                      />
-                      <Button
-                        type="submit"
-                        disabled={
-                          bindingPending ||
-                          !accountId.trim() ||
-                          !selected.id
-                        }
-                      >
-                        {bindingPending ? <Spinner /> : <LinkIcon />}
-                        绑定
-                      </Button>
-                    </div>
-                  </DrawerFormField>
-                </form>
-              ) : null}
-              <div className="flex items-center justify-between gap-3">
-                <strong className="text-sm">已绑定账号</strong>
-                <Badge tone="neutral">{bindings.length}</Badge>
-              </div>
-              <ListPagination
-                ariaLabel="账号绑定分页"
-                page={bindingPagination.page}
-                pageSize={bindingPagination.pageSize}
-                total={bindingPagination.total}
-                pageSizeOptions={[20, 50, 100]}
-                disabled={bindingsLoading}
-                onPageChange={bindingPagination.setPage}
-                onPageSizeChange={bindingPagination.setPageSize}
-              />
-              {bindingsLoading ? (
-                <div className="loading-state min-h-28">
-                  <Spinner />
-                  正在加载绑定账号…
-                </div>
-              ) : bindings.length ? (
-                <div className="overflow-hidden rounded-xl border">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead adaptive>账号</TableHead>
-                        <TableHead>绑定时间</TableHead>
-                        <TableHead>操作</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {bindingPagination.rows.map((binding) => (
-                        <TableRow key={binding.readKey}>
-                          <TableCell>
-                            <div className="flex min-w-0 items-center gap-3">
-                              <span className="small-avatar">
-                                <ShieldCheckIcon />
-                              </span>
-                              <div className="cell-main min-w-0">
-                                <strong>
-                                  {binding.accountName ||
-                                    binding.accountPhone ||
-                                    "账号已不存在"}
-                                </strong>
-                                <span>
-                                  {binding.accountId || "残留 IP 绑定"}
-                                </span>
-                              </div>
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            {formatDateTime(binding.createdAt)}
-                          </TableCell>
-                          <TableCell>
-                            {canManage ? (
-                              <IconButton
-                                label="解绑"
-                                disabled={!binding.id}
-                                onClick={() => void unbind(binding)}
-                              >
-                                <UnlinkIcon />
-                              </IconButton>
-                            ) : null}
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              ) : (
-                <EmptyState
-                  title="暂无绑定"
-                  description="从统一账号池选择账号，将它固定到当前代理。"
-                />
-              )}
-            </section>
           </div>
         ) : null}
       </Drawer>
@@ -2079,7 +1854,7 @@ export function IpManagementPage() {
             >
               <div className="grid gap-3">
                 {rebindSourceRows.map((source) => {
-                  const targetOptions = rows
+                  const targetOptions = proxyOptions
                     .filter(
                       (target) =>
                         target.id &&

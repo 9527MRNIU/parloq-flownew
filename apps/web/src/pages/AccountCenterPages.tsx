@@ -7,6 +7,7 @@ import {
   PlusIcon,
   RefreshCwIcon,
   RouteIcon,
+  SlidersHorizontalIcon,
   UserRoundIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -24,10 +25,11 @@ import { EntityPrimaryCell } from "../components/entity-primary-cell";
 import { MonitoringLandingCell } from "../components/monitoring-landing-cell";
 import {
   ListPagination,
+  ListSortableHead,
+  type ListSortOrder,
   ListTableCard,
   ListToolbar,
   StandardListPage,
-  useClientPagination,
 } from "../components/list-page";
 import {
   Badge,
@@ -37,7 +39,10 @@ import {
   Drawer,
   EmptyState,
   Input,
-  Progress,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+  SearchableSelect,
   SelectField,
   Spinner,
   Table,
@@ -79,411 +84,6 @@ const optionalNumber = (row: Record<string, unknown>, ...keys: string[]) => {
   return null;
 };
 
-type ExportAccount = {
-  id: string;
-  readKey: string;
-  phone: string;
-  name: string;
-  countryCode: string;
-  status: string;
-  source: string;
-  connected: boolean;
-  validationStatus: string;
-  metadataSyncStatus: string;
-  lastError: string;
-  groupId: string;
-  groupName: string;
-  createdAt: string;
-};
-
-function exportAccount(input: unknown): ExportAccount {
-  const row = input as Record<string, unknown>;
-  const status = field(row, "connectionStatus", "connection_status", "status");
-  const group = (row.group || {}) as Record<string, unknown>;
-  const id = snowflakeId(
-    row,
-    "id",
-    "accountId",
-    "account_id",
-    "snowflakeId",
-    "snowflake_id",
-  );
-  const rawName = field(row, "displayName", "display_name", "name");
-  return {
-    id,
-    readKey: accountRowKey(row, id),
-    phone: formatPhoneDisplay(
-      field(row, "phoneNumber", "phone_number", "phone"),
-    ),
-    name: /^\+\d+$/.test(rawName)
-      ? formatPhoneDisplay(rawName)
-      : rawName,
-    countryCode: field(row, "countryCode", "country_code"),
-    status: status || "offline",
-    source: field(row, "source", "credentialSource", "credential_source"),
-    connected: Boolean(
-      row.connected ?? ["connected", "online", "online_idle", "sending"].includes(status),
-    ),
-    validationStatus: field(row, "validationStatus", "validation_status"),
-    metadataSyncStatus: field(row, "metadataSyncStatus", "metadata_sync_status"),
-    lastError: field(row, "lastError", "last_error"),
-    groupId:
-      snowflakeId(group, "id", "groupId", "group_id") ||
-      snowflakeId(row, "groupId", "group_id"),
-    groupName:
-      field(group, "name") || field(row, "groupName", "group_name"),
-    createdAt: field(row, "createdAt", "created_at"),
-  };
-}
-
-const exportable = (row: ExportAccount) =>
-  Boolean(row.id) &&
-  row.validationStatus === "ready" &&
-  !["pairing", "warming", "online_idle", "sending", "draining"].includes(
-    row.status,
-  );
-
-function sourceBadge(source: string) {
-  if (["landing_page", "landing", "pairing"].includes(source))
-    return <Badge tone="neutral">落地页链接</Badge>;
-  if (["json", "json_import", "import"].includes(source))
-    return <Badge tone="neutral">JSON 导入</Badge>;
-  return <Badge tone="neutral">待识别</Badge>;
-}
-
-export function AccountExportPage() {
-  const { can } = useAuth();
-  const canManage =
-    can("resources.accounts.export") ||
-    can("resources.accounts.manage") ||
-    can("business.personal_accounts.manage");
-  const [rows, setRows] = useState<ExportAccount[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [keyword, setKeyword] = useState("");
-  const [connectionFilter, setConnectionFilter] = useState("all");
-  const [validationFilter, setValidationFilter] = useState("all");
-  const [sourceFilter, setSourceFilter] = useState("all");
-  const [groupFilter, setGroupFilter] = useState("all");
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [exporting, setExporting] = useState("");
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const payload = await apiRequest("/api/personal-accounts?pageSize=100");
-      const nextRows = unwrapList<unknown>(payload).rows.map(exportAccount);
-      setRows(nextRows);
-      setSelectedIds((current) =>
-        current.filter((id) =>
-          nextRows.some((row) => row.id === id && exportable(row)),
-        ),
-      );
-    } catch (caught) {
-      setRows([]);
-      toast.error(caught instanceof Error ? caught.message : "账号加载失败");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-  useEffect(() => void load(), [load]);
-  const visible = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    return rows.filter(
-      (row) =>
-        (!search ||
-          `${row.phone} ${row.name} ${row.id} ${row.countryCode} ${row.groupName}`
-            .toLowerCase()
-            .includes(search)) &&
-        (connectionFilter === "all" ||
-          (connectionFilter === "online" ? row.connected : !row.connected)) &&
-        (validationFilter === "all" ||
-          (validationFilter === "exportable"
-            ? exportable(row)
-            : row.validationStatus === validationFilter)) &&
-        (sourceFilter === "all" || row.source === sourceFilter) &&
-        (groupFilter === "all" ||
-          (groupFilter === "__ungrouped__"
-            ? !row.groupId
-            : row.groupId === groupFilter)),
-    );
-  }, [
-    connectionFilter,
-    groupFilter,
-    keyword,
-    rows,
-    sourceFilter,
-    validationFilter,
-  ]);
-  const groupOptions = useMemo(
-    () =>
-      Array.from(
-        new Map(
-          rows
-            .filter((row) => row.groupId)
-            .map((row) => [row.groupId, row.groupName || row.groupId]),
-        ),
-      ).map(([value, label]) => ({ value, label })),
-    [rows],
-  );
-  const exportPagination = useClientPagination(visible, {
-    resetKey: `${keyword}|${connectionFilter}|${validationFilter}|${sourceFilter}|${groupFilter}`,
-  });
-  const selectableIds = visible.filter(exportable).map((row) => row.id);
-  const allVisibleSelected =
-    Boolean(selectableIds.length) &&
-    selectableIds.every((id) => selectedIds.includes(id));
-
-  function saveDownload(blob: Blob, filename: string) {
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = filename;
-    anchor.click();
-    URL.revokeObjectURL(url);
-  }
-
-  async function download(row: ExportAccount, format: "baileys_creds" | "native") {
-    if (!row.id) return;
-    const operation = `${row.id}:${format}`;
-    setExporting(operation);
-    try {
-      const response = await apiDownload(`/api/personal-accounts/${row.id}/export?format=${format}`);
-      saveDownload(
-        response.blob,
-        response.filename
-          ? decodeURIComponent(response.filename)
-          : `${row.phone || row.id}${format === "native" ? "-parloq-full" : ""}.json`,
-      );
-      toast.success("账号 JSON 已生成，请妥善保管凭据文件");
-    } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "导出失败");
-    } finally {
-      setExporting("");
-    }
-  }
-
-  async function downloadBatch(format: "baileys_creds" | "native") {
-    if (!selectedIds.length) return;
-    if (
-      !(await confirmAction({
-        title: `导出所选 ${selectedIds.length} 个账号？`,
-        description:
-          "系统会生成一个 ZIP，包内每个 JSON 都包含敏感登录凭据，请仅保存到受控设备。",
-        confirmText: "确认导出",
-      }))
-    )
-      return;
-    const operation = `batch:${format}`;
-    setExporting(operation);
-    try {
-      const response = await apiDownload("/api/personal-accounts/export/batch", {
-        method: "POST",
-        body: JSON.stringify({ accountIds: selectedIds, format }),
-      });
-      saveDownload(
-        response.blob,
-        response.filename
-          ? decodeURIComponent(response.filename)
-          : `parloq-accounts-${format}.zip`,
-      );
-      toast.success(`已生成 ${selectedIds.length} 个账号的导出包`);
-    } catch (caught) {
-      toast.error(caught instanceof Error ? caught.message : "批量导出失败");
-    } finally {
-      setExporting("");
-    }
-  }
-
-  return (
-    <StandardListPage viewport>
-      <div className="notice-warning rounded-lg border px-4 py-3 text-sm">
-        “兼容 JSON”可用于其他支持相同账号格式的环境；“完整备份”适合本系统间迁移。导出文件可用于登录账号，请妥善保管。
-      </div>
-      <ListToolbar
-        search={{ value: keyword, onChange: setKeyword, placeholder: "搜索号码、名称或账号 ID" }}
-        filters={
-          <>
-            <SelectField
-              ariaLabel="连接状态"
-              className="w-[140px]"
-              value={connectionFilter}
-              onValueChange={setConnectionFilter}
-              options={[
-                { value: "all", label: "全部连接状态" },
-                { value: "online", label: "在线" },
-                { value: "offline", label: "离线" },
-              ]}
-            />
-            <SelectField
-              ariaLabel="导出条件"
-              className="w-[140px]"
-              value={validationFilter}
-              onValueChange={setValidationFilter}
-              options={[
-                { value: "all", label: "全部导出条件" },
-                { value: "exportable", label: "当前可导出" },
-                { value: "ready", label: "验证通过" },
-                { value: "validating", label: "验证中" },
-                { value: "failed", label: "验证失败" },
-              ]}
-            />
-            <SelectField
-              ariaLabel="账号来源"
-              className="w-[135px]"
-              value={sourceFilter}
-              onValueChange={setSourceFilter}
-              options={[
-                { value: "all", label: "全部来源" },
-                { value: "landing_page", label: "落地页链接" },
-                { value: "json_import", label: "JSON 导入" },
-              ]}
-            />
-            <SelectField
-              ariaLabel="账号分组"
-              className="w-[145px]"
-              value={groupFilter}
-              onValueChange={setGroupFilter}
-              options={[
-                { value: "all", label: "全部分组" },
-                { value: "__ungrouped__", label: "未分组" },
-                ...groupOptions,
-              ]}
-            />
-          </>
-        }
-        meta={
-          selectedIds.length
-            ? `已选择 ${selectedIds.length} / ${visible.length} 个账号`
-            : `${visible.length} 个账号`
-        }
-        actions={
-          <>
-            {selectedIds.length ? (
-              <>
-                <Button
-                  variant="outline"
-                  disabled={Boolean(exporting)}
-                  onClick={() => void downloadBatch("baileys_creds")}
-                >
-                  {exporting === "batch:baileys_creds" ? <Spinner /> : <DownloadIcon size={15} />}
-                  导出兼容包
-                </Button>
-                <Button
-                  disabled={Boolean(exporting)}
-                  onClick={() => void downloadBatch("native")}
-                >
-                  {exporting === "batch:native" ? <Spinner /> : <DownloadIcon size={15} />}
-                  导出完整包
-                </Button>
-              </>
-            ) : null}
-            <Button variant="outline" onClick={() => void load()} disabled={loading}>
-              <RefreshCwIcon size={16} className={loading ? "spin" : ""} />刷新
-            </Button>
-          </>
-        }
-      />
-      <ListPagination
-        page={exportPagination.page}
-        pageSize={exportPagination.pageSize}
-        total={exportPagination.total}
-        disabled={loading}
-        onPageChange={exportPagination.setPage}
-        onPageSizeChange={exportPagination.setPageSize}
-      />
-      <ListTableCard>
-        {loading ? <div className="loading-state"><Spinner />正在加载账号…</div> : visible.length ? (
-          <Table layout="list">
-            <TableHeader><TableRow>
-              <TableHead>
-                <Checkbox
-                  aria-label="选择全部可导出账号"
-                  checked={allVisibleSelected}
-                  disabled={!canManage || !selectableIds.length}
-                  onCheckedChange={(checked) =>
-                    setSelectedIds((current) =>
-                      checked
-                        ? Array.from(new Set([...current, ...selectableIds]))
-                        : current.filter((id) => !selectableIds.includes(id)),
-                    )
-                  }
-                />
-              </TableHead>
-              <TableHead adaptive>账号</TableHead><TableHead>来源</TableHead><TableHead>分组</TableHead><TableHead>导出条件</TableHead><TableHead>入库时间</TableHead><TableHead>操作</TableHead>
-            </TableRow></TableHeader>
-            <TableBody>{exportPagination.rows.map((row) => (
-              <TableRow key={row.readKey}>
-                <TableCell>
-                  <Checkbox
-                    aria-label={`选择账号 ${row.phone || row.name || "待迁移账号"}`}
-                    checked={Boolean(row.id) && selectedIds.includes(row.id)}
-                    disabled={!canManage || !exportable(row)}
-                    onCheckedChange={(checked) =>
-                      setSelectedIds((current) =>
-                        checked
-                          ? Array.from(new Set([...current, row.id]))
-                          : current.filter((id) => id !== row.id),
-                      )
-                    }
-                  />
-                </TableCell>
-                <TableCell primary>
-                  <div className="flex min-w-[220px] items-start gap-3">
-                    <AccountStatusIndicator
-                      status={row.status}
-                      connected={row.connected}
-                      validationStatus={row.validationStatus}
-                      metadataSyncStatus={row.metadataSyncStatus}
-                      lastError={row.lastError}
-                    />
-                    <div className="cell-main min-w-0">
-                      <strong title={row.name || undefined}>{row.phone || row.name || "账号待迁移"}</strong>
-                      {row.id ? (
-                        <span title={row.id}>{row.id}</span>
-                      ) : (
-                        <span>等待 ID 迁移</span>
-                      )}
-                    </div>
-                  </div>
-                </TableCell>
-                <TableCell>{sourceBadge(row.source)}</TableCell>
-                <TableCell>
-                  {row.groupId || row.groupName ? (
-                    <div className="cell-main min-w-[140px]">
-                      <strong>{row.groupName || "未命名分组"}</strong>
-                      {row.groupId ? (
-                        <span title={row.groupId}>
-                          {row.groupId}
-                        </span>
-                      ) : (
-                        <span>等待 ID 迁移</span>
-                      )}
-                    </div>
-                  ) : (
-                    <span className="text-muted-foreground">未分组</span>
-                  )}
-                </TableCell>
-                <TableCell>
-                  {exportable(row) ? (
-                    <Badge tone="success">可导出</Badge>
-                  ) : row.connected ? (
-                    <Badge tone="warning">请先断开</Badge>
-                  ) : row.validationStatus === "failed" ? (
-                    <Badge tone="danger">验证失败</Badge>
-                  ) : (
-                    <Badge tone="neutral">等待验证</Badge>
-                  )}
-                </TableCell>
-                <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
-                <TableCell><div className="flex min-w-max justify-end gap-2"><Button variant="outline" size="sm" disabled={!canManage || !exportable(row) || Boolean(exporting)} onClick={() => void download(row, "baileys_creds")}>{exporting === `${row.id}:baileys_creds` ? <Spinner /> : null}兼容 JSON</Button><Button variant="outline" size="sm" disabled={!canManage || !exportable(row) || Boolean(exporting)} onClick={() => void download(row, "native")}>{exporting === `${row.id}:native` ? <Spinner /> : null}完整备份</Button></div></TableCell>
-              </TableRow>
-            ))}</TableBody>
-          </Table>
-        ) : <EmptyState title="暂无可导出的账号" description="账号通过落地页链接或 JSON 导入后，会出现在这里。" />}
-      </ListTableCard>
-    </StandardListPage>
-  );
-}
-
 type AccountGroup = {
   id: string;
   readKey: string;
@@ -492,6 +92,7 @@ type AccountGroup = {
   accountCount: number | null;
   validAccountCount: number | null;
   validRate: number | null;
+  averageScore: number | null;
   onlineAccountCount: number | null;
   abnormalAccountCount: number | null;
   pendingValidationCount: number | null;
@@ -502,9 +103,18 @@ type AccountGroup = {
   noAvatarCount: number | null;
   noGroupCount: number | null;
   zeroFriendCount: number | null;
-  zeroMutualCount: number | null;
   createdAt: string;
+  updatedAt: string;
 };
+type AccountGroupSortBy =
+  | "id"
+  | "accountCount"
+  | "validAccountCount"
+  | "abnormalAccountCount"
+  | "validRate"
+  | "averageScore"
+  | "createdAt"
+  | "updatedAt";
 function accountGroup(input: unknown): AccountGroup {
   const row = input as Record<string, unknown>;
   const id = snowflakeId(row, "id", "groupId", "group_id");
@@ -520,6 +130,7 @@ function accountGroup(input: unknown): AccountGroup {
       "valid_account_count",
     ),
     validRate: optionalNumber(row, "validRate", "valid_rate"),
+    averageScore: optionalNumber(row, "averageScore", "average_score"),
     onlineAccountCount: optionalNumber(
       row,
       "onlineAccountCount",
@@ -562,12 +173,8 @@ function accountGroup(input: unknown): AccountGroup {
       "zeroFriendCount",
       "zero_friend_count",
     ),
-    zeroMutualCount: optionalNumber(
-      row,
-      "zeroMutualCount",
-      "zero_mutual_count",
-    ),
     createdAt: field(row, "createdAt", "created_at"),
+    updatedAt: field(row, "updatedAt", "updated_at"),
   };
 }
 
@@ -580,6 +187,12 @@ export function AccountGroupsPage() {
   const [rows, setRows] = useState<AccountGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
+  const [sortBy, setSortBy] = useState<AccountGroupSortBy>("id");
+  const [sortOrder, setSortOrder] = useState<ListSortOrder>("desc");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<AccountGroup | null>(null);
   const [name, setName] = useState("");
@@ -588,21 +201,35 @@ export function AccountGroupsPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const payload = await apiRequest("/api/account-groups?pageSize=100");
-      setRows(unwrapList<unknown>(payload).rows.map(accountGroup));
+      const query = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+      if (debouncedKeyword) query.set("keyword", debouncedKeyword);
+      query.set("sortBy", sortBy);
+      query.set("sortOrder", sortOrder);
+      const payload = await apiRequest(`/api/account-groups?${query}`);
+      const list = unwrapList<unknown>(payload);
+      setRows(list.rows.map(accountGroup));
+      setTotal(list.total);
     } catch (caught) {
       setRows([]);
+      setTotal(0);
       toast.error(caught instanceof Error ? caught.message : "分组加载失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [debouncedKeyword, page, pageSize, sortBy, sortOrder]);
   useEffect(() => void load(), [load]);
-  const visible = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    return search ? rows.filter((row) => `${row.name} ${row.description}`.toLowerCase().includes(search)) : rows;
-  }, [keyword, rows]);
-  const groupPagination = useClientPagination(visible, { resetKey: keyword });
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+  function changeSort(nextSortBy: AccountGroupSortBy, nextSortOrder: ListSortOrder) {
+    setSortBy(nextSortBy);
+    setSortOrder(nextSortOrder);
+    setPage(1);
+  }
   function edit(row?: AccountGroup) {
     setEditing(row || null);
     setName(row?.name || "");
@@ -641,22 +268,33 @@ export function AccountGroupsPage() {
   return (
     <StandardListPage viewport>
       <ListToolbar
-        search={{ value: keyword, onChange: setKeyword, placeholder: "搜索分组名称或说明" }}
-        meta={`${visible.length} 个分组`}
+        search={{ value: keyword, onChange: setKeyword, placeholder: "搜索分组名称或备注" }}
+        meta={`${total} 个分组`}
         actions={<><Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCwIcon size={16} className={loading ? "spin" : ""} />刷新</Button>{canManage ? <Button onClick={() => edit()}><PlusIcon size={16} />新建分组</Button> : null}</>}
       />
       <ListPagination
-        page={groupPagination.page}
-        pageSize={groupPagination.pageSize}
-        total={groupPagination.total}
+        page={page}
+        pageSize={pageSize}
+        total={total}
         disabled={loading}
-        onPageChange={groupPagination.setPage}
-        onPageSizeChange={groupPagination.setPageSize}
+        onPageChange={setPage}
+        onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
       />
       <ListTableCard>
-        {loading ? <div className="loading-state"><Spinner />正在加载账号分组…</div> : visible.length ? (
-          <Table layout="list"><TableHeader><TableRow><TableHead>分组</TableHead><TableHead adaptive>说明</TableHead><TableHead>账号概况</TableHead><TableHead>资料情况</TableHead><TableHead>创建时间</TableHead><TableHead>操作</TableHead></TableRow></TableHeader>
-            <TableBody>{groupPagination.rows.map((row) => <TableRow key={row.readKey}>
+        {loading ? <div className="loading-state"><Spinner />正在加载账号分组…</div> : rows.length ? (
+          <Table layout="list"><TableHeader><TableRow>
+            <ListSortableHead sortKey="id" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>分组</ListSortableHead>
+            <TableHead adaptive>备注</TableHead>
+            <ListSortableHead sortKey="accountCount" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>账号总数</ListSortableHead>
+            <ListSortableHead sortKey="validAccountCount" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>有效账号</ListSortableHead>
+            <ListSortableHead sortKey="abnormalAccountCount" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>异常账号</ListSortableHead>
+            <ListSortableHead sortKey="validRate" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>有效率</ListSortableHead>
+            <ListSortableHead sortKey="averageScore" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>评分</ListSortableHead>
+            <ListSortableHead sortKey="createdAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>创建时间</ListSortableHead>
+            <ListSortableHead sortKey="updatedAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>更新时间</ListSortableHead>
+            <TableHead>操作</TableHead>
+          </TableRow></TableHeader>
+            <TableBody>{rows.map((row) => <TableRow key={row.readKey}>
               <TableCell>
                 <EntityPrimaryCell
                   title={row.name}
@@ -667,58 +305,26 @@ export function AccountGroupsPage() {
                     tone: "success",
                     details: [
                       { label: "账号数", value: row.accountCount == null ? "待同步" : row.accountCount },
-                      { label: "说明", value: row.description || "暂无说明" },
+                      { label: "备注", value: row.description || "暂无备注" },
                     ],
                   }}
                 />
               </TableCell>
-              <TableCell className="max-w-[360px] text-muted-foreground">{row.description || "暂无说明"}</TableCell>
-              <TableCell>
-                <div className="cell-main min-w-[250px] gap-2">
-                  <strong>
-                    有效 {row.validAccountCount == null ? "-" : row.validAccountCount} / {row.accountCount == null ? "-" : row.accountCount}
-                  </strong>
-                  <Progress
-                    value={row.validRate == null ? 0 : Math.min(100, Math.max(0, row.validRate <= 1 ? row.validRate * 100 : row.validRate))}
-                    aria-label={`${row.name} 有效账号比例`}
-                  />
-                  <span>
-                    有效率 {row.validRate == null ? "-" : `${(row.validRate <= 1 ? row.validRate * 100 : row.validRate).toFixed(1)}%`}
-                    {" · "}在线 {row.onlineAccountCount ?? "-"}
-                    {" · "}异常 {row.abnormalAccountCount ?? "-"}
-                    {" · "}待验证 {row.pendingValidationCount ?? "-"}
-                  </span>
-                </div>
-              </TableCell>
-              <TableCell>
-                <div className="cell-main min-w-[250px] gap-2">
-                  <strong>
-                    基础资料完整 {row.profileCompleteCount ?? "-"} / {row.profileKnownCount ?? "-"}
-                  </strong>
-                  <Progress
-                    value={row.profileCompleteRate == null ? 0 : Math.min(100, Math.max(0, row.profileCompleteRate <= 1 ? row.profileCompleteRate * 100 : row.profileCompleteRate))}
-                    aria-label={`${row.name} 基础资料完整比例`}
-                  />
-                  <span>
-                    完整率 {row.profileCompleteRate == null ? "-" : `${(row.profileCompleteRate <= 1 ? row.profileCompleteRate * 100 : row.profileCompleteRate).toFixed(1)}%`}
-                    {" · "}未知 {row.profileUnknownCount ?? "-"}
-                    {" · "}无头像 {row.noAvatarCount ?? "-"}
-                    {" · "}无群组 {row.noGroupCount ?? "-"}
-                  </span>
-                  <span>
-                    0 好友 {row.zeroFriendCount ?? "-"}
-                    {" · "}0 双向 {row.zeroMutualCount ?? "-"}
-                  </span>
-                </div>
-              </TableCell>
+              <TableCell className="max-w-[360px] text-muted-foreground">{row.description || "暂无备注"}</TableCell>
+              <TableCell className="text-center tabular-nums">{row.accountCount ?? "-"}</TableCell>
+              <TableCell className="text-center tabular-nums">{row.validAccountCount ?? "-"}</TableCell>
+              <TableCell className="text-center tabular-nums">{row.abnormalAccountCount ?? "-"}</TableCell>
+              <TableCell className="text-center tabular-nums">{row.validRate == null ? "-" : `${(row.validRate <= 1 ? row.validRate * 100 : row.validRate).toFixed(1)}%`}</TableCell>
+              <TableCell className="text-center tabular-nums">{row.averageScore == null ? "待同步" : `${row.averageScore} 分`}</TableCell>
               <TableCell className="text-muted-foreground">{formatDateTime(row.createdAt)}</TableCell>
+              <TableCell className="text-muted-foreground">{formatDateTime(row.updatedAt)}</TableCell>
               <TableCell><div className="flex min-w-max justify-end gap-2"><Button variant="outline" size="sm" disabled={!row.id} onClick={() => navigate(`/resources/accounts/manage?groupId=${encodeURIComponent(row.id)}`)}><EyeIcon size={16} />查看账号</Button>{canManage ? <><Button variant="outline" size="sm" disabled={!row.id} onClick={() => edit(row)}>编辑</Button><Button variant="destructive" size="sm" disabled={!row.id} onClick={() => void remove(row)}>删除</Button></> : null}</div></TableCell>
             </TableRow>)}</TableBody>
           </Table>
         ) : <EmptyState title="还没有账号分组" description="创建分组后可按用途、国家或客户业务组织统一账号池。" />}
       </ListTableCard>
       <Drawer open={open} onClose={() => !pending && setOpen(false)} title={editing ? "编辑账号分组" : "新建账号分组"} description="分组仅用于组织和筛选，不改变账号凭据或连接状态。" footer={<><Button variant="outline" onClick={() => setOpen(false)}>取消</Button><Button disabled={pending || !name.trim()} onClick={() => void save()}>{pending ? <Spinner /> : null}保存</Button></>}>
-        <div className="drawer-form"><label className="field"><DrawerFieldLabel required>分组名称</DrawerFieldLabel><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：美国推广账号" /></label><label className="field"><DrawerFieldLabel>分组说明</DrawerFieldLabel><Textarea rows={4} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="说明用途、地区或运营规则" /></label></div>
+        <div className="drawer-form"><label className="field"><DrawerFieldLabel required>分组名称</DrawerFieldLabel><Input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：美国推广账号" /></label><label className="field"><DrawerFieldLabel>备注</DrawerFieldLabel><Textarea rows={4} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="备注用途、地区或运营规则" /></label></div>
       </Drawer>
     </StandardListPage>
   );
@@ -775,6 +381,17 @@ type IntakeAttempt = {
   createdAt: string;
   updatedAt?: string;
 };
+type IntakeSortBy =
+  | "accountId"
+  | "status"
+  | "pairingType"
+  | "countryCode"
+  | "visitorCountryCode"
+  | "channelId"
+  | "admissionStatus"
+  | "metadataStatus"
+  | "createdAt";
+type IntakeFilterOption = { id: string; name: string };
 
 const attemptLabel: Record<string, string> = {
   code_issued: "配对码已生成",
@@ -1043,6 +660,25 @@ export function AccountIntakePage() {
   const [keyword, setKeyword] = useState("");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [pairingTypeFilter, setPairingTypeFilter] = useState("");
+  const [groupFilter, setGroupFilter] = useState("");
+  const [channelFilter, setChannelFilter] = useState("");
+  const [templateFilter, setTemplateFilter] = useState("");
+  const [protocolFilter, setProtocolFilter] = useState("");
+  const [sourceIpInput, setSourceIpInput] = useState("");
+  const [sourceIpFilter, setSourceIpFilter] = useState("");
+  const [countryFilter, setCountryFilter] = useState("");
+  const [visitorCountryFilter, setVisitorCountryFilter] = useState("");
+  const [admissionFilter, setAdmissionFilter] = useState("");
+  const [metadataFilter, setMetadataFilter] = useState("");
+  const [groups, setGroups] = useState<IntakeFilterOption[]>([]);
+  const [channels, setChannels] = useState<IntakeFilterOption[]>([]);
+  const [templates, setTemplates] = useState<IntakeFilterOption[]>([]);
+  const [protocols, setProtocols] = useState<IntakeFilterOption[]>([]);
+  const [countries, setCountries] = useState<string[]>([]);
+  const [visitorCountries, setVisitorCountries] = useState<string[]>([]);
+  const [sortBy, setSortBy] = useState<IntakeSortBy>("createdAt");
+  const [sortOrder, setSortOrder] = useState<ListSortOrder>("desc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState(0);
@@ -1057,6 +693,18 @@ export function AccountIntakePage() {
       });
       if (query) params.set("keyword", query);
       if (statusFilter !== "all") params.set("status", statusFilter);
+      if (pairingTypeFilter) params.set("pairingType", pairingTypeFilter);
+      if (groupFilter) params.set("groupId", groupFilter);
+      if (channelFilter) params.set("channelId", channelFilter);
+      if (templateFilter) params.set("templateId", templateFilter);
+      if (protocolFilter) params.set("protocolId", protocolFilter);
+      if (sourceIpFilter) params.set("sourceIp", sourceIpFilter);
+      if (countryFilter) params.set("countryCode", countryFilter);
+      if (visitorCountryFilter) params.set("visitorCountryCode", visitorCountryFilter);
+      if (admissionFilter) params.set("admissionStatus", admissionFilter);
+      if (metadataFilter) params.set("metadataStatus", metadataFilter);
+      params.set("sortBy", sortBy);
+      params.set("sortOrder", sortOrder);
       const payload = await apiRequest(`/api/personal-accounts/intake/attempts?${params}`);
       const list = unwrapList<IntakeAttempt>(payload);
       setRows(list.rows);
@@ -1068,18 +716,69 @@ export function AccountIntakePage() {
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, query, statusFilter]);
+  }, [admissionFilter, channelFilter, countryFilter, groupFilter, metadataFilter, page, pageSize, pairingTypeFilter, protocolFilter, query, sortBy, sortOrder, sourceIpFilter, statusFilter, templateFilter, visitorCountryFilter]);
 
   useEffect(() => void load(), [load]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setSourceIpFilter(sourceIpInput.trim());
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [sourceIpInput]);
+  useEffect(() => {
+    void apiRequest("/api/personal-accounts/intake/attempts/filter-options")
+      .then((payload) => {
+        const data = ((payload as { data?: unknown }).data || payload) as Record<string, unknown>;
+        const options = (key: string) =>
+          (Array.isArray(data[key]) ? data[key] : [])
+            .map((input) => {
+              const row = input as Record<string, unknown>;
+              return { id: snowflakeId(row, "id"), name: field(row, "name") };
+            })
+            .filter((row) => row.id);
+        setGroups(options("groups"));
+        setChannels(options("channels"));
+        setTemplates(options("templates"));
+        setProtocols(options("protocols"));
+        setCountries(Array.isArray(data.countries) ? data.countries.map(String).filter(Boolean) : []);
+        setVisitorCountries(Array.isArray(data.visitorCountries) ? data.visitorCountries.map(String).filter(Boolean) : []);
+      })
+      .catch(() => {
+        setGroups([]);
+        setChannels([]);
+        setTemplates([]);
+        setProtocols([]);
+        setCountries([]);
+        setVisitorCountries([]);
+      });
+  }, []);
 
-  async function copyLandingUrl(value: string) {
+  function changeSort(nextSortBy: IntakeSortBy, nextSortOrder: ListSortOrder) {
+    setSortBy(nextSortBy);
+    setSortOrder(nextSortOrder);
+    setPage(1);
+  }
+
+  async function copyLandingUrl(value: string, notifications = toast) {
     try {
       await navigator.clipboard.writeText(value);
-      toast.success("访问地址已复制");
+      notifications.success("访问地址已复制");
     } catch {
-      toast.error("复制失败，请手动复制");
+      notifications.error("复制失败，请手动复制");
     }
   }
+  const advancedFilterCount = [
+    groupFilter,
+    channelFilter,
+    templateFilter,
+    protocolFilter,
+    sourceIpFilter,
+    countryFilter,
+    visitorCountryFilter,
+    admissionFilter,
+    metadataFilter,
+  ].filter(Boolean).length;
 
   return (
     <StandardListPage viewport>
@@ -1093,26 +792,58 @@ export function AccountIntakePage() {
           },
           placeholder: "搜索号码、账号名称或接入 ID",
         }}
-        filters={
+        filters={<>
           <SelectField
-            ariaLabel="接入状态"
-            className="w-[165px]"
-            value={statusFilter}
-            onValueChange={(value) => {
-              setPage(1);
-              setStatusFilter(value);
-            }}
+              ariaLabel="接入状态"
+              className="w-[165px]"
+              value={statusFilter}
+              onValueChange={(value) => {
+                setPage(1);
+                setStatusFilter(value);
+              }}
+              options={[
+                { value: "all", label: "全部接入状态" },
+                { value: "waiting_phone", label: "等待手机确认" },
+                { value: "reconnecting", label: "连接恢复中" },
+                { value: "verified", label: "验证成功" },
+                { value: "failed", label: "绑定失败" },
+                { value: "expired", label: "配对码过期" },
+                { value: "cancelled", label: "用户取消" },
+              ]}
+            />
+          <SelectField
+            ariaLabel="接入类型"
+            className="w-[145px]"
+            value={pairingTypeFilter}
+            onValueChange={(value) => { setPairingTypeFilter(value); setPage(1); }}
+            placeholder="全部接入类型"
+            clearable
             options={[
-              { value: "all", label: "全部接入状态" },
-              { value: "waiting_phone", label: "等待手机确认" },
-              { value: "reconnecting", label: "连接恢复中" },
-              { value: "verified", label: "验证成功" },
-              { value: "failed", label: "绑定失败" },
-              { value: "expired", label: "配对码过期" },
-              { value: "cancelled", label: "用户取消" },
+              { value: "initial", label: "首次绑定" },
+              { value: "reauthentication", label: "重新认证" },
             ]}
           />
-        }
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button variant="outline">
+                <SlidersHorizontalIcon size={16} />更多筛选
+                {advancedFilterCount ? <Badge tone="neutral">{advancedFilterCount}</Badge> : null}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-80 space-y-3">
+              <SearchableSelect ariaLabel="分组筛选" value={groupFilter} onValueChange={(value) => { setGroupFilter(value); setPage(1); }} placeholder="全部分组" searchPlaceholder="搜索分组名称或 ID" options={[{ value: "", label: "全部分组" }, { value: "__ungrouped__", label: "未分组" }, ...groups.map((row) => ({ value: row.id, label: `${row.name} · ${row.id}` }))]} />
+              <SearchableSelect ariaLabel="渠道筛选" value={channelFilter} onValueChange={(value) => { setChannelFilter(value); setPage(1); }} placeholder="全部渠道" searchPlaceholder="搜索渠道名称或 ID" options={[{ value: "", label: "全部渠道" }, ...channels.map((row) => ({ value: row.id, label: `${row.name} · ${row.id}` }))]} />
+              <SearchableSelect ariaLabel="模板筛选" value={templateFilter} onValueChange={(value) => { setTemplateFilter(value); setPage(1); }} placeholder="全部模板" searchPlaceholder="搜索模板名称或 ID" options={[{ value: "", label: "全部模板" }, ...templates.map((row) => ({ value: row.id, label: `${row.name} · ${row.id}` }))]} />
+              <SearchableSelect ariaLabel="协议筛选" value={protocolFilter} onValueChange={(value) => { setProtocolFilter(value); setPage(1); }} placeholder="全部协议" searchPlaceholder="搜索协议名称或 ID" options={[{ value: "", label: "全部协议" }, ...protocols.map((row) => ({ value: row.id, label: `${row.name} · ${row.id}` }))]} />
+              <label className="field"><span>访问 IP</span><Input value={sourceIpInput} onChange={(event) => setSourceIpInput(event.target.value)} placeholder="输入完整或部分 IP" /></label>
+              <SelectField ariaLabel="号码国家筛选" value={countryFilter} onValueChange={(value) => { setCountryFilter(value); setPage(1); }} placeholder="全部号码国家" clearable options={countries.map((value) => ({ value, label: value }))} />
+              <SelectField ariaLabel="访问国家筛选" value={visitorCountryFilter} onValueChange={(value) => { setVisitorCountryFilter(value); setPage(1); }} placeholder="全部访问国家" clearable options={visitorCountries.map((value) => ({ value, label: value }))} />
+              <SelectField ariaLabel="入池结果筛选" value={admissionFilter} onValueChange={(value) => { setAdmissionFilter(value); setPage(1); }} placeholder="全部入池结果" clearable options={[{ value: "active", label: "已正式入池" }, { value: "reserved", label: "接入预留" }, { value: "abandoned", label: "未进入账号池" }]} />
+              <SelectField ariaLabel="资料同步筛选" value={metadataFilter} onValueChange={(value) => { setMetadataFilter(value); setPage(1); }} placeholder="全部资料同步状态" clearable options={[{ value: "pending", label: "待同步" }, { value: "syncing", label: "同步中" }, { value: "ready", label: "同步完成" }, { value: "failed", label: "同步失败" }, { value: "unsupported", label: "不支持同步" }]} />
+              <Button variant="outline" className="w-full" disabled={!advancedFilterCount} onClick={() => { setGroupFilter(""); setChannelFilter(""); setTemplateFilter(""); setProtocolFilter(""); setSourceIpInput(""); setSourceIpFilter(""); setCountryFilter(""); setVisitorCountryFilter(""); setAdmissionFilter(""); setMetadataFilter(""); setPage(1); }}>清除精细筛选</Button>
+            </PopoverContent>
+          </Popover>
+        </>}
         meta={`${total} 条接入记录`}
         actions={
           <Button variant="outline" onClick={() => void load()} disabled={loading}>
@@ -1137,20 +868,20 @@ export function AccountIntakePage() {
         ) : rows.length ? (
           <Table layout="list">
             <TableHeader><TableRow>
-              <TableHead className="text-center" adaptive>号码/账号ID</TableHead>
+              <ListSortableHead sortKey="accountId" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort} adaptive>号码/账号ID</ListSortableHead>
               <TableHead className="text-center">分组</TableHead>
-              <TableHead className="text-center">接入状态</TableHead>
-              <TableHead className="text-center">接入类型</TableHead>
-              <TableHead className="text-center">号码国家</TableHead>
-              <TableHead className="text-center">访问国家</TableHead>
+              <ListSortableHead sortKey="status" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>接入状态</ListSortableHead>
+              <ListSortableHead sortKey="pairingType" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>接入类型</ListSortableHead>
+              <ListSortableHead sortKey="countryCode" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>号码国家</ListSortableHead>
+              <ListSortableHead sortKey="visitorCountryCode" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>访问国家</ListSortableHead>
               <TableHead className="text-center">访问 IP</TableHead>
               <TableHead className="text-center">落地页</TableHead>
-              <TableHead className="text-center">渠道</TableHead>
+              <ListSortableHead sortKey="channelId" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>渠道</ListSortableHead>
               <TableHead className="text-center">模板</TableHead>
               <TableHead className="text-center">协议</TableHead>
-              <TableHead className="text-center">入池结果</TableHead>
-              <TableHead className="text-center">资料同步</TableHead>
-              <TableHead className="text-center">记录时间</TableHead>
+              <ListSortableHead sortKey="admissionStatus" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>入池结果</ListSortableHead>
+              <ListSortableHead sortKey="metadataStatus" activeSortKey={sortBy} sortOrder={sortOrder} onSort={changeSort}>资料同步</ListSortableHead>
+              <ListSortableHead sortKey="createdAt" activeSortKey={sortBy} sortOrder={sortOrder} defaultOrder="desc" onSort={changeSort}>记录时间</ListSortableHead>
               <TableHead className="text-center">操作</TableHead>
             </TableRow></TableHeader>
             <TableBody>{rows.map((row) => {
@@ -1232,17 +963,18 @@ export function AccountIntakePage() {
                   ) : "模板已删除"}
                 </TableCell>
                 <TableCell className="text-center align-middle">
-                  <span className="whitespace-nowrap">{row.protocol?.name || "协议不可用"}</span>
+                  <div className="cell-main mx-auto min-w-[145px] justify-items-center text-center">
+                    <strong>{row.protocol?.name || "协议不可用"}</strong>
+                    <span>{row.protocol?.id || "-"}</span>
+                  </div>
                 </TableCell>
                 <TableCell className="text-center align-middle">
                   {admissionBadge(row.account.admissionStatus)}
                 </TableCell>
                 <TableCell className="text-center align-middle">
-                  {row.syncJob ? (
-                    <Badge tone={row.syncJob.status === "succeeded" ? "success" : row.syncJob.status === "failed" ? "danger" : "warning"}>
-                      {row.syncJob.status === "succeeded" ? "同步完成" : row.syncJob.status === "failed" ? "同步失败" : "后台同步中"}
-                    </Badge>
-                  ) : <Badge tone="neutral" className="badge-outline">尚未触发</Badge>}
+                  <Badge tone={row.account.metadataSyncStatus === "ready" ? "success" : row.account.metadataSyncStatus === "failed" ? "danger" : row.account.metadataSyncStatus === "syncing" ? "warning" : "neutral"}>
+                    {row.account.metadataSyncStatus === "ready" ? "同步完成" : row.account.metadataSyncStatus === "failed" ? "同步失败" : row.account.metadataSyncStatus === "syncing" ? "同步中" : row.account.metadataSyncStatus === "unsupported" ? "不支持同步" : "待同步"}
+                  </Badge>
                 </TableCell>
                 <TableCell className="text-center align-middle text-muted-foreground">
                   <span className="whitespace-nowrap">{formatDateTime(row.createdAt)}</span>
@@ -1273,7 +1005,10 @@ export function AccountIntakePage() {
         footer={<Button onClick={() => setSelectedAttempt(null)}>关闭</Button>}
       >
         {selectedAttempt ? (
-          <IntakeRecordDetail attempt={selectedAttempt} onCopyLanding={copyLandingUrl} />
+          <IntakeRecordDetail
+            attempt={selectedAttempt}
+            onCopyLanding={(value) => void copyLandingUrl(value, toast)}
+          />
         ) : null}
       </Drawer>
     </StandardListPage>

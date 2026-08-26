@@ -105,17 +105,18 @@ class AccountGroupUpdate(Model):
 class ProtocolSyncPolicy(Model):
     close_online: bool = Field(default=True, alias="closeOnline")
     avatar: bool = True
-    group_summary: bool = Field(default=True, alias="groupSummary")
-    group_details: bool = Field(default=False, alias="groupDetails")
-    contacts: bool = False
-    chats: bool = False
-    message_history: bool = Field(default=False, alias="messageHistory")
+    group_details: bool = Field(default=True, alias="groupDetails")
+    contacts: bool = True
 
-    @model_validator(mode="after")
-    def group_details_include_summary(self):
-        if self.group_details:
-            self.group_summary = True
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_group_summary(cls, value):
+        if not isinstance(value, dict) or "groupDetails" in value or "group_details" in value:
+            return value
+        legacy = value.get("groupSummary", value.get("group_summary"))
+        if not isinstance(legacy, bool):
+            return value
+        return {**value, "groupDetails": legacy}
 
 
 class ProtocolRateLimitRule(Model):
@@ -445,12 +446,24 @@ class PairRequest(Model):
     _phone = field_validator("phone")(lambda value: normalize_phone(value) if value else None)
 
 
+MESSAGE_TARGET_JID_RE = re.compile(
+    r"^(?:[1-9]\d{6,19}(?::\d{1,5})?@s\.whatsapp\.net|[1-9]\d{5,20}(?:-\d{5,20})?@g\.us)$"
+)
+
+
+def normalize_message_target(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if MESSAGE_TARGET_JID_RE.fullmatch(normalized):
+        return normalized
+    return normalize_phone(normalized)
+
+
 class SendRequest(Model):
     to: str
     message: str = Field(min_length=1, max_length=4096)
     idempotency_key: str = Field(alias="idempotencyKey", min_length=8, max_length=160)
 
-    _to = field_validator("to")(normalize_phone)
+    _to = field_validator("to")(normalize_message_target)
 
 
 class DomainCreate(Model):

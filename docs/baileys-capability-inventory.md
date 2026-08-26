@@ -12,10 +12,12 @@
 | 连接与会话 | 二维码配对 | `connection.update` 中的 QR | 未产品化 | Baileys 支持，当前页面未提供 |
 | 连接与会话 | 保存登录凭证 | `creds.update` | 已接入 | 持久化凭证和 Signal 密钥 |
 | 连接与会话 | 恢复登录会话 | `auth`、保存的凭证 | 已接入 | 无需重新配对即可恢复连接 |
+| 连接与会话 | 识别账号平台 | `AuthenticationCreds.platform`、`creds.update` | 底层已保存，业务未提取 | 配对成功时 Baileys 保存手机平台原始值；可归一化为 Android、iOS、其他或未知 |
+| 连接与会话 | 识别个人版/商业版 | `isWABusinessPlatform(platform)` | 未接入业务表 | Baileys 6.7.24 明确将 `smba`、`smbi` 判断为 WhatsApp Business；分别对应 Android、iOS |
 | 连接与会话 | 连接状态与断线原因 | `connection.update` | 已接入 | 驱动账号状态机、断线重连和管理端在线/离线显示 |
 | 连接与会话 | 连接后向 WhatsApp 显示在线 | `markOnlineOnConnect` | 已接入，可配置 | 协议节点提供“关闭在线”开关且默认开启；开启时传 `false`，关闭该开关时传 `true`，不影响 Parloq 管理端判断连接状态 |
 | 连接与会话 | 主动发布在线、离线或输入状态 | `sendPresenceUpdate()` | 未直接接入 | Baileys 支持 `available`、`unavailable`、`composing`、`recording`、`paused` 等 Presence 状态 |
-| 连接与会话 | 主动登出 | `logout()` | 已接入 | 删除登录会话，需要重新配对 |
+| 连接与会话 | 主动登出 | `logout()` | 已接入删除链路 | 不单独暴露；删除账号时用于退出 WhatsApp 并清理登录会话 |
 | 连接与会话 | 关闭连接 | `end()` | 已接入 | 关闭 Socket，不等同于登出 |
 | 连接与会话 | 等待连接状态 | `waitForConnectionUpdate()` | 未直接调用 | 当前通过 `connection.update` 事件加 Promise、超时和配对稳定窗口实现扩展等待逻辑 |
 | 连接与会话 | 固定代理 | Socket `agent`、`fetchAgent` | 已接入 | Parloq 在 Baileys 之上增加代理分配和健康管理 |
@@ -51,10 +53,12 @@
 | 媒体 | 刷新媒体连接 | `refreshMediaConn()` | 已接入底层链路 | Baileys 内部上传所需 |
 | 媒体 | 下载媒体 | `downloadMediaMessage()` | 未接入 | 未做入站媒体归档 |
 | 媒体 | 媒体重传 | `updateMediaMessage()` | 未产品化 | Baileys 支持 |
-| 历史同步 | 请求完整历史 | `syncFullHistory` | 部分接入 | 联系人、聊天列表或消息历史开启时设为 `true` |
-| 历史同步 | 过滤历史消息类型 | `shouldSyncHistoryMessage()` | 部分接入 | 由消息历史开关控制 |
+| 历史同步 | 请求完整历史 | `syncFullHistory` | 部分接入 | 作为 Parloq“好友同步” `contacts` 的内部取数机制；实际下发范围由 WhatsApp 决定 |
+| 历史同步 | 选择是否处理历史同步通知 | `shouldSyncHistoryMessage()` | 部分接入 | 与“好友同步” `contacts` 使用同一判断；处理联系人资源后丢弃聊天列表和消息正文 |
 | 历史同步 | 接收首次历史 | `messaging-history.set` | 部分接入 | 当前只统计聊天、联系人和历史消息数量 |
+| 历史同步 | 识别聊天记录联系人 | 历史 `messages`、在线 `messages.upsert` | 未接入 | 只提取一对一联系对象和最后联系时间，不保存聊天列表或消息正文 |
 | 联系人 | 联系人新增/更新事件 | `contacts.upsert`、`contacts.update` | 部分接入 | 当前只统计联系人增量数量 |
+| 联系人 | 判断本账号已保存的联系人 | `Contact.name` | 未接入业务表 | `name` 是本账号保存的名称；`notify` 是对方自己的显示名，不能作为已保存好友的证据 |
 | 联系人 | 新增或修改联系人 | `addOrEditContact()` | 未接入 | Baileys 支持 |
 | 联系人 | 删除联系人 | `removeContact()` | 未接入 | Baileys 支持 |
 | 聊天 | 聊天新增/更新/删除事件 | `chats.upsert/update/delete` | 未接入 | Baileys 支持 |
@@ -81,8 +85,9 @@
 | 隐私 | 修改通话/消息权限 | `updateCallPrivacy()`、`updateMessagesPrivacy()` | 未接入 | Baileys 支持 |
 | 隐私 | 修改默认消失消息 | `updateDefaultDisappearingMode()` | 未接入 | Baileys 支持 |
 | 群组 | 查询单个群资料 | `groupMetadata()` | 未直接接入 | Baileys 支持 |
-| 群组 | 查询全部参与群 | `groupFetchAllParticipating()` | 已接入 | 用于群组概览和群组详情 |
+| 群组 | 查询全部参与群 | `groupFetchAllParticipating()` | 已接入 | 用于群组详情，并直接计算群组数量 |
 | 群组 | 统计参与群数量 | `groupFetchAllParticipating()` | 已接入 | Parloq 计算并保存 `groupCount` |
+| 群组 | 跨群去重成员数 | 全部 `GroupMetadata.participants`、LID/JID 映射 | 未接入 | 排除本账号并归一身份，聚合数量仅作资源统计参考，不参与当前评分 |
 | 群组 | 保存群 ID、名称和人数 | `groupFetchAllParticipating()` | 部分接入 | 只存网关元数据，主系统未消费 |
 | 群组 | 创建/退出群组 | `groupCreate()`、`groupLeave()` | 未接入 | Baileys 支持 |
 | 群组 | 修改群名称/描述/设置 | `groupUpdateSubject()` 等 | 未接入 | Baileys 支持 |
@@ -108,29 +113,29 @@
 | 底层协议 | Signal 会话和 PreKey | `assertSessions()`、`uploadPreKeys()` | 已接入底层链路 | 维持加密会话所需 |
 | 底层协议 | App State 重新同步 | `resyncAppState()`、`appPatch()` | 未产品化 | Baileys 支持 |
 
-## 2. 当前同步开关确认表
+## 2. 账户同步开关规划
 
 | 同步开关 | Baileys 能力 | 当前保存结果 | 主系统是否消费 | 数据/资源成本 | 当前默认 | 建议 |
 | --- | --- | --- | --- | --- | --- | --- |
 | 头像 `avatar` | `profilePictureUrl(ownJid)` | `hasAvatar` | 是 | 低 | 开 | 保留，默认开启 |
-| 群组概览 `groupSummary` | `groupFetchAllParticipating()` | `groupCount` | 是 | 中，需要读取全部参与群 | 开 | 需要群数量就保留并默认开启 |
-| 群组详情 `groupDetails` | `groupFetchAllParticipating()` | 群 ID、名称、人数 | 否，只在网关保存 | 较高，包含群资料 | 关 | 没有近期需求就删除 |
-| 联系人 `contacts` | `syncFullHistory`、联系人事件 | 联系人数量、增量数 | 否 | 高，会触发完整历史同步 | 关 | 没有近期联系人功能就删除 |
-| 聊天列表 `chats` | `syncFullHistory`、聊天历史事件 | 聊天数量 | 否 | 高，会触发完整历史同步 | 关 | 没有近期会话列表功能就删除 |
-| 消息历史 `messageHistory` | `syncFullHistory`、`shouldSyncHistoryMessage()` | 历史消息数量 | 否 | 很高 | 关 | 建议删除，发送不依赖它 |
+| 群组同步 `groupDetails` | `groupFetchAllParticipating()`、历史/实时聊天事件 | `groupCount`、群 ID、名称、人数、权限、最近联系时间、跨群去重成员数 | 是，明细已落主系统资源表 | 中，需要读取全部参与群和成员身份；最近联系时间不保存消息正文 | 开 | 已删除 `groupSummary`；服务概览、评分和后续群组营销 |
+| 好友同步 `contacts` | `syncFullHistory`、`shouldSyncHistoryMessage()`、历史包、联系人事件、LID/JID 映射、新消息事件 | 好友并集清单、来源、身份映射和最后联系时间 | 是，明细已落主系统资源表 | 中高，仅显式资料同步请求历史 | 开 | 好友为通讯录联系人和聊天记录联系人并集；历史同步只作为内部实现 |
+| 聊天列表 `chats` | 聊天历史事件 | 只统计数量 | 否 | 高 | 关 | 删除开关及配套，不建设聊天列表资源 |
+| 消息历史 `messageHistory` | 历史消息集合 | 只统计数量 | 否 | 很高 | 关 | 删除开关及配套，不保存消息正文 |
 
-## 3. 建议确认结果
+## 3. 已确认规划
 
 | 决策 | 同步开关 | 默认值 |
 | --- | --- | --- |
-| 建议保留 | 头像 `avatar` | 开 |
-| 建议保留 | 群组概览 `groupSummary` | 开 |
-| 建议删除 | 群组详情 `groupDetails` | — |
-| 建议删除 | 联系人 `contacts` | — |
-| 建议删除 | 聊天列表 `chats` | — |
-| 建议删除 | 消息历史 `messageHistory` | — |
+| 保留 | 关闭在线 `closeOnline` | 开 |
+| 保留 | 头像 `avatar` | 开 |
+| 删除，能力合并到群组同步 | 群组概览 `groupSummary` | — |
+| 保留，兼顾概览、评分和群组营销 | 群组同步 `groupDetails` | 开，继承原 `groupSummary` 策略 |
+| 不新增产品开关，仅作为内部取数机制 | 历史同步 | — |
+| 保留现有字段并升级语义 | 好友同步 `contacts` | 开 |
+| 删除 | 聊天列表 `chats` | — |
+| 删除 | 消息历史 `messageHistory` | — |
 
-需要确认的只有两点：
+产品不暴露独立历史开关。开启“好友同步” `contacts` 或“群组同步” `groupDetails` 后，网关只在显式资料同步任务中临时启用历史摘要处理，日常连接和发信重连不请求完整历史；群基础资料仍通过独立群组接口获取，历史摘要只用于补充最近联系时间。
 
-1. 群组数量是否仍用于账号质量、筛选或分组规则？
-2. 近期是否确定要建设群详情、联系人、聊天列表或历史消息功能？
+群组营销和好友营销的具体接口、同步字段、落库范围及任务前置条件见 [接入账户模型升级方案](./account-model-lightweight-upgrade.md)。

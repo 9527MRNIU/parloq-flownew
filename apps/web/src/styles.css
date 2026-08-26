@@ -1632,6 +1632,17 @@ tr.selected-row {
 }
 .cn-toast {
   font-family: inherit;
+  min-height: 56px;
+}
+[data-sonner-toaster].toaster {
+  z-index: 100;
+}
+.cn-toast [data-icon] {
+  color: currentColor;
+}
+.cn-toast [data-close-button] {
+  width: 28px;
+  height: 28px;
 }
 .full-button {
   width: 100%;

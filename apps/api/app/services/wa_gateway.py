@@ -304,7 +304,6 @@ class WaGatewayClient:
                     "hasAvatar": None,
                     "groupCount": None,
                     "friendCount": None,
-                    "mutualContactCount": None,
                 },
             }
         value = self._post(
@@ -337,8 +336,14 @@ class WaGatewayClient:
         value = self._post(f"/v1/accounts/{account_id}/pairing-cancel")
         return value if isinstance(value, dict) else {}
 
-    def logout(self, account_id: str) -> dict[str, Any]:
-        value = self._post(f"/v1/accounts/{account_id}/logout")
+    def delete_account(self, account_id: str) -> dict[str, Any]:
+        if self.settings.wa_gateway_mock:
+            return {
+                "accountId": account_id,
+                "deleted": True,
+                "providerLogoutConfirmed": True,
+            }
+        value = self._request("DELETE", f"/v1/accounts/{account_id}")
         return value if isinstance(value, dict) else {}
 
     def import_session(

@@ -51,6 +51,7 @@ export function buildServer(options: ServerOptions) {
   })
   app.get('/v1/accounts', async () => ({ data: await options.service.listAccounts() }))
   app.get<{ Params: { accountId: string } }>('/v1/accounts/:accountId', async (request) => ({ data: await options.service.getAccount(request.params.accountId) }))
+  app.delete<{ Params: { accountId: string } }>('/v1/accounts/:accountId', async (request) => ({ data: await options.service.deleteAccount(request.params.accountId) }))
   app.patch<{ Params: { accountId: string }; Body: { phoneE164?: string; proxyUrl?: string; protocolDefinitionId?: string; protocolVersion?: string; autoConnect?: boolean; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: import('./domain.js').SyncPolicy } }>('/v1/accounts/:accountId', async (request) => ({ data: await options.service.updateAccount(request.params.accountId, request.body) }))
   app.post<{ Params: { accountId: string }; Body: { phoneE164?: string } }>('/v1/accounts/:accountId/pairing-code', async (request) => ({ data: await options.service.requestPairingCode(request.params.accountId, request.body?.phoneE164) }))
   app.post<{ Params: { accountId: string }; Body: { phoneE164?: string } }>('/v1/accounts/:accountId/reauthentication-code', async (request) => ({ data: await options.service.requestReauthenticationCode(request.params.accountId, request.body?.phoneE164) }))
@@ -60,10 +61,6 @@ export function buildServer(options: ServerOptions) {
   app.post<{ Params: { accountId: string } }>('/v1/accounts/:accountId/disconnect', async (request) => ({
     data: await options.service.disconnect(request.params.accountId),
     meta: { sessionPreserved: true, message: 'Disconnected. The saved session can reconnect without pairing again.' },
-  }))
-  app.post<{ Params: { accountId: string } }>('/v1/accounts/:accountId/logout', async (request) => ({
-    data: await options.service.logout(request.params.accountId),
-    meta: { sessionPreserved: false, message: 'Logged out. The linked-device session was removed and pairing is required.' },
   }))
   app.post<{ Params: { accountId: string }; Body: { session: unknown; proxyUrl?: string; protocolDefinitionId?: string; protocolVersion?: string } }>('/v1/accounts/:accountId/import-session', async (request) => {
     if (!request.body || !('session' in request.body)) throw new GatewayError('invalid_argument', 'session is required')

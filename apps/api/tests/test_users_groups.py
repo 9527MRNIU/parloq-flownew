@@ -5,7 +5,8 @@ from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.main import app
-from app.models import DomainRecord, UserAccount
+from app.models import DomainRecord, UserAccount, UserMfaCredential
+from app.security import utcnow
 
 
 def test_builtin_operator_group_is_seeded(admin_client: TestClient) -> None:
@@ -76,6 +77,121 @@ def test_user_list_is_server_paginated_and_searchable(admin_client: TestClient) 
     second = admin_client.get("/api/users?keyword=Paging%20Person&page=2&pageSize=2")
     assert second.json()["data"]["total"] == 3
     assert len(second.json()["data"]["rows"]) == 1
+
+
+def test_user_list_supports_confirmed_filters_and_sorting(
+    admin_client: TestClient,
+) -> None:
+    role = admin_client.post(
+        "/api/system/roles",
+        json={"name": "sorting-users-role", "enabled": True},
+    ).json()["data"]["role"]
+    created_users = []
+    for index, enabled in enumerate((True, False)):
+        response = admin_client.post(
+            "/api/users",
+            json={
+                "username": f"sorting-user-{index}",
+                "password": "secure-pass-123",
+                "groupId": role["id"],
+                "enabled": enabled,
+            },
+        )
+        assert response.status_code == 201
+        created_users.append(response.json()["data"]["user"])
+
+    with SessionLocal() as db:
+        db.add(
+            UserMfaCredential(
+                user_id=int(created_users[0]["id"]),
+                secret_ciphertext="test-secret",
+                recovery_code_hashes=[],
+                enabled_at=utcnow(),
+            )
+        )
+        db.commit()
+
+    default_rows = admin_client.get(
+        "/api/users?keyword=sorting-user-&pageSize=20"
+    ).json()["data"]["rows"]
+    assert [int(row["id"]) for row in default_rows] == sorted(
+        [int(row["id"]) for row in default_rows], reverse=True
+    )
+
+    filtered = admin_client.get(
+        "/api/users",
+        params={
+            "keyword": "sorting-user-",
+            "groupId": role["id"],
+            "enabled": "true",
+            "isAdmin": "false",
+            "mfaEnabled": "true",
+            "sortBy": "updatedAt",
+            "sortOrder": "desc",
+        },
+    )
+    assert filtered.status_code == 200
+    data = filtered.json()["data"]
+    assert data["total"] == 1
+    assert data["rows"][0]["id"] == created_users[0]["id"]
+    assert data["rows"][0]["mfaEnabled"] is True
+    assert data["rows"][0]["updatedAt"]
+    assert admin_client.get("/api/users?sortBy=unknown").status_code == 422
+
+
+def test_role_list_supports_confirmed_filters_and_sorting(
+    admin_client: TestClient,
+) -> None:
+    roles = []
+    for index, enabled in enumerate((True, False)):
+        response = admin_client.post(
+            "/api/system/roles",
+            json={"name": f"sorting-role-{index}", "enabled": enabled},
+        )
+        assert response.status_code == 201
+        roles.append(response.json()["data"]["role"])
+
+    for index in range(2):
+        assert admin_client.post(
+            "/api/users",
+            json={
+                "username": f"sorting-role-member-{index}",
+                "password": "secure-pass-123",
+                "groupId": roles[0]["id"],
+            },
+        ).status_code == 201
+
+    default_rows = admin_client.get(
+        "/api/system/roles?keyword=sorting-role-&pageSize=20"
+    ).json()["data"]["rows"]
+    assert [int(row["id"]) for row in default_rows] == sorted(
+        int(row["id"]) for row in default_rows
+    )
+
+    by_member_count = admin_client.get(
+        "/api/system/roles",
+        params={
+            "keyword": "sorting-role-",
+            "isBuiltin": "false",
+            "sortBy": "userCount",
+            "sortOrder": "desc",
+        },
+    )
+    assert by_member_count.status_code == 200
+    rows = by_member_count.json()["data"]["rows"]
+    assert [row["userCount"] for row in rows] == [2, 0]
+
+    disabled = admin_client.get(
+        "/api/system/roles",
+        params={
+            "keyword": "sorting-role-",
+            "isBuiltin": "false",
+            "enabled": "false",
+        },
+    ).json()["data"]
+    assert disabled["total"] == 1
+    assert disabled["rows"][0]["id"] == roles[1]["id"]
+    assert admin_client.get("/api/system/roles?sortBy=unknown").status_code == 422
 
 
 def test_user_delete_requires_owned_resources_to_be_removed_then_hard_deletes(

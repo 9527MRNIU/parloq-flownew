@@ -58,7 +58,6 @@ import {
   ListTableCard,
   ListToolbar,
   StandardListPage,
-  useClientPagination,
 } from "../components/list-page";
 import {
   Badge,
@@ -543,6 +542,10 @@ export function HyperlinkTemplatesPage() {
   const [rows, setRows] = useState<TemplateRow[]>([]);
   const [materials, setMaterials] = useState<RelatedRow[]>([]);
   const [keyword, setKeyword] = useState("");
+  const [debouncedKeyword, setDebouncedKeyword] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
   const [statusFilter, setStatusFilter] = useState<TemplateStatusFilter>("all");
   const [headerFilter, setHeaderFilter] = useState<TemplateHeaderFilter>("all");
   const [loading, setLoading] = useState(true);
@@ -560,34 +563,35 @@ export function HyperlinkTemplatesPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      const query = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+      if (debouncedKeyword) query.set("keyword", debouncedKeyword);
+      if (statusFilter !== "all") query.set("enabled", statusFilter === "enabled" ? "true" : "false");
+      if (headerFilter !== "all") query.set("headerType", headerFilter);
       const [templatesPayload, materialsPayload] = await Promise.all([
-        apiRequest("/api/hyperlink/templates?pageSize=100"),
-        apiRequest("/api/materials?pageSize=100"),
+        apiRequest(`/api/hyperlink/templates?${query}`),
+        apiRequest("/api/materials/options"),
       ]);
-      setRows(unwrapList(templatesPayload).rows.map(normalizeTemplate));
+      const list = unwrapList(templatesPayload);
+      setRows(list.rows.map(normalizeTemplate));
+      setTotal(list.total);
       setMaterials(unwrapList(materialsPayload).rows.map(normalizeRelated).filter((item): item is RelatedRow => Boolean(item)));
     } catch (caught) {
       toast.error(caught instanceof Error ? caught.message : "超链模板加载失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [debouncedKeyword, headerFilter, page, pageSize, statusFilter]);
 
   useEffect(() => { void load(); }, [load]);
 
-  const visible = useMemo(() => {
-    const search = keyword.trim().toLowerCase();
-    return rows.filter((row) => {
-      const formValue = formFromRow(row);
-      const matchesSearch = !search || `${row.name} ${row.id} ${row.contentJson.body ? JSON.stringify(row.contentJson.body) : ""}`.toLowerCase().includes(search);
-      const matchesStatus = statusFilter === "all" || (statusFilter === "enabled" ? row.enabled : !row.enabled);
-      const matchesHeader = headerFilter === "all" || formValue.headerType === headerFilter;
-      return matchesSearch && matchesStatus && matchesHeader;
-    });
-  }, [headerFilter, keyword, rows, statusFilter]);
-  const pagination = useClientPagination(visible, {
-    resetKey: `${keyword}|${statusFilter}|${headerFilter}`,
-  });
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(keyword.trim());
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+  useEffect(() => { setPage(1); }, [headerFilter, statusFilter]);
 
   function open(row?: TemplateRow) {
     setEditing(row || null);
@@ -687,7 +691,7 @@ export function HyperlinkTemplatesPage() {
 
   async function save() {
     const error = validateForm();
-    if (error) { toast.error(error); return; }
+    if (error) { toast.warning(error); return; }
     setPending(true);
     try {
       await apiRequest(editing ? `/api/hyperlink/templates/${editing.id}` : "/api/hyperlink/templates", {
@@ -752,21 +756,21 @@ export function HyperlinkTemplatesPage() {
             />
           </>
         }
-        meta={`${visible.length} 个模板`}
+        meta={`${total} 个模板`}
         actions={<><Button variant="outline" onClick={() => void load()}><RefreshCwIcon />刷新</Button>{canManage ? <Button onClick={() => open()}><PlusIcon />创建模板</Button> : null}</>}
       />
       <ListPagination
-        page={pagination.page}
-        pageSize={pagination.pageSize}
-        total={pagination.total}
+        page={page}
+        pageSize={pageSize}
+        total={total}
         disabled={loading}
-        onPageChange={pagination.setPage}
-        onPageSizeChange={pagination.setPageSize}
+        onPageChange={setPage}
+        onPageSizeChange={(value) => { setPageSize(value); setPage(1); }}
       />
       <ListTableCard>
-        {loading ? <div className="loading-state"><Spinner /></div> : visible.length ? (
+        {loading ? <div className="loading-state"><Spinner /></div> : rows.length ? (
           <div className="grid grid-cols-1 gap-4 bg-muted/[0.18] p-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-            {pagination.rows.map((row) => {
+            {rows.map((row) => {
               const formValue = formFromRow(row);
               const material = materials.find((item) => item.id === row.materialId);
               const structure = [

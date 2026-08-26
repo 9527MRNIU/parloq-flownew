@@ -15,6 +15,7 @@ const LoginPage = lazy(() => import("./pages/LoginPage").then((module) => ({ def
 const AccountSecurityPage = lazy(() => import("./pages/AccountSecurityPage").then((module) => ({ default: module.AccountSecurityPage })));
 const IpManagementPage = lazy(() => import("./pages/IpManagementPage").then((module) => ({ default: module.IpManagementPage })));
 const PersonalAccountsPage = lazy(() => import("./pages/PersonalAccountsPage").then((module) => ({ default: module.PersonalAccountsPage })));
+const AccountResourceDetailPage = lazy(() => import("./pages/AccountResourceDetailPage").then((module) => ({ default: module.AccountResourceDetailPage })));
 const PromotionTemplatePreviewPage = lazy(() => import("./pages/PromotionPages").then((module) => ({ default: module.PromotionTemplatePreviewPage })));
 const PromotionChannelsPage = lazy(() => import("./pages/PromotionPages").then((module) => ({ default: module.PromotionChannelsPage })));
 const PromotionTemplatesPage = lazy(() => import("./pages/PromotionPages").then((module) => ({ default: module.PromotionTemplatesPage })));
@@ -32,7 +33,6 @@ const HyperlinkMarketInsightsPage = lazy(() => import("./pages/HyperlinkMarketIn
 const UserGroupsPage = lazy(() => import("./pages/UserGroupsPage").then((module) => ({ default: module.UserGroupsPage })));
 const UsersPage = lazy(() => import("./pages/UsersPage").then((module) => ({ default: module.UsersPage })));
 const SystemConfigurationPage = lazy(() => import("./pages/SystemConfigurationPage").then((module) => ({ default: module.SystemConfigurationPage })));
-const AccountExportPage = lazy(() => import("./pages/AccountCenterPages").then((module) => ({ default: module.AccountExportPage })));
 const AccountGroupsPage = lazy(() => import("./pages/AccountCenterPages").then((module) => ({ default: module.AccountGroupsPage })));
 const AccountIntakePage = lazy(() => import("./pages/AccountCenterPages").then((module) => ({ default: module.AccountIntakePage })));
 const AccountStatisticsPage = lazy(() => import("./pages/AccountStatisticsPage").then((module) => ({ default: module.AccountStatisticsPage })));
@@ -161,8 +161,8 @@ export default function App() {
             path="/resources/accounts/import"
             element={<Navigate to="/resources/accounts/manage?import=1" replace />}
           />
-          <Route path="/resources/accounts/export" element={<AccountExportPage />} />
           <Route path="/resources/accounts/manage" element={<PersonalAccountsPage />} />
+          <Route path="/resources/accounts/manage/:accountId" element={<AccountResourceDetailPage />} />
           <Route path="/resources/accounts/groups" element={<AccountGroupsPage />} />
           <Route path="/resources/accounts/intake" element={<AccountIntakePage />} />
           <Route path="/resources/accounts/statistics" element={<AccountStatisticsPage />} />
@@ -208,6 +208,10 @@ export default function App() {
           <Route
             path="/direct-short-links"
             element={<DirectShortLinksPage />}
+          />
+          <Route
+            path="/contact-marketing"
+            element={<GroupMarketingConstructionPage title="好友营销" />}
           />
           {groupMarketingPages.map((page) => (
             <Route

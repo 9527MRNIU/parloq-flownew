@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import String, and_, case, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.business_schemas import (
@@ -106,6 +106,7 @@ from app.services.github_repository import (
     github_repository_snapshot,
     refresh_github_repository_snapshot,
     repository_local_status,
+    REMOTE_SOURCE_KEY,
     repository_source_matches_artifact,
     remote_artifact_row,
     stored_repository_source,
@@ -551,10 +552,22 @@ def template_row(
     db: DbSession,
     item: PromotionTemplate,
     repository_snapshot: GitHubRepositorySnapshot | None = None,
+    *,
+    integration_ids: list[str] | None = None,
+    channel_count: int | None = None,
 ) -> dict:
     manifest = item.manifest_json or {}
     quality_report = item.quality_report_json or unchecked_template_quality_report()
-    return {"id": entity_id(item), "name": item.name, "description": item.description, "version": item.version, "status": item.status, "manifest": manifest, "defaultLocale": manifest.get("defaultLocale"), "supportedLocales": manifest.get("supportedLocales", []), "i18n": manifest.get("i18n"), "assetCount": item.asset_count, "totalSize": item.total_size, "qualityReport": quality_report, "integrationIds": _template_integration_ids(db, item.id), "repositorySource": _template_repository_source(item, repository_snapshot), "createdAt": iso(item.created_at), "updatedAt": iso(item.updated_at)}
+    if channel_count is None:
+        channel_count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(PromotionChannel)
+                .where(PromotionChannel.template_id == item.id)
+            )
+            or 0
+        )
+    return {"id": entity_id(item), "name": item.name, "description": item.description, "version": item.version, "status": item.status, "manifest": manifest, "defaultLocale": manifest.get("defaultLocale"), "supportedLocales": manifest.get("supportedLocales", []), "i18n": manifest.get("i18n"), "assetCount": item.asset_count, "totalSize": item.total_size, "qualityReport": quality_report, "integrationIds": integration_ids if integration_ids is not None else _template_integration_ids(db, item.id), "channelCount": channel_count, "repositorySource": _template_repository_source(item, repository_snapshot), "createdAt": iso(item.created_at), "updatedAt": iso(item.updated_at)}
 
 
 def _channel_hostname(item: PromotionChannel, domain: DomainRecord | None) -> str:
@@ -660,7 +673,7 @@ def channel_row(db: DbSession, item: PromotionChannel) -> dict:
             },
         },
         "localeMode": "auto",
-        "locale": None,
+        "locale": item.locale or manifest.get("defaultLocale"),
         "status": item.status,
         "publicUrl": f"https://{hostname}/{item.slug}" if hostname else f"/api/public/promotion/channels/{item.slug}/render",
         "fissionPublicUrl": f"https://{hostname}/{item.slug}/1" if hostname else f"/api/public/promotion/channels/{item.slug}/fission/render",
@@ -1229,16 +1242,165 @@ def _preview_asset_response(
 
 
 @router.get("/api/promotion/templates")
-def list_templates(db: DbSession, current_user: CurrentUser) -> dict:
-    statement = select(PromotionTemplate)
+def list_templates(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str | None = None,
+    template_status: str | None = Query(default=None, alias="status"),
+    repository_source: Literal["repository", "offline"] | None = Query(
+        default=None,
+        alias="repositorySource",
+    ),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id",
+        "repositorySource",
+        "assetCount",
+        "integrationCount",
+        "channelCount",
+        "createdAt",
+        "updatedAt",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
+) -> dict:
+    integration_counts = (
+        select(
+            PromotionTemplateIntegration.template_id.label("template_id"),
+            func.count(PromotionTemplateIntegration.integration_id).label(
+                "integration_count"
+            ),
+        )
+        .where(PromotionTemplateIntegration.enabled.is_(True))
+        .group_by(PromotionTemplateIntegration.template_id)
+        .subquery()
+    )
+    channel_counts = (
+        select(
+            PromotionChannel.template_id.label("template_id"),
+            func.count(PromotionChannel.id).label("channel_count"),
+        )
+        .group_by(PromotionChannel.template_id)
+        .subquery()
+    )
+    repository_source_expression = case(
+        (
+            PromotionTemplate.manifest_json[REMOTE_SOURCE_KEY]["provider"]
+            .as_string()
+            == "github",
+            "repository",
+        ),
+        else_="offline",
+    )
+    statement = (
+        select(
+            PromotionTemplate,
+            func.coalesce(channel_counts.c.channel_count, 0).label("channel_count"),
+        )
+        .outerjoin(
+            integration_counts,
+            integration_counts.c.template_id == PromotionTemplate.id,
+        )
+        .outerjoin(
+            channel_counts,
+            channel_counts.c.template_id == PromotionTemplate.id,
+        )
+    )
     if current_user.role != "admin": statement = statement.where(PromotionTemplate.created_by == current_user.id)
-    items = db.scalars(statement.order_by(PromotionTemplate.created_at.desc())).all()
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        statement = statement.where(
+            or_(
+                cast(PromotionTemplate.id, String).ilike(pattern),
+                PromotionTemplate.public_id.ilike(pattern),
+                PromotionTemplate.name.ilike(pattern),
+                PromotionTemplate.description.ilike(pattern),
+                PromotionTemplate.version.ilike(pattern),
+                PromotionTemplate.status.ilike(pattern),
+            )
+        )
+    if template_status and template_status != "all":
+        statement = statement.where(PromotionTemplate.status == template_status)
+    if repository_source and repository_source != "all":
+        statement = statement.where(
+            repository_source_expression == repository_source
+        )
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    sort_columns = {
+        "id": PromotionTemplate.id,
+        "repositorySource": repository_source_expression,
+        "assetCount": PromotionTemplate.asset_count,
+        "integrationCount": func.coalesce(
+            integration_counts.c.integration_count,
+            0,
+        ),
+        "channelCount": func.coalesce(channel_counts.c.channel_count, 0),
+        "createdAt": PromotionTemplate.created_at,
+        "updatedAt": PromotionTemplate.updated_at,
+    }
+    sort_column = sort_columns[sort_by]
+    ordering = [
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    ]
+    if sort_by != "id":
+        ordering.append(
+            PromotionTemplate.id.asc()
+            if sort_order == "asc"
+            else PromotionTemplate.id.desc()
+        )
+    item_rows = db.execute(
+        statement.order_by(*ordering)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    template_ids = [item.id for item, _ in item_rows]
+    integration_ids: dict[int, list[str]] = {item_id: [] for item_id in template_ids}
+    if template_ids:
+        for template_id, integration_id in db.execute(
+            select(
+                PromotionTemplateIntegration.template_id,
+                PromotionTemplateIntegration.integration_id,
+            )
+            .where(
+                PromotionTemplateIntegration.template_id.in_(template_ids),
+                PromotionTemplateIntegration.enabled.is_(True),
+            )
+            .order_by(
+                PromotionTemplateIntegration.template_id,
+                PromotionTemplateIntegration.integration_id,
+            )
+        ).all():
+            integration_ids[template_id].append(str(integration_id))
     try:
         cached = cached_github_repository_snapshot(db, kind="template")
     except PlatformClientError:
         cached = None
     snapshot = cached[0] if cached is not None else None
-    return {"data": {"rows": [template_row(db, x, snapshot) for x in items], "total": len(items)}}
+    return {"data": {"rows": [template_row(db, item, snapshot, integration_ids=integration_ids[item.id], channel_count=int(channel_count)) for item, channel_count in item_rows], "total": total, "page": page, "pageSize": page_size}}
+
+
+@router.get("/api/promotion/templates/options")
+def list_template_options(db: DbSession, current_user: CurrentUser) -> dict:
+    statement = select(PromotionTemplate)
+    if current_user.role != "admin":
+        statement = statement.where(PromotionTemplate.created_by == current_user.id)
+    items = db.scalars(statement.order_by(PromotionTemplate.name, PromotionTemplate.id)).all()
+    return {
+        "data": {
+            "rows": [
+                {
+                    "id": entity_id(item),
+                    "name": item.name,
+                    "version": item.version,
+                    "manifest": item.manifest_json or {},
+                }
+                for item in items
+            ],
+            "total": len(items),
+        }
+    }
 
 
 @router.post("/api/promotion/templates/package-metadata")
@@ -1269,6 +1431,12 @@ def _repository_templates_response(
     refreshed_at: datetime,
     *,
     cache_hit: bool,
+    keyword: str | None,
+    local_status: Literal["new", "current", "update", "conflict"] | None,
+    page: int,
+    page_size: int,
+    sort_by: Literal["sequence", "assetCount", "localStatus"],
+    sort_order: Literal["asc", "desc"],
 ) -> dict:
     rows = []
     for artifact in snapshot.artifacts:
@@ -1286,10 +1454,33 @@ def _repository_templates_response(
                 "localVersion": item.version if item is not None else None,
             }
         )
+    if keyword and keyword.strip():
+        search = keyword.strip().lower()
+        rows = [
+            row
+            for row in rows
+            if search
+            in " ".join(
+                str(row.get(key) or "")
+                for key in ("sequence", "name", "description", "slug", "version")
+            ).lower()
+        ]
+    if local_status and local_status != "all":
+        rows = [row for row in rows if row.get("localStatus") == local_status]
+    sort_key = {
+        "sequence": lambda row: str(row.get("sequence") or ""),
+        "assetCount": lambda row: int(row.get("fileCount") or 0),
+        "localStatus": lambda row: str(row.get("localStatus") or ""),
+    }[sort_by]
+    rows.sort(key=sort_key, reverse=sort_order == "desc")
+    total = len(rows)
+    start = (page - 1) * page_size
     return {
         "data": {
-            "rows": rows,
-            "total": len(rows),
+            "rows": rows[start : start + page_size],
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
             "repository": snapshot.repository,
             "ref": snapshot.ref,
             "commitSha": snapshot.commit_sha,
@@ -1303,6 +1494,18 @@ def _repository_templates_response(
 def list_repository_templates(
     db: DbSession,
     current_user: CurrentUser,
+    keyword: str | None = None,
+    local_status: Literal["new", "current", "update", "conflict"] | None = Query(
+        default=None,
+        alias="localStatus",
+    ),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal["sequence", "assetCount", "localStatus"] = Query(
+        default="sequence",
+        alias="sortBy",
+    ),
+    sort_order: Literal["asc", "desc"] = Query(default="asc", alias="sortOrder"),
 ) -> dict:
     try:
         cached = cached_github_repository_snapshot(db, kind="template")
@@ -1323,6 +1526,12 @@ def list_repository_templates(
         snapshot,
         refreshed_at,
         cache_hit=cache_hit,
+        keyword=keyword,
+        local_status=local_status,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
     )
 
 
@@ -1330,6 +1539,18 @@ def list_repository_templates(
 def refresh_repository_templates(
     db: DbSession,
     current_user: CurrentUser,
+    keyword: str | None = None,
+    local_status: Literal["new", "current", "update", "conflict"] | None = Query(
+        default=None,
+        alias="localStatus",
+    ),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal["sequence", "assetCount", "localStatus"] = Query(
+        default="sequence",
+        alias="sortBy",
+    ),
+    sort_order: Literal["asc", "desc"] = Query(default="asc", alias="sortOrder"),
 ) -> dict:
     try:
         snapshot, refreshed_at = refresh_github_repository_snapshot(
@@ -1344,6 +1565,12 @@ def refresh_repository_templates(
         snapshot,
         refreshed_at,
         cache_hit=False,
+        keyword=keyword,
+        local_status=local_status,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
     )
 
 
@@ -1873,10 +2100,172 @@ def _resolve_channel_protocol_route(
 
 
 @router.get("/api/promotion/channels")
-def list_channels(db: DbSession, current_user: CurrentUser) -> dict:
-    statement = select(PromotionChannel)
+def list_channels(
+    db: DbSession,
+    current_user: CurrentUser,
+    keyword: str | None = None,
+    country_code: str | None = Query(default=None, alias="countryCode"),
+    channel_type: str | None = Query(default=None, alias="channelType"),
+    template_id: str | None = Query(default=None, alias="templateId"),
+    account_group_id: str | None = Query(default=None, alias="accountGroupId"),
+    pixel_id: str | None = Query(default=None, alias="pixelId"),
+    meta_domain_status: Literal["normal", "blocked", "unmonitored"] | None = Query(
+        default=None,
+        alias="metaDomainStatus",
+    ),
+    locale: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id",
+        "countryCode",
+        "channelType",
+        "templateName",
+        "accountGroupName",
+        "hostname",
+        "pixelName",
+        "locale",
+        "createdAt",
+        "updatedAt",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
+) -> dict:
+    locale_expression = func.coalesce(
+        PromotionChannel.locale,
+        PromotionTemplate.manifest_json["defaultLocale"].as_string(),
+    )
+    meta_domain_monitored = and_(
+        DomainRecord.id.is_not(None),
+        MetaPixel.enabled.is_(True),
+        MetaPixel.browser_pixel_enabled.is_(True),
+    )
+    statement = (
+        select(PromotionChannel)
+        .outerjoin(
+            PromotionTemplate,
+            PromotionTemplate.id == PromotionChannel.template_id,
+        )
+        .outerjoin(
+            DomainRecord,
+            DomainRecord.id == PromotionChannel.domain_id,
+        )
+        .outerjoin(
+            AccountGroup,
+            AccountGroup.id == PromotionChannel.account_group_id,
+        )
+        .outerjoin(MetaPixel, MetaPixel.id == PromotionChannel.pixel_id)
+    )
     if current_user.role != "admin": statement = statement.where(PromotionChannel.created_by == current_user.id)
-    items = db.scalars(statement.order_by(PromotionChannel.created_at.desc())).all(); return {"data": {"rows": [channel_row(db, x) for x in items], "total": len(items)}}
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        statement = statement.where(
+            or_(
+                cast(PromotionChannel.id, String).ilike(pattern),
+                PromotionChannel.public_id.ilike(pattern),
+                PromotionChannel.name.ilike(pattern),
+                PromotionChannel.country_code.ilike(pattern),
+                PromotionChannel.channel_type.ilike(pattern),
+                PromotionChannel.slug.ilike(pattern),
+                DomainRecord.hostname.ilike(pattern),
+                AccountGroup.name.ilike(pattern),
+                PromotionTemplate.name.ilike(pattern),
+                MetaPixel.name.ilike(pattern),
+            )
+        )
+    if country_code and country_code != "all":
+        statement = statement.where(PromotionChannel.country_code == country_code.upper())
+    if channel_type and channel_type != "all":
+        statement = statement.where(PromotionChannel.channel_type == channel_type)
+    if template_id and template_id != "all":
+        statement = statement.where(identifier_filter(PromotionTemplate, template_id))
+    if account_group_id and account_group_id != "all":
+        statement = statement.where(identifier_filter(AccountGroup, account_group_id))
+    if pixel_id and pixel_id != "all":
+        statement = statement.where(identifier_filter(MetaPixel, pixel_id))
+    if meta_domain_status == "normal":
+        statement = statement.where(
+            meta_domain_monitored,
+            PromotionChannel.meta_domain_blocked.is_(False),
+        )
+    elif meta_domain_status == "blocked":
+        statement = statement.where(
+            meta_domain_monitored,
+            PromotionChannel.meta_domain_blocked.is_(True),
+        )
+    elif meta_domain_status == "unmonitored":
+        statement = statement.where(~meta_domain_monitored)
+    if locale and locale != "all":
+        statement = statement.where(locale_expression == locale)
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    sort_columns = {
+        "id": PromotionChannel.id,
+        "countryCode": PromotionChannel.country_code,
+        "channelType": PromotionChannel.channel_type,
+        "templateName": PromotionTemplate.name,
+        "accountGroupName": AccountGroup.name,
+        "hostname": DomainRecord.hostname,
+        "pixelName": MetaPixel.name,
+        "locale": locale_expression,
+        "createdAt": PromotionChannel.created_at,
+        "updatedAt": PromotionChannel.updated_at,
+    }
+    sort_column = sort_columns[sort_by]
+    ordering = [
+        sort_column.asc().nullslast()
+        if sort_order == "asc"
+        else sort_column.desc().nullslast()
+    ]
+    if sort_by != "id":
+        ordering.append(
+            PromotionChannel.id.asc()
+            if sort_order == "asc"
+            else PromotionChannel.id.desc()
+        )
+    items = db.scalars(
+        statement.order_by(*ordering)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {"data": {"rows": [channel_row(db, x) for x in items], "total": total, "page": page, "pageSize": page_size}}
+
+
+@router.get("/api/promotion/channels/options")
+def list_channel_options(db: DbSession, current_user: CurrentUser) -> dict:
+    statement = (
+        select(
+            PromotionChannel,
+            PromotionTemplate,
+            UserAccount,
+        )
+        .outerjoin(
+            PromotionTemplate,
+            PromotionTemplate.id == PromotionChannel.template_id,
+        )
+        .outerjoin(UserAccount, UserAccount.id == PromotionChannel.created_by)
+    )
+    if current_user.role != "admin":
+        statement = statement.where(PromotionChannel.created_by == current_user.id)
+    items = db.execute(
+        statement.order_by(PromotionChannel.name, PromotionChannel.id)
+    ).all()
+    return {
+        "data": {
+            "rows": [
+                {
+                    "id": entity_id(channel),
+                    "name": channel.name,
+                    "countryCode": channel.country_code,
+                    "channelType": channel.channel_type,
+                    "templateId": entity_id(template) if template else None,
+                    "templateName": template.name if template else None,
+                    "creatorId": str(channel.created_by),
+                    "creatorName": creator.display_name or creator.username if creator else None,
+                }
+                for channel, template, creator in items
+            ],
+            "total": len(items),
+        }
+    }
 
 
 @router.post("/api/promotion/channels", status_code=status.HTTP_201_CREATED)
@@ -3662,6 +4051,7 @@ def public_pairing_status(
         select(PersonalAccount).where(
             PersonalAccount.id == database_id,
             PersonalAccount.created_by == channel.created_by,
+            PersonalAccount.deleted_at.is_(None),
         )
     )
     if item is None:
@@ -3912,6 +4302,7 @@ def cancel_public_pairing(
         select(PersonalAccount).where(
             PersonalAccount.id == database_id,
             PersonalAccount.created_by == channel.created_by,
+            PersonalAccount.deleted_at.is_(None),
         )
     )
     if item is None:
@@ -4069,8 +4460,23 @@ async def report_internal_success(request: Request, db: DbSession) -> JSONRespon
 
 
 @router.get("/api/promotion/channels/{channel_id}/leads")
-def list_leads(channel_id: str, db: DbSession, current_user: CurrentUser) -> dict:
-    channel = _channel(db, channel_id, current_user); items = db.scalars(select(PromotionLead).where(PromotionLead.channel_id == channel.id).order_by(PromotionLead.last_seen_at.desc())).all(); rows = [{"id": entity_id(x), "phone": x.phone_e164, "countryCode": x.country_code, "firstSeenAt": iso(x.first_seen_at), "lastSeenAt": iso(x.last_seen_at), "submissionCount": x.submission_count} for x in items]; return {"data": {"rows": rows, "total": len(rows)}}
+def list_leads(
+    channel_id: str,
+    db: DbSession,
+    current_user: CurrentUser,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+) -> dict:
+    channel = _channel(db, channel_id, current_user)
+    statement = select(PromotionLead).where(PromotionLead.channel_id == channel.id)
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
+    items = db.scalars(
+        statement.order_by(PromotionLead.last_seen_at.desc(), PromotionLead.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    rows = [{"id": entity_id(x), "phone": x.phone_e164, "countryCode": x.country_code, "firstSeenAt": iso(x.first_seen_at), "lastSeenAt": iso(x.last_seen_at), "submissionCount": x.submission_count} for x in items]
+    return {"data": {"rows": rows, "total": total, "page": page, "pageSize": page_size}}
 
 
 @router.get("/api/promotion/channels/{channel_id}/stats")
@@ -4359,13 +4765,19 @@ def list_ad_metrics(
     date_from: date | None = Query(default=None, alias="dateFrom"),
     date_to: date | None = Query(default=None, alias="dateTo"),
     promotion_channel_id: str | None = Query(default=None, alias="promotionChannelId"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
 ) -> dict:
+    statement = _metric_statement(db, current_user, date_from, date_to, promotion_channel_id)
+    total = int(db.scalar(select(func.count()).select_from(statement.subquery())) or 0)
     items = db.scalars(
-        _metric_statement(db, current_user, date_from, date_to, promotion_channel_id).order_by(
+        statement.order_by(
             AdMetric.metric_date.desc(), AdMetric.id.desc()
         )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     ).all()
-    return {"data": {"rows": [_ad_metric_row(db, item) for item in items], "total": len(items)}}
+    return {"data": {"rows": [_ad_metric_row(db, item) for item in items], "total": total, "page": page, "pageSize": page_size}}
 
 
 @router.post("/api/promotion/ad-metrics", status_code=201)
@@ -4623,11 +5035,13 @@ def _analytics_data(
     template_ids_raw: str | None,
     country_codes_raw: str | None,
     creator_ids_raw: str | None,
+    channel_types_raw: str | None = None,
 ) -> dict:
     start, end = _analytics_range(date_from, date_to)
     channel_ids = _csv_values(channel_ids_raw)
     template_ids = _csv_values(template_ids_raw)
     country_codes = {value.upper() for value in _csv_values(country_codes_raw)}
+    channel_types = _csv_values(channel_types_raw)
     try:
         creator_ids = {
             parse_snowflake_id(value) for value in _csv_values(creator_ids_raw)
@@ -4644,6 +5058,8 @@ def _analytics_data(
         statement = statement.where(identifiers_filter(PromotionChannel, channel_ids))
     if country_codes:
         statement = statement.where(PromotionChannel.country_code.in_(country_codes))
+    if channel_types:
+        statement = statement.where(PromotionChannel.channel_type.in_(channel_types))
     if creator_ids:
         statement = statement.where(PromotionChannel.created_by.in_(creator_ids))
     channels = list(db.scalars(statement.order_by(PromotionChannel.created_at.desc())).all())
@@ -4796,6 +5212,8 @@ def _analytics_data(
                 "templateName": template.name if template else None,
                 "creatorId": str(channel.created_by),
                 "creatorName": creator.display_name or creator.username if creator else None,
+                "createdAt": iso(channel.created_at),
+                "updatedAt": iso(channel.updated_at),
                 **_finalize_analytics(bucket),
                 "daily": detail_rows,
             }
@@ -4848,9 +5266,16 @@ def promotion_data_center_trends(
     template_ids: str | None = Query(default=None, alias="templateIds"),
     country_codes: str | None = Query(default=None, alias="countryCodes"),
     creator_ids: str | None = Query(default=None, alias="creatorIds"),
+    sort_by: Literal["date"] = Query(default="date", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="asc", alias="sortOrder"),
 ) -> dict:
     data = _analytics_data(db, current_user, date_from, date_to, channel_ids, template_ids, country_codes, creator_ids)
-    return {"data": {"range": data["range"], "summary": data["summary"], "series": data["series"], "definitions": data["definitions"]}}
+    series = sorted(
+        data["series"],
+        key=lambda row: row[sort_by],
+        reverse=sort_order == "desc",
+    )
+    return {"data": {"range": data["range"], "summary": data["summary"], "series": series, "definitions": data["definitions"]}}
 
 
 @router.get("/api/promotion/data-center/channels")
@@ -4863,6 +5288,62 @@ def promotion_data_center_channels(
     template_ids: str | None = Query(default=None, alias="templateIds"),
     country_codes: str | None = Query(default=None, alias="countryCodes"),
     creator_ids: str | None = Query(default=None, alias="creatorIds"),
+    channel_types: str | None = Query(default=None, alias="channelTypes"),
+    keyword: str = Query(default="", max_length=200),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, alias="pageSize", ge=1, le=100),
+    sort_by: Literal[
+        "id",
+        "countryCode",
+        "channelType",
+        "loginRequestUv",
+        "loginSuccessUv",
+        "requestRate",
+        "successRate",
+        "visitorSuccessRate",
+        "costPerSuccess",
+        "fissionLoginSuccessUv",
+        "templateName",
+        "createdAt",
+        "updatedAt",
+    ] = Query(default="id", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="desc", alias="sortOrder"),
 ) -> dict:
-    data = _analytics_data(db, current_user, date_from, date_to, channel_ids, template_ids, country_codes, creator_ids)
-    return {"data": {"range": data["range"], "summary": data["summary"], "rows": data["rows"], "total": len(data["rows"]), "definitions": data["definitions"]}}
+    data = _analytics_data(db, current_user, date_from, date_to, channel_ids, template_ids, country_codes, creator_ids, channel_types)
+    rows = data["rows"]
+    search = keyword.strip().lower()
+    if search:
+        rows = [
+            row
+            for row in rows
+            if search in f"{row['promotionChannelName']} {row['templateName'] or ''}".lower()
+        ]
+    sort_keys = {
+        "id": "promotionChannelId",
+        "countryCode": "countryCode",
+        "channelType": "channelType",
+        "loginRequestUv": "loginRequestUv",
+        "loginSuccessUv": "loginSuccessUv",
+        "requestRate": "requestRate",
+        "successRate": "successRate",
+        "visitorSuccessRate": "visitorSuccessRate",
+        "costPerSuccess": "costPerSuccess",
+        "fissionLoginSuccessUv": "fissionLoginSuccessUv",
+        "templateName": "templateName",
+        "createdAt": "createdAt",
+        "updatedAt": "updatedAt",
+    }
+    key = sort_keys[sort_by]
+    present = [row for row in rows if row.get(key) not in {None, ""}]
+    missing = [row for row in rows if row.get(key) in {None, ""}]
+    present.sort(
+        key=lambda row: (
+            int(row[key]) if sort_by == "id" else row[key],
+            int(row["promotionChannelId"]),
+        ),
+        reverse=sort_order == "desc",
+    )
+    rows = present + missing
+    total = len(rows)
+    start = (page - 1) * page_size
+    return {"data": {"range": data["range"], "summary": data["summary"], "rows": rows[start:start + page_size], "total": total, "page": page, "pageSize": page_size, "definitions": data["definitions"]}}

@@ -2,6 +2,7 @@ import { ConstructionIcon } from "lucide-react";
 import { EmptyState } from "../components/ui";
 
 export type GroupMarketingPageKind =
+  | "好友营销"
   | "拉群任务-炸群"
   | "模板管理-炸群"
   | "拉群任务-剧本"

@@ -187,11 +187,11 @@ export function SystemConfigurationPage() {
     if (!draft) return;
     const credential = draft.value.trim();
     if (!row.configured && credential.length < 8) {
-      toast.error(`请输入 ${row.credentialLabel}`);
+      toast.warning(`请输入 ${row.credentialLabel}`);
       return;
     }
     if (row.key === "namesilo" && draft.paymentId && !/^\d{1,64}$/.test(draft.paymentId.trim())) {
-      toast.error("NameSilo 支付 ID 只能包含数字");
+      toast.warning("NameSilo 支付 ID 只能包含数字");
       return;
     }
     if (
@@ -200,15 +200,15 @@ export function SystemConfigurationPage() {
       && draft.paymentMode === "verified_card"
       && !draft.paymentId?.trim()
     ) {
-      toast.error("使用已验证信用卡支付时必须填写 NameSilo Payment ID");
+      toast.warning("使用已验证信用卡支付时必须填写 NameSilo Payment ID");
       return;
     }
     if (row.key === "baota" && draft.enabled && !draft.baseUrl?.trim()) {
-      toast.error("启用宝塔面板前请填写面板地址");
+      toast.warning("启用宝塔面板前请填写面板地址");
       return;
     }
     if (row.key === "github" && draft.enabled && !draft.repository?.trim()) {
-      toast.error("启用 GitHub 前请填写私人仓库");
+      toast.warning("启用 GitHub 前请填写私人仓库");
       return;
     }
     setPendingKey(`${row.key}:save`);

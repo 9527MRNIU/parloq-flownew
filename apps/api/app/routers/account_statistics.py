@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -35,6 +36,8 @@ def daily(
         max_length=2,
         pattern=r"^[A-Za-z]{2}$",
     ),
+    sort_by: Literal["date"] = Query(default="date", alias="sortBy"),
+    sort_order: Literal["asc", "desc"] = Query(default="asc", alias="sortOrder"),
 ) -> dict:
     if date_from > date_to:
         raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
@@ -48,6 +51,8 @@ def daily(
         date_to=date_to,
         country_code=normalized_country,
     )
+    if sort_order == "desc":
+        rows = list(reversed(rows))
     return {
         "data": {
             "rows": rows,

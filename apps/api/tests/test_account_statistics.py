@@ -19,7 +19,7 @@ from app.models import (
     UserGroup,
 )
 from app.security import hash_password
-from app.services.account_statistics import LifecyclePoint, _snapshot_at
+from app.services.account_statistics import LifecyclePoint, _active_at, _snapshot_at
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -48,6 +48,29 @@ def test_imported_linked_offline_is_not_valid_until_connected() -> None:
     assert verified_before_connect is False
     assert state_after_connect == connected
     assert verified_after_connect is True
+
+
+def test_deleted_account_remains_in_historical_windows_only() -> None:
+    created_at = datetime(2026, 8, 20, 1, tzinfo=UTC)
+    deleted_at = datetime(2026, 8, 22, 1, tzinfo=UTC)
+    account = PersonalAccount(
+        public_id="wa_deleted_history_window",
+        name="Deleted history window",
+        phone_e164=None,
+        deleted_phone_e164="+12025550880",
+        status="deleted",
+        source="landing_page",
+        validation_status="failed",
+        metadata_sync_status="unsupported",
+        protocol_id=1,
+        enabled=False,
+        marketing_eligible=False,
+        created_by=1,
+        created_at=created_at,
+        deleted_at=deleted_at,
+    )
+    assert _active_at(account, datetime(2026, 8, 21, 1, tzinfo=UTC)) is True
+    assert _active_at(account, datetime(2026, 8, 23, 1, tzinfo=UTC)) is False
 
 
 def _utc_on(day, hour: int) -> datetime:
@@ -280,6 +303,18 @@ def test_account_statistics_are_event_based_and_tenant_scoped(
         assert event_row["postMarketingInvalidRate"] == 0.5
         assert event_row["netGrowth"] == -1
         assert event_row["overallInvalidRate"] == 1
+        descending = owner_client.get(
+            "/api/account-statistics/daily",
+            params={
+                "dateFrom": first_day.isoformat(),
+                "dateTo": today.isoformat(),
+                "sortBy": "date",
+                "sortOrder": "desc",
+            },
+        )
+        assert descending.status_code == 200, descending.text
+        descending_dates = [row["date"] for row in descending.json()["data"]["rows"]]
+        assert descending_dates == sorted(descending_dates, reverse=True)
 
         countries = owner_client.get("/api/account-statistics/countries")
         assert countries.status_code == 200
