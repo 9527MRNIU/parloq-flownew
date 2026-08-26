@@ -208,6 +208,10 @@ const CONTACT_SOURCE_HISTORY = 2
 const CONTACT_SOURCE_MESSAGE = 4
 const CONTACT_SOURCE_REALTIME = 8
 const MAX_TRANSIENT_RECONNECT_ATTEMPTS = 6
+// Baileys keeps AwaitingInitialSync open for 20 seconds. Give its completion
+// event a small scheduling margin instead of declaring the snapshot ready
+// after a shorter, unrelated local timeout.
+const HISTORY_SYNC_WAIT_TIMEOUT_MS = 21_000
 
 export function compatibleWebBrowser(
   baileys: BaileysRuntimeModule,
@@ -436,10 +440,16 @@ function resolveHistoryWaiters(accumulator: ResourceAccumulator): void {
 
 async function waitForHistory(accumulator: ResourceAccumulator): Promise<void> {
   if (!accumulator.historyRequested || accumulator.historyComplete) return
-  await Promise.race([
-    new Promise<void>((resolve) => accumulator.historyWaiters.add(resolve)),
-    new Promise<void>((resolve) => setTimeout(resolve, 8_000)),
-  ])
+  await new Promise<void>((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const finish = () => {
+      if (timer) clearTimeout(timer)
+      accumulator.historyWaiters.delete(finish)
+      resolve()
+    }
+    accumulator.historyWaiters.add(finish)
+    timer = setTimeout(finish, HISTORY_SYNC_WAIT_TIMEOUT_MS)
+  })
 }
 
 function sameIdentity(
@@ -1288,13 +1298,17 @@ export class MockEngine implements ProtocolEngine {
     if (!this.isOnline(id)) throw new Error('account is offline')
     return `mock-${crypto.randomUUID()}`
   }
-  async getQuality(_id: string, _policy: SyncPolicy): Promise<AccountQuality> {
+  async getQuality(_id: string, policy: SyncPolicy): Promise<AccountQuality> {
+    const resources = emptyAccountResources()
+    resources.contactsStatus = policy.contacts ? 'complete' : 'disabled'
+    resources.contactsComplete = policy.contacts
+    resources.groupsStatus = policy.groupDetails ? 'complete' : 'disabled'
     return {
       hasAvatar: null,
-      groupCount: null,
-      friendCount: null,
+      groupCount: policy.groupDetails ? 0 : null,
+      friendCount: policy.contacts ? 0 : null,
       metadata: {},
-      resources: emptyAccountResources(),
+      resources,
     }
   }
 }

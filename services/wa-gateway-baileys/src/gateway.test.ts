@@ -573,6 +573,34 @@ describe('Baileys gateway HTTP contract', () => {
     expect(engine.isOnline('wa_existing_metadata')).toBe(true)
   })
 
+  it('keeps an incomplete Baileys resource snapshot pending', async () => {
+    const headers = { authorization: `Bearer ${token}` }
+    await app.inject({ method: 'POST', url: '/v1/accounts', headers, payload: { id: 'wa_incomplete_metadata', phoneE164: '+14155550141' } })
+    await app.inject({ method: 'POST', url: '/v1/accounts/wa_incomplete_metadata/pairing-code', headers, payload: {} })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const resources = emptyAccountResources()
+    resources.contactsStatus = 'pending'
+    resources.groupsStatus = 'disabled'
+    vi.spyOn(engine, 'getQuality').mockResolvedValueOnce({
+      hasAvatar: null,
+      groupCount: null,
+      friendCount: 0,
+      metadata: {},
+      resources,
+    })
+
+    const synced = await app.inject({
+      method: 'POST',
+      url: '/v1/accounts/wa_incomplete_metadata/metadata-sync',
+      headers,
+      payload: { syncPolicy: { contacts: true, groupDetails: false } },
+    })
+
+    expect(synced.statusCode).toBe(200)
+    expect(synced.json().data.metadataSyncStatus).toBe('pending')
+    expect((await store.getAccount('wa_incomplete_metadata')).metadataSyncStatus).toBe('pending')
+  })
+
   it('returns downloaded avatars transiently without storing Base64 in the gateway account', async () => {
     const headers = { authorization: `Bearer ${token}` }
     vi.spyOn(engine, 'getQuality').mockResolvedValue({

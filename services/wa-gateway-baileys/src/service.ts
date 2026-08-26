@@ -36,6 +36,14 @@ export function customPairingCode(
   return normalized
 }
 
+function metadataResourcesComplete(
+  policy: SyncPolicy,
+  resources: AccountResourceSnapshot,
+): boolean {
+  return (!policy.contacts || resources.contactsStatus === 'complete')
+    && (!policy.groupDetails || resources.groupsStatus === 'complete')
+}
+
 function pairingCodeFromCreds(value: unknown): string | null {
   if (!value || typeof value !== 'object') return null
   const code = (value as { pairingCode?: unknown }).pairingCode
@@ -522,6 +530,12 @@ export class GatewayService {
     // the post-verify/idle timer from closing it halfway through history wait.
     this.clearIdleDisconnect(id)
     const wasOnline = this.engine.isOnline(id)
+    const postVerifyDeadline = wasOnline
+      && current.state === 'online_idle'
+      && current.pairingStatus === 'verified'
+      && current.metadataSyncStatus === 'pending'
+      ? current.stateChangedAt.getTime() + current.postVerifyGraceSeconds * 1_000
+      : null
     const requestContactsHistory = current.syncPolicy.contacts || current.syncPolicy.groupDetails
     const historyAlreadyPrepared = current.metadata.requestContactsHistory === true
     let avatar: AccountAvatar | null | undefined
@@ -570,7 +584,13 @@ export class GatewayService {
         await this.disconnect(id)
       }
       if (shouldRemainOnline && this.engine.isOnline(id)) {
-        this.scheduleIdleDisconnect(await this.store.getAccount(id))
+        const remainingGraceSeconds = postVerifyDeadline === null
+          ? undefined
+          : Math.max(0, Math.ceil((postVerifyDeadline - Date.now()) / 1_000))
+        this.scheduleIdleDisconnect(
+          await this.store.getAccount(id),
+          remainingGraceSeconds,
+        )
       }
     }
     const response = publicAccount(await this.store.getAccount(id))
@@ -735,8 +755,12 @@ export class GatewayService {
             syncedAt: resources.syncedAt,
           },
         }
+        const metadataSyncStatus = metadataResourcesComplete(
+          account.syncPolicy,
+          resources,
+        ) ? 'ready' : 'pending'
         const updated = await this.store.updateAccount(account.id, {
-          metadataSyncStatus: 'ready',
+          metadataSyncStatus,
           ...persistentQuality,
           metadata: mergedMetadata,
         })

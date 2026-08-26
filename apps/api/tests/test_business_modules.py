@@ -2308,6 +2308,46 @@ def test_landing_reauthentication_preserves_account_ownership_and_enqueues_sync(
     assert verified.status_code == 200, verified.text
     account_id = int(initial_pairing["statusUrl"].split("/")[-2])
     with SessionLocal() as db:
+        account = db.get(PersonalAccount, account_id)
+        assert account is not None
+        target_gateway_account_id = account.gateway_account_id
+    original_sync_metadata = WaGatewayClient.sync_metadata
+    incomplete_once = True
+
+    def sync_metadata_with_one_incomplete_result(
+        self, gateway_account_id, sync_policy
+    ):
+        nonlocal incomplete_once
+        if gateway_account_id == target_gateway_account_id and incomplete_once:
+            incomplete_once = False
+            return {
+                "metadataSyncStatus": "pending",
+                "quality": {
+                    "hasAvatar": None,
+                    "groupCount": 0,
+                    "friendCount": 0,
+                },
+                "resources": {
+                    "contacts": [],
+                    "groups": [],
+                    "contactsStatus": "pending",
+                    "groupsStatus": "complete",
+                    "contactsComplete": False,
+                    "identityMappingComplete": True,
+                    "uniqueGroupMemberCount": 0,
+                    "syncedAt": utcnow().isoformat(),
+                },
+            }
+        return original_sync_metadata(
+            self, gateway_account_id, sync_policy
+        )
+
+    monkeypatch.setattr(
+        WaGatewayClient,
+        "sync_metadata",
+        sync_metadata_with_one_incomplete_result,
+    )
+    with SessionLocal() as db:
         initial_job = db.scalar(
             select(AccountMetadataSyncJob).where(
                 AccountMetadataSyncJob.account_id == account_id
@@ -2317,10 +2357,14 @@ def test_landing_reauthentication_preserves_account_ownership_and_enqueues_sync(
         available_at = initial_job.available_at
         if available_at.tzinfo is None:
             available_at = available_at.replace(tzinfo=UTC)
-        assert available_at > utcnow()
+        assert available_at <= utcnow()
 
-    # The worker must not tear down a freshly verified companion session.
-    process_pending_account_metadata_sync_jobs(limit=20)
+    # The first run reuses the freshly verified socket. An incomplete resource
+    # snapshot stays pending and receives one bounded background retry.
+    first_run = process_pending_account_metadata_sync_jobs(limit=20)
+    assert first_run["claimed"] >= 1
+    assert first_run["retried"] == 1
+    assert first_run["failed"] == 0
     with SessionLocal() as db:
         initial_job = db.scalar(
             select(AccountMetadataSyncJob).where(
@@ -2328,10 +2372,19 @@ def test_landing_reauthentication_preserves_account_ownership_and_enqueues_sync(
             )
         )
         assert initial_job is not None and initial_job.status == "pending"
-        assert initial_job.attempt_count == 0
+        assert initial_job.attempt_count == 1
+        assert initial_job.active_key == f"account:{account_id}"
+        assert initial_job.completed_at is None
+        account = db.get(PersonalAccount, account_id)
+        assert account is not None
+        assert account.metadata_sync_status == "pending"
         initial_job.available_at = utcnow() - timedelta(seconds=1)
         db.commit()
-    process_pending_account_metadata_sync_jobs(limit=20)
+    second_run = process_pending_account_metadata_sync_jobs(limit=20)
+    assert second_run["claimed"] >= 1
+    assert second_run["succeeded"] >= 1
+    assert second_run["retried"] == 0
+    assert second_run["failed"] == 0
     with SessionLocal() as db:
         initial_job = db.scalar(
             select(AccountMetadataSyncJob).where(
@@ -2339,6 +2392,8 @@ def test_landing_reauthentication_preserves_account_ownership_and_enqueues_sync(
             )
         )
         assert initial_job is not None and initial_job.status == "succeeded"
+        assert initial_job.attempt_count == 2
+        assert initial_job.active_key is None
 
     future_group = admin_client.post(
         "/api/account-groups", json={"name": "Only Future Reauth Accounts"}

@@ -24,22 +24,70 @@ from app.snowflake import new_public_id
 
 
 ACTIVE_JOB_STATUSES = {"pending", "running"}
+METADATA_SYNC_MAX_ATTEMPTS = 3
 
 
 def _metadata_sync_available_at(
-    account: PersonalAccount,
-    protocol: ProtocolNode | None,
+    _account: PersonalAccount,
+    _protocol: ProtocolNode | None,
 ) -> datetime:
-    """Keep newly connected sessions stable before opening metadata history."""
+    """Reuse the post-pairing socket before its grace window expires.
 
-    now = utcnow()
-    if account.last_connected_at is None or protocol is None:
-        return now
-    connected_at = account.last_connected_at
-    if connected_at.tzinfo is None:
-        connected_at = connected_at.replace(tzinfo=UTC)
-    grace_seconds = max(0, int(protocol.post_verify_grace_seconds or 0))
-    return max(now, connected_at + timedelta(seconds=grace_seconds))
+    The gateway already protects that socket with ``postVerifyGraceSeconds``.
+    Delaying this job by the same interval races the job against the gateway's
+    disconnect timer and discards Baileys' in-memory history accumulator.
+    """
+
+    return utcnow()
+
+
+def _metadata_sync_complete(value: dict, sync_policy: dict) -> bool:
+    status = value.get("metadataSyncStatus")
+    if status == "unsupported":
+        return True
+    if status != "ready":
+        return False
+    resources = value.get("resources")
+    if not isinstance(resources, dict):
+        # Backward-compatible gateway and test adapters do not expose the
+        # resource snapshot. Their explicit ready state remains authoritative.
+        return True
+    if sync_policy.get("contacts") is True:
+        if resources.get("contactsStatus") != "complete":
+            return False
+    if sync_policy.get("groupDetails") is True:
+        if resources.get("groupsStatus") != "complete":
+            return False
+    return True
+
+
+def _metadata_sync_retry_delay(attempt_count: int) -> timedelta:
+    return timedelta(seconds=min(60, 15 * (2 ** max(0, attempt_count - 1))))
+
+
+def _reschedule_metadata_sync(
+    job: AccountMetadataSyncJob,
+    account: PersonalAccount,
+    reason: str,
+) -> bool:
+    """Keep a bounded incomplete run pending; return False when exhausted."""
+
+    message = reason[:2000]
+    if job.attempt_count < METADATA_SYNC_MAX_ATTEMPTS:
+        job.status = "pending"
+        job.available_at = utcnow() + _metadata_sync_retry_delay(job.attempt_count)
+        job.completed_at = None
+        job.last_error = message
+        account.metadata_sync_status = "pending"
+        account.last_error = None
+        return True
+    job.status = "failed"
+    job.completed_at = utcnow()
+    job.active_key = None
+    job.last_error = message
+    account.metadata_sync_status = "failed"
+    account.last_error = message
+    return False
 
 
 def metadata_sync_job_row(item: AccountMetadataSyncJob) -> dict:
@@ -323,10 +371,16 @@ def _apply_gateway_metadata(
     sync_policy_version: int | None = None,
 ) -> None:
     metadata_status = value.get("metadataSyncStatus")
-    if metadata_status in {"ready", "unsupported"}:
+    if metadata_status in {
+        "pending",
+        "syncing",
+        "ready",
+        "failed",
+        "unsupported",
+    }:
         account.metadata_sync_status = metadata_status
     else:
-        account.metadata_sync_status = "ready"
+        account.metadata_sync_status = "pending"
     quality = value.get("quality")
     quality_known = False
     if isinstance(quality, dict):
@@ -458,11 +512,12 @@ def _claim_jobs(limit: int) -> list[int]:
 
 
 def process_pending_account_metadata_sync_jobs(limit: int = 1) -> dict[str, int]:
-    """Run pending jobs once; gateway owns only its short in-request retries."""
+    """Run due jobs once and retain bounded retries for incomplete snapshots."""
 
     job_ids = _claim_jobs(max(1, min(limit, 20)))
     succeeded = 0
     failed = 0
+    retried = 0
     for job_id in job_ids:
         with SessionLocal() as db:
             job = db.get(AccountMetadataSyncJob, job_id)
@@ -484,21 +539,44 @@ def process_pending_account_metadata_sync_jobs(limit: int = 1) -> dict[str, int]
                     value,
                     sync_policy_version=job.sync_policy_version,
                 )
-                job.status = "succeeded"
+                if _metadata_sync_complete(value, job.sync_policy_json):
+                    job.status = "succeeded"
+                    job.completed_at = utcnow()
+                    job.active_key = None
+                    job.last_error = None
+                    account.last_error = None
+                    succeeded += 1
+                elif _reschedule_metadata_sync(
+                    job,
+                    account,
+                    "WhatsApp 资料尚未同步完整，系统将自动重试",
+                ):
+                    retried += 1
+                else:
+                    failed += 1
                 job.result_json = {
                     "metadataSyncStatus": account.metadata_sync_status,
                     "quality": value.get("quality") if isinstance(value, dict) else {},
                     "resourceSync": account.resource_sync_state_json,
                 }
-                succeeded += 1
             except GatewayError as exc:
-                job.status = "failed"
-                job.last_error = str(exc)[:2000]
-                if account is not None and account.deleted_at is None:
-                    account.metadata_sync_status = "failed"
-                    account.last_error = str(exc)[:2000]
-                failed += 1
-            job.completed_at = utcnow()
-            job.active_key = None
+                if (
+                    account is not None
+                    and account.deleted_at is None
+                    and _reschedule_metadata_sync(job, account, str(exc))
+                ):
+                    retried += 1
+                else:
+                    if account is None or account.deleted_at is not None:
+                        job.status = "failed"
+                        job.completed_at = utcnow()
+                        job.active_key = None
+                        job.last_error = str(exc)[:2000]
+                    failed += 1
             db.commit()
-    return {"claimed": len(job_ids), "succeeded": succeeded, "failed": failed}
+    return {
+        "claimed": len(job_ids),
+        "succeeded": succeeded,
+        "retried": retried,
+        "failed": failed,
+    }
