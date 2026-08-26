@@ -398,6 +398,9 @@ function RecordDetail({
             <RecordDetailField label="采集来源">
               {networkSourceLabel(item.networkSource)}
             </RecordDetailField>
+            <RecordDetailField label="User-Agent">
+              {item.device.userAgent || "未采集"}
+            </RecordDetailField>
           </dl>
         </div>
       </div>
