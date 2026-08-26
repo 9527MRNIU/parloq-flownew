@@ -26,6 +26,22 @@ from app.snowflake import new_public_id
 ACTIVE_JOB_STATUSES = {"pending", "running"}
 
 
+def _metadata_sync_available_at(
+    account: PersonalAccount,
+    protocol: ProtocolNode | None,
+) -> datetime:
+    """Keep newly connected sessions stable before opening metadata history."""
+
+    now = utcnow()
+    if account.last_connected_at is None or protocol is None:
+        return now
+    connected_at = account.last_connected_at
+    if connected_at.tzinfo is None:
+        connected_at = connected_at.replace(tzinfo=UTC)
+    grace_seconds = max(0, int(protocol.post_verify_grace_seconds or 0))
+    return max(now, connected_at + timedelta(seconds=grace_seconds))
+
+
 def metadata_sync_job_row(item: AccountMetadataSyncJob) -> dict:
     return {
         "id": str(item.id),
@@ -35,6 +51,7 @@ def metadata_sync_job_row(item: AccountMetadataSyncJob) -> dict:
         "syncPolicy": item.sync_policy_json,
         "status": item.status,
         "attemptCount": item.attempt_count,
+        "availableAt": item.available_at.isoformat() if item.available_at else None,
         "startedAt": item.started_at.isoformat() if item.started_at else None,
         "completedAt": item.completed_at.isoformat() if item.completed_at else None,
         "lastError": item.last_error,
@@ -70,10 +87,15 @@ def enqueue_account_metadata_sync(
         if sync_policy_version is not None
         else protocol.sync_policy_version if protocol is not None else 1
     )
+    available_at = _metadata_sync_available_at(account, protocol)
     if existing is not None:
         if existing.status == "pending":
             existing.sync_policy_json = policy
             existing.sync_policy_version = version
+            current_available_at = existing.available_at
+            if current_available_at.tzinfo is None:
+                current_available_at = current_available_at.replace(tzinfo=UTC)
+            existing.available_at = max(current_available_at, available_at)
             account.metadata_sync_status = "pending"
         return existing
     item = AccountMetadataSyncJob(
@@ -85,6 +107,7 @@ def enqueue_account_metadata_sync(
         status="pending",
         active_key=active_key,
         attempt_count=0,
+        available_at=available_at,
         result_json={},
         created_by=account.created_by,
     )
@@ -384,7 +407,10 @@ def _claim_jobs(limit: int) -> list[int]:
                     PersonalAccount.id == AccountMetadataSyncJob.account_id,
                 )
                 .where(
-                    (AccountMetadataSyncJob.status == "pending")
+                    (
+                        (AccountMetadataSyncJob.status == "pending")
+                        & (AccountMetadataSyncJob.available_at <= utcnow())
+                    )
                     | (
                         (AccountMetadataSyncJob.status == "running")
                         & (AccountMetadataSyncJob.started_at < stale_before)
@@ -409,6 +435,7 @@ def _claim_jobs(limit: int) -> list[int]:
                     .exists(),
                 )
                 .order_by(
+                    AccountMetadataSyncJob.available_at,
                     AccountMetadataSyncJob.created_at,
                     AccountMetadataSyncJob.id,
                 )

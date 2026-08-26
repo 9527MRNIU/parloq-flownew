@@ -1619,6 +1619,7 @@ class AccountMetadataSyncJob(Base, TimestampMixin):
         Index(
             "ix_account_metadata_sync_jobs_pending",
             "status",
+            "available_at",
             "created_at",
         ),
     )
@@ -1650,6 +1651,9 @@ class AccountMetadataSyncJob(Base, TimestampMixin):
         String(80), unique=True, index=True
     )
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)

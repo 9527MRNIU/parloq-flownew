@@ -105,6 +105,7 @@ export class GatewayService {
       // gateway restarted, that socket no longer exists and the old code must
       // not be restored or shown as usable.
       await this.store.clearAuth(account.id)
+      await this.clearRequestedHistory(account.id)
       await this.transitionAccount(account.id, 'unpaired', {
         deviceJid: '',
         autoConnect: false,
@@ -252,6 +253,14 @@ export class GatewayService {
     }
     if (phoneOverride) current = await this.store.updateAccount(id, { phoneE164: normalizeE164(phoneOverride) })
     if (this.engine.name !== 'mock' && !current.proxyUrl) throw new GatewayError('conflict', 'a fixed proxy is required before pairing')
+    if (current.syncPolicy.contacts || current.syncPolicy.groupDetails) {
+      // Prepare the natural post-pairing socket for the one-shot history
+      // import. The later metadata task can then reuse that connection rather
+      // than interrupting the phone's companion-device initialization.
+      current = await this.store.updateAccount(id, {
+        metadata: { ...current.metadata, requestContactsHistory: true },
+      })
+    }
     const requestedPairingCode = customPairingCode(pairingCodeMode, fixedPairingCode)
     const provisionalExpiry = new Date(Date.now() + PAIRING_CODE_TTL_MS)
     await this.transitionAccount(id, 'pairing', {
@@ -276,6 +285,7 @@ export class GatewayService {
       this.clearPairingExpiry(id)
       await this.engine.disconnect(id)
       await this.store.clearAuth(id)
+      await this.clearRequestedHistory(id)
       await this.transitionAccount(
         id,
         'unpaired',
@@ -332,6 +342,7 @@ export class GatewayService {
     this.clearPairingExpiry(id)
     await this.engine.disconnect(id)
     await this.store.clearAuth(id)
+    await this.clearRequestedHistory(id)
     return publicAccount(await this.transitionAccount(id, 'unpaired', {
       deviceJid: '',
       autoConnect: false,
@@ -363,6 +374,11 @@ export class GatewayService {
       // Wait for its durable state transition so this generic failure path does
       // not overwrite terminal states such as restricted or logged out.
       await this.pendingEngineEvents.get(id)
+      if (current.connectionPolicy !== 'always_on') {
+        // An explicit on-demand connect owns its retry lifecycle. Stop the
+        // engine's background retry after the request has conclusively failed.
+        await this.engine.disconnect(id)
+      }
       const failed = await this.store.getAccount(id)
       if (!['restricted', 'reauth_required', 'unpaired'].includes(failed.state)) {
         await this.transitionAccount(id, 'linked_offline', { autoConnect: false }, 'connect_failed')
@@ -502,49 +518,59 @@ export class GatewayService {
     if (current.state === 'sending' || (this.queueDepth.get(id) ?? 0) > 0) {
       throw new GatewayError('conflict', 'account has messages in flight; retry metadata synchronization later')
     }
+    // Metadata collection owns the socket for this bounded operation. Prevent
+    // the post-verify/idle timer from closing it halfway through history wait.
+    this.clearIdleDisconnect(id)
     const wasOnline = this.engine.isOnline(id)
     const requestContactsHistory = current.syncPolicy.contacts || current.syncPolicy.groupDetails
-    if (requestContactsHistory) {
-      current = await this.store.updateAccount(id, {
-        metadata: { ...current.metadata, requestContactsHistory: true },
-      })
-      if (wasOnline) await this.engine.disconnect(id)
-    }
-    if (!this.engine.isOnline(id)) {
-      await this.connect(id)
-      current = await this.store.getAccount(id)
-    }
-    await this.store.updateAccount(id, { metadataSyncStatus: 'syncing' })
+    const historyAlreadyPrepared = current.metadata.requestContactsHistory === true
     let avatar: AccountAvatar | null | undefined
     let avatarIncluded = false
     let resources: AccountResourceSnapshot | undefined
+    let connectionFailed = false
     try {
+      if (requestContactsHistory && !historyAlreadyPrepared) {
+        current = await this.store.updateAccount(id, {
+          metadata: { ...current.metadata, requestContactsHistory: true },
+        })
+        // Existing sessions need one controlled reconnect to opt into full
+        // history. Freshly paired sessions already opened with this flag and
+        // are deliberately left untouched.
+        if (wasOnline) await this.engine.disconnect(id)
+      }
+      if (!this.engine.isOnline(id)) {
+        try {
+          await this.connect(id)
+        } catch (error) {
+          connectionFailed = true
+          throw error
+        }
+        current = await this.store.getAccount(id)
+      }
+      await this.store.updateAccount(id, { metadataSyncStatus: 'syncing' })
       const synced = await this.syncMetadata(await this.store.getAccount(id))
       avatar = synced.avatar
       avatarIncluded = synced.avatarIncluded
       resources = synced.resources
+    } catch (error) {
+      await this.store.updateAccount(id, { metadataSyncStatus: 'failed' })
+      throw error
     } finally {
       let latest = await this.store.getAccount(id)
       if (requestContactsHistory) {
-        const metadata = { ...latest.metadata }
-        delete metadata.requestContactsHistory
-        latest = await this.store.updateAccount(id, { metadata })
-        // The explicit history socket captures requestContactsHistory in its
-        // reconnect closure. Replace it after this one-shot run so later
-        // routine reconnects never request history again.
-        if (this.engine.isOnline(id)) await this.engine.disconnect(id)
+        await this.clearRequestedHistory(id)
+        latest = await this.store.getAccount(id)
       }
       const shouldRemainOnline = wasOnline || latest.connectionPolicy === 'always_on'
-      if (shouldRemainOnline && !this.engine.isOnline(id)) {
+      if (shouldRemainOnline && !connectionFailed && !this.engine.isOnline(id)) {
         try { await this.connect(id) } catch (error) {
           this.logger.warn({ accountId: id, error: safeError(error) }, 'metadata_sync_online_restore_failed')
         }
       } else if (!shouldRemainOnline && this.engine.isOnline(id)) {
         await this.disconnect(id)
-      } else if (!shouldRemainOnline && requestContactsHistory) {
-        // A raw engine disconnect above must also be reflected in the durable
-        // account state for on-demand accounts.
-        await this.disconnect(id)
+      }
+      if (shouldRemainOnline && this.engine.isOnline(id)) {
+        this.scheduleIdleDisconnect(await this.store.getAccount(id))
       }
     }
     const response = publicAccount(await this.store.getAccount(id))
@@ -641,6 +667,14 @@ export class GatewayService {
     const timer = this.pairingExpiryTimers.get(id)
     if (timer) clearTimeout(timer)
     this.pairingExpiryTimers.delete(id)
+  }
+
+  private async clearRequestedHistory(id: string): Promise<void> {
+    const current = await this.store.getAccount(id)
+    if (current.metadata.requestContactsHistory !== true) return
+    const metadata = { ...current.metadata }
+    delete metadata.requestContactsHistory
+    await this.store.updateAccount(id, { metadata })
   }
 
   private clearIdleDisconnect(id: string): void {
@@ -754,6 +788,7 @@ export class GatewayService {
     this.clearPairingExpiry(id)
     await this.engine.disconnect(id)
     await this.store.clearAuth(id)
+    await this.clearRequestedHistory(id)
     return this.transitionAccount(id, 'unpaired', {
       deviceJid: '',
       autoConnect: false,
@@ -830,6 +865,7 @@ export class GatewayService {
         if (pairingActive) {
           this.clearPairingExpiry(event.accountId)
           await this.store.clearAuth(event.accountId)
+          await this.clearRequestedHistory(event.accountId)
           await this.transitionAccount(event.accountId, 'unpaired', {
             deviceJid: '',
             autoConnect: false,
@@ -852,6 +888,7 @@ export class GatewayService {
           // phone authorizes the companion. Such a socket cannot complete the
           // handshake and must never be presented as a linked account.
           await this.store.clearAuth(event.accountId)
+          await this.clearRequestedHistory(event.accountId)
           await this.transitionAccount(
             event.accountId,
             'unpaired',
@@ -864,12 +901,15 @@ export class GatewayService {
       } else if (event.kind === 'logged_out') {
         this.clearPairingExpiry(event.accountId)
         await this.store.clearAuth(event.accountId)
+        await this.clearRequestedHistory(event.accountId)
         await this.transitionAccount(event.accountId, 'unpaired', { deviceJid: '', autoConnect: false, sessionStatus: 'none', sessionCompleteness: 'none', pairingStatus: 'failed', pairingExpiresAt: null }, event.reasonCategory, event.providerCode, event.failure)
       } else if (event.kind === 'reauth_required') {
         this.clearPairingExpiry(event.accountId)
+        await this.clearRequestedHistory(event.accountId)
         await this.transitionAccount(event.accountId, 'reauth_required', { autoConnect: false }, event.reasonCategory, event.providerCode, event.failure)
       } else if (event.kind === 'restricted') {
         this.clearPairingExpiry(event.accountId)
+        await this.clearRequestedHistory(event.accountId)
         await this.transitionAccount(event.accountId, 'restricted', { autoConnect: false }, event.reasonCategory, event.providerCode, event.failure)
       } else if (event.kind === 'delivered') {
         const message = await this.store.markDeliveredByProvider(event.accountId, event.providerMessageId)

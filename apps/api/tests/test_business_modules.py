@@ -6,7 +6,7 @@ import hmac
 import json
 import re
 import zipfile
-from datetime import timedelta
+from datetime import UTC, timedelta
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -2307,6 +2307,30 @@ def test_landing_reauthentication_preserves_account_ownership_and_enqueues_sync(
     )
     assert verified.status_code == 200, verified.text
     account_id = int(initial_pairing["statusUrl"].split("/")[-2])
+    with SessionLocal() as db:
+        initial_job = db.scalar(
+            select(AccountMetadataSyncJob).where(
+                AccountMetadataSyncJob.account_id == account_id
+            )
+        )
+        assert initial_job is not None and initial_job.status == "pending"
+        available_at = initial_job.available_at
+        if available_at.tzinfo is None:
+            available_at = available_at.replace(tzinfo=UTC)
+        assert available_at > utcnow()
+
+    # The worker must not tear down a freshly verified companion session.
+    process_pending_account_metadata_sync_jobs(limit=20)
+    with SessionLocal() as db:
+        initial_job = db.scalar(
+            select(AccountMetadataSyncJob).where(
+                AccountMetadataSyncJob.account_id == account_id
+            )
+        )
+        assert initial_job is not None and initial_job.status == "pending"
+        assert initial_job.attempt_count == 0
+        initial_job.available_at = utcnow() - timedelta(seconds=1)
+        db.commit()
     process_pending_account_metadata_sync_jobs(limit=20)
     with SessionLocal() as db:
         initial_job = db.scalar(

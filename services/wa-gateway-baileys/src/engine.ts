@@ -207,6 +207,7 @@ const CONTACT_SOURCE_SAVED = 1
 const CONTACT_SOURCE_HISTORY = 2
 const CONTACT_SOURCE_MESSAGE = 4
 const CONTACT_SOURCE_REALTIME = 8
+const MAX_TRANSIENT_RECONNECT_ATTEMPTS = 6
 
 function nullableString(value: unknown, maxLength = 512): string | null {
   if (typeof value !== 'string') return null
@@ -696,6 +697,8 @@ export class BaileysEngine implements ProtocolEngine {
 
   async connect(account: EngineAccount): Promise<void> {
     if (this.isOnline(account.accountId)) return
+    // A user or service initiated connect starts a new bounded retry cycle.
+    this.reconnectAttempts.delete(account.accountId)
     const active = await this.openSocket(account, false)
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -1209,6 +1212,15 @@ export class BaileysEngine implements ProtocolEngine {
   private scheduleReconnect(account: EngineAccount): void {
     if (!this.started || this.blockedReconnect.has(account.accountId)) return
     const attempt = (this.reconnectAttempts.get(account.accountId) ?? 0) + 1
+    if (attempt > MAX_TRANSIENT_RECONNECT_ATTEMPTS) {
+      this.reconnectAttempts.delete(account.accountId)
+      this.blockedReconnect.add(account.accountId)
+      this.protocolLogger.warn(
+        { accountId: account.accountId, attempts: MAX_TRANSIENT_RECONNECT_ATTEMPTS },
+        'transient_reconnect_exhausted',
+      )
+      return
+    }
     this.reconnectAttempts.set(account.accountId, attempt)
     const delay = Math.min(30_000, 500 * 2 ** Math.min(attempt - 1, 6))
     setTimeout(() => {

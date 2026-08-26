@@ -1941,3 +1941,52 @@ def test_protocol_pairing_code_migration_keeps_existing_nodes_unconfigured(
     assert "pairing_code_mode" not in downgraded_columns
     assert "fixed_pairing_code" not in downgraded_columns
     engine.dispose()
+
+
+def test_metadata_sync_window_migration_updates_the_pending_queue_index(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'metadata-sync-window.db'}"
+    _alembic(database_url, "0079_protocol_pairing_codes")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    assert "available_at" not in {
+        column["name"]
+        for column in inspector.get_columns("account_metadata_sync_jobs")
+    }
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    columns = {
+        column["name"]: column
+        for column in inspector.get_columns("account_metadata_sync_jobs")
+    }
+    assert columns["available_at"]["nullable"] is False
+    pending_index = next(
+        index
+        for index in inspector.get_indexes("account_metadata_sync_jobs")
+        if index["name"] == "ix_account_metadata_sync_jobs_pending"
+    )
+    assert pending_index["column_names"] == [
+        "status",
+        "available_at",
+        "created_at",
+    ]
+    engine.dispose()
+
+    _alembic_downgrade(database_url, "0079_protocol_pairing_codes")
+    engine = sa.create_engine(database_url)
+    inspector = sa.inspect(engine)
+    assert "available_at" not in {
+        column["name"]
+        for column in inspector.get_columns("account_metadata_sync_jobs")
+    }
+    pending_index = next(
+        index
+        for index in inspector.get_indexes("account_metadata_sync_jobs")
+        if index["name"] == "ix_account_metadata_sync_jobs_pending"
+    )
+    assert pending_index["column_names"] == ["status", "created_at"]
+    engine.dispose()

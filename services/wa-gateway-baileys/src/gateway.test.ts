@@ -155,6 +155,30 @@ class TerminalConnectEngine implements ProtocolEngine {
   isOnline(_accountId: string): boolean { return false }
 }
 
+class TransientConnectEngine implements ProtocolEngine {
+  readonly name = 'transient-test'
+  private handler: (event: EngineEvent) => void = () => undefined
+  setEventHandler(handler: (event: EngineEvent) => void): void { this.handler = handler }
+  async start(): Promise<void> {}
+  async ready(): Promise<void> {}
+  async close(): Promise<void> {}
+  async pair(_account: EngineAccount): Promise<PairResult> { throw new Error('not implemented') }
+  async connect(account: EngineAccount): Promise<void> {
+    this.handler({
+      kind: 'disconnected',
+      accountId: account.accountId,
+      reasonCategory: 'connection_lost',
+      providerCode: '428',
+    })
+    throw new Error('Connection Terminated')
+  }
+  async disconnect(_accountId: string): Promise<void> {}
+  async logout(_account: EngineAccount): Promise<void> {}
+  async send(_accountId: string, _toE164: string, _message: import('./message-content.js').OutboundMessage): Promise<string> { throw new Error('not implemented') }
+  async getQuality(_accountId: string): Promise<AccountQuality> { throw new Error('account is offline') }
+  isOnline(_accountId: string): boolean { return false }
+}
+
 class InterruptedPairingEngine implements ProtocolEngine {
   readonly name = 'interrupted-pairing-test'
   private handler: (event: EngineEvent) => void = () => undefined
@@ -500,7 +524,9 @@ describe('Baileys gateway HTTP contract', () => {
 
   it('runs metadata collection only through the explicit background-task endpoint', async () => {
     const headers = { authorization: `Bearer ${token}` }
+    const pair = vi.spyOn(engine, 'pair')
     const connect = vi.spyOn(engine, 'connect')
+    const disconnect = vi.spyOn(engine, 'disconnect')
     await app.inject({ method: 'POST', url: '/v1/accounts', headers, payload: { id: 'wa_metadata', phoneE164: '+14155550137' } })
     await app.inject({ method: 'POST', url: '/v1/accounts/wa_metadata/pairing-code', headers, payload: {} })
     await new Promise((resolve) => setTimeout(resolve, 0))
@@ -514,11 +540,37 @@ describe('Baileys gateway HTTP contract', () => {
     })
     expect(synced.statusCode).toBe(200)
     expect(synced.json().data.metadataSyncStatus).toBe('ready')
-    expect((await store.getAccount('wa_metadata')).metadataSyncStatus).toBe('ready')
-    expect(connect).toHaveBeenCalledTimes(2)
-    expect(connect.mock.calls[0]?.[0].metadata?.requestContactsHistory).toBe(true)
-    expect(connect.mock.calls[1]?.[0].metadata?.requestContactsHistory).toBeUndefined()
+    expect(await store.getAccount('wa_metadata')).toMatchObject({
+      metadataSyncStatus: 'ready',
+      metadata: expect.not.objectContaining({ requestContactsHistory: true }),
+    })
+    expect(pair.mock.calls[0]?.[0].metadata?.requestContactsHistory).toBe(true)
+    expect(connect).not.toHaveBeenCalled()
+    expect(disconnect).not.toHaveBeenCalled()
     expect(engine.isOnline('wa_metadata')).toBe(true)
+  })
+
+  it('uses only one controlled reconnect when an existing online session needs history', async () => {
+    const headers = { authorization: `Bearer ${token}` }
+    await app.inject({ method: 'POST', url: '/v1/accounts', headers, payload: { id: 'wa_existing_metadata', phoneE164: '+14155550140' } })
+    await app.inject({ method: 'POST', url: '/v1/accounts/wa_existing_metadata/pairing-code', headers, payload: {} })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await store.updateAccount('wa_existing_metadata', { metadata: {} })
+    const connect = vi.spyOn(engine, 'connect')
+    const disconnect = vi.spyOn(engine, 'disconnect')
+
+    const synced = await app.inject({
+      method: 'POST',
+      url: '/v1/accounts/wa_existing_metadata/metadata-sync',
+      headers,
+      payload: { syncPolicy: { contacts: false, groupDetails: true } },
+    })
+
+    expect(synced.statusCode).toBe(200)
+    expect(disconnect).toHaveBeenCalledTimes(1)
+    expect(connect).toHaveBeenCalledTimes(1)
+    expect(connect.mock.calls[0]?.[0].metadata?.requestContactsHistory).toBe(true)
+    expect(engine.isOnline('wa_existing_metadata')).toBe(true)
   })
 
   it('returns downloaded avatars transiently without storing Base64 in the gateway account', async () => {
@@ -687,7 +739,9 @@ describe('terminal connection failures', () => {
     const logger = pino({ level: 'silent' })
     const webhook = new WebhookClient('', '', 0, logger)
     const stateEvents = vi.spyOn(webhook, 'deliverAccountState')
-    const service = new GatewayService(store, new TerminalConnectEngine(), webhook, logger)
+    const engine = new TerminalConnectEngine()
+    const disconnect = vi.spyOn(engine, 'disconnect')
+    const service = new GatewayService(store, engine, webhook, logger)
     await service.start()
     await store.createAccount({ id: 'wa_terminal', phoneE164: '+14155550129', proxyUrl: 'socks5://proxy.example:1080', state: 'linked_offline' })
     await store.setCreds('wa_terminal', { registered: true })
@@ -697,6 +751,7 @@ describe('terminal connection failures', () => {
     expect((await store.getAccount('wa_terminal')).state).toBe('restricted')
     expect((await store.getAccount('wa_terminal')).autoConnect).toBe(false)
     expect((await store.getAccount('wa_terminal')).invalidatedAt).toBeInstanceOf(Date)
+    expect(disconnect).toHaveBeenCalledTimes(1)
     expect(stateEvents).toHaveBeenCalledTimes(2)
     expect(stateEvents.mock.calls[1]?.[0]).toMatchObject({
       event: 'account.state',
@@ -724,6 +779,28 @@ describe('terminal connection failures', () => {
     expect((await store.getAccount('wa_reauth')).state).toBe('reauth_required')
     expect((await store.getAccount('wa_reauth')).autoConnect).toBe(false)
     expect((await store.getAccount('wa_reauth')).invalidatedAt).toBeNull()
+    await service.close()
+  })
+
+  it('cleans the one-shot history request after a transient metadata connection failure', async () => {
+    const store = new MemoryStore()
+    const engine = new TransientConnectEngine()
+    const disconnect = vi.spyOn(engine, 'disconnect')
+    const logger = pino({ level: 'silent' })
+    const service = new GatewayService(store, engine, new WebhookClient('', '', 0, logger), logger)
+    await service.start()
+    await store.createAccount({ id: 'wa_metadata_428', phoneE164: '+14155550141', proxyUrl: 'socks5://proxy.example:1080', state: 'linked_offline' })
+    await store.setCreds('wa_metadata_428', { registered: true })
+    await store.updateAccount('wa_metadata_428', { deviceJid: '14155550141:1@s.whatsapp.net' })
+
+    await expect(service.syncAccountMetadata('wa_metadata_428')).rejects.toMatchObject({ code: 'protocol_error' })
+
+    expect(await store.getAccount('wa_metadata_428')).toMatchObject({
+      state: 'linked_offline',
+      metadataSyncStatus: 'failed',
+      metadata: expect.not.objectContaining({ requestContactsHistory: true }),
+    })
+    expect(disconnect).toHaveBeenCalledTimes(1)
     await service.close()
   })
 })
