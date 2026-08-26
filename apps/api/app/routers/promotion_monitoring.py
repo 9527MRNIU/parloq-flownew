@@ -43,6 +43,14 @@ SOURCE_LABELS = {
 }
 
 BROWSER_SIGNATURES = (
+    (
+        "Instagram 内置浏览器",
+        re.compile(r"Instagram(?:/|\s)([0-9.]+)", re.IGNORECASE),
+    ),
+    (
+        "Facebook 内置浏览器",
+        re.compile(r"FBAV/([0-9.]+)", re.IGNORECASE),
+    ),
     ("Chrome iOS", re.compile(r"CriOS/([0-9.]+)", re.IGNORECASE)),
     ("Firefox iOS", re.compile(r"FxiOS/([0-9.]+)", re.IGNORECASE)),
     ("Edge iOS", re.compile(r"EdgiOS/([0-9.]+)", re.IGNORECASE)),

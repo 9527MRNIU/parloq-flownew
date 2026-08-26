@@ -20,7 +20,7 @@ export function Table({
         data-slot="table"
         data-table-layout={layout === "list" ? "list" : undefined}
         className={cn(
-          "w-full caption-bottom text-sm",
+          "w-full caption-bottom text-sm select-none [&_input]:select-text [&_textarea]:select-text",
           layout === "list" && "standard-list-table table-auto",
           className,
         )}

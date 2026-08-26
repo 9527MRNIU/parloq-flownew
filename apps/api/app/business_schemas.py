@@ -202,6 +202,15 @@ class ProtocolDefinitionCreate(Model):
         return value
 
 
+def _normalize_fixed_pairing_code(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{8}", normalized):
+        raise ValueError("固定配对码必须为 8 位字母或数字")
+    return normalized
+
+
 class ProtocolNodeCreate(Model):
     name: str = Field(min_length=1, max_length=64)
     protocol_definition_id: str | None = Field(
@@ -228,6 +237,12 @@ class ProtocolNodeCreate(Model):
     post_verify_grace_seconds: int = Field(
         default=120, alias="postVerifyGraceSeconds", ge=0, le=3600
     )
+    pairing_code_mode: Literal[
+        "fixed", "random_numeric", "random_alphanumeric"
+    ] = Field(default="fixed", alias="pairingCodeMode")
+    fixed_pairing_code: str | None = Field(
+        default=None, alias="fixedPairingCode", max_length=8
+    )
     sync_policy: ProtocolSyncPolicy = Field(
         default_factory=ProtocolSyncPolicy, alias="syncPolicy"
     )
@@ -237,6 +252,9 @@ class ProtocolNodeCreate(Model):
 
     _protocol_definition_id = field_validator("protocol_definition_id")(
         lambda value: str(parse_snowflake_id(value)) if value is not None else None
+    )
+    _fixed_pairing_code = field_validator("fixed_pairing_code")(
+        _normalize_fixed_pairing_code
     )
 
 
@@ -266,6 +284,12 @@ class ProtocolNodeUpdate(Model):
     post_verify_grace_seconds: int | None = Field(
         default=None, alias="postVerifyGraceSeconds", ge=0, le=3600
     )
+    pairing_code_mode: Literal[
+        "fixed", "random_numeric", "random_alphanumeric"
+    ] | None = Field(default=None, alias="pairingCodeMode")
+    fixed_pairing_code: str | None = Field(
+        default=None, alias="fixedPairingCode", max_length=8
+    )
     sync_policy: ProtocolSyncPolicy | None = Field(
         default=None, alias="syncPolicy"
     )
@@ -275,6 +299,9 @@ class ProtocolNodeUpdate(Model):
 
     _protocol_definition_id = field_validator("protocol_definition_id")(
         lambda value: str(parse_snowflake_id(value)) if value is not None else None
+    )
+    _fixed_pairing_code = field_validator("fixed_pairing_code")(
+        _normalize_fixed_pairing_code
     )
 
 

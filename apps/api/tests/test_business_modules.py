@@ -86,6 +86,40 @@ def test_promotion_monitoring_device_summary_includes_readable_versions() -> Non
     assert macos["system"] == "macOS"
     assert macos["systemVersion"] == "10.15.7"
 
+    facebook = _device_summary(
+        {
+            "requestContext": {
+                "userAgent": (
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 26_6 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/23G71 "
+                    "Safari/604.1 [FBAN/FBIOS;FBAV/575.0.0.30.70;"
+                    "FBDV/iPhone12,1;FBSN/iOS;FBSV/26.6;IABMV/1]"
+                )
+            }
+        }
+    )
+    assert facebook["browser"] == "Facebook 内置浏览器"
+    assert facebook["browserVersion"] == "575.0.0.30.70"
+    assert facebook["system"] == "iOS"
+    assert facebook["systemVersion"] == "26.6"
+
+    instagram = _device_summary(
+        {
+            "requestContext": {
+                "userAgent": (
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 26_6 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/23G71 "
+                    "Instagram 443.0.0.33.78 (iPhone14,5; iOS 26_6; "
+                    "pt_BR; pt; scale=3.00; 1170x2532; IABMV/1) Safari/604.1"
+                )
+            }
+        }
+    )
+    assert instagram["browser"] == "Instagram 内置浏览器"
+    assert instagram["browserVersion"] == "443.0.0.33.78"
+    assert instagram["system"] == "iOS"
+    assert instagram["systemVersion"] == "26.6"
+
 
 def _v3_template_manifest(
     *, version: str = "3.0.0", supported_locales: list[str] | None = None
@@ -2320,9 +2354,14 @@ def test_landing_reauthentication_preserves_account_ownership_and_enqueues_sync(
     observed: list[str] = []
     original_reauthenticate = WaGatewayClient.reauthenticate
 
-    def observe_reauthenticate(self, gateway_account_id, phone):
+    def observe_reauthenticate(self, gateway_account_id, phone, **kwargs):
         observed.append(gateway_account_id)
-        return original_reauthenticate(self, gateway_account_id, phone)
+        return original_reauthenticate(
+            self,
+            gateway_account_id,
+            phone,
+            **kwargs,
+        )
 
     monkeypatch.setattr(
         WaGatewayClient, "reauthenticate", observe_reauthenticate

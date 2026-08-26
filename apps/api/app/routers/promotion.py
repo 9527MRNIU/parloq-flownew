@@ -117,6 +117,7 @@ from app.services.template_quality import (
     inspect_template_quality,
     unchecked_template_quality_report,
 )
+from app.services.wa_gateway import PAIRING_CODE_TTL_SECONDS
 from app.validation import (
     parse_public_datetime,
     phone_country_code,
@@ -1800,7 +1801,9 @@ def preview_template(
                     "pairingCode": "48271639",
                     "attemptId": "4780486454931999",
                     "pairingStatus": "code_issued",
-                    "expiresAt": iso(utcnow() + timedelta(minutes=3)),
+                    "expiresAt": iso(
+                        utcnow() + timedelta(seconds=PAIRING_CODE_TTL_SECONDS)
+                    ),
                     "statusUrl": preview_status_url,
                     "cancelUrl": preview_status_url,
                     "statusToken": preview_token,
@@ -3856,7 +3859,7 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
                 network_source=network.network_source,
                 request_context_json=request_snapshot,
                 status="code_issued",
-                expires_at=now + timedelta(minutes=3),
+                expires_at=now + timedelta(seconds=PAIRING_CODE_TTL_SECONDS),
             )
             db.add(active_attempt)
             db.flush()
@@ -3900,9 +3903,19 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             active_attempt.attempt_type == "reauthentication"
             and gateway_requires_reset
         ):
-            result = client.reauthenticate(item.gateway_account_id, payload.phone)
+            result = client.reauthenticate(
+                item.gateway_account_id,
+                payload.phone,
+                pairing_code_mode=protocol.pairing_code_mode,
+                fixed_pairing_code=protocol.fixed_pairing_code,
+            )
         else:
-            result = client.pair(item.gateway_account_id, payload.phone)
+            result = client.pair(
+                item.gateway_account_id,
+                payload.phone,
+                pairing_code_mode=protocol.pairing_code_mode,
+                fixed_pairing_code=protocol.fixed_pairing_code,
+            )
         item.status = "linked_offline" if client.settings.wa_gateway_mock else "pairing"
         item.last_error = None
         try:
@@ -3911,9 +3924,9 @@ async def start_public_pairing(slug: str, request: Request, db: DbSession) -> JS
             )
             expires_at = _utc_datetime(expires_at)
         except ValueError:
-            expires_at = now + timedelta(minutes=3)
+            expires_at = now + timedelta(seconds=PAIRING_CODE_TTL_SECONDS)
         if not now + timedelta(seconds=15) <= expires_at <= now + timedelta(minutes=10):
-            expires_at = now + timedelta(minutes=3)
+            expires_at = now + timedelta(seconds=PAIRING_CODE_TTL_SECONDS)
         active_attempt.status = "waiting_phone"
         active_attempt.expires_at = expires_at
         active_attempt.terminal_reason = None

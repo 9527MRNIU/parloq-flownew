@@ -71,6 +71,30 @@ describe('Baileys pairing socket readiness', () => {
     expect(socket.requestPairingCode).toHaveBeenCalledWith('14155550123')
   })
 
+  it('forwards a configured custom code only after pair-device readiness', async () => {
+    const ev = eventBus()
+    const socket = {
+      waitForSocketOpen: vi.fn(async () => undefined),
+      requestPairingCode: vi.fn(async () => 'ABCD1234'),
+      ev,
+    }
+
+    const pending = requestStablePairingCode(
+      socket,
+      '14155550123',
+      1_000,
+      1,
+      'ABCD1234',
+    )
+    ev.emit('connection.update', { qr: 'pair-device-ref' })
+
+    await expect(pending).resolves.toBe('ABCD1234')
+    expect(socket.requestPairingCode).toHaveBeenCalledWith(
+      '14155550123',
+      'ABCD1234',
+    )
+  })
+
   it('does not request a code when the socket closes before pair-device readiness', async () => {
     const ev = eventBus()
     const socket = {

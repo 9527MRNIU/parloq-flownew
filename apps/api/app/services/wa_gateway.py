@@ -11,6 +11,7 @@ from app.security import utcnow
 
 
 _UNSET = object()
+PAIRING_CODE_TTL_SECONDS = 150
 _HTTP_CLIENT = httpx.Client(
     limits=httpx.Limits(max_connections=500, max_keepalive_connections=200),
     # On-demand sends may first warm a saved Baileys session. The gateway's
@@ -268,27 +269,51 @@ class WaGatewayClient:
                 raise
         return self.update(account_id, **desired)
 
-    def pair(self, account_id: str, phone: str | None) -> dict[str, Any]:
+    def pair(
+        self,
+        account_id: str,
+        phone: str | None,
+        *,
+        pairing_code_mode: str | None = None,
+        fixed_pairing_code: str | None = None,
+    ) -> dict[str, Any]:
         if self.settings.wa_gateway_mock:
             return {
                 "code": "0000-0000",
                 "qrPayload": f"mock://pair/{account_id}",
-                "expiresAt": (utcnow() + timedelta(minutes=3)).isoformat(),
+                "expiresAt": (
+                    utcnow() + timedelta(seconds=PAIRING_CODE_TTL_SECONDS)
+                ).isoformat(),
             }
-        return self._post(
-            f"/v1/accounts/{account_id}/pairing-code",
-            {"phoneE164": phone or ""},
-        )
+        payload = {"phoneE164": phone or ""}
+        if pairing_code_mode is not None:
+            payload["pairingCodeMode"] = pairing_code_mode
+        if fixed_pairing_code is not None:
+            payload["fixedPairingCode"] = fixed_pairing_code
+        return self._post(f"/v1/accounts/{account_id}/pairing-code", payload)
 
-    def reauthenticate(self, account_id: str, phone: str | None) -> dict[str, Any]:
+    def reauthenticate(
+        self,
+        account_id: str,
+        phone: str | None,
+        *,
+        pairing_code_mode: str | None = None,
+        fixed_pairing_code: str | None = None,
+    ) -> dict[str, Any]:
         if self.settings.wa_gateway_mock:
             return {
                 "code": "0000-0000",
-                "expiresAt": (utcnow() + timedelta(minutes=3)).isoformat(),
+                "expiresAt": (
+                    utcnow() + timedelta(seconds=PAIRING_CODE_TTL_SECONDS)
+                ).isoformat(),
             }
+        payload = {"phoneE164": phone or ""}
+        if pairing_code_mode is not None:
+            payload["pairingCodeMode"] = pairing_code_mode
+        if fixed_pairing_code is not None:
+            payload["fixedPairingCode"] = fixed_pairing_code
         value = self._post(
-            f"/v1/accounts/{account_id}/reauthentication-code",
-            {"phoneE164": phone or ""},
+            f"/v1/accounts/{account_id}/reauthentication-code", payload
         )
         return value if isinstance(value, dict) else {}
 

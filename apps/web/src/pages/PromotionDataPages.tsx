@@ -9,7 +9,6 @@ import {
   CartesianGrid,
   Funnel,
   FunnelChart,
-  LabelList,
   Line,
   LineChart,
   XAxis,
@@ -788,7 +787,7 @@ function ConversionTrendPanel({ rows }: { rows: Array<Record<string, string | nu
     <section className="trend-panel">
       <header><strong>转化率趋势</strong></header>
       <ChartContainer config={conversionChartConfig} className="promotion-chart">
-        <LineChart data={rows} margin={{ top: 12, right: 18, bottom: 4, left: 0 }}>
+        <LineChart accessibilityLayer={false} data={rows} margin={{ top: 12, right: 18, bottom: 4, left: 0 }}>
           <CartesianGrid vertical={false} strokeDasharray="3 3" />
           <XAxis dataKey="date" tickFormatter={(value) => String(value).slice(5)} tickLine={false} axisLine={false} />
           <YAxis unit="%" tickLine={false} axisLine={false} width={44} />
@@ -818,22 +817,39 @@ function ConversionFunnelPanel({
   return (
     <section className="trend-panel">
       <header><strong>访问转化漏斗</strong></header>
-      <ChartContainer config={{ value: { label: "数量", color: "#6d87cd" } }} className="promotion-chart">
-        <FunnelChart margin={{ top: 12, right: 28, bottom: 12, left: 28 }}>
-          <ChartTooltip content={<ChartTooltipContent />} />
-          <Funnel dataKey="value" data={rows} isAnimationActive={false}>
-            <LabelList position="right" dataKey="name" fill="var(--foreground)" stroke="none" />
-            <LabelList position="center" dataKey="value" fill="#fff" stroke="none" />
-          </Funnel>
-        </FunnelChart>
-      </ChartContainer>
+      <div className="conversion-funnel">
+        <ol className="conversion-funnel-legend" aria-label="访问转化阶段">
+          {rows.map((row) => (
+            <li key={row.name}>
+              <span
+                className="conversion-funnel-swatch"
+                style={{ backgroundColor: row.fill }}
+                aria-hidden="true"
+              />
+              <span className="conversion-funnel-copy">
+                <span>{row.name}</span>
+                <strong>{row.value.toLocaleString()}</strong>
+              </span>
+            </li>
+          ))}
+        </ol>
+        <ChartContainer
+          config={{ value: { label: "数量", color: "#6d87cd" } }}
+          className="promotion-chart conversion-funnel-chart"
+        >
+          <FunnelChart accessibilityLayer={false} margin={{ top: 12, right: 12, bottom: 12, left: 12 }}>
+            <ChartTooltip content={<ChartTooltipContent />} />
+            <Funnel dataKey="value" data={rows} isAnimationActive={false} />
+          </FunnelChart>
+        </ChartContainer>
+      </div>
     </section>
   );
 }
 
 export function PromotionTrendPage() {
   const [channelId, setChannelId] = useState("all");
-  const [sortOrder, setSortOrder] = useState<ListSortOrder>("asc");
+  const [sortOrder, setSortOrder] = useState<ListSortOrder>("desc");
   const report = usePromotionReport("trends", channelId, {
     sortBy: "date",
     sortOrder,
@@ -853,6 +869,7 @@ export function PromotionTrendPage() {
     requestRate: number(row.requestRate) * 100,
     successRate: number(row.successRate) * 100,
   }));
+  const chartDaily = [...daily].sort((left, right) => left.date.localeCompare(right.date));
   const pagination = useClientPagination(daily, {
     resetKey: `${channelId}|${report.dateFrom}|${report.dateTo}|${sortOrder}`,
   });
@@ -881,7 +898,7 @@ export function PromotionTrendPage() {
         }
         actions={
           <>
-            <Button variant="outline" onClick={() => { setSortOrder("asc"); report.reset(); }}>重置</Button>
+            <Button variant="outline" onClick={() => { setSortOrder("desc"); report.reset(); }}>重置</Button>
             <Button variant="outline" onClick={() => void report.refresh()}>
               <RefreshCwIcon size={16} className={report.loading ? "spin" : ""} />刷新
             </Button>
@@ -895,7 +912,7 @@ export function PromotionTrendPage() {
         <>
           <div className="trend-grid">
             <ConversionFunnelPanel {...totals} />
-            <ConversionTrendPanel rows={daily} />
+            <ConversionTrendPanel rows={chartDaily} />
           </div>
           <ListPagination
             page={pagination.page}

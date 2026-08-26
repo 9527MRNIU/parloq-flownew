@@ -78,10 +78,17 @@ type ProtocolNode = {
   connectionPolicy: "on_demand" | "always_on";
   idleDisconnectSeconds: number;
   postVerifyGraceSeconds: number;
+  pairingCodeMode: PairingCodeMode;
+  fixedPairingCode: string;
   syncPolicy: SyncPolicy;
   rateLimitPolicy: RateLimitPolicy;
   createdAt: string;
 };
+
+type PairingCodeMode =
+  | "fixed"
+  | "random_numeric"
+  | "random_alphanumeric";
 
 type ProtocolNodeSortBy =
   | "id"
@@ -137,6 +144,16 @@ const DEFAULT_SYNC_POLICY: SyncPolicy = {
   groupDetails: true,
   contacts: true,
 };
+
+const PAIRING_CODE_MODE_OPTIONS = [
+  { value: "fixed", label: "固定字符" },
+  { value: "random_numeric", label: "随机数字" },
+  { value: "random_alphanumeric", label: "随机字母数字" },
+];
+
+function validPairingCode(mode: PairingCodeMode, code: string) {
+  return mode !== "fixed" || /^[A-Z0-9]{8}$/.test(code);
+}
 
 const DEFAULT_RATE_LIMIT_POLICY: RateLimitPolicy = {
   visitorCheck: { maxRequests: 5, windowSeconds: 600 },
@@ -256,6 +273,8 @@ function protocolNode(input: unknown): ProtocolNode {
     connectionPolicy: (text(row, "connectionPolicy", "connection_policy") || "on_demand") as ProtocolNode["connectionPolicy"],
     idleDisconnectSeconds: number(row, "idleDisconnectSeconds", "idle_disconnect_seconds") || 600,
     postVerifyGraceSeconds: number(row, "postVerifyGraceSeconds", "post_verify_grace_seconds") ?? 120,
+    pairingCodeMode: (text(row, "pairingCodeMode", "pairing_code_mode") || "fixed") as PairingCodeMode,
+    fixedPairingCode: text(row, "fixedPairingCode", "fixed_pairing_code"),
     syncPolicy: {
       closeOnline: typeof rawSync.closeOnline === "boolean" ? rawSync.closeOnline : true,
       avatar: typeof rawSync.avatar === "boolean" ? rawSync.avatar : true,
@@ -347,6 +366,8 @@ export function ProtocolManagementPage({
     connectionPolicy: "on_demand" as "on_demand" | "always_on",
     idleDisconnectSeconds: "600",
     postVerifyGraceSeconds: "120",
+    pairingCodeMode: "fixed" as PairingCodeMode,
+    fixedPairingCode: "",
     syncPolicy: { ...DEFAULT_SYNC_POLICY },
     rateLimitPolicy: toRateLimitForm(DEFAULT_RATE_LIMIT_POLICY),
     remark: "",
@@ -444,6 +465,8 @@ export function ProtocolManagementPage({
       connectionPolicy: row.connectionPolicy,
       idleDisconnectSeconds: String(row.idleDisconnectSeconds),
       postVerifyGraceSeconds: String(row.postVerifyGraceSeconds),
+      pairingCodeMode: row.pairingCodeMode,
+      fixedPairingCode: row.fixedPairingCode,
       syncPolicy: { ...row.syncPolicy },
       rateLimitPolicy: toRateLimitForm(row.rateLimitPolicy),
       remark: row.remark,
@@ -463,6 +486,8 @@ export function ProtocolManagementPage({
       connectionPolicy: "on_demand",
       idleDisconnectSeconds: "600",
       postVerifyGraceSeconds: "120",
+      pairingCodeMode: "fixed",
+      fixedPairingCode: "",
       syncPolicy: { ...DEFAULT_SYNC_POLICY },
       rateLimitPolicy: toRateLimitForm(DEFAULT_RATE_LIMIT_POLICY),
       remark: "",
@@ -485,6 +510,9 @@ export function ProtocolManagementPage({
           connectionPolicy: form.connectionPolicy,
           idleDisconnectSeconds: Number(form.idleDisconnectSeconds),
           postVerifyGraceSeconds: Number(form.postVerifyGraceSeconds),
+          pairingCodeMode: form.pairingCodeMode,
+          fixedPairingCode:
+            form.pairingCodeMode === "fixed" ? form.fixedPairingCode : null,
           syncPolicy: form.syncPolicy,
           rateLimitPolicy: Object.fromEntries(
             Object.entries(form.rateLimitPolicy).map(([key, rule]) => [
@@ -698,7 +726,7 @@ export function ProtocolManagementPage({
         onClose={() => { if (!saving) { setEditing(null); setCreating(false); } }}
         title={creating ? "新建节点" : `编辑节点 · ${editing?.id || ""}`}
         description="节点绑定一个已构建协议，并承载容量、连接、同步和配对限速等运营参数。"
-        footer={<><Button variant="outline" disabled={saving} onClick={() => { setEditing(null); setCreating(false); }}>取消</Button><Button disabled={saving || !form.protocolDefinitionId || !form.name.trim() || form.name.trim().length > 64 || form.remark.length > 512 || Number(form.idleDisconnectSeconds) < 60 || Number(form.postVerifyGraceSeconds) < 0 || !validRateLimitForm(form.rateLimitPolicy)} onClick={() => void save()}>{saving ? <LoaderCircleIcon className="spin" size={16} /> : null}{creating ? "创建" : "保存"}</Button></>}
+        footer={<><Button variant="outline" disabled={saving} onClick={() => { setEditing(null); setCreating(false); }}>取消</Button><Button disabled={saving || !form.protocolDefinitionId || !form.name.trim() || form.name.trim().length > 64 || form.remark.length > 512 || Number(form.idleDisconnectSeconds) < 60 || Number(form.postVerifyGraceSeconds) < 0 || !validPairingCode(form.pairingCodeMode, form.fixedPairingCode) || !validRateLimitForm(form.rateLimitPolicy)} onClick={() => void save()}>{saving ? <LoaderCircleIcon className="spin" size={16} /> : null}{creating ? "创建" : "保存"}</Button></>}
       >
         <DrawerFormLayout>
           <DrawerFormSection title="基础信息" hideHeader>
@@ -713,6 +741,38 @@ export function ProtocolManagementPage({
             </DrawerFormField>
             <DrawerFormField label="营销开关" hint="关闭后该节点账号不会被营销任务选中，账号连接不受影响。">
               <Switch checked={form.marketingEnabled} onCheckedChange={(checked) => setForm((current) => ({ ...current, marketingEnabled: checked }))} aria-label="营销开关" />
+            </DrawerFormField>
+            <DrawerFormField label="配对码模式" hint="固定字符必须为 8 位字母或数字；随机数字每次生成新的 8 位数字配对码。" required align="compound">
+              <div className="grid min-w-0 grid-cols-2 gap-2">
+                <SelectField
+                  className="w-full"
+                  value={form.pairingCodeMode}
+                  onValueChange={(next) =>
+                    setForm((current) => ({
+                      ...current,
+                      pairingCodeMode: next as PairingCodeMode,
+                    }))
+                  }
+                  options={PAIRING_CODE_MODE_OPTIONS}
+                />
+                <Input
+                  aria-label="固定配对码"
+                  autoComplete="off"
+                  disabled={form.pairingCodeMode !== "fixed"}
+                  maxLength={8}
+                  placeholder="8位字母或数字"
+                  value={form.fixedPairingCode}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      fixedPairingCode: event.target.value
+                        .toUpperCase()
+                        .replace(/[^A-Z0-9]/g, "")
+                        .slice(0, 8),
+                    }))
+                  }
+                />
+              </div>
             </DrawerFormField>
           </DrawerFormSection>
 

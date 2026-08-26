@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -17,6 +18,18 @@ class _Response:
 
     def json(self) -> dict:
         return {"data": self.data}
+
+
+def test_gateway_mock_pairing_expiry_is_150_seconds() -> None:
+    client = wa_gateway.WaGatewayClient()
+    client.settings = replace(get_settings(), wa_gateway_mock=True)
+
+    for result in (
+        client.pair("wa_mock_pair", "+12025550123"),
+        client.reauthenticate("wa_mock_reauth", "+12025550124"),
+    ):
+        remaining = datetime.fromisoformat(result["expiresAt"]) - wa_gateway.utcnow()
+        assert timedelta(seconds=149) < remaining <= timedelta(seconds=150)
 
 
 def test_gateway_error_preserves_response_status(monkeypatch) -> None:
@@ -205,6 +218,44 @@ def test_gateway_client_uses_canonical_contract_and_bearer(monkeypatch) -> None:
         call[2]["headers"]["Authorization"] == "Bearer gateway-token"
         for call in calls
     )
+
+
+def test_gateway_client_forwards_pairing_code_configuration(monkeypatch) -> None:
+    calls = []
+
+    def request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return _Response({"code": "ABCD1234"})
+
+    monkeypatch.setattr(wa_gateway._HTTP_CLIENT, "request", request)
+    client = wa_gateway.WaGatewayClient()
+    client.settings = replace(
+        get_settings(),
+        wa_gateway_mock=False,
+        wa_gateway_url="http://gateway.test",
+    )
+
+    client.pair(
+        "wa_fixed",
+        "+12025550199",
+        pairing_code_mode="fixed",
+        fixed_pairing_code="ABCD1234",
+    )
+    client.reauthenticate(
+        "wa_numeric",
+        "+12025550200",
+        pairing_code_mode="random_numeric",
+    )
+
+    assert calls[0][2]["json"] == {
+        "phoneE164": "+12025550199",
+        "pairingCodeMode": "fixed",
+        "fixedPairingCode": "ABCD1234",
+    }
+    assert calls[1][2]["json"] == {
+        "phoneE164": "+12025550200",
+        "pairingCodeMode": "random_numeric",
+    }
 
 
 def test_connect_synchronizes_an_explicit_proxy_before_connecting(monkeypatch) -> None:

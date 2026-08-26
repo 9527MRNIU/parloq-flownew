@@ -436,7 +436,7 @@ export function AccountStatisticsPage() {
             <div className="loading-state h-[300px]"><Spinner />正在汇总趋势…</div>
           ) : daily.length ? (
             <ChartContainer config={chartConfig} className="mt-2 h-[300px] w-full">
-              <LineChart accessibilityLayer data={chartDaily} margin={{ top: 12, right: 12, bottom: 0, left: -18 }}>
+              <LineChart accessibilityLayer={false} data={chartDaily} margin={{ top: 12, right: 12, bottom: 0, left: -18 }}>
                 <CartesianGrid vertical={false} strokeDasharray="3 3" />
                 <XAxis dataKey="date" tickFormatter={(value) => String(value).slice(5)} tickLine={false} axisLine={false} />
                 <YAxis allowDecimals={false} tickLine={false} axisLine={false} />
@@ -465,7 +465,7 @@ export function AccountStatisticsPage() {
             <>
               <div className="relative mx-auto mt-2 w-full max-w-[280px]">
                 <ChartContainer config={{ total: { label: "账号数" } }} className="mx-auto aspect-square h-[250px] w-full">
-                  <PieChart accessibilityLayer>
+                  <PieChart accessibilityLayer={false}>
                     <Pie data={countrySlices} dataKey="total" nameKey="name" innerRadius={64} outerRadius={96} paddingAngle={2} strokeWidth={2}>
                       {countrySlices.map((row) => <Cell key={row.key} fill={row.color} />)}
                     </Pie>

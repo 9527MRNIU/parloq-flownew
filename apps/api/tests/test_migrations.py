@@ -135,7 +135,6 @@ def test_menu_management_removal_is_reversible(tmp_path: Path) -> None:
         assert assigned_roles == ["admin"]
     engine.dispose()
 
-
 def test_promotion_monitoring_menu_migration_is_reversible(tmp_path: Path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'promotion-monitoring.db'}"
     _alembic(database_url, "0056_remove_menu_management")
@@ -1894,4 +1893,51 @@ def test_marketing_navigation_migration_is_reversible(tmp_path: Path) -> None:
                 "WHERE public_id = 'menu_marketing_group'"
             )
         ).scalar_one() == "拉群营销"
+    engine.dispose()
+
+
+def test_protocol_pairing_code_migration_keeps_existing_nodes_unconfigured(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'protocol-pairing-code.db'}"
+    _alembic(database_url, "0078_provider_domain_cache")
+    engine = sa.create_engine(database_url)
+    before_columns = {
+        column["name"]
+        for column in sa.inspect(engine).get_columns("protocol_nodes")
+    }
+    assert "pairing_code_mode" not in before_columns
+    with engine.connect() as connection:
+        protocol_id = connection.execute(
+            sa.text("SELECT id FROM protocol_nodes ORDER BY id LIMIT 1")
+        ).scalar_one()
+    engine.dispose()
+
+    _alembic(database_url, "head")
+    engine = sa.create_engine(database_url)
+    columns = {
+        column["name"]: column
+        for column in sa.inspect(engine).get_columns("protocol_nodes")
+    }
+    assert columns["pairing_code_mode"]["nullable"] is True
+    assert columns["fixed_pairing_code"]["nullable"] is True
+    with engine.connect() as connection:
+        configured = connection.execute(
+            sa.text(
+                "SELECT pairing_code_mode, fixed_pairing_code "
+                "FROM protocol_nodes WHERE id = :protocol_id"
+            ),
+            {"protocol_id": protocol_id},
+        ).one()
+    assert configured == (None, None)
+    engine.dispose()
+
+    _alembic_downgrade(database_url, "0078_provider_domain_cache")
+    engine = sa.create_engine(database_url)
+    downgraded_columns = {
+        column["name"]
+        for column in sa.inspect(engine).get_columns("protocol_nodes")
+    }
+    assert "pairing_code_mode" not in downgraded_columns
+    assert "fixed_pairing_code" not in downgraded_columns
     engine.dispose()

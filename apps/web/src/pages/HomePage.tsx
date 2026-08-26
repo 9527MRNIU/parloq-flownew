@@ -305,7 +305,7 @@ export function HomePage() {
             <div className="flex h-[280px] items-center justify-center gap-2 text-sm text-muted-foreground"><Spinner />正在加载趋势…</div>
           ) : (
             <ChartContainer config={accountChartConfig} className="h-[280px] w-full">
-              <AreaChart data={daily} margin={{ top: 12, right: 12, bottom: 0, left: -18 }}>
+              <AreaChart accessibilityLayer={false} data={daily} margin={{ top: 12, right: 12, bottom: 0, left: -18 }}>
                 <CartesianGrid vertical={false} strokeDasharray="3 3" />
                 <XAxis dataKey="date" tickFormatter={(input) => String(input).slice(5)} tickLine={false} axisLine={false} />
                 <YAxis allowDecimals={false} tickLine={false} axisLine={false} />
@@ -328,7 +328,7 @@ export function HomePage() {
           ) : taskSummary.length ? (
             <div className="grid min-h-[280px] grid-cols-[minmax(160px,1fr)_minmax(120px,0.8fr)] items-center gap-2">
               <ChartContainer config={{ value: { label: "任务", color: "#6d87cd" } }} className="h-[240px] w-full">
-                <PieChart>
+                <PieChart accessibilityLayer={false}>
                   <ChartTooltip content={<ChartTooltipContent />} />
                   <Pie data={taskSummary} dataKey="value" nameKey="name" innerRadius={58} outerRadius={88} paddingAngle={3} stroke="none">
                     {taskSummary.map((item) => <Cell key={item.status} fill={item.color} />)}

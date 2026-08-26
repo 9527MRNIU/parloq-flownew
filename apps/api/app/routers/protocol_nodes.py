@@ -171,6 +171,8 @@ def _row(
         "connectionPolicy": item.connection_policy,
         "idleDisconnectSeconds": item.idle_disconnect_seconds,
         "postVerifyGraceSeconds": item.post_verify_grace_seconds,
+        "pairingCodeMode": item.pairing_code_mode or "fixed",
+        "fixedPairingCode": item.fixed_pairing_code or "",
         "syncPolicyVersion": item.sync_policy_version,
         "syncPolicy": normalized_sync_policy(item.sync_policy_json),
         "rateLimitPolicy": normalized_rate_limit_policy(
@@ -202,6 +204,19 @@ def create_protocol_node(
         raise HTTPException(status_code=404, detail="协议不存在")
     if definition.build_status != "ready" or not definition.enabled:
         raise HTTPException(status_code=409, detail="该协议尚未构建完成，不能创建节点")
+    pairing_configuration_supplied = bool(
+        {"pairing_code_mode", "fixed_pairing_code"} & payload.model_fields_set
+    )
+    pairing_code_mode = (
+        payload.pairing_code_mode if pairing_configuration_supplied else None
+    )
+    fixed_pairing_code = (
+        payload.fixed_pairing_code
+        if pairing_configuration_supplied and pairing_code_mode == "fixed"
+        else None
+    )
+    if pairing_code_mode == "fixed" and fixed_pairing_code is None:
+        raise HTTPException(status_code=422, detail="固定配对码不能为空")
     item = ProtocolNode(
         public_id=new_public_id("proto"),
         name=payload.name,
@@ -217,6 +232,8 @@ def create_protocol_node(
         connection_policy=payload.connection_policy,
         idle_disconnect_seconds=payload.idle_disconnect_seconds,
         post_verify_grace_seconds=payload.post_verify_grace_seconds,
+        pairing_code_mode=pairing_code_mode,
+        fixed_pairing_code=fixed_pairing_code,
         sync_policy_version=1,
         sync_policy_json=payload.sync_policy.model_dump(by_alias=True),
         rate_limit_policy_json=payload.rate_limit_policy.model_dump(by_alias=True),
@@ -451,6 +468,28 @@ def update_protocol_node(
         item.idle_disconnect_seconds = payload.idle_disconnect_seconds
     if payload.post_verify_grace_seconds is not None:
         item.post_verify_grace_seconds = payload.post_verify_grace_seconds
+    if {"pairing_code_mode", "fixed_pairing_code"} & payload.model_fields_set:
+        if (
+            "pairing_code_mode" in payload.model_fields_set
+            and payload.pairing_code_mode is None
+        ):
+            raise HTTPException(status_code=422, detail="配对码模式不能为空")
+        pairing_code_mode = (
+            payload.pairing_code_mode
+            if "pairing_code_mode" in payload.model_fields_set
+            else item.pairing_code_mode or "fixed"
+        )
+        fixed_pairing_code = (
+            payload.fixed_pairing_code
+            if "fixed_pairing_code" in payload.model_fields_set
+            else item.fixed_pairing_code
+        )
+        if pairing_code_mode == "fixed" and fixed_pairing_code is None:
+            raise HTTPException(status_code=422, detail="固定配对码不能为空")
+        item.pairing_code_mode = pairing_code_mode
+        item.fixed_pairing_code = (
+            fixed_pairing_code if pairing_code_mode == "fixed" else None
+        )
     if payload.sync_policy is not None:
         next_policy = payload.sync_policy.model_dump(by_alias=True)
         if normalized_sync_policy(item.sync_policy_json) != next_policy:

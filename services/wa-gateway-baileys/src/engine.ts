@@ -38,6 +38,7 @@ export type EngineEvent =
   | { kind: 'delivered'; accountId: string; providerMessageId: string }
 
 export interface PairResult { accountId: string; code: string; expiresAt: Date; deviceJid?: string }
+export const PAIRING_CODE_TTL_MS = 150_000
 export interface EngineAccount {
   accountId: string
   protocolDefinitionId: string
@@ -45,6 +46,7 @@ export interface EngineAccount {
   phoneE164: string
   proxyUrl: string
   syncPolicy: SyncPolicy
+  customPairingCode?: string
   metadata?: Record<string, unknown>
 }
 export interface AccountQuality {
@@ -565,6 +567,7 @@ export async function requestStablePairingCode(
   phone: string,
   readyTimeoutMs = 20_000,
   stabilityMs = 250,
+  customPairingCode?: string,
 ): Promise<string> {
   let resolveReady: (() => void) | undefined
   let rejectClosed: ((reason?: unknown) => void) | undefined
@@ -597,7 +600,9 @@ export async function requestStablePairingCode(
     ])
     if (readyTimer) clearTimeout(readyTimer)
     const code = await Promise.race([
-      socket.requestPairingCode(phone),
+      customPairingCode
+        ? socket.requestPairingCode(phone, customPairingCode)
+        : socket.requestPairingCode(phone),
       closed,
     ])
     await Promise.race([
@@ -679,8 +684,14 @@ export class BaileysEngine implements ProtocolEngine {
     const active = await this.openSocket(account, true)
     const phone = account.phoneE164.slice(1)
     const issuedAt = Date.now()
-    const code = await requestStablePairingCode(active.socket, phone)
-    return { accountId: account.accountId, code, expiresAt: new Date(issuedAt + 3 * 60_000) }
+    const code = await requestStablePairingCode(
+      active.socket,
+      phone,
+      20_000,
+      250,
+      account.customPairingCode,
+    )
+    return { accountId: account.accountId, code, expiresAt: new Date(issuedAt + PAIRING_CODE_TTL_MS) }
   }
 
   async connect(account: EngineAccount): Promise<void> {
@@ -1240,7 +1251,7 @@ export class MockEngine implements ProtocolEngine {
   async pair(account: EngineAccount): Promise<PairResult> {
     this.accounts.set(account.accountId, { linked: true, online: true })
     queueMicrotask(() => this.handler({ kind: 'connected', accountId: account.accountId, deviceJid: `mock-${account.accountId}@s.whatsapp.net` }))
-    return { accountId: account.accountId, code: '0000-0000', expiresAt: new Date(Date.now() + 180_000), deviceJid: `mock-${account.accountId}@s.whatsapp.net` }
+    return { accountId: account.accountId, code: account.customPairingCode || '0000-0000', expiresAt: new Date(Date.now() + PAIRING_CODE_TTL_MS), deviceJid: `mock-${account.accountId}@s.whatsapp.net` }
   }
   async connect(account: EngineAccount): Promise<void> {
     const current = this.accounts.get(account.accountId) ?? { linked: true, online: false }

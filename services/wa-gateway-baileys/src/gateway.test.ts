@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { emptyAccountResources, GatewayError, type Account, type AccountState, type Message, type StoredAuth, type StoredKey } from './domain.js'
 import { MockEngine, type AccountQuality, type EngineAccount, type EngineEvent, type PairResult, type ProtocolEngine } from './engine.js'
 import { buildServer } from './http.js'
-import { GatewayService } from './service.js'
+import { customPairingCode, GatewayService } from './service.js'
 import type { Store } from './store.js'
 import { WebhookClient } from './webhook.js'
 
@@ -106,6 +106,29 @@ class MemoryStore implements Store {
 }
 
 const token = 'test-token-with-at-least-thirty-two-characters'
+
+describe('pairing code modes', () => {
+  it('normalizes fixed codes and preserves the current random mode', () => {
+    expect(customPairingCode('fixed', 'abcd1234')).toBe('ABCD1234')
+    expect(customPairingCode('random_alphanumeric', undefined)).toBeUndefined()
+    expect(customPairingCode(undefined, undefined)).toBeUndefined()
+  })
+
+  it('generates exactly eight digits for random numeric codes', () => {
+    for (let index = 0; index < 25; index += 1) {
+      expect(customPairingCode('random_numeric', undefined)).toMatch(/^\d{8}$/)
+    }
+  })
+
+  it('rejects missing or invalid fixed codes', () => {
+    expect(() => customPairingCode('fixed', undefined)).toThrow(
+      'fixedPairingCode must contain exactly 8 letters or digits',
+    )
+    expect(() => customPairingCode('fixed', '1234')).toThrow(
+      'fixedPairingCode must contain exactly 8 letters or digits',
+    )
+  })
+})
 
 class TerminalConnectEngine implements ProtocolEngine {
   readonly name = 'terminal-test'
@@ -336,6 +359,8 @@ describe('Baileys gateway HTTP contract', () => {
       await isolatedService.createAccount({ id: 'wa_interrupted_pairing', phoneE164: '+14155550132', proxyUrl: 'socks5://proxy.example:1080' })
       const pairing = await isolatedService.requestPairingCode('wa_interrupted_pairing')
       expect(pairing.code).toBe('ABCD-EFGH')
+      expect(pairing.expiresAt.getTime() - Date.now()).toBeGreaterThan(149_000)
+      expect(pairing.expiresAt.getTime() - Date.now()).toBeLessThanOrEqual(150_000)
       await new Promise((resolve) => setTimeout(resolve, 0))
 
       const account = await isolatedStore.getAccount('wa_interrupted_pairing')

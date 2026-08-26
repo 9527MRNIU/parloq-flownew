@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto'
 import Fastify from 'fastify'
 import type { Logger } from 'pino'
 import { GatewayError } from './domain.js'
-import type { GatewayService } from './service.js'
+import type { GatewayService, PairingCodeMode } from './service.js'
 import type { SendMessageRequest } from './message-content.js'
 import { checkProxy } from './proxy-health.js'
 
@@ -11,6 +11,12 @@ interface ServerOptions {
   apiToken: string
   instanceId: string
   logger: Logger
+}
+
+interface PairingCodeBody {
+  phoneE164?: string
+  pairingCodeMode?: PairingCodeMode
+  fixedPairingCode?: string
 }
 
 function authorized(header: string | undefined, token: string): boolean {
@@ -53,8 +59,22 @@ export function buildServer(options: ServerOptions) {
   app.get<{ Params: { accountId: string } }>('/v1/accounts/:accountId', async (request) => ({ data: await options.service.getAccount(request.params.accountId) }))
   app.delete<{ Params: { accountId: string } }>('/v1/accounts/:accountId', async (request) => ({ data: await options.service.deleteAccount(request.params.accountId) }))
   app.patch<{ Params: { accountId: string }; Body: { phoneE164?: string; proxyUrl?: string; protocolDefinitionId?: string; protocolVersion?: string; autoConnect?: boolean; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: import('./domain.js').SyncPolicy } }>('/v1/accounts/:accountId', async (request) => ({ data: await options.service.updateAccount(request.params.accountId, request.body) }))
-  app.post<{ Params: { accountId: string }; Body: { phoneE164?: string } }>('/v1/accounts/:accountId/pairing-code', async (request) => ({ data: await options.service.requestPairingCode(request.params.accountId, request.body?.phoneE164) }))
-  app.post<{ Params: { accountId: string }; Body: { phoneE164?: string } }>('/v1/accounts/:accountId/reauthentication-code', async (request) => ({ data: await options.service.requestReauthenticationCode(request.params.accountId, request.body?.phoneE164) }))
+  app.post<{ Params: { accountId: string }; Body: PairingCodeBody }>('/v1/accounts/:accountId/pairing-code', async (request) => ({
+    data: await options.service.requestPairingCode(
+      request.params.accountId,
+      request.body?.phoneE164,
+      request.body?.pairingCodeMode,
+      request.body?.fixedPairingCode,
+    ),
+  }))
+  app.post<{ Params: { accountId: string }; Body: PairingCodeBody }>('/v1/accounts/:accountId/reauthentication-code', async (request) => ({
+    data: await options.service.requestReauthenticationCode(
+      request.params.accountId,
+      request.body?.phoneE164,
+      request.body?.pairingCodeMode,
+      request.body?.fixedPairingCode,
+    ),
+  }))
   app.post<{ Params: { accountId: string } }>('/v1/accounts/:accountId/pairing-cancel', async (request) => ({ data: await options.service.cancelPairing(request.params.accountId) }))
   app.post<{ Params: { accountId: string }; Body: { syncPolicy?: import('./domain.js').SyncPolicy } }>('/v1/accounts/:accountId/metadata-sync', async (request) => ({ data: await options.service.syncAccountMetadata(request.params.accountId, request.body ?? {}) }))
   app.post<{ Params: { accountId: string } }>('/v1/accounts/:accountId/connect', async (request) => ({ data: await options.service.connect(request.params.accountId) }))

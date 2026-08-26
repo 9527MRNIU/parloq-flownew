@@ -3051,7 +3051,12 @@ def pairing_code(account_id: str, payload: PairRequest, db: DbSession, current_u
             phone_e164=phone,
             client=client,
         )
-        result = client.pair(item.gateway_account_id, phone)
+        result = client.pair(
+            item.gateway_account_id,
+            phone,
+            pairing_code_mode=protocol.pairing_code_mode,
+            fixed_pairing_code=protocol.fixed_pairing_code,
+        )
     except GatewayError as exc:
         item.last_error = str(exc)
         db.commit()

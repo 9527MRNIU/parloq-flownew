@@ -19,6 +19,8 @@ def test_protocol_node_metrics_ingress_and_marketing_controls(
     assert node["id"].isdecimal()
     assert "publicId" not in node
     assert node["protocol"] == "baileys"
+    assert node["pairingCodeMode"] == "fixed"
+    assert node["fixedPairingCode"] == ""
     assert node["accountTotal"] >= 0
     assert node["validRate"] is None or 0 <= node["validRate"] <= 100
     assert definition["name"] == "Baileys Web协议"
@@ -109,6 +111,8 @@ def test_protocol_node_create_pool_and_template_contract(
             "connectionPolicy": "on_demand",
             "idleDisconnectSeconds": 600,
             "postVerifyGraceSeconds": 120,
+            "pairingCodeMode": "fixed",
+            "fixedPairingCode": "abcd1234",
             "syncPolicy": {
                 "avatar": True,
                 "groupSummary": True,
@@ -130,6 +134,8 @@ def test_protocol_node_create_pool_and_template_contract(
     assert node["maxAccountCount"] is None
     assert node["maxOnlineAccounts"] == 1000
     assert node["connectionPolicy"] == "on_demand"
+    assert node["pairingCodeMode"] == "fixed"
+    assert node["fixedPairingCode"] == "ABCD1234"
     assert node["syncPolicy"] == {
         "closeOnline": True,
         "avatar": True,
@@ -166,6 +172,28 @@ def test_protocol_node_create_pool_and_template_contract(
     assert updated.status_code == 200, updated.text
     assert updated.json()["data"]["protocol"]["syncPolicyVersion"] == 2
     assert updated.json()["data"]["protocol"]["syncPolicy"]["closeOnline"] is False
+
+    pairing_mode_updated = admin_client.patch(
+        f"/api/protocol-nodes/{node['id']}",
+        json={"pairingCodeMode": "random_numeric"},
+    )
+    assert pairing_mode_updated.status_code == 200, pairing_mode_updated.text
+    pairing_protocol = pairing_mode_updated.json()["data"]["protocol"]
+    assert pairing_protocol["pairingCodeMode"] == "random_numeric"
+    assert pairing_protocol["fixedPairingCode"] == ""
+
+    invalid_fixed_code = admin_client.patch(
+        f"/api/protocol-nodes/{node['id']}",
+        json={
+            "pairingCodeMode": "fixed",
+            "fixedPairingCode": "1234",
+        },
+    )
+    assert invalid_fixed_code.status_code == 422
+    assert admin_client.patch(
+        f"/api/protocol-nodes/{node['id']}",
+        json={"pairingCodeMode": None},
+    ).status_code == 422
 
     rate_updated = admin_client.patch(
         f"/api/protocol-nodes/{node['id']}",

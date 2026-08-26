@@ -1,7 +1,8 @@
+import { randomInt } from 'node:crypto'
 import type { Logger } from 'pino'
 import type { Account, AccountResourceSnapshot, AccountState, Message, PublicAccount } from './domain.js'
 import { GatewayError, defaultSyncPolicy, normalizeE164, normalizeMessageTarget, normalizeSyncPolicy, publicAccount, safeError, validateProxy, type AccountAvatar, type MetadataSyncResponse, type SyncPolicy } from './domain.js'
-import type { EngineEvent, PairResult, ProtocolEngine } from './engine.js'
+import { PAIRING_CODE_TTL_MS, type EngineEvent, type PairResult, type ProtocolEngine } from './engine.js'
 import { BAILEYS_VERSION, exportSession, parseImportedSession, phoneFromDeviceJid } from './session.js'
 import type { Store } from './store.js'
 import { newPublicId } from './snowflake.js'
@@ -15,6 +16,25 @@ export interface CreateAccountRequest { id?: string; protocolDefinitionId?: stri
 export interface UpdateAccountRequest { phoneE164?: string; proxyUrl?: string; protocolDefinitionId?: string; protocolVersion?: string; autoConnect?: boolean; connectionPolicy?: 'on_demand' | 'always_on'; idleDisconnectSeconds?: number; postVerifyGraceSeconds?: number; syncPolicy?: SyncPolicy }
 export interface MetadataSyncRequest { syncPolicy?: SyncPolicy }
 export interface DeleteAccountResult { accountId: string; deleted: boolean; providerLogoutConfirmed: boolean }
+export type PairingCodeMode = 'fixed' | 'random_numeric' | 'random_alphanumeric'
+
+export function customPairingCode(
+  mode: PairingCodeMode | undefined,
+  fixedPairingCode: string | undefined,
+): string | undefined {
+  if (mode === undefined || mode === 'random_alphanumeric') return undefined
+  if (mode === 'random_numeric') {
+    return String(randomInt(0, 100_000_000)).padStart(8, '0')
+  }
+  if (mode !== 'fixed') {
+    throw new GatewayError('invalid_argument', 'pairingCodeMode is invalid')
+  }
+  const normalized = fixedPairingCode?.trim().toUpperCase() || ''
+  if (!/^[A-Z0-9]{8}$/.test(normalized)) {
+    throw new GatewayError('invalid_argument', 'fixedPairingCode must contain exactly 8 letters or digits')
+  }
+  return normalized
+}
 
 function pairingCodeFromCreds(value: unknown): string | null {
   if (!value || typeof value !== 'object') return null
@@ -185,7 +205,12 @@ export class GatewayService {
     return publicAccount(await this.store.updateAccount(id, changes))
   }
 
-  async requestPairingCode(id: string, phoneOverride?: string): Promise<PairResult> {
+  async requestPairingCode(
+    id: string,
+    phoneOverride?: string,
+    pairingCodeMode?: PairingCodeMode,
+    fixedPairingCode?: string,
+  ): Promise<PairResult> {
     let current = await this.store.getAccount(id)
     let storedCreds = await this.store.getCreds(id)
     const activeCode = pairingCodeFromCreds(storedCreds)
@@ -227,14 +252,21 @@ export class GatewayService {
     }
     if (phoneOverride) current = await this.store.updateAccount(id, { phoneE164: normalizeE164(phoneOverride) })
     if (this.engine.name !== 'mock' && !current.proxyUrl) throw new GatewayError('conflict', 'a fixed proxy is required before pairing')
-    const provisionalExpiry = new Date(Date.now() + 3 * 60_000)
+    const requestedPairingCode = customPairingCode(pairingCodeMode, fixedPairingCode)
+    const provisionalExpiry = new Date(Date.now() + PAIRING_CODE_TTL_MS)
     await this.transitionAccount(id, 'pairing', {
       pairingStatus: 'waiting_phone',
       pairingExpiresAt: provisionalExpiry,
     }, 'pairing_started')
     try {
-      const result = await this.engine.pair(engineAccount(current))
-      const expiresAt = result.expiresAt.getTime() > Date.now() ? result.expiresAt : provisionalExpiry
+      const result = await this.engine.pair({
+        ...engineAccount(current),
+        ...(requestedPairingCode
+          ? { customPairingCode: requestedPairingCode }
+          : {}),
+      })
+      const engineExpiry = result.expiresAt.getTime() > Date.now() ? result.expiresAt : provisionalExpiry
+      const expiresAt = new Date(Math.min(engineExpiry.getTime(), provisionalExpiry.getTime()))
       await this.store.updateAccount(id, { pairingStatus: 'waiting_phone', pairingExpiresAt: expiresAt })
       this.schedulePairingExpiry(id, expiresAt)
       result.expiresAt = expiresAt
@@ -261,7 +293,12 @@ export class GatewayService {
     }
   }
 
-  async requestReauthenticationCode(id: string, phoneOverride?: string): Promise<PairResult> {
+  async requestReauthenticationCode(
+    id: string,
+    phoneOverride?: string,
+    pairingCodeMode?: PairingCodeMode,
+    fixedPairingCode?: string,
+  ): Promise<PairResult> {
     const current = await this.store.getAccount(id)
     if (current.state !== 'reauth_required') {
       throw new GatewayError('conflict', 'account does not require reauthentication')
@@ -279,7 +316,12 @@ export class GatewayService {
       pairingExpiresAt: null,
       metadataSyncStatus: 'pending',
     }, 'reauthentication_started')
-    return this.requestPairingCode(id, phoneOverride)
+    return this.requestPairingCode(
+      id,
+      phoneOverride,
+      pairingCodeMode,
+      fixedPairingCode,
+    )
   }
 
   async cancelPairing(id: string): Promise<PublicAccount> {

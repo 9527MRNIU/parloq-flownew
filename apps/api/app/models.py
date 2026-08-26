@@ -635,6 +635,15 @@ class ProtocolNode(Base, TimestampMixin):
             "idle_disconnect_seconds >= 60 AND post_verify_grace_seconds >= 0",
             name="ck_protocol_nodes_connection_windows",
         ),
+        CheckConstraint(
+            "pairing_code_mode IS NULL OR pairing_code_mode IN "
+            "('fixed', 'random_numeric', 'random_alphanumeric')",
+            name="ck_protocol_nodes_pairing_code_mode",
+        ),
+        CheckConstraint(
+            "fixed_pairing_code IS NULL OR length(fixed_pairing_code) = 8",
+            name="ck_protocol_nodes_fixed_pairing_code_length",
+        ),
         UniqueConstraint(
             "created_by", "name", name="uq_protocol_nodes_owner_name"
         ),
@@ -676,6 +685,8 @@ class ProtocolNode(Base, TimestampMixin):
     post_verify_grace_seconds: Mapped[int] = mapped_column(
         Integer, default=120, nullable=False
     )
+    pairing_code_mode: Mapped[str | None] = mapped_column(String(24))
+    fixed_pairing_code: Mapped[str | None] = mapped_column(String(8))
     sync_policy_version: Mapped[int] = mapped_column(
         Integer, default=1, nullable=False
     )
