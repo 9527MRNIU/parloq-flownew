@@ -209,6 +209,17 @@ const CONTACT_SOURCE_MESSAGE = 4
 const CONTACT_SOURCE_REALTIME = 8
 const MAX_TRANSIENT_RECONNECT_ATTEMPTS = 6
 
+export function compatibleWebBrowser(
+  baileys: BaileysRuntimeModule,
+): ReturnType<BaileysRuntimeModule['Browsers']['ubuntu']> {
+  // Baileys 6.7.x maps Mac OS/Windows to the native desktop sub-platform
+  // whenever syncFullHistory is enabled. WhatsApp currently rejects that
+  // mixed Web + DARWIN/WIN32 registration before it emits pair-device refs.
+  // A canonical Linux Chrome identity remains WEB_BROWSER while preserving
+  // requireFullSync, and works for built-in and versioned protocol runtimes.
+  return baileys.Browsers.ubuntu('Chrome')
+}
+
 function nullableString(value: unknown, maxLength = 512): string | null {
   if (typeof value !== 'string') return null
   const normalized = value.trim()
@@ -1004,7 +1015,7 @@ export class BaileysEngine implements ProtocolEngine {
       && account.metadata?.requestContactsHistory === true
     const socket = this.baileys.default({
       auth: state,
-      browser: this.baileys.Browsers.macOS('Chrome'),
+      browser: compatibleWebBrowser(this.baileys),
       version,
       logger: this.protocolLogger,
       markOnlineOnConnect: !account.syncPolicy.closeOnline,

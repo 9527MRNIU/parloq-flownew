@@ -1,12 +1,16 @@
 import { EventEmitter } from 'node:events'
 import {
   BufferJSON,
+  DEFAULT_CONNECTION_CONFIG,
+  generateRegistrationNode,
   initAuthCreds,
+  proto,
   type ConnectionState,
 } from '@whiskeysockets/baileys'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   BaileysEngine,
+  compatibleWebBrowser,
   downloadProfileAvatar,
   hasReconnectableIdentity,
   isRequiredPairingRestart,
@@ -17,6 +21,25 @@ import type { ManagedMediaReference } from './message-content.js'
 import type { Store } from './store.js'
 
 afterEach(() => vi.unstubAllGlobals())
+
+describe('Baileys registration browser compatibility', () => {
+  it('keeps full-history registration on WEB_BROWSER', async () => {
+    const baileys = await import('@whiskeysockets/baileys')
+    const registration = generateRegistrationNode(initAuthCreds(), {
+      ...DEFAULT_CONNECTION_CONFIG,
+      browser: compatibleWebBrowser(baileys),
+      syncFullHistory: true,
+    })
+    const deviceProps = proto.DeviceProps.decode(
+      registration.devicePairingData?.deviceProps as Uint8Array,
+    )
+
+    expect(registration.webInfo?.webSubPlatform).toBe(
+      proto.ClientPayload.WebInfo.WebSubPlatform.WEB_BROWSER,
+    )
+    expect(deviceProps.requireFullSync).toBe(true)
+  })
+})
 
 describe('Baileys message targets', () => {
   it('maps E.164 recipients and preserves WhatsApp JIDs', () => {
@@ -226,6 +249,7 @@ describe('Baileys intentional disconnect handling', () => {
     })
 
     expect(baileys.default).toHaveBeenCalledWith(expect.objectContaining({
+      browser: ['Ubuntu', 'Chrome', '22.04.4'],
       markOnlineOnConnect,
       syncFullHistory: false,
     }))
@@ -326,7 +350,10 @@ describe('Baileys intentional disconnect handling', () => {
       syncFullHistory: boolean
       shouldSyncHistoryMessage: (message: unknown) => boolean
     }])[0]
-    expect(socketOptions).toEqual(expect.objectContaining({ syncFullHistory: true }))
+    expect(socketOptions).toEqual(expect.objectContaining({
+      browser: ['Ubuntu', 'Chrome', '22.04.4'],
+      syncFullHistory: true,
+    }))
     expect(socketOptions.shouldSyncHistoryMessage({})).toBe(true)
 
     emitter.emit('messaging-history.set', {
