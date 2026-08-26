@@ -2644,6 +2644,16 @@ tr.selected-row {
   color: var(--muted-foreground);
   font-size: 12px;
 }
+.trend-panel .chart-container,
+.trend-panel .chart-container .recharts-wrapper,
+.trend-panel .chart-container .recharts-surface {
+  -webkit-user-select: none;
+  user-select: none;
+}
+.trend-panel .chart-container .recharts-wrapper:focus,
+.trend-panel .chart-container .recharts-surface:focus {
+  outline: none;
+}
 .conversion-funnel {
   display: grid;
   grid-template-columns: minmax(132px, 0.45fr) minmax(0, 1.55fr);

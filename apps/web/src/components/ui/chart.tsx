@@ -45,7 +45,7 @@ export function ChartContainer({
       <div
         data-slot="chart"
         data-chart={chartId}
-        className={cn("chart-container select-none", className)}
+        className={cn("chart-container", className)}
         {...props}
       >
         {css ? <style dangerouslySetInnerHTML={{ __html: css }} /> : null}
