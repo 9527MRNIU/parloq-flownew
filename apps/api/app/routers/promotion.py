@@ -98,6 +98,7 @@ from app.services.public_runtime_assets import (
 from app.services.request_context import public_request_context
 from app.services.request_network import RequestNetwork, resolve_request_network
 from app.services.github_repository import (
+    GitHubRepositoryArtifactValidationError,
     GitHubRemoteArtifact,
     GitHubRepositoryConfigurationError,
     GitHubRepositorySnapshot,
@@ -955,6 +956,8 @@ def _repository_http_error(error: PlatformClientError) -> HTTPException:
         status_code=(
             status.HTTP_409_CONFLICT
             if isinstance(error, GitHubRepositoryConfigurationError)
+            else status.HTTP_422_UNPROCESSABLE_CONTENT
+            if isinstance(error, GitHubRepositoryArtifactValidationError)
             else status.HTTP_502_BAD_GATEWAY
         ),
         detail=str(error),

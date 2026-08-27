@@ -7,15 +7,18 @@ import zipfile
 from dataclasses import replace
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 import app.routers.promotion as promotion_router
 import app.routers.promotion_integrations as integration_router
 import app.services.github_repository as github_repository_service
 from app.services.github_repository import (
+    GitHubRepositoryArtifactValidationError,
     GitHubRemoteArtifact,
     GitHubRepositoryClient,
     GitHubRepositorySnapshot,
+    GitHubTreeFile,
     REMOTE_SOURCE_KEY,
 )
 
@@ -315,6 +318,64 @@ def test_github_client_reads_catalog_and_source_directory_without_release_zip() 
             ]
     finally:
         http.close()
+
+
+def test_repository_archive_allows_large_video_but_keeps_other_files_at_five_mb(
+    monkeypatch,
+) -> None:
+    client = GitHubRepositoryClient(
+        "private-token",
+        repository="owner/private-repository",
+        client=httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(404))),
+    )
+    video = GitHubTreeFile(
+        path="themes/video/assets/reveal.mp4",
+        sha="video",
+        size=10 * 1024 * 1024,
+    )
+    artifact = GitHubRemoteArtifact(
+        sequence="0006",
+        kind="template",
+        slug="video",
+        source="themes/video",
+        manifest_path="themes/video/manifest.json",
+        name="Video",
+        description=None,
+        version="1",
+        integration_key=None,
+        integration_type=None,
+        source_sha="source",
+        files=(video,),
+    )
+    monkeypatch.setattr(client, "_blob_bytes", lambda _file, *, max_bytes: b"video")
+    try:
+        assert client.archive_artifact(artifact)
+        regular = replace(
+            artifact,
+            files=(replace(video, path="themes/video/assets/app.js", size=6 * 1024 * 1024),),
+        )
+        with pytest.raises(
+            GitHubRepositoryArtifactValidationError,
+            match="仓库文件超过 5MB",
+        ):
+            client.archive_artifact(regular)
+        oversized_video = replace(
+            artifact,
+            files=(replace(video, size=51 * 1024 * 1024),),
+        )
+        with pytest.raises(
+            GitHubRepositoryArtifactValidationError,
+            match="视频文件超过 50MB",
+        ):
+            client.archive_artifact(oversized_video)
+    finally:
+        client._client.close()
+
+
+def test_repository_artifact_validation_error_maps_to_422() -> None:
+    error = GitHubRepositoryArtifactValidationError("仓库文件超过限制")
+    assert promotion_router._repository_http_error(error).status_code == 422
+    assert integration_router._repository_http_error(error).status_code == 422
 
 
 def test_repository_template_can_be_added_and_updated_without_overwriting_name(

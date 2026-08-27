@@ -32,16 +32,23 @@ GITHUB_API_URL = "https://api.github.com"
 DEFAULT_GITHUB_REF = "main"
 DEFAULT_CATALOG_PATH = "artifacts/catalog.json"
 REMOTE_SOURCE_KEY = "_parloqRepositorySource"
-MAX_CATALOG_BYTES = 1024 * 1024
+MIB = 1024 * 1024
+MAX_CATALOG_BYTES = MIB
 MAX_REMOTE_FILES = 500
-MAX_REMOTE_FILE_BYTES = 5 * 1024 * 1024
-MAX_REMOTE_TOTAL_BYTES = 50 * 1024 * 1024
-MAX_REMOTE_ARCHIVE_BYTES = 20 * 1024 * 1024
+MAX_REMOTE_FILE_BYTES = 5 * MIB
+MAX_REMOTE_VIDEO_FILE_BYTES = 50 * MIB
+MAX_REMOTE_TOTAL_BYTES = 64 * MIB
+MAX_REMOTE_ARCHIVE_BYTES = 64 * MIB
+REMOTE_VIDEO_EXTENSIONS = {".mp4", ".webm"}
 SEQUENCE_RE = re.compile(r"^[0-9]{4}$")
 REPOSITORY_PART_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 
 
 class GitHubRepositoryConfigurationError(PlatformClientError):
+    pass
+
+
+class GitHubRepositoryArtifactValidationError(PlatformClientError):
     pass
 
 
@@ -581,18 +588,39 @@ class GitHubRepositoryClient:
 
     def archive_artifact(self, artifact: GitHubRemoteArtifact) -> bytes:
         if len(artifact.files) > MAX_REMOTE_FILES:
-            raise PlatformClientError(f"远程项目文件数量超过限制：{artifact.source}")
+            raise GitHubRepositoryArtifactValidationError(
+                f"远程项目文件数量超过限制：{artifact.source}"
+            )
         total = sum(file.size for file in artifact.files)
         if total > MAX_REMOTE_TOTAL_BYTES:
-            raise PlatformClientError(f"远程项目总大小超过限制：{artifact.source}")
+            raise GitHubRepositoryArtifactValidationError(
+                f"远程项目总大小超过 64MB：{artifact.source}"
+            )
         for file in artifact.files:
-            if file.size > MAX_REMOTE_FILE_BYTES:
-                raise PlatformClientError(f"仓库文件超过 5MB：{file.path}")
+            extension = PurePosixPath(file.path).suffix.lower()
+            max_bytes = (
+                MAX_REMOTE_VIDEO_FILE_BYTES
+                if extension in REMOTE_VIDEO_EXTENSIONS
+                else MAX_REMOTE_FILE_BYTES
+            )
+            if file.size > max_bytes:
+                file_kind = "视频文件" if extension in REMOTE_VIDEO_EXTENSIONS else "仓库文件"
+                raise GitHubRepositoryArtifactValidationError(
+                    f"{file_kind}超过 {max_bytes // MIB}MB：{file.path}"
+                )
         workers = max(1, min(8, len(artifact.files)))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             contents = list(
                 executor.map(
-                    lambda file: self._blob_bytes(file, max_bytes=MAX_REMOTE_FILE_BYTES),
+                    lambda file: self._blob_bytes(
+                        file,
+                        max_bytes=(
+                            MAX_REMOTE_VIDEO_FILE_BYTES
+                            if PurePosixPath(file.path).suffix.lower()
+                            in REMOTE_VIDEO_EXTENSIONS
+                            else MAX_REMOTE_FILE_BYTES
+                        ),
+                    ),
                     artifact.files,
                 )
             )
@@ -615,7 +643,9 @@ class GitHubRepositoryClient:
                 archive.writestr(info, content, compresslevel=9)
         result = buffer.getvalue()
         if len(result) > MAX_REMOTE_ARCHIVE_BYTES:
-            raise PlatformClientError(f"远程项目内容超过导入限制：{artifact.source}")
+            raise GitHubRepositoryArtifactValidationError(
+                f"远程项目归档超过 64MB：{artifact.source}"
+            )
         return result
 
 
